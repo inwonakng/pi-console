@@ -16,6 +16,10 @@
       "rev": "ec1b98d3f5f44a1cff1f2c3832af2f09c3d806ca",
       "src": "https://github.com/ibhagwan/fzf-lua"
     },
+    "nvim-extras": {
+      "rev": "e6877c491ab89e370dab97f2edb0d9e51b6b85d5",
+      "src": "https://github.com/inwonakng/nvim-extras"
+    },
     "nvim-treesitter": {
       "rev": "728e031f6b11d03d1f0708b7dc4fb0f1d9c8a137",
       "src": "https://github.com/nvim-treesitter/nvim-treesitter"

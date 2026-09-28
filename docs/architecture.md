@@ -26,8 +26,9 @@ Pi's normal trust and configuration rules.
 ## tmux backend
 
 `tmux/pi-console.conf` contains only the options and bindings owned by
-pi-console. The user's primary tmux configuration sets `@pi_console_root` and
-sources this file. The shell helpers maintain a persistent `agents` session
+pi-console. The user's primary tmux configuration asks the installed
+`pi-console` command to source this file, and its bindings route back through
+that command. The shell helpers maintain a persistent `agents` session
 containing one overview window and zero or more conversation windows.
 
 Neovim session snapshots are published as tmux pane options. Cross-instance
@@ -37,6 +38,6 @@ terminal keystroke injection.
 ## Shared Neovim modules
 
 Markdown table and LaTeX rendering live in the separate `nvim-extras`
-repository. During local development, pi-console finds a sibling checkout by
-default or uses `NVIM_EXTRAS_PATH`. A future installer can install both
-repositories at stable paths.
+repository. Neovim installs the revision in pi-console's package lockfile by
+default. Setting `NVIM_EXTRAS_PATH` prepends an editable checkout to
+`runtimepath` instead, so local changes load without reinstalling the package.

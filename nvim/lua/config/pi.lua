@@ -3,7 +3,7 @@ local agent_dir = vim.env.PI_CODING_AGENT_DIR
 local settings_dir = agent_dir or vim.fs.joinpath(vim.fn.expand("~"), ".pi", "agent")
 
 local function archive_after_days()
-	local ok, lines = pcall(vim.fn.readfile, vim.fs.joinpath(settings_dir, "extension-settings.yaml"))
+	local ok, lines = pcall(vim.fn.readfile, vim.fs.joinpath(settings_dir, "pi-console-config.yaml"))
 	if not ok then
 		return nil
 	end

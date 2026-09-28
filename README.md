@@ -20,7 +20,7 @@ settings, and packages.
 - Session history, archive, restore, trash, and transcript previews.
 - Tool approval previews, access modes, workspaces, and subagents.
 - OpenAI Codex usage display and desktop notification controls.
-- Markdown rendering supplied by the sibling `nvim-extras` project.
+- Markdown rendering supplied by the `nvim-extras` Neovim package.
 
 ## Repository layout
 
@@ -30,6 +30,7 @@ nvim/                   dedicated Neovim configuration and RPC client
 pi/                     installable Pi extension package
 tmux/pi-console.conf    sourceable tmux integration
 tmux/scripts/           popup and session helpers
+scripts/                 development installer and uninstaller
 docs/                   architecture documentation
 ```
 
@@ -40,14 +41,13 @@ See [`docs/architecture.md`](docs/architecture.md) for component boundaries.
 The application is currently developed against Neovim 0.12, Pi 0.87.1, and
 tmux 3.7. It also requires:
 
-- Git, Bash, Node.js, and npm;
+- Git, Bash, Node.js, npm, and `realpath`;
 - `fzf`;
 - Rust/Cargo to build `blink.cmp`;
 - a C compiler and parser toolchain for Tree-sitter;
-- a local checkout of [`nvim-extras`](https://github.com/inwonakng/nvim-extras);
 - network access during initial package, plugin, and parser installation.
 
-Neovim installs the pinned Catppuccin, fzf-lua, render-markdown,
+Neovim installs the pinned nvim-extras, Catppuccin, fzf-lua, render-markdown,
 nvim-treesitter, which-key, blink.cmp, blink.lib, and oil.nvim revisions on the
 first launch. The checked-in Neovim lockfile is copied to pi-console's isolated
 Neovim configuration directory before those plugins load.
@@ -65,48 +65,69 @@ Optional or feature-specific dependencies:
 
 ## Local development setup
 
-Place `pi-console` and `nvim-extras` beside one another:
-
-```text
-~/Documents/projects/
-├── pi-console/
-└── nvim-extras/
-```
-
-Install the Pi package dependencies and register the local package with the
-existing Pi agent directory:
+Install dependencies and register the checkout as a local Pi package:
 
 ```sh
-npm ci --prefix ~/Documents/projects/pi-console/pi
-pi install ~/Documents/projects/pi-console/pi
+bash ~/Documents/projects/pi-console/scripts/install-dev.sh
 ```
+
+The installer checks required commands, runs `npm ci`, registers the local
+package, and links `pi-console` into `~/.local/bin`. The launcher resolves that
+symlink before locating the application files.
 
 Pi keeps using the regular `~/.pi/agent` directory. The bundled subagent
 profiles are defaults: user profiles override bundled profiles with the same
 name, and trusted project profiles override both.
 
-Run the application directly with:
+Run the application with:
 
 ```sh
-bash ~/Documents/projects/pi-console/bin/pi-console
+pi-console
 ```
 
-Set `NVIM_EXTRAS_PATH` when the extras checkout is not a sibling:
+By default, Neovim installs the pinned `nvim-extras` package. Set
+`NVIM_EXTRAS_PATH` to load an editable local checkout instead:
 
 ```sh
-NVIM_EXTRAS_PATH=/path/to/nvim-extras bash /path/to/pi-console/bin/pi-console
+NVIM_EXTRAS_PATH=~/Documents/projects/nvim-extras pi-console
 ```
+
+Remove the development registration without deleting the checkout or user
+configuration:
+
+```sh
+bash ~/Documents/projects/pi-console/scripts/uninstall-dev.sh
+```
+
+## Development workflow
+
+A development install loads the Pi package, Neovim application, tmux helpers,
+and an optional `NVIM_EXTRAS_PATH` override directly from their working trees.
+There is no need to install a published release on the development machine.
+
+Use local branches and commits freely, keep the daily-use `main` branch at a
+known-good revision, and push only changes that are ready to share. Restart
+running Pi or pi-console processes after changing extensions or Neovim code;
+reload tmux after changing `tmux/pi-console.conf`.
+
+Keep dependency metadata aligned with source changes: run `npm install` from
+`pi/` when changing npm dependencies, and update `nvim/nvim-pack-lock.json`
+when changing Neovim plugins. Validate plugin changes with a cold start in an
+isolated Neovim data directory before committing them. Changes to shared
+rendering modules belong in the `nvim-extras` repository and should be committed
+there separately.
 
 ## tmux integration
 
-Add these lines to the main tmux configuration, adjusting the path:
+After installing the command, add this path-independent line to the main tmux
+configuration:
 
 ```tmux
-set -g @pi_console_root "$HOME/Documents/projects/pi-console"
-source-file "$HOME/Documents/projects/pi-console/tmux/pi-console.conf"
+if-shell "command -v pi-console >/dev/null 2>&1" "run-shell 'pi-console --tmux setup'"
 ```
 
-Reload tmux, then use:
+The command resolves the installed symlink and sources the integration from the
+corresponding checkout. Reload tmux, then use:
 
 | Binding | Action |
 |---|---|
@@ -123,12 +144,12 @@ the user's existing provider, model, credentials, instructions, and resource
 configuration.
 
 Optional extension overrides may be copied from
-[`pi/extension-settings.example.yaml`](pi/extension-settings.example.yaml) to
-`~/.pi/agent/extension-settings.yaml`.
+[`pi/pi-console-config.example.yaml`](pi/pi-console-config.example.yaml) to
+`~/.pi/agent/pi-console-config.yaml`.
 
 ## Project status
 
-Work remaining before the first public release includes an idempotent installer,
+Work remaining before the first public release includes a public installer,
 cross-platform notifications, clean-home validation, supported version ranges,
 and public package/update instructions.
 

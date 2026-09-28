@@ -30,7 +30,7 @@ function requireKnownKeys(value: Record<string, unknown>, keys: string[], path: 
 // Read on demand so every extension sees edits without a watcher or reload cache.
 // Add each new extension's section and validation here as it adopts this file.
 export function loadExtensionSettings(): ExtensionSettings {
-	const path = join(getAgentDir(), "extension-settings.yaml");
+	const path = join(getAgentDir(), "pi-console-config.yaml");
 	let source: string;
 	try {
 		source = readFileSync(path, "utf8");
