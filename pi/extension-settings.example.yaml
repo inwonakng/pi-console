@@ -1,0 +1,10 @@
+# Optional pi-console extension settings.
+# Copy this file to ~/.pi/agent/extension-settings.yaml and change only the
+# values you want to override. Extension changes are read on demand.
+
+session-picker:
+  archive-after-days: 180
+
+# auto-title:
+#   provider-models:
+#     provider-id: model-id

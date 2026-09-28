@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+set -eu
+
+usage() {
+    printf 'Usage: %s [--overview | --session PATH]\n' "${0##*/}" >&2
+    exit 2
+}
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+app_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+
+unset PI_CONSOLE_OVERVIEW PI_CONSOLE_SESSION
+export NVIM_APPNAME=pi-console
+
+case "$#" in
+    0)
+        ;;
+    1)
+        [ "$1" = "--overview" ] || usage
+        export PI_CONSOLE_OVERVIEW=1
+        ;;
+    2)
+        [ "$1" = "--session" ] && [ -n "$2" ] || usage
+        export PI_CONSOLE_SESSION=$2
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+nvim -u "$app_root/nvim/init.lua"
