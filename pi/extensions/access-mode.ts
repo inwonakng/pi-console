@@ -18,6 +18,7 @@ import {
 } from "./shared/bash-sandbox";
 import { getInteractionMode } from "./shared/interaction-mode";
 import { notifyPiToolApproval } from "./shared/notifications";
+import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 
 const READONLY_TOOLS = new Set(["web_search", "web_fetch", "todowrite", "question"]);
 const PATH_READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -34,6 +35,12 @@ const KNOWN_TOOLS = new Set([
 const READONLY_WORKSPACE_ACTIONS = new Set(["status", "list"]);
 const READONLY_SPAWN_CONTROL_ACTIONS = new Set(["list", "status", "join", "join_all"]);
 const sessionCapabilityGrants = new Set<string>();
+const ACCESS_SETTING = "access";
+
+type PersistedAccessState = {
+  mode?: string;
+  grants?: unknown[];
+};
 
 function jsonPreview(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
@@ -243,6 +250,26 @@ function setStatus(ctx: ExtensionContext): void {
   ctx.ui.setStatus("pi-access-mode", `Mode: ${getAccessMode()}`);
 }
 
+function saveAccessState(pi: ExtensionAPI): void {
+  saveSessionSetting(pi, ACCESS_SETTING, {
+    mode: getAccessMode(),
+    grants: [...sessionCapabilityGrants],
+  });
+}
+
+function restoreAccessState(ctx: ExtensionContext, restoreGrants = true): void {
+  const stored = loadSessionSetting(ctx, ACCESS_SETTING) as PersistedAccessState | undefined;
+  const spawnMode = parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE);
+  setAccessMode(spawnMode ?? parseAccessMode(stored?.mode) ?? "ask");
+  sessionCapabilityGrants.clear();
+  if (!spawnMode && restoreGrants && Array.isArray(stored?.grants)) {
+    for (const grant of stored.grants) {
+      if (typeof grant === "string" && grant.length > 0) sessionCapabilityGrants.add(grant);
+    }
+  }
+  setStatus(ctx);
+}
+
 export default function accessModeExtension(pi: ExtensionAPI) {
   const defaultBash = createBashToolDefinition(process.cwd());
   pi.registerTool({
@@ -260,10 +287,14 @@ export default function accessModeExtension(pi: ExtensionAPI) {
   pi.on("user_bash", (_event, ctx) => ({ operations: createAccessControlledBashOperations(ctx) }));
 
   pi.on("session_start", async (event, ctx) => {
-    void event;
-    sessionCapabilityGrants.clear();
-    setStatus(ctx);
+    const startsAnotherSession = event.reason === "new" || event.reason === "fork";
+    restoreAccessState(ctx, !startsAnotherSession);
+    if (event.reason === "fork" && !process.env.PI_SPAWN_ACCESS_MODE) saveAccessState(pi);
     await initializeBashSandbox(ctx);
+  });
+
+  pi.on("session_tree", (_event, ctx) => {
+    restoreAccessState(ctx);
   });
 
   pi.on("session_shutdown", async () => {
@@ -328,7 +359,10 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     notifyPiToolApproval(ctx);
     const title = ctx.mode === "rpc" ? approvalPayload(event, ctx) : `Allow ${event.toolName}?`;
     const choice = await ctx.ui.select(title, ["Allow once", "Allow for session", "Deny"]);
-    if (choice === "Allow for session") sessionCapabilityGrants.add(capabilityKey);
+    if (choice === "Allow for session") {
+      sessionCapabilityGrants.add(capabilityKey);
+      saveAccessState(pi);
+    }
     if (choice === "Allow once" || choice === "Allow for session") return undefined;
     return { block: true, reason: `Tool "${event.toolName}" blocked by user.` };
   });
@@ -342,7 +376,9 @@ export default function accessModeExtension(pi: ExtensionAPI) {
         setStatus(ctx);
         return;
       }
+      const changed = requestedMode !== getAccessMode();
       setAccessMode(requestedMode);
+      if (changed) saveAccessState(pi);
       setStatus(ctx);
       ctx.ui.notify(`Access mode: ${getAccessMode()}`, "info");
     },

@@ -8,10 +8,18 @@ import {
 	setNotificationsEnabled,
 	toggleNotificationsEnabled,
 } from "./shared/notifications";
+import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 import { getPendingWorkspaceId } from "./shared/workspace";
+
+const NOTIFICATIONS_SETTING = "notifications";
 
 function setStatus(ctx: ExtensionContext): void {
 	ctx.ui.setStatus("pi-notifications", notificationsEnabled() ? "notify on" : "notify off");
+}
+
+function restoreNotifications(ctx: ExtensionContext): void {
+	setNotificationsEnabled(loadSessionSetting(ctx, NOTIFICATIONS_SETTING) === true);
+	setStatus(ctx);
 }
 
 function lastAssistantMessage(messages: unknown[]): { stopReason?: string } | undefined {
@@ -28,7 +36,11 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 	let finalStopReason: string | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
-		setStatus(ctx);
+		restoreNotifications(ctx);
+	});
+
+	pi.on("session_tree", (_event, ctx) => {
+		restoreNotifications(ctx);
 	});
 
 	pi.on("agent_end", (event) => {
@@ -66,10 +78,12 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			const wasEnabled = notificationsEnabled();
 			const enabled = mode === "toggle" ? toggleNotificationsEnabled() : mode;
 			if (mode !== "toggle") {
 				setNotificationsEnabled(enabled);
 			}
+			if (enabled !== wasEnabled) saveSessionSetting(pi, NOTIFICATIONS_SETTING, enabled);
 			setStatus(ctx);
 			if (enabled && !alerterPath()) {
 				ctx.ui.notify("Pi notifications: on, but alerter was not found", "warning");

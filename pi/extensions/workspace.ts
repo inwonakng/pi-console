@@ -18,6 +18,7 @@ import {
 } from "./shared/integration-state";
 import { getInteractionMode } from "./shared/interaction-mode";
 import { notifyPiWorkspaceIntegration, suppressNextInputNotification } from "./shared/notifications";
+import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 import { activeLocation, moveToLocation } from "./shared/workspace-navigation";
 import {
   createWorkspace,
@@ -56,6 +57,7 @@ const INTEGRATION_ICONS: Record<IntegrationMode, string> = {
   ask: "?",
   allowed: "✓",
 };
+const INTEGRATION_SETTING = "integration";
 const REVIEW_SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "../scripts/review-workspace.sh");
 
 type ProcessResult = {
@@ -160,6 +162,12 @@ function publishIntegrationMode(ctx: ExtensionContext): void {
     "pi-integration-mode",
     ctx.mode === "rpc" ? `Integration: ${mode}` : INTEGRATION_ICONS[mode],
   );
+}
+
+function restoreIntegrationMode(ctx: ExtensionContext): void {
+  const stored = loadSessionSetting(ctx, INTEGRATION_SETTING);
+  setIntegrationMode(parseIntegrationMode(typeof stored === "string" ? stored : undefined) ?? "ask");
+  publishIntegrationMode(ctx);
 }
 
 function queueCommand(pi: ExtensionAPI, command: string): void {
@@ -302,6 +310,7 @@ async function confirmDestructive(
 
 export default function workspaceExtension(pi: ExtensionAPI) {
   pi.on("session_start", (event, ctx) => {
+    restoreIntegrationMode(ctx);
     const envWorkspaceId = process.env.PI_WORKSPACE_ID;
     if (envWorkspaceId) {
       const record = loadWorkspace(envWorkspaceId);
@@ -332,7 +341,10 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       }
     }
     publishWorkspaceState(ctx);
-    publishIntegrationMode(ctx);
+  });
+
+  pi.on("session_tree", (_event, ctx) => {
+    restoreIntegrationMode(ctx);
   });
 
   pi.on("session_before_fork", (_event, ctx) => {
@@ -520,7 +532,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         return;
       }
 
+      const changed = requestedMode !== getIntegrationMode();
       setIntegrationMode(requestedMode);
+      if (changed) saveSessionSetting(pi, INTEGRATION_SETTING, requestedMode);
       publishIntegrationMode(ctx);
       ctx.ui.notify(`Integration mode: ${getIntegrationMode()}`, "info");
     },
