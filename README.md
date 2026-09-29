@@ -85,11 +85,12 @@ Run the application with:
 pi-console
 ```
 
-By default, Neovim installs the pinned `nvim-extras` package. Set
-`NVIM_EXTRAS_PATH` to load an editable local checkout instead:
+By default, Neovim installs the pinned `nvim-extras` package. To load an
+editable checkout instead, register it at the shared development path:
 
 ```sh
-NVIM_EXTRAS_PATH=~/Documents/projects/nvim-extras pi-console
+mkdir -p ~/.local/share/nvim-dev
+ln -s ~/Documents/projects/nvim-extras ~/.local/share/nvim-dev/nvim-extras
 ```
 
 Remove the development registration without deleting the checkout or user
@@ -101,8 +102,9 @@ bash ~/Documents/projects/pi-console/scripts/uninstall-dev.sh
 
 ## Development workflow
 
-A development install loads the Pi package, Neovim application, tmux helpers,
-and an optional `NVIM_EXTRAS_PATH` override directly from their working trees.
+A development install loads the Pi package, Neovim application, and tmux
+helpers directly from their working trees. When the optional shared
+`nvim-extras` development link exists, Neovim loads that checkout as well.
 There is no need to install a published release on the development machine.
 
 Use local branches and commits freely, keep the daily-use `main` branch at a

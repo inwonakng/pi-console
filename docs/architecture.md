@@ -34,10 +34,3 @@ containing one overview window and zero or more conversation windows.
 Neovim session snapshots are published as tmux pane options. Cross-instance
 controls connect to each Neovim RPC server, so the dashboard is not coupled to
 terminal keystroke injection.
-
-## Shared Neovim modules
-
-Markdown table and LaTeX rendering live in the separate `nvim-extras`
-repository. Neovim installs the revision in pi-console's package lockfile by
-default. Setting `NVIM_EXTRAS_PATH` prepends an editable checkout to
-`runtimepath` instead, so local changes load without reinstalling the package.
