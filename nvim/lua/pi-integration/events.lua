@@ -350,6 +350,17 @@ local function decode_approval_payload(message)
 	return decoded
 end
 
+local function decode_question_payload(title, expected_kind)
+	if type(title) ~= "string" or title == "" then
+		return nil
+	end
+	local payload = json.decode_object(title)
+	if not payload or payload.kind ~= expected_kind or type(payload.question) ~= "string" then
+		return nil
+	end
+	return payload
+end
+
 local function compact_request_text(value, max_chars)
 	if type(value) ~= "string" then
 		return nil
@@ -384,11 +395,19 @@ local function summarize_ui_request(event)
 		}
 	end
 
-	local title_payload = type(event.title) == "string" and json.decode_object(event.title) or nil
-	if title_payload and title_payload.kind == "pi_question_response" then
+	local question_select = decode_question_payload(event.title, "pi_question_select")
+	if question_select then
+		return {
+			label = "Choice requested",
+			question = compact_request_text(question_select.question, 360) or "Pi needs input.",
+		}
+	end
+
+	local question_response = decode_question_payload(event.title, "pi_question_response")
+	if question_response then
 		return {
 			label = "Question response",
-			question = compact_request_text(title_payload.question, 360) or "Write a response to Pi's question.",
+			question = compact_request_text(question_response.question, 360) or "Write a response to Pi's question.",
 		}
 	end
 
@@ -425,25 +444,15 @@ local function summarize_ui_request(event)
 	}
 end
 
-local function approval_preview_item(payload)
-	local preview = type(payload.preview) == "string" and payload.preview or ""
-	local lines = vim.split(preview, "\n", { plain = true })
-	if #lines == 0 then
-		lines = { "" }
+local function approval_preview_text(payload, prompt)
+	local sections = { prompt }
+	if type(payload.summary) == "string" and payload.summary ~= "" and payload.summary ~= prompt then
+		table.insert(sections, payload.summary)
 	end
-
-	local buf = vim.api.nvim_create_buf(false, true)
-	vim.bo[buf].buftype = "nofile"
-	vim.bo[buf].bufhidden = "wipe"
-	vim.bo[buf].swapfile = false
-	vim.bo[buf].filetype = payload.preview_filetype or "text"
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-	vim.bo[buf].modifiable = false
-
-	return {
-		buf = buf,
-		pos = { 1, 1 },
-	}
+	if type(payload.preview) == "string" and payload.preview ~= "" then
+		table.insert(sections, payload.preview)
+	end
+	return table.concat(sections, "\n\n")
 end
 
 local function confirm_with_preview(ctx, event)
@@ -467,15 +476,15 @@ local function confirm_with_preview(ctx, event)
 		end, 50)
 	end
 
-	local prompt = payload.tool and ("Allow " .. payload.tool .. "?") or (event.title or "Pi confirm")
+	local prompt = type(event.title) == "string" and event.title ~= "" and event.title
+		or (payload.tool and ("Allow " .. payload.tool .. "?") or "Pi confirm")
 	local ok, err = pcall(vim.ui.select, { "Allow", "Deny" }, {
 		prompt = prompt,
-		kind = "pi_approval",
+		prompt_label = "Permission",
+		preview_text = approval_preview_text(payload, prompt),
+		preview_filetype = payload.preview_filetype,
 		no_hide = true,
 		on_close = deny_if_unanswered,
-		preview_item = function()
-			return approval_preview_item(payload)
-		end,
 	}, function(choice)
 		respond_once({ confirmed = choice == "Allow" })
 	end)
@@ -501,18 +510,17 @@ local function select_capability_approval(ctx, event)
 		send_extension_ui_response(ctx, event.id, response)
 	end
 
-	local prompt = compact_request_text(payload.summary, 160) or "Allow bash?"
+	local prompt = type(payload.summary) == "string" and payload.summary ~= "" and payload.summary or "Allow bash?"
 	local ok, err = pcall(vim.ui.select, event.options or {}, {
 		prompt = prompt,
-		kind = "pi_approval",
+		prompt_label = "Permission",
+		preview_text = approval_preview_text(payload, prompt),
+		preview_filetype = payload.preview_filetype,
 		no_hide = true,
 		on_close = function()
 			vim.defer_fn(function()
 				respond_once({ cancelled = true })
 			end, 50)
-		end,
-		preview_item = function()
-			return approval_preview_item(payload)
 		end,
 	}, function(choice)
 		if choice then
@@ -736,7 +744,14 @@ function M.handle_extension_ui_request(ctx, event)
 			return
 		end
 		local respond, on_close = picker_response(ctx, event.id, { cancelled = true })
-		vim.ui.select(event.options or {}, { prompt = event.title or "Pi select", no_hide = true, on_close = on_close }, function(choice)
+		local question = decode_question_payload(event.title, "pi_question_select")
+		local select_opts = { prompt = event.title or "Pi select", no_hide = true, on_close = on_close }
+		if question then
+			select_opts.prompt = question.question
+			select_opts.prompt_label = "Question"
+			select_opts.preview_text = question.question
+		end
+		vim.ui.select(event.options or {}, select_opts, function(choice)
 			respond(choice and { value = choice } or { cancelled = true })
 		end)
 	elseif event.method == "confirm" then
@@ -744,11 +759,18 @@ function M.handle_extension_ui_request(ctx, event)
 			return
 		end
 		local prompt = event.title or "Pi confirm"
+		local preview_text = prompt
 		if type(event.message) == "string" and event.message ~= "" then
-			prompt = prompt .. "\n" .. event.message
+			preview_text = preview_text .. "\n\n" .. event.message
 		end
 		local respond, on_close = picker_response(ctx, event.id, { confirmed = false })
-		vim.ui.select({ "Yes", "No" }, { prompt = prompt, no_hide = true, on_close = on_close }, function(choice)
+		vim.ui.select({ "Yes", "No" }, {
+			prompt = prompt,
+			prompt_label = "Confirmation",
+			preview_text = preview_text,
+			no_hide = true,
+			on_close = on_close,
+		}, function(choice)
 			respond({ confirmed = choice == "Yes" })
 		end)
 	elseif event.method == "input" then

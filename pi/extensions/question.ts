@@ -125,7 +125,10 @@ export default function questionExtension(pi: ExtensionAPI) {
 
       while (true) {
         preparePrompt();
-        const selected = await ctx.ui.select(question, displayedOptions, { signal });
+        const selectTitle = ctx.mode === "rpc"
+          ? JSON.stringify({ kind: "pi_question_select", question })
+          : question;
+        const selected = await ctx.ui.select(selectTitle, displayedOptions, { signal });
         if (selected === undefined) {
           return {
             content: [{ type: "text", text: "The user cancelled the question without answering." }],
