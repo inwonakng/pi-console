@@ -17,26 +17,12 @@ settings, and packages.
 - OpenAI Codex usage display and desktop notification controls.
 - Markdown rendering supplied by the `nvim-extras` Neovim package.
 
-## Repository layout
-
-```text
-bin/pi-console          launcher
-nvim/                   dedicated Neovim configuration and RPC client
-pi/                     installable Pi extension package
-tmux/pi-console.conf    sourceable tmux integration
-tmux/scripts/           popup and session helpers
-scripts/                 development installer and uninstaller
-docs/                   architecture documentation
-```
-
-See [`docs/architecture.md`](docs/architecture.md) for component boundaries.
-
 ## Requirements
 
 The application is currently developed against Neovim 0.12, Pi 0.87.1, and
 tmux 3.7. It also requires:
 
-- Git, Bash, Node.js, npm, and `realpath`;
+- Git, Bash, curl, Node.js, npm, and `realpath`;
 - `fzf`;
 - Rust/Cargo to build `blink.cmp`;
 - a C compiler and parser toolchain for Tree-sitter;
@@ -47,22 +33,48 @@ Optional or feature-specific dependencies:
 
 - a Nerd Font and a true-color terminal for the intended interface;
 - `alerter` for desktop notifications, which are currently macOS-only;
-- `diffview.nvim` in the regular Neovim configuration used by workspace review;
+- `diffview.nvim` in the regular Neovim configuration used by workspace review (only if you want to view diff from workspace changes)
 - `fd` or `fdfind` for faster file completion;
 - `trash` or `gio trash` to move deleted sessions to the OS trash instead of
   permanently deleting them;
 
+## Installation
+
+Install the latest published release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/inwonakng/pi-console/main/scripts/install.sh | bash
+```
+
+Until the first release is published, the installer reports that it is using
+the `main` branch. It installs the application under
+`~/.local/share/pi-console`, registers `pi/` as a global Pi package, and writes
+the `pi-console` command to `~/.local/bin`. Set `XDG_DATA_HOME`,
+`PI_CONSOLE_INSTALL_DIR`, or `PI_CONSOLE_BIN_DIR` to override those locations.
+
+Running the installer again updates the existing managed installation. To
+select a release or another Git ref explicitly:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/inwonakng/pi-console/main/scripts/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/inwonakng/pi-console/main/scripts/install.sh | bash -s -- --ref main
+```
+
+The installer offers to add the tmux integration when it has access to an
+interactive terminal. Pass `--configure-tmux` or `--no-configure-tmux` to make
+that choice non-interactively.
+
 ## tmux integration
 
-After installing the command, add this path-independent line to the main tmux
+The installer can add this path-independent line to the main tmux
 configuration:
 
 ```tmux
 if-shell "command -v pi-console >/dev/null 2>&1" "run-shell 'pi-console --tmux setup'"
 ```
 
-The command resolves the installed symlink and sources the integration from the
-corresponding checkout. Reload tmux, then use:
+The command resolves its application directory and sources the matching tmux
+integration. Reload tmux, then use:
 
 | Binding | Action |
 |---|---|
@@ -78,50 +90,56 @@ Optional extension overrides may be copied from
 [`pi/pi-console-config.example.yaml`](pi/pi-console-config.example.yaml) to
 `~/.pi/agent/pi-console-config.yaml`.
 
+pi-console uses the existing Pi agent directory, including credentials,
+instructions, skills, prompts, models, and other packages. Its dedicated
+Neovim application is named `pi-console-nvim`, so its Neovim configuration,
+data, state, and cache remain separate from both the installed application and
+the user's normal Neovim setup.
+
+## Bundled Pi extensions
+
+The global Pi package loads these extensions in pi-console and ordinary Pi
+sessions:
+
+| Extension | Capability |
+|---|---|
+| `access-mode` | Read-only, approval, and edit access modes |
+| `auto-title` | Automatic and explicit session titles |
+| `codex-usage` | OpenAI Codex usage status |
+| `history` | Session history, archive, restore, and transcript operations |
+| `litellm` | LiteLLM model provider support |
+| `notifications` | Completion notifications |
+| `question` | Structured multiple-choice questions |
+| `spawn` | Background and foreground subagents |
+| `todowrite` | Structured task lists |
+| `tree` | Session-tree navigation helpers |
+| `web-search` | DuckDuckGo search and page fetching |
+| `workspace` | Isolated Git workspaces and integration |
+
+The package registers the tool names `question`, `spawn`, `spawn_control`,
+`todowrite`, `web_search`, `web_fetch`, and `workspace`. Pi resolves duplicate
+tool names by extension precedence and then registration order: project and
+user extension resources take precedence over package resources, and the first
+package registration wins between packages. Users can therefore override a
+bundled tool with a project or user extension, or reorder package declarations
+when two packages register the same name. `pi config` can disable individual
+package extensions, although disabling an extension also disables the related
+pi-console feature.
+
+The profiles under `pi/agents/` are defaults used by the bundled `spawn`
+extension, not a standard Pi resource directory. Additional profiles can be
+placed in `~/.pi/agent/agents/` or a trusted project's `.pi/agents/` directory.
+A user profile overrides a bundled profile with the same name, and a project
+profile overrides both.
+
 ## Project status
 
-Work remaining before the first public release includes a public installer,
-cross-platform notifications, clean-home validation, supported version ranges,
-and public package/update instructions.
+Work remaining before the first public release includes cross-platform
+notifications, clean-home validation, and supported version ranges.
 
-## Local development setup
+## Development
 
-Install dependencies and register the checkout as a local Pi package:
-
-```sh
-bash ~/Documents/projects/pi-console/scripts/install-dev.sh
-```
-
-The installer checks required commands, runs `npm ci`, registers the local
-package, and links `pi-console` into `~/.local/bin`. The launcher resolves that
-symlink before locating the application files.
-
-Pi keeps using the regular `~/.pi/agent` directory. The bundled subagent
-profiles are defaults: user profiles override bundled profiles with the same
-name, and trusted project profiles override both.
-
-Run the application with:
-
-```sh
-pi-console
-```
-
-By default, Neovim installs the pinned `nvim-extras` package. To load an
-editable checkout instead, register it at the shared development path:
-
-```sh
-mkdir -p ~/.local/share/nvim-dev
-ln -s $NVIM_EXTRAS_PATH ~/.local/share/nvim-dev/nvim-extras
-```
-
-where `$NVIM_EXTRAS_PATH` is where you cloned the `nvim-extras` repository.
-
-To remove the development registration without deleting the checkout or user
-configuration:
-
-```sh
-bash ~/Documents/projects/pi-console/scripts/uninstall-dev.sh
-```
+See [`docs/development.md`](docs/development.md) for the checkout-based setup.
 
 ## License
 

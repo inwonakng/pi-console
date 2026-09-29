@@ -1,3 +1,4 @@
 .DS_Store
 pi/node_modules/
 *.log
+/TODO.md

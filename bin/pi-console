@@ -37,7 +37,7 @@ if [ "${1-}" = "--tmux" ]; then
 fi
 
 unset PI_CONSOLE_OVERVIEW PI_CONSOLE_SESSION
-export NVIM_APPNAME=pi-console
+export NVIM_APPNAME=pi-console-nvim
 
 case "$#" in
     0)

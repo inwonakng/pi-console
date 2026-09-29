@@ -18,7 +18,7 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
-npm ci --prefix "$project_root/pi"
+(cd "$project_root/pi" && npm ci)
 pi install "$project_root/pi"
 
 mkdir -p "$bin_dir"

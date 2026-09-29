@@ -10,6 +10,7 @@ vim.opt.termguicolors = true
 vim.opt.splitbelow = true
 vim.opt.splitright = true
 vim.opt.hidden = true
+vim.opt.ignorecase = true
 
 vim.schedule(function()
 	vim.opt.clipboard = "unnamedplus"

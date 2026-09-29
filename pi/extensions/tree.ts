@@ -7,6 +7,7 @@ import {
 	prepareWorkspaceDiscard,
 	removeWorkspace,
 	retainedChildWorkspaces,
+	sameSessionFile,
 	type WorkspaceRecord,
 } from "./shared/workspace";
 import { hasRunningSubagents } from "./spawn";
@@ -121,7 +122,7 @@ function workspacesRemovedWithSubtree(
 		.filter((record): record is WorkspaceRecord => !!record
 			&& record.kind === "task"
 			&& record.retained
-			&& record.sourceSessionFile === sessionFile);
+			&& sameSessionFile(record.sourceSessionFile, sessionFile));
 }
 
 function deletionConfirmation(entryId: string, deleteCount: number, workspaces: WorkspaceRecord[]): string {

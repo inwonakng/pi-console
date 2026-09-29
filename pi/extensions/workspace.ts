@@ -33,6 +33,7 @@ import {
   prepareWorkspaceDiscard,
   removeWorkspace,
   retainedChildWorkspaces,
+  sameSessionFile,
   saveWorkspace,
   setExpectedWorkspaceMissing,
   setPendingWorkspace,
@@ -166,7 +167,7 @@ function queueCommand(pi: ExtensionAPI, command: string): void {
 
 function taskForCurrentContext(ctx: ExtensionContext): WorkspaceRecord | undefined {
   const active = workspaceForContext(ctx.cwd, sessionFile(ctx));
-  return active?.kind === "task" && active.sourceSessionFile === sessionFile(ctx) ? active : undefined;
+  return active?.kind === "task" && sameSessionFile(active.sourceSessionFile, sessionFile(ctx)) ? active : undefined;
 }
 
 function returnPending(record: WorkspaceRecord | undefined): record is WorkspaceRecord {
@@ -264,7 +265,7 @@ function workspaceBlockReason(
 
   const active = workspaceForContext(ctx.cwd, sessionFile(ctx));
   if (active && existsSync(active.worktreePath)) {
-    if (active.kind === "task" && active.sourceSessionFile !== sessionFile(ctx)) {
+    if (active.kind === "task" && !sameSessionFile(active.sourceSessionFile, sessionFile(ctx))) {
       return `Workspace ${active.id} belongs to a different Pi session; edits in this worktree are blocked.`;
     }
     if (isWorkspaceFinalized(active)) {
@@ -309,7 +310,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         const pendingId = getPendingWorkspaceId();
         const recoveringReturn = (event.reason === "startup" || event.reason === "resume")
           && returnPending(location.workspace)
-          && location.workspace.sourceSessionFile === sessionFile(ctx)
+          && sameSessionFile(location.workspace.sourceSessionFile, sessionFile(ctx))
           && location.cwd === ctx.cwd;
         if (recoveringReturn && (!pendingId || pendingId === location.workspace.id)) {
           const workspaceId = location.workspace.id;
@@ -368,7 +369,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const record = loadWorkspace(args.trim());
       if (!record || record.kind !== "task" || !record.retained || isWorkspaceFinalized(record)
-        || record.sourceSessionFile !== sessionFile(ctx)) {
+        || !sameSessionFile(record.sourceSessionFile, sessionFile(ctx))) {
         setPendingWorkspace(undefined);
         throw new Error(`Task workspace is unavailable: ${args.trim()}`);
       }
@@ -422,7 +423,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       const id = args.trim();
       try {
         const record = loadWorkspace(id);
-        if (!record || record.kind !== "task" || record.sourceSessionFile !== sessionFile(ctx)
+        if (!record || record.kind !== "task" || !sameSessionFile(record.sourceSessionFile, sessionFile(ctx))
           || (record.lifecycle !== "integration_pending" && record.lifecycle !== "discard_pending")
           || taskForCurrentContext(ctx)?.id !== id) {
           throw new Error(`No completed return transition for task workspace: ${id}`);
@@ -584,7 +585,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         if (record && record.kind !== "task") {
           throw new Error(`Workspace ${record.id} is a child workspace; resume it through spawn_control.`);
         }
-        if (record && record.sourceSessionFile !== source) throw new Error(`Workspace ${record.id} belongs to a different conversation.`);
+        if (record && !sameSessionFile(record.sourceSessionFile, source)) throw new Error(`Workspace ${record.id} belongs to a different conversation.`);
         if (record) checkRequestedIgnoredFiles(record, params.ignoredFiles);
         if (record && isWorkspaceFinalized(record)) {
           throw new Error(

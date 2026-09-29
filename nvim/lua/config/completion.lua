@@ -2,7 +2,22 @@ local cmp = require("blink.cmp")
 cmp.build():pwait()
 cmp.setup({
 	cmdline = {
-		enabled = false,
+		enabled = true,
+		sources = {
+			default = function()
+				if vim.fn.getcmdtype() == "@" and vim.fn.getcmdcompltype() == "dir" then
+					return { "cmdline" }
+				end
+				return {}
+			end,
+		},
+		completion = {
+			menu = {
+				auto_show = function()
+					return vim.fn.getcmdtype() == "@" and vim.fn.getcmdcompltype() == "dir"
+				end,
+			},
+		},
 	},
 	keymap = {
 		["<C-space>"] = { "show", "show_documentation", "hide_documentation" },

@@ -131,6 +131,14 @@ function canonicalPath(path: string): string {
   return resolve(realpathSync.native(current), ...suffix);
 }
 
+function canonicalSessionFile(sessionFile: string | undefined): string | undefined {
+  return sessionFile ? canonicalPath(sessionFile) : undefined;
+}
+
+export function sameSessionFile(left: string | undefined, right: string | undefined): boolean {
+  return canonicalSessionFile(left) === canonicalSessionFile(right);
+}
+
 export function pathInside(parent: string, child: string): boolean {
   const rel = relative(canonicalPath(parent), canonicalPath(child));
   return rel === "" || (!rel.startsWith("..") && !rel.startsWith(sep));
@@ -412,7 +420,7 @@ export function createWorkspace(input: {
     baselineCommit: baseline.commit,
     baselineTree: baseline.tree,
     baselineRef: baseline.ref,
-    sourceSessionFile: input.sourceSessionFile,
+    sourceSessionFile: canonicalSessionFile(input.sourceSessionFile),
     parentWorkspaceId: input.parentWorkspaceId,
     runId: input.runId,
     integration: "pending",
@@ -459,7 +467,7 @@ export function retainedChildWorkspaces(parentId: string): WorkspaceRecord[] {
 
 export function taskWorkspacesForSession(sessionFile: string | undefined): WorkspaceRecord[] {
   return sessionFile ? listWorkspaces().filter((record) =>
-    record.kind === "task" && record.retained && record.sourceSessionFile === sessionFile,
+    record.kind === "task" && record.retained && sameSessionFile(record.sourceSessionFile, sessionFile),
   ) : [];
 }
 

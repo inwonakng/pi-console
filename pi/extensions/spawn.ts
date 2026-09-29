@@ -22,6 +22,7 @@ import {
   loadWorkspace,
   prepareWorkspaceDiscard,
   removeWorkspace,
+  sameSessionFile,
   saveWorkspace,
   workspaceForContext,
   workspaceStorageRoot,
@@ -1369,7 +1370,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         if (!parentWorkspace) {
           throw new Error("Isolated writing subagents require an active parent task workspace. Call workspace with action=enter first.");
         }
-        if (parentWorkspace.kind === "task" && parentWorkspace.sourceSessionFile !== ctx.sessionManager.getSessionFile()) {
+        if (parentWorkspace.kind === "task" && !sameSessionFile(parentWorkspace.sourceSessionFile, ctx.sessionManager.getSessionFile())) {
           throw new Error(`Workspace ${parentWorkspace.id} belongs to another conversation; do not spawn writers from a fork of its session.`);
         }
         if (isWorkspaceFinalized(parentWorkspace)) {
