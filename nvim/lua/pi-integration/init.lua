@@ -430,6 +430,14 @@ local integration_context = {
 		event_error_text = event_error_text,
 		recent_stderr_text = recent_stderr_text,
 	},
+	events = {
+		set_loading = function(loading)
+			return pi_events.set_loading(integration_ctx(), loading)
+		end,
+		start_activity = function(label)
+			return pi_events.start_activity(integration_ctx(), label)
+		end,
+	},
 	logs = {
 		add = add_log,
 		show = show_logs,
@@ -575,6 +583,18 @@ end
 
 function M.submit_prompt()
 	pi_actions.submit_prompt(integration_ctx())
+end
+
+function M.fail_pending_prompts()
+	pi_actions.fail_pending_prompts(integration_ctx())
+end
+
+function M.flush_queued_prompts()
+	pi_actions.flush_queued_prompts(integration_ctx())
+end
+
+function M.finish_loading_if_ready()
+	pi_actions.finish_loading_if_ready(integration_ctx())
 end
 
 function M.abort()

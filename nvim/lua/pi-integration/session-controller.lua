@@ -3,10 +3,11 @@ local runtime = require("pi-integration.runtime")
 
 local M = {}
 
-local function reset_conversation(ctx, keep_transcript)
+local function reset_conversation(ctx, keep_transcript, keep_pending_messages)
 	local state = ctx.state
+	local pending_user_messages = keep_pending_messages and state.pending_user_messages or {}
 	state.pending_ui_requests = {}
-	state.pending_user_message = nil
+	state.pending_user_messages = pending_user_messages
 	state.session_name = nil
 	state.message_count = 0
 	state.has_sent_message = false
@@ -43,7 +44,7 @@ function M.apply_state(ctx, data, new_session)
 	local previous_leaf_id = state.tree_leaf_id
 	local sent_before_sync = state.has_sent_message
 	if new_session or session_changed then
-		reset_conversation(ctx, restore_transcript)
+		reset_conversation(ctx, restore_transcript, state.is_loading and not new_session)
 	end
 	state.session_file = data.sessionFile
 	state.pending_session_file = nil
@@ -63,20 +64,50 @@ end
 
 function M.sync(ctx, options)
 	options = options or {}
+	local state = ctx.state
+	state.session_sync_generation = (state.session_sync_generation or 0) + 1
+	local generation = state.session_sync_generation
+	local function fail_sync(message)
+		state.session_sync_complete = false
+		ctx.events.set_loading(false)
+		state.loading_error = message
+		ctx.actions.fail_pending_prompts()
+		ctx.ui.notify(message, vim.log.levels.ERROR)
+	end
 	ctx.rpc.send({ type = "get_state" }, function(event)
+		if generation ~= state.session_sync_generation then
+			return
+		end
 		if not event.success or not event.data then
-			ctx.ui.notify(event.error or "Could not get Pi session state", vim.log.levels.ERROR)
+			fail_sync(event.error or "Could not get Pi session state")
 			return
 		end
 		M.apply_state(ctx, event.data, options.new_session)
-		ctx.actions.refresh_messages()
-		ctx.actions.refresh_session_stats()
-		if options.publish_workspace then
-			ctx.rpc.send({ type = "prompt", message = "/pi-workspace-publish" })
-		end
-		if options.on_success then
-			options.on_success()
-		end
+		ctx.rpc.send({ type = "get_commands" }, function(commands_event)
+			if generation ~= state.session_sync_generation then
+				return
+			end
+			if not commands_event.success or not commands_event.data then
+				fail_sync(commands_event.error or "Could not discover Pi commands")
+				return
+			end
+			state.command_sources = {}
+			for _, command in ipairs(commands_event.data.commands or {}) do
+				if type(command.name) == "string" then
+					state.command_sources[command.name] = command.source
+				end
+			end
+			state.session_sync_complete = true
+			ctx.actions.finish_loading_if_ready()
+			ctx.actions.refresh_messages()
+			ctx.actions.refresh_session_stats()
+			if options.publish_workspace then
+				ctx.rpc.send({ type = "prompt", message = "/pi-workspace-publish" })
+			end
+			if options.on_success then
+				options.on_success()
+			end
+		end)
 	end)
 end
 

@@ -364,8 +364,10 @@ local function append_text_message(lines, message, text, has_body)
 	local text_lines = vim.split(text, "\n", { plain = true })
 	add_message_separator(lines, has_body)
 	table.insert(lines, "## " .. message_role_title(message))
+	local header_line = #lines
 	table.insert(lines, "")
 	vim.list_extend(lines, text_lines)
+	return header_line
 end
 
 local function append_assistant_blocks(ctx, lines, items, message, has_body, options)
@@ -562,6 +564,18 @@ function M.collect_message_lines(ctx, messages)
 		if appended then
 			has_body = true
 			last_rendered_kind = rendered_kind
+		end
+	end
+
+	for _, pending in ipairs(ctx.state.pending_user_messages or {}) do
+		if pending.status == "queued" or pending.status == "sending" or pending.status == "failed" then
+			close_assistant_block()
+			local role = pending.status == "queued" and "User · Queued"
+				or pending.status == "sending" and "User · Sending"
+				or "User · Failed"
+			pending.header_line = append_text_message(lines, { role = role }, pending.text, has_body)
+			has_body = true
+			last_rendered_kind = "message"
 		end
 	end
 

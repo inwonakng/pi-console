@@ -189,6 +189,10 @@ local function snapshot(state)
 		status = "Stopped"
 	elseif waiting then
 		status = "Waiting"
+	elseif state.loading_error then
+		status = "Error"
+	elseif state.is_loading then
+		status = "Loading"
 	elseif state.is_retrying then
 		status = "Retrying"
 	elseif state.is_compacting then

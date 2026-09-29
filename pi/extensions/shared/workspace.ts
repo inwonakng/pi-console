@@ -77,6 +77,7 @@ export type WorkspaceDisplayState = {
   sessionFile?: string;
   lifecycle: WorkspaceLifecycle | "local" | "external";
   localCheckout: boolean;
+  transitionPending?: boolean;
 };
 
 type Snapshot = {

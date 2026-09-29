@@ -199,10 +199,23 @@ local function current_thinking_level_label(state)
 end
 
 local function activity_statusline_label(state)
-	if not state.is_streaming and not state.is_retrying then
+	if not state.is_loading and not state.is_streaming and not state.is_retrying and not state.awaiting_agent_output then
 		return ""
 	end
-	local label = state.is_retrying and "retry" or state.activity_label or "work"
+	local label
+	if state.is_loading then
+		local queued = 0
+		for _, pending in ipairs(state.pending_user_messages or {}) do
+			if pending.status == "queued" then
+				queued = queued + 1
+			end
+		end
+		label = queued > 0 and ("loading · " .. tostring(queued) .. " queued") or "loading"
+	elseif state.is_retrying then
+		label = "retry"
+	else
+		label = state.activity_label or "work"
+	end
 	local tick = tonumber(state.activity_spinner_tick) or 1
 	local frame = activity_spinner_frames[((tick - 1) % #activity_spinner_frames) + 1]
 	return " " .. frame .. " " .. label

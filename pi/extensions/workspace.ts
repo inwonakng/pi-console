@@ -144,7 +144,10 @@ function displayLabel(state: WorkspaceDisplayState): string {
 }
 
 function publishWorkspaceState(ctx: ExtensionContext): void {
-  const state = workspaceDisplayState(ctx.cwd, sessionFile(ctx));
+  const state = {
+    ...workspaceDisplayState(ctx.cwd, sessionFile(ctx)),
+    transitionPending: getPendingWorkspaceId() !== undefined,
+  };
   ctx.ui.setStatus(
     "pi-workspace",
     ctx.mode === "rpc" ? JSON.stringify(state) : `Workspace: ${displayLabel(state)}`,
@@ -373,6 +376,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       if (!record || record.kind !== "task" || !record.retained || isWorkspaceFinalized(record)
         || !sameSessionFile(record.sourceSessionFile, sessionFile(ctx))) {
         setPendingWorkspace(undefined);
+        publishWorkspaceState(ctx);
         throw new Error(`Task workspace is unavailable: ${args.trim()}`);
       }
       try {
@@ -391,7 +395,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         });
         if (!moved) throw new Error("Workspace switch was cancelled.");
       } catch (error) {
+        const transitionPending = getPendingWorkspaceId() !== undefined;
         setPendingWorkspace(undefined);
+        if (transitionPending) publishWorkspaceState(ctx);
         record.lifecycle = "retained";
         record.integrationReason = error instanceof Error ? error.message : String(error);
         saveWorkspace(record);
@@ -409,12 +415,21 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         if (location.cwd !== ctx.cwd) {
           const moved = await moveToLocation(ctx, location.cwd, ctx.sessionManager.getLeafId(), {
             saveCursor: false,
-            onArrival: (nextCtx) => publishWorkspaceState(nextCtx),
+            onArrival: (nextCtx) => {
+              setPendingWorkspace(undefined);
+              publishWorkspaceState(nextCtx);
+            },
           });
           if (!moved) throw new Error("Workspace restoration was cancelled.");
+        } else {
+          setPendingWorkspace(undefined);
+          publishWorkspaceState(ctx);
         }
-      } finally {
+      } catch (error) {
+        const transitionPending = getPendingWorkspaceId() !== undefined;
         setPendingWorkspace(undefined);
+        if (transitionPending) publishWorkspaceState(ctx);
+        throw error;
       }
     },
   });
@@ -449,7 +464,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         });
         if (!moved) throw new Error("Return to the origin checkout was cancelled; the workspace was retained.");
       } catch (error) {
+        const transitionPending = getPendingWorkspaceId() !== undefined;
         setPendingWorkspace(undefined);
+        if (transitionPending) publishWorkspaceState(ctx);
         const retained = loadWorkspace(id);
         if (retained) {
           retained.integrationReason = error instanceof Error ? error.message : String(error);
@@ -610,6 +627,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           throw new Error(`Retained workspace record points to a missing path: ${record.worktreePath}`);
         }
         setPendingWorkspace(record.id);
+        publishWorkspaceState(ctx);
         queueCommand(pi, `/pi-workspace-enter ${record.id}`);
         return {
           content: [{
@@ -674,6 +692,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           };
         }
         setPendingWorkspace(integrated.id);
+        publishWorkspaceState(ctx);
         queueCommand(pi, `/pi-workspace-return ${integrated.id}`);
         return {
           content: [{
@@ -710,6 +729,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         prepared.lifecycle = "discard_pending";
         saveWorkspace(prepared);
         setPendingWorkspace(prepared.id);
+        publishWorkspaceState(ctx);
         queueCommand(pi, `/pi-workspace-return ${prepared.id}`);
         return {
           content: [{

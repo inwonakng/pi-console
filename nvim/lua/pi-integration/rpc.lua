@@ -91,6 +91,9 @@ local function reset_runtime_state(ctx)
 	state.is_streaming = false
 	state.is_retrying = false
 	state.is_compacting = false
+	state.is_loading = false
+	state.workspace_status_received = false
+	state.session_sync_complete = false
 	state.pending_ui_requests = {}
 	state.active_ui_request_id = nil
 	state.awaiting_agent_output = false
@@ -118,6 +121,9 @@ function M.start(ctx)
 	state.error_rendered_for_active_run = false
 	state.is_retrying = false
 	state.pending_retry_error = nil
+	state.workspace_status_received = false
+	state.session_sync_complete = false
+	ctx.events.set_loading(true)
 
 	state.job = vim.fn.jobstart(M.argv(ctx), {
 		stdin = "pipe",
@@ -157,6 +163,7 @@ function M.start(ctx)
 					(restarting and "pi exited for restart with code " or "pi exited with code ") .. tostring(code),
 					ctx.rpc.recent_stderr_text()
 				)
+				ctx.actions.fail_pending_prompts()
 				if not restarting then
 					if (ctx.transcript.assistant_placeholder_active() or awaiting_output) and not state.error_rendered_for_active_run then
 						ctx.transcript.render_error_message(
@@ -183,6 +190,7 @@ function M.start(ctx)
 		ctx.logs.add("error", "Failed to start pi. Is `pi` on PATH?")
 		ctx.ui.notify("Failed to start pi. Is `pi` on PATH?", vim.log.levels.ERROR)
 		state.job = nil
+		ctx.events.set_loading(false)
 		return
 	end
 
@@ -218,8 +226,12 @@ function M.send(ctx, cmd, callback)
 	local state = ctx.state
 	M.start(ctx)
 	if not state.job or state.job <= 0 then
-		ctx.logs.add("error", "Could not start pi. Is `pi` on PATH?")
-		ctx.transcript.render_error_message("Pi Error", "Could not start pi. Is `pi` on PATH?")
+		local message = "Could not start pi. Is `pi` on PATH?"
+		ctx.logs.add("error", message)
+		ctx.transcript.render_error_message("Pi Error", message)
+		if callback then
+			callback({ type = "response", success = false, error = message })
+		end
 		return
 	end
 
@@ -234,8 +246,12 @@ function M.send(ctx, cmd, callback)
 		if cmd.id then
 			state.callbacks[cmd.id] = nil
 		end
-		ctx.logs.add("error", "Could not send request to pi; the RPC channel is closed.", cmd)
-		ctx.transcript.render_error_message("Pi Error", "Could not send request to pi; the RPC channel is closed.")
+		local message = "Could not send request to pi; the RPC channel is closed."
+		ctx.logs.add("error", message, cmd)
+		ctx.transcript.render_error_message("Pi Error", message)
+		if callback then
+			callback({ type = "response", success = false, error = message })
+		end
 	end
 end
 

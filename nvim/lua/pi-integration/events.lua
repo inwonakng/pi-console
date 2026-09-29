@@ -130,7 +130,7 @@ local function start_activity(ctx, label, tool_call_id)
 		if state.activity_timer ~= timer then
 			return
 		end
-		if not state.is_streaming and not state.is_retrying then
+		if not state.is_streaming and not state.is_retrying and not state.is_loading and not state.awaiting_agent_output then
 			stop_activity(ctx)
 			return
 		end
@@ -150,6 +150,22 @@ stop_activity = function(ctx)
 	state.activity_tool_call_id = nil
 	state.activity_spinner_tick = 1
 	ctx.transcript.update_statusline()
+end
+
+function M.set_loading(ctx, loading)
+	ctx.state.is_loading = loading == true
+	if ctx.state.is_loading then
+		ctx.state.loading_error = nil
+		start_activity(ctx, "loading")
+	elseif not ctx.state.is_streaming and not ctx.state.is_retrying and not ctx.state.awaiting_agent_output then
+		stop_activity(ctx)
+	else
+		ctx.transcript.update_statusline()
+	end
+end
+
+function M.start_activity(ctx, label)
+	start_activity(ctx, label)
 end
 
 local function update_spawn_run_line(ctx, run, progress)
@@ -642,21 +658,35 @@ local function modified_buffers_under(path)
 	return count
 end
 
+local function fail_workspace_loading(ctx, message, detail)
+	ctx.logs.add("error", message, detail)
+	M.set_loading(ctx, false)
+	ctx.state.loading_error = message
+	ctx.actions.fail_pending_prompts()
+	ctx.ui.notify(message, vim.log.levels.ERROR)
+end
+
 local function update_workspace_from_status(ctx, text)
 	local payload = type(text) == "string" and json.decode_object(text) or nil
 	if type(payload) ~= "table" or type(payload.cwd) ~= "string" or payload.cwd == "" then
+		fail_workspace_loading(ctx, "Pi returned an invalid workspace status.", text)
 		return
 	end
 	local state = ctx.state
 	local previous = state.workspace or {}
 	local cwd_changed = previous.cwd ~= payload.cwd
 	local session_changed = type(payload.sessionFile) == "string" and payload.sessionFile ~= state.session_file
+	local transition_pending = payload.transitionPending == true
+	local transition_finished = previous.transitionPending == true and not transition_pending
 	if cwd_changed then
 		local modified = modified_buffers_under(previous.path)
 		local ok, error_message = pcall(vim.api.nvim_set_current_dir, payload.cwd)
 		if not ok then
-			ctx.logs.add("error", "Could not change Neovim cwd for Pi workspace", error_message)
-			ctx.ui.notify("Could not enter Pi workspace cwd: " .. tostring(error_message), vim.log.levels.ERROR)
+			fail_workspace_loading(
+				ctx,
+				"Could not enter Pi workspace cwd: " .. tostring(error_message),
+				error_message
+			)
 			return
 		end
 		if modified > 0 then
@@ -667,10 +697,20 @@ local function update_workspace_from_status(ctx, text)
 		end
 	end
 	state.workspace = payload
-	if session_changed or cwd_changed then
+	state.workspace_status_received = true
+	if transition_pending then
+		state.session_sync_complete = false
+		state.session_sync_generation = (state.session_sync_generation or 0) + 1
+		M.set_loading(ctx, true)
+	elseif session_changed or cwd_changed or transition_finished then
+		state.session_sync_complete = false
+		state.session_sync_generation = (state.session_sync_generation or 0) + 1
+		M.set_loading(ctx, true)
 		vim.defer_fn(function()
 			ctx.session.sync()
 		end, 20)
+	else
+		ctx.actions.finish_loading_if_ready()
 	end
 	ctx.transcript.refresh_ui()
 end
@@ -880,6 +920,7 @@ function M.handle_event(ctx, event)
 	if event.type == "response" then
 		ctx.rpc.handle_response(event)
 	elseif event.type == "agent_start" then
+		state.is_loading = false
 		state.is_streaming = true
 		state.is_retrying = false
 		state.pending_retry_error = nil
@@ -916,7 +957,11 @@ function M.handle_event(ctx, event)
 		state.pending_retry_error = nil
 		local awaiting_output = state.awaiting_agent_output
 		state.awaiting_agent_output = false
-		stop_activity(ctx)
+		if state.is_loading then
+			start_activity(ctx, "loading")
+		else
+			stop_activity(ctx)
+		end
 		if message and not state.error_rendered_for_active_run then
 			ctx.transcript.render_error_message("Agent Error", message)
 		elseif (ctx.transcript.assistant_placeholder_active() or awaiting_output) and state.abort_requested then
@@ -937,6 +982,7 @@ function M.handle_event(ctx, event)
 		if should_refresh_from_file then
 			schedule_transcript_refresh(ctx)
 		end
+		ctx.actions.flush_queued_prompts()
 		ctx.ui.notify("Pi finished")
 	elseif event.type == "auto_retry_start" then
 		state.is_retrying = true
@@ -974,14 +1020,27 @@ function M.handle_event(ctx, event)
 	elseif event.type == "message_update" then
 		M.handle_message_update(ctx, event)
 	elseif event.type == "message_end" then
-		if
-			event.message
-			and event.message.role == "user"
-			and state.pending_user_message
-			and vim.trim(ctx.messages.extract_text(event.message) or "") == state.pending_user_message
-		then
-			state.pending_user_message = nil
-			return
+		if event.message and event.message.role == "user" then
+			local text = vim.trim(ctx.messages.extract_text(event.message) or "")
+			local fallback_index
+			for index, pending in ipairs(state.pending_user_messages or {}) do
+				if pending.status == "sending" then
+					fallback_index = fallback_index or index
+					if pending.text == text then
+						fallback_index = index
+						break
+					end
+				end
+			end
+			if fallback_index then
+				local pending = state.pending_user_messages[fallback_index]
+				if pending.header_line then
+					ctx.transcript.set_line(pending.header_line, "## User")
+				end
+				table.remove(state.pending_user_messages, fallback_index)
+				ctx.transcript.update_statusline()
+				return
+			end
 		end
 		if event.message and event.message.role == "toolResult" then
 			if pi_skills.tool_result_skill_name(state, event.message) then
