@@ -15,7 +15,7 @@ M.config = {
 	show_thinking = true,
 	show_stderr = false,
 	log_max_entries = 1000,
-	access_modes = { "readonly", "ask", "edit" },
+	access_modes = { "readonly", "ask", "edit", "full" },
 	integration_modes = { "ask", "allowed" },
 	session_dirs = {
 		"~/.pi/agent/sessions",

@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getAccessMode } from "./shared/access-state";
 import {
   getIntegrationMode,
   parseIntegrationMode,
@@ -360,6 +361,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         terminate: true,
       };
     }
+    if (getAccessMode() === "full") return undefined;
     const reason = workspaceBlockReason(event.toolName, input, ctx);
     return reason ? { block: true, reason } : undefined;
   });

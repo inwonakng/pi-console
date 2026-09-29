@@ -6,12 +6,16 @@
   "keywords": [
     "pi-package"
   ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
   "pi": {
     "extensions": [
       "./extensions/*.ts"
     ]
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.77",
     "yaml": "2.9.0"
   },
   "peerDependencies": {

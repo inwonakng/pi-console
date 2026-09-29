@@ -22,8 +22,9 @@ settings, and packages.
 The application is currently developed against Neovim 0.12, Pi 0.87.1, and
 tmux 3.7. It also requires:
 
-- Git, Bash, curl, Node.js, npm, and `realpath`;
+- Git, Bash, curl, Node.js 20.11 or newer, npm, `realpath`, and `ripgrep`;
 - `fzf`;
+- on Linux, `bubblewrap` and `socat` for OS-enforced command sandboxing;
 - Rust/Cargo to build `blink.cmp`;
 - a C compiler and parser toolchain for Tree-sitter;
 - network access during initial package, plugin, and parser installation.
@@ -103,7 +104,7 @@ sessions:
 
 | Extension | Capability |
 |---|---|
-| `access-mode` | Read-only, approval, and edit access modes |
+| `access-mode` | Sandboxed read-only, approval, edit, and unrestricted access modes |
 | `auto-title` | Automatic and explicit session titles |
 | `codex-usage` | OpenAI Codex usage status |
 | `history` | Session history, archive, restore, and transcript operations |
@@ -116,7 +117,18 @@ sessions:
 | `web-search` | DuckDuckGo search and page fetching |
 | `workspace` | Isolated Git workspaces and integration |
 
-The package registers the tool names `question`, `spawn`, `spawn_control`,
+The access modes are:
+
+- `readonly`: project reads with persistent writes and shell network access denied;
+- `ask`: the read-only baseline, with capability prompts after a sandbox denial;
+- `edit`: automatic workspace writes with prompts for shell network access; and
+- `full`: unrestricted host-user filesystem and network access.
+
+Capability prompts offer one-command and session-scoped grants. Existing
+`~/.pi/agent/bash-access.json` files from earlier releases are left untouched
+but are no longer read.
+
+The package registers the tool names `bash`, `question`, `spawn`, `spawn_control`,
 `todowrite`, `web_search`, `web_fetch`, and `workspace`. Pi resolves duplicate
 tool names by extension precedence and then registration order: project and
 user extension resources take precedence over package resources, and the first

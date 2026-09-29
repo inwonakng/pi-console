@@ -81,7 +81,11 @@ case "$bin_dir" in
 esac
 
 missing=
-for command in curl git node npm nvim pi tmux fzf cargo cc realpath; do
+required_commands='curl git node npm nvim pi tmux fzf cargo cc realpath rg'
+if [ "$(uname -s)" = Linux ]; then
+    required_commands="$required_commands bwrap socat"
+fi
+for command in $required_commands; do
     if ! command -v "$command" >/dev/null 2>&1; then
         missing="$missing $command"
     fi

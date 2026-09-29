@@ -28,7 +28,7 @@ import {
   workspaceStorageRoot,
 } from "./shared/workspace";
 
-const ACCESS_MODES = ["readonly", "ask", "edit"] as const;
+const ACCESS_MODES = ["readonly", "ask", "edit", "full"] as const;
 type AccessMode = (typeof ACCESS_MODES)[number];
 
 const SPAWN_MODES = ["background", "foreground"] as const;
@@ -722,7 +722,7 @@ async function applyWorktreeChanges(run: SpawnRun): Promise<void> {
     writeStatus(run);
     return;
   }
-  if (getAccessMode() !== "edit") {
+  if (getAccessMode() !== "edit" && getAccessMode() !== "full") {
     worktree.integration = "needs_parent";
     worktree.integrationReason = `parent access mode is ${getAccessMode()}; not applying isolated worktree changes`;
     writeStatus(run);
@@ -1314,7 +1314,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       "Use spawn when the user says 'use subagents' or when bounded isolated work would help.",
       "spawn defaults to background. If your response depends on the subagent result, call spawn_control with action=join or join_all before answering.",
       "Prefer named subagent profiles such as researcher, planner, reviewer, or verifier when they match.",
-      "Use accessMode=readonly for investigation/review/verification. Use accessMode=edit only for bounded implementation; edit agents default to isolated git worktrees and their changes are reconciled at join.",
+      "Use accessMode=readonly for investigation/review/verification. Use accessMode=edit only for bounded implementation; edit agents default to isolated git worktrees and their changes are reconciled at join. Use accessMode=full only when the parent is in full mode and unrestricted host access is required.",
     ],
     parameters: Type.Object({
       prompt: Type.String({ description: "The complete bounded prompt/task for the subagent." }),
@@ -1328,6 +1328,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         Type.Literal("readonly"),
         Type.Literal("ask"),
         Type.Literal("edit"),
+        Type.Literal("full"),
       ], { description: "Subagent access mode. Defaults to the profile accessMode, otherwise readonly." })),
       isolation: Type.Optional(Type.Union([
         Type.Literal("none"),
@@ -1358,8 +1359,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
       if (!ACCESS_MODES.includes(accessMode)) {
         throw new Error(`Invalid accessMode: ${String(params.accessMode)}`);
       }
-      if (accessMode === "edit" && getAccessMode() !== "edit") {
-        throw new Error("edit-mode spawned subagents require parent access mode edit. Run /pi-mode edit before delegating edit work.");
+      if (accessMode === "edit" && getAccessMode() !== "edit" && getAccessMode() !== "full") {
+        throw new Error("edit-mode spawned subagents require parent access mode edit or full. Run /pi-mode edit before delegating edit work.");
+      }
+      if (accessMode === "full" && getAccessMode() !== "full") {
+        throw new Error("full-mode spawned subagents require parent access mode full. Run /pi-mode full before delegating unrestricted work.");
       }
       const isolation = parseIsolationMode(params.isolation, accessMode);
       if (accessMode === "edit" && isolation !== "worktree") {

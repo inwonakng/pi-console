@@ -1,6 +1,6 @@
-export type AccessMode = "readonly" | "ask" | "edit";
+export type AccessMode = "readonly" | "ask" | "edit" | "full";
 
-const ACCESS_MODES: AccessMode[] = ["readonly", "ask", "edit"];
+const ACCESS_MODES: AccessMode[] = ["readonly", "ask", "edit", "full"];
 
 export function parseAccessMode(input: string | undefined): AccessMode | undefined {
   if (!input) {

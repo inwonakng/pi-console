@@ -98,7 +98,9 @@ local function truncate_plain_to_width(text, width)
 end
 
 local function mode_highlight_group(mode)
-	if mode == "edit" then
+	if mode == "full" then
+		return "PiModeFull"
+	elseif mode == "edit" then
 		return "PiModeEdit"
 	elseif mode == "ask" then
 		return "PiModeAsk"
@@ -113,7 +115,9 @@ local function mode_statusline_highlight(mode)
 end
 
 local function mode_statusline_label(mode)
-	if mode == "edit" then
+	if mode == "full" then
+		return "󱓞 "
+	elseif mode == "edit" then
 		return "󱇧 "
 	elseif mode == "ask" then
 		return "󰋗 "

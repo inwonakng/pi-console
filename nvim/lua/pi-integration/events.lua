@@ -385,12 +385,7 @@ local function summarize_ui_request(event)
 	end
 
 	local title_payload = type(event.title) == "string" and json.decode_object(event.title) or nil
-	if title_payload and title_payload.kind == "pi_remember_note" then
-		return {
-			label = "Permission note",
-			question = "Add a note for the remembered command?",
-		}
-	elseif title_payload and title_payload.kind == "pi_question_response" then
+	if title_payload and title_payload.kind == "pi_question_response" then
 		return {
 			label = "Question response",
 			question = compact_request_text(title_payload.question, 360) or "Write a response to Pi's question.",
@@ -491,9 +486,9 @@ local function confirm_with_preview(ctx, event)
 	return true
 end
 
-local function select_bash_approval(ctx, event)
+local function select_capability_approval(ctx, event)
 	local payload = decode_approval_payload(event.title)
-	if not payload or payload.tool ~= "bash" then
+	if not payload then
 		return false
 	end
 
@@ -506,8 +501,9 @@ local function select_bash_approval(ctx, event)
 		send_extension_ui_response(ctx, event.id, response)
 	end
 
+	local prompt = compact_request_text(payload.summary, 160) or "Allow bash?"
 	local ok, err = pcall(vim.ui.select, event.options or {}, {
-		prompt = "Allow bash?",
+		prompt = prompt,
 		kind = "pi_approval",
 		no_hide = true,
 		on_close = function()
@@ -534,17 +530,13 @@ end
 
 local function markdown_input_float(ctx, event)
 	local payload = type(event.title) == "string" and json.decode_object(event.title)
-	if not payload or (payload.kind ~= "pi_remember_note" and payload.kind ~= "pi_question_response") then
+	if not payload or payload.kind ~= "pi_question_response" then
 		return false
 	end
 
-	local is_question = payload.kind == "pi_question_response"
-	local buffer_kind = is_question and "question-response" or "remember-note"
-	local title = is_question
-		and " Answer question (:wq to submit, :q! to return) "
-		or " Remember comment (:wq to save, :q! to return) "
+	local title = " Answer question (:wq to submit, :q! to return) "
 	local buf = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_buf_set_name(buf, "pi://" .. buffer_kind .. "/" .. tostring(event.id))
+	vim.api.nvim_buf_set_name(buf, "pi://question-response/" .. tostring(event.id))
 	vim.bo[buf].buftype = "acwrite"
 	vim.bo[buf].bufhidden = "wipe"
 	vim.bo[buf].swapfile = false
@@ -740,7 +732,7 @@ function M.handle_extension_ui_request(ctx, event)
 		vim.opt.titlestring = event.title
 		vim.opt.title = true
 	elseif event.method == "select" then
-		if select_bash_approval(ctx, event) then
+		if select_capability_approval(ctx, event) then
 			return
 		end
 		local respond, on_close = picker_response(ctx, event.id, { cancelled = true })
