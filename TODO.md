@@ -1,0 +1,4 @@
+- public installer script. need to update readme to only have that. separate doc for dev install
+- currently the spinner sometimes shows up in second line of status and sometimes in the first. need to figure out what is happening.
+- need to think about how it's going to work with other pi extensions.. 
+- blink.cmp path support for when deciding the cwd of session (either new or changing). can it be shown in the command prompt?

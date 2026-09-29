@@ -24,7 +24,7 @@ Severity labels:
 - Critical: must fix before completion; likely correctness, safety, data loss, or severe regression.
 - Important: should fix before completion; meaningful bug, missed requirement, or maintainability risk.
 - Minor: low-risk cleanup or polish.
-- Question: ambiguity requiring user/controller/implementer decision.
+- Question: ambiguity requiring a user or controller decision.
 
 Return format:
 - Status: `DONE` | `BLOCKED` | `NEEDS_CONTEXT`

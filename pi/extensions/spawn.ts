@@ -1312,12 +1312,12 @@ export default function spawnExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use spawn when the user says 'use subagents' or when bounded isolated work would help.",
       "spawn defaults to background. If your response depends on the subagent result, call spawn_control with action=join or join_all before answering.",
-      "Prefer named subagent profiles such as researcher, planner, implementer, reviewer, or verifier when they match.",
+      "Prefer named subagent profiles such as researcher, planner, reviewer, or verifier when they match.",
       "Use accessMode=readonly for investigation/review/verification. Use accessMode=edit only for bounded implementation; edit agents default to isolated git worktrees and their changes are reconciled at join.",
     ],
     parameters: Type.Object({
       prompt: Type.String({ description: "The complete bounded prompt/task for the subagent." }),
-      agent: Type.Optional(Type.String({ description: "Named subagent profile to load from ~/.pi/agent/agents/*.md or trusted .pi/agents/*.md, e.g. researcher, planner, implementer, reviewer." })),
+      agent: Type.Optional(Type.String({ description: "Named subagent profile to load from ~/.pi/agent/agents/*.md or trusted .pi/agents/*.md, e.g. researcher, planner, reviewer, verifier." })),
       role: Type.Optional(Type.String({ description: "Backward-compatible role/instructions label. If it matches a subagent profile and agent is omitted, that profile is loaded." })),
       mode: Type.Optional(Type.Union([
         Type.Literal("background"),

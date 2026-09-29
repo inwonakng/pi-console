@@ -194,14 +194,11 @@ local function current_thinking_level_label(state)
 	return level
 end
 
-local function activity_statusline_label(state, row)
+local function activity_statusline_label(state)
 	if not state.is_streaming and not state.is_retrying then
 		return ""
 	end
 	local label = state.is_retrying and "retry" or state.activity_label or "work"
-	if (row == "primary" and label ~= "work") or (row == "secondary" and label == "work") then
-		return ""
-	end
 	local tick = tonumber(state.activity_spinner_tick) or 1
 	local frame = activity_spinner_frames[((tick - 1) % #activity_spinner_frames) + 1]
 	return " " .. frame .. " " .. label
@@ -316,7 +313,6 @@ function M.render(ctx)
 	local model_label = status_delimiter .. current_model_statusline_label(ctx)
 	local thinking_level = current_thinking_level_label(state)
 	local thinking_label = thinking_level and (" [" .. thinking_level .. "]") or ""
-	local activity_label = activity_statusline_label(state, "primary")
 	local limits_text = codex_limits_statusline_label(state)
 	local stats_text, stats_statusline = format_session_stats(state)
 	local width = vim.api.nvim_win_get_width(state.status_win)
@@ -326,8 +322,7 @@ function M.render(ctx)
 	local workspace_width = vim.fn.strdisplaywidth(workspace_label)
 	local model_width = vim.fn.strdisplaywidth(model_label)
 	local thinking_width = vim.fn.strdisplaywidth(thinking_label)
-	local activity_width = vim.fn.strdisplaywidth(activity_label)
-	local left_width = mode_width + integration_width + notification_width + workspace_width + model_width + thinking_width + activity_width
+	local left_width = mode_width + integration_width + notification_width + workspace_width + model_width + thinking_width
 	local available_right_width = width - left_width - 3
 	local stats_plain = " " .. stats_text .. " "
 	local limits_plain = limits_text ~= "" and (" " .. limits_text .. " ") or ""
@@ -368,7 +363,7 @@ function M.render(ctx)
 	if width <= left_width then
 		return left_label
 			.. "%#PiUsageStats#"
-			.. statusline_escape(truncate_plain_to_width(integration_segment_label .. notification_segment_label .. workspace_label .. model_label .. thinking_label .. activity_label, width - mode_width))
+			.. statusline_escape(truncate_plain_to_width(integration_segment_label .. notification_segment_label .. workspace_label .. model_label .. thinking_label, width - mode_width))
 			.. "%*"
 	end
 
@@ -396,15 +391,12 @@ function M.render(ctx)
 			.. statusline_escape(thinking_label)
 			.. "%#PiUsageStats#"
 	end
-	if activity_label ~= "" then
-		left_label = left_label .. "%#PiActivity#" .. statusline_escape(activity_label) .. "%#PiUsageStats#"
-	end
 	return left_label .. "%#PiUsageStats#%=" .. right_label .. "%*"
 end
 
 function M.render_secondary(ctx)
 	local state = ctx.state
-	local activity_label = activity_statusline_label(state, "secondary")
+	local activity_label = activity_statusline_label(state)
 	local spawn_label = spawn_statusline_label(state)
 	local left_text = activity_label .. spawn_label
 	local _, _, stats_text, stats_statusline = format_session_stats(state)

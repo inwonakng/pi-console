@@ -8,11 +8,6 @@ user's normal Neovim configuration. It bundles the Pi extensions used by the
 UI while preserving the user's existing Pi credentials, instructions, skills,
 settings, and packages.
 
-> [!NOTE]
-> This repository is an initial extraction from a personal dotfiles repository.
-> The source and development layout are in place, but there is not yet a public
-> installer or a compatibility guarantee.
-
 ## Features
 
 - Streaming Pi RPC conversation UI with editable Markdown input.
@@ -46,11 +41,7 @@ tmux 3.7. It also requires:
 - Rust/Cargo to build `blink.cmp`;
 - a C compiler and parser toolchain for Tree-sitter;
 - network access during initial package, plugin, and parser installation.
-
-Neovim installs the pinned nvim-extras, Catppuccin, fzf-lua, render-markdown,
-nvim-treesitter, which-key, blink.cmp, blink.lib, and oil.nvim revisions on the
-first launch. The checked-in Neovim lockfile is copied to pi-console's isolated
-Neovim configuration directory before those plugins load.
+- as well as some neovim plugins (TODO: list them with git links here.)
 
 Optional or feature-specific dependencies:
 
@@ -60,8 +51,38 @@ Optional or feature-specific dependencies:
 - `fd` or `fdfind` for faster file completion;
 - `trash` or `gio trash` to move deleted sessions to the OS trash instead of
   permanently deleting them;
-- OpenAI Codex authentication through Pi for the usage display;
-- the additional math-rendering programs documented by `nvim-extras`.
+
+## tmux integration
+
+After installing the command, add this path-independent line to the main tmux
+configuration:
+
+```tmux
+if-shell "command -v pi-console >/dev/null 2>&1" "run-shell 'pi-console --tmux setup'"
+```
+
+The command resolves the installed symlink and sources the integration from the
+corresponding checkout. Reload tmux, then use:
+
+| Binding | Action |
+|---|---|
+| `<prefix>g` | Toggle the `agents` popup |
+| `<prefix>G` | Start a conversation in the current pane's directory |
+| `<prefix>o` | Open or focus the persistent overview |
+
+Inside pi-console, `<leader>?` shows the complete context-sensitive key list.
+
+## Configuration
+
+Optional extension overrides may be copied from
+[`pi/pi-console-config.example.yaml`](pi/pi-console-config.example.yaml) to
+`~/.pi/agent/pi-console-config.yaml`.
+
+## Project status
+
+Work remaining before the first public release includes a public installer,
+cross-platform notifications, clean-home validation, supported version ranges,
+and public package/update instructions.
 
 ## Local development setup
 
@@ -90,70 +111,17 @@ editable checkout instead, register it at the shared development path:
 
 ```sh
 mkdir -p ~/.local/share/nvim-dev
-ln -s ~/Documents/projects/nvim-extras ~/.local/share/nvim-dev/nvim-extras
+ln -s $NVIM_EXTRAS_PATH ~/.local/share/nvim-dev/nvim-extras
 ```
 
-Remove the development registration without deleting the checkout or user
+where `$NVIM_EXTRAS_PATH` is where you cloned the `nvim-extras` repository.
+
+To remove the development registration without deleting the checkout or user
 configuration:
 
 ```sh
 bash ~/Documents/projects/pi-console/scripts/uninstall-dev.sh
 ```
-
-## Development workflow
-
-A development install loads the Pi package, Neovim application, and tmux
-helpers directly from their working trees. When the optional shared
-`nvim-extras` development link exists, Neovim loads that checkout as well.
-There is no need to install a published release on the development machine.
-
-Use local branches and commits freely, keep the daily-use `main` branch at a
-known-good revision, and push only changes that are ready to share. Restart
-running Pi or pi-console processes after changing extensions or Neovim code;
-reload tmux after changing `tmux/pi-console.conf`.
-
-Keep dependency metadata aligned with source changes: run `npm install` from
-`pi/` when changing npm dependencies, and update `nvim/nvim-pack-lock.json`
-when changing Neovim plugins. Validate plugin changes with a cold start in an
-isolated Neovim data directory before committing them. Changes to shared
-rendering modules belong in the `nvim-extras` repository and should be committed
-there separately.
-
-## tmux integration
-
-After installing the command, add this path-independent line to the main tmux
-configuration:
-
-```tmux
-if-shell "command -v pi-console >/dev/null 2>&1" "run-shell 'pi-console --tmux setup'"
-```
-
-The command resolves the installed symlink and sources the integration from the
-corresponding checkout. Reload tmux, then use:
-
-| Binding | Action |
-|---|---|
-| `<prefix>g` | Toggle the `agents` popup |
-| `<prefix>G` | Start a conversation in the current pane's directory |
-| `<prefix>o` | Open or focus the persistent overview |
-
-Inside pi-console, `<leader>?` shows the complete context-sensitive key list.
-
-## Configuration
-
-pi-console intentionally does not ship an agent-level `settings.json`. Pi uses
-the user's existing provider, model, credentials, instructions, and resource
-configuration.
-
-Optional extension overrides may be copied from
-[`pi/pi-console-config.example.yaml`](pi/pi-console-config.example.yaml) to
-`~/.pi/agent/pi-console-config.yaml`.
-
-## Project status
-
-Work remaining before the first public release includes a public installer,
-cross-platform notifications, clean-home validation, supported version ranges,
-and public package/update instructions.
 
 ## License
 
