@@ -19,7 +19,7 @@ local function command(args)
 end
 
 function M.list()
-	local output, err = command({ "list-panes", "-a", "-F", "#{pane_id}\t#{session_id}\t#{window_id}\t#{pane_dead}\t#{@pi_nvim}" })
+	local output, err = command({ "list-panes", "-a", "-F", "#{pane_id}\t#{session_id}\t#{window_id}\t#{pane_dead}\t#{" .. option .. "}" })
 	if not output then
 		return nil, err
 	end
