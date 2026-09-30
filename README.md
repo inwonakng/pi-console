@@ -1,21 +1,91 @@
 # pi-console
 
-A Neovim-powered conversation and session console for the
-[Pi coding agent](https://pi.dev), with tmux-backed multi-session management.
+A Neovim frontend for the [Pi coding agent](https://pi.dev), with tmux to keep multiple conversations running and an overview to keep track of them so you no longer need to bounce back and forth between your favorite editor and the TUI.
 
-pi-console runs as a dedicated Neovim application rather than modifying the
-user's normal Neovim configuration. It bundles the Pi extensions used by the
-UI while preserving the user's existing Pi credentials, instructions, skills,
-settings, and packages.
+Your existing Pi credentials, instructions, skills, settings, and packages carry over; the extensions needed by the UI are bundled.
+
+This is a work in progress. The main reason for sharing this repository is to serve as an inspiration for others who want to build something similar. I use this project daily so I will continue to improve/add features, but I do not guarantee that it will be maintained or supported in the future. If you want to use it, please read the requirements and installation instructions carefully (or have your agent do it).
+
+![Regular conversation view with the transcript, prompt buffer, and session status](assets/regular.png)
 
 ## Features
 
-- Streaming Pi RPC conversation UI with editable Markdown input.
-- Persistent tmux session with one overview and multiple conversations.
-- Session history, archive, restore, trash, and transcript previews.
-- Tool approval previews, access modes, workspaces, and subagents.
-- OpenAI Codex usage display and desktop notification controls.
-- Markdown rendering supplied by the `nvim-extras` Neovim package.
+- **Conversations in Neovim.** Editable Markdown prompts and rendered
+  transcripts, with tool output and thinking available to open when you need
+  them. Switch models and thinking levels, or send another prompt to steer an
+  active run.
+- **Multiple sessions without losing your place.** A persistent tmux session
+  holds your conversations. The overview shows who's working, idle, or waiting
+  for you, along with each session's directory and workspace.
+- **History you can navigate.** Fuzzy-find sessions with transcript previews,
+  resume old work, and archive, restore, or trash conversations. The session
+  tree lets you revisit earlier messages and explore a different branch.
+- **Control over agent changes.** Choose an access mode, inspect approval
+  requests with highlighted commands and diffs, and work in isolated Git
+  workspaces. Review workspace changes before integrating them.
+- **Subagents you can follow.** Delegate work to foreground or background
+  agents and inspect their transcripts without leaving the parent conversation.
+- **Decisions and progress in the UI.** Multiple-choice questions with a
+  freeform response option, structured task lists, and desktop notification
+  controls.
+- **Usage at a glance.** Session token, context, and cost information in the
+  statusline, plus OpenAI Codex quota and reset times in a dedicated view.
+
+## Screenshots
+
+### Session overview
+
+See which conversations need attention, check their workspaces, and jump into
+one from a single overview.
+
+![Session overview showing working, idle, and waiting conversations](assets/overview.png)
+
+<details>
+<summary>Session picker and transcript preview</summary>
+
+Search saved conversations and read a preview before resuming. Archive and
+trash actions are available in the same picker.
+
+![Session history picker with a preview of the selected conversation](assets/session-picker.png)
+
+</details>
+
+<details>
+<summary>Conversation tree</summary>
+
+Navigate conversation branches and jump back to an earlier message, with an
+optional summary when switching context.
+
+![Conversation tree showing multiple branches and the current message](assets/tree-view.png)
+
+</details>
+
+<details>
+<summary>Subagent transcript</summary>
+
+Open a delegated agent's transcript alongside the parent conversation.
+
+![Subagent transcript opened over the parent conversation](assets/subagent-transcript.png)
+
+</details>
+
+<details>
+<summary>Question picker</summary>
+
+Choose an answer or write your own response when the agent needs a decision.
+
+![Question picker with multiple choices and a custom response option](assets/question-picker.png)
+
+</details>
+
+<details>
+<summary>OpenAI Codex usage</summary>
+
+Check the remaining five-hour and weekly quotas, with reset times.
+
+![OpenAI Codex usage view showing remaining quotas and reset times](assets/codex-usage.png)
+
+</details>
 
 ## Requirements
 
@@ -28,7 +98,6 @@ tmux 3.7. It also requires:
 - Rust/Cargo to build `blink.cmp`;
 - a C compiler and parser toolchain for Tree-sitter;
 - network access during initial package, plugin, and parser installation.
-- as well as some neovim plugins (TODO: list them with git links here.)
 
 Optional or feature-specific dependencies:
 
@@ -83,7 +152,8 @@ integration. Reload tmux, then use:
 | `<prefix>G` | Start a conversation in the current pane's directory |
 | `<prefix>o` | Open or focus the persistent overview |
 
-Inside pi-console, `<leader>?` shows the complete context-sensitive key list.
+You can also run `pi-console` directly from a project directory. Inside
+pi-console, `<leader>?` shows the complete context-sensitive key list.
 
 ## Configuration
 
@@ -124,10 +194,6 @@ The access modes are:
 - `edit`: automatic workspace writes with prompts for shell network access; and
 - `full`: unrestricted host-user filesystem and network access.
 
-Capability prompts offer one-command and session-scoped grants. Existing
-`~/.pi/agent/bash-access.json` files from earlier releases are left untouched
-but are no longer read.
-
 The package registers the tool names `bash`, `question`, `spawn`, `spawn_control`,
 `todowrite`, `web_search`, `web_fetch`, and `workspace`. Pi resolves duplicate
 tool names by extension precedence and then registration order: project and
@@ -144,14 +210,11 @@ placed in `~/.pi/agent/agents/` or a trusted project's `.pi/agents/` directory.
 A user profile overrides a bundled profile with the same name, and a project
 profile overrides both.
 
-## Project status
-
-Work remaining before the first public release includes cross-platform
-notifications, clean-home validation, and supported version ranges.
-
 ## Development
 
-See [`docs/development.md`](docs/development.md) for the checkout-based setup.
+For a checkout-based setup, run [`scripts/install-dev.sh`](scripts/install-dev.sh)
+from the repository root. It registers the local Pi package and links
+`pi-console` to the checkout. Restart running Pi/Neovim processes after edits.
 
 ## License
 
