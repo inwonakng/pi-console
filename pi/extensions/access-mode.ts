@@ -98,7 +98,7 @@ function writePreview(cwd: string, input: Record<string, unknown>): { text: stri
   const absolutePath = resolve(cwd, path);
   if (!existsSync(absolutePath)) {
     return {
-      text: `# New file: ${path}\n# Directory: ${dirname(absolutePath)}\n\n${content}`,
+      text: content,
       filetype: "text",
     };
   }
@@ -126,6 +126,11 @@ function approvalPayload(event: ToolCallEvent, ctx: ExtensionContext): string {
     tool: event.toolName,
     mode: getAccessMode(),
     summary,
+    request: MUTATION_TOOLS.has(event.toolName)
+      ? "Workspace file writes"
+      : `Run ${event.toolName}${typeof input.action === "string" ? `: ${input.action}` : ""}`,
+    directory: ctx.cwd,
+    path: typeof input.path === "string" ? input.path : undefined,
     preview_filetype: preview.filetype,
     preview: preview.text,
   });

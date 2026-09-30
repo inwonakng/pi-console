@@ -14,6 +14,9 @@ map("n", "<Esc>", "<cmd>nohlsearch<CR>")
 
 -- Conversation-only actions must not start an agent in the overview.
 if not vim.g.pi_overview then
+	map("n", "<leader>pa", function()
+		require("pi-integration").restore_pending_action()
+	end, { desc = "Restore pending Pi action" })
 	map("n", "<leader>pi", function()
 		require("pi-integration").show_input()
 	end, { desc = "Pi input" })
@@ -48,7 +51,7 @@ map("n", "<leader>bo", function()
 	end
 	local failed = {}
 	for _, i in ipairs(bufs) do
-		if non_hidden_buffer[i] == nil then
+		if non_hidden_buffer[i] == nil and not require("pi-integration.pending-picker").owns_buffer(i) then
 			local ok, err = pcall(vim.api.nvim_buf_delete, i, {})
 			if not ok then
 				local name = vim.api.nvim_buf_get_name(i)

@@ -12,3 +12,8 @@ scripts/                 development installer and uninstaller
 ```
 
 The `TODO.md` is written by me and should not be editted. You can make suggestions for changes in this file if you think some of the points are addressed.
+
+## Coding best practice
+
+- No alt-bound hotkeys. alt is reserved for OS related apps
+- No tests. Write tests only for your sake if you absolutely need it. Do not include them in the final code.

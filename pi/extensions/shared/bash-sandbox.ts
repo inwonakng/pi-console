@@ -22,6 +22,7 @@ let sandboxError: string | undefined;
 let sandboxTempDir: string | undefined;
 let activeNetworkRequest: {
   command: string;
+  cwd: string;
   ctx: ExtensionContext;
   mode: AccessMode;
   allowedHosts: Set<string>;
@@ -29,14 +30,16 @@ let activeNetworkRequest: {
 let commandQueue: Promise<void> = Promise.resolve();
 let networkPromptQueue: Promise<void> = Promise.resolve();
 
-function approvalPayload(command: string, summary: string, mode: AccessMode): string {
+function approvalPayload(command: string, summary: string, mode: AccessMode, cwd: string): string {
   return JSON.stringify({
     kind: "pi_approval_preview",
     tool: "bash",
     mode,
     summary,
+    request: summary,
+    directory: cwd,
     preview_filetype: "sh",
-    preview: `# mode: ${mode}\n\n${command}`,
+    preview: command,
   });
 }
 
@@ -61,11 +64,12 @@ async function chooseCapability(
   mode: AccessMode,
   command: string,
   summary: string,
+  cwd: string,
 ): Promise<"once" | "session" | "deny"> {
   if (!canPrompt(ctx, mode)) return "deny";
   notifyPiToolApproval(ctx);
   const title = ctx.mode === "rpc"
-    ? approvalPayload(command, summary, mode)
+    ? approvalPayload(command, summary, mode, cwd)
     : summary;
   const choice = await ctx.ui.select(title, ["Allow once", "Allow for session", "Deny"]);
   if (choice === "Allow once") return "once";
@@ -109,6 +113,7 @@ async function approveNetwork({ host, port }: { host: string; port: number | und
       request.mode,
       request.command,
       `Allow network access to ${destination}?`,
+      request.cwd,
     );
     if (decision === "deny") return false;
     request.allowedHosts.add(normalizedHost);
@@ -224,7 +229,7 @@ async function runSandboxed(
   const commandId = randomUUID();
   const startedAt = new Date();
   let wrappedCommand = false;
-  activeNetworkRequest = { command, ctx, mode, allowedHosts };
+  activeNetworkRequest = { command, cwd, ctx, mode, allowedHosts };
   updateNetworkConfig(mode, allowedHosts);
   try {
     const previousTempDir = process.env.CLAUDE_CODE_TMPDIR;
@@ -292,6 +297,7 @@ async function executeRestricted(
         mode,
         command,
         `Allow workspace writes for this command in ${canonicalCwd}?`,
+        canonicalCwd,
       );
       if (decision === "deny") {
         appendViolations(attempt.commandId, options.onData);

@@ -1,4 +1,5 @@
 local json = require("pi-integration.utils.json")
+local pending_picker = require("pi-integration.pending-picker")
 
 local M = {}
 
@@ -94,6 +95,7 @@ local function reset_runtime_state(ctx)
 	state.is_loading = false
 	state.workspace_status_received = false
 	state.session_sync_complete = false
+	pending_picker.clear(ctx, false)
 	state.pending_ui_requests = {}
 	state.active_ui_request_id = nil
 	state.awaiting_agent_output = false
@@ -263,6 +265,7 @@ function M.restart(ctx, options)
 		return
 	end
 
+	pending_picker.clear(ctx, true)
 	if options.fresh_session then
 		state.session_file = nil
 		state.pending_session_file = nil
@@ -299,6 +302,7 @@ function M.restart(ctx, options)
 end
 
 function M.stop(ctx)
+	pending_picker.clear(ctx, false)
 	local state = ctx.state
 	if state.job and state.job > 0 then
 		vim.fn.jobstop(state.job)

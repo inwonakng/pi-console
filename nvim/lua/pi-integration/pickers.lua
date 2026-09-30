@@ -74,7 +74,7 @@ function M.set_access_mode(ctx, mode)
 end
 
 function M.pick_access_mode(ctx)
-	vim.ui.select(ctx.config.access_modes or {}, { prompt = "Pi access mode" }, function(choice)
+	vim.ui.select(ctx.config.access_modes or {}, { prompt = "Pi access mode", pi_select_layout = "compact" }, function(choice)
 		if not choice then
 			return
 		end
@@ -106,7 +106,7 @@ function M.set_integration_mode(ctx, mode)
 end
 
 function M.pick_integration_mode(ctx)
-	vim.ui.select(ctx.config.integration_modes or {}, { prompt = "Pi integration mode" }, function(choice)
+	vim.ui.select(ctx.config.integration_modes or {}, { prompt = "Pi integration mode", pi_select_layout = "compact" }, function(choice)
 		if not choice then
 			return
 		end
@@ -123,7 +123,7 @@ end
 
 function M.pick_thinking(ctx)
 	local levels = { "off", "minimal", "low", "medium", "high", "xhigh" }
-	vim.ui.select(levels, { prompt = "Thinking level" }, function(choice)
+	vim.ui.select(levels, { prompt = "Thinking level", pi_select_layout = "compact" }, function(choice)
 		if not choice then
 			return
 		end

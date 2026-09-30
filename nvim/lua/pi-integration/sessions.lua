@@ -463,6 +463,7 @@ local function confirm(prompt, callback)
 
 	vim.ui.select({ "Yes", "No" }, {
 		prompt = prompt,
+		pi_select_layout = "compact",
 		on_close = function()
 			picker_closed = true
 			dispatch()
@@ -724,13 +725,6 @@ local function session_previewer(ctx, by_id)
 	}
 end
 
-local function picker_title(view, stale)
-	if stale then
-		return " Pi sessions to archive "
-	end
-	return view == "archived" and " Pi archived sessions " or " Pi sessions "
-end
-
 local function reopen(ctx, opts)
 	vim.schedule(function()
 		M.pick(ctx, opts)
@@ -891,8 +885,7 @@ function M.pick(ctx, opts)
 		keymap.fzf.start = "select-all"
 	end
 	require("fzf-lua").fzf_exec(entries, {
-		prompt = archived and "Archived > " or "Sessions > ",
-		winopts = { title = picker_title(view, opts.paths ~= nil), title_pos = "left" },
+		prompt = opts.paths ~= nil and "Archive sessions > " or (archived and "Archived > " or "Sessions > "),
 		previewer = session_previewer(ctx, by_id),
 		fzf_opts = {
 			["--multi"] = true,

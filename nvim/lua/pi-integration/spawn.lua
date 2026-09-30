@@ -107,7 +107,7 @@ end
 
 local function pick_send_action(ctx, run)
 	local actions = { "status", "join", "stop" }
-	vim.ui.select(actions, { prompt = "Send subagent action" }, function(choice)
+	vim.ui.select(actions, { prompt = "Send subagent action", pi_select_layout = "compact" }, function(choice)
 		if choice then
 			send_spawn_action(ctx, run, choice)
 		end
@@ -132,6 +132,7 @@ local function pick_run_action(ctx, run)
 
 	vim.ui.select(choices, {
 		prompt = "Subagent " .. tostring(run.runId or ""),
+		pi_select_layout = "compact",
 		format_item = function(item)
 			return item.label .. (item.path and ("  " .. item.path) or "")
 		end,

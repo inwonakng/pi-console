@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, type WorkspaceRecord } from "./workspace";
+import { getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, workspaceDisplayState, type WorkspaceRecord } from "./workspace";
 import { hasRunningSubagents } from "../spawn";
 
 const LOCATION_ENTRY = "pi-workspace-location";
@@ -35,6 +35,18 @@ export function activeLocation(ctx: ExtensionContext): Location {
   return locationForEntry(ctx, ctx.sessionManager.getLeafId());
 }
 
+export function publishWorkspaceState(ctx: ExtensionContext): void {
+  const state = {
+    ...workspaceDisplayState(ctx.cwd, ctx.sessionManager.getSessionFile()),
+    transitionPending: getPendingWorkspaceId() !== undefined,
+  };
+  const branch = state.branch ? ` (${state.branch})` : "";
+  ctx.ui.setStatus(
+    "pi-workspace",
+    ctx.mode === "rpc" ? JSON.stringify(state) : `Workspace: ${state.name}${branch}`,
+  );
+}
+
 /** Change Pi's cwd-bound runtime without forking its session. The cursor survives a later reopen. */
 export async function moveToLocation(
   ctx: ExtensionCommandContext,
@@ -53,28 +65,36 @@ export async function moveToLocation(
   if ((ctx.cwd !== cwd || options.reload) && hasRunningSubagents()) {
     throw new Error("Wait for running subagents before switching workspaces; replacing Pi's runtime would abort them.");
   }
+  const ownsPending = (ctx.cwd !== cwd || options.reload === true) && !getPendingWorkspaceId();
   const arrival = async (nextCtx: ExtensionCommandContext, sendMessage?: MoveContext["sendMessage"]) => {
-    if (options.navigateTo) {
-      const result = await nextCtx.navigateTree(options.navigateTo);
-      if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
-    } else if (leafId === null) {
-      nextCtx.sessionManager.resetLeaf();
-    } else if (nextCtx.sessionManager.getLeafId() !== leafId) {
-      // Call Pi's navigation API to restore the finalized model context, not just the JSONL leaf.
-      const result = await nextCtx.navigateTree(leafId);
-      if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
+    try {
+      if (options.navigateTo) {
+        const result = await nextCtx.navigateTree(options.navigateTo);
+        if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
+      } else if (leafId === null) {
+        nextCtx.sessionManager.resetLeaf();
+      } else if (nextCtx.sessionManager.getLeafId() !== leafId) {
+        // Call Pi's navigation API to restore the finalized model context, not just the JSONL leaf.
+        const result = await nextCtx.navigateTree(leafId);
+        if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
+      }
+      if (options.markLocation) {
+        nextCtx.sessionManager.appendCustomEntry(LOCATION_ENTRY, {
+          workspaceId: options.workspaceId ?? null,
+          label: options.workspaceLabel ?? "Origin checkout",
+          cwd,
+        });
+      } else if (options.saveCursor !== false) {
+        nextCtx.sessionManager.appendCustomEntry(CURSOR_ENTRY, {});
+      }
+      setExpectedWorkspaceMissing(undefined);
+      options.onArrival?.(nextCtx);
+    } finally {
+      if (ownsPending) {
+        setPendingWorkspace(undefined);
+        publishWorkspaceState(nextCtx);
+      }
     }
-    if (options.markLocation) {
-      nextCtx.sessionManager.appendCustomEntry(LOCATION_ENTRY, {
-        workspaceId: options.workspaceId ?? null,
-        label: options.workspaceLabel ?? "Origin checkout",
-        cwd,
-      });
-    } else if (options.saveCursor !== false) {
-      nextCtx.sessionManager.appendCustomEntry(CURSOR_ENTRY, {});
-    }
-    setExpectedWorkspaceMissing(undefined);
-    options.onArrival?.(nextCtx);
     if (options.continueWith) {
       if (!sendMessage) throw new Error("The switched session cannot resume the agent.");
       await sendMessage({ customType: "workspace-continuation", content: options.continueWith, display: false }, { triggerTurn: true });
@@ -89,14 +109,32 @@ export async function moveToLocation(
     cwdOverride: string;
     withSession: (nextCtx: MoveContext) => Promise<void>;
   }) => Promise<{ cancelled: boolean }>;
-  const ownsPending = !getPendingWorkspaceId();
   if (ownsPending) setPendingWorkspace("navigation");
+  let arrived = false;
   try {
     const result = await switchWithCwd(file, {
       cwdOverride: cwd,
-      withSession: async (nextCtx) => arrival(nextCtx, nextCtx.sendMessage.bind(nextCtx)),
+      withSession: async (nextCtx) => {
+        arrived = true;
+        await arrival(nextCtx, nextCtx.sendMessage.bind(nextCtx));
+      },
     });
+    if (result.cancelled && ownsPending) {
+      setPendingWorkspace(undefined);
+      publishWorkspaceState(ctx);
+    }
     return !result.cancelled;
+  } catch (error) {
+    if (ownsPending && !arrived) {
+      setPendingWorkspace(undefined);
+      try {
+        publishWorkspaceState(ctx);
+      } catch {
+        // Runtime creation can fail after disposing ctx, before a fresh context exists.
+        // Preserve the original switch error when there is no live context to publish from.
+      }
+    }
+    throw error;
   } finally {
     if (ownsPending) setPendingWorkspace(undefined);
   }

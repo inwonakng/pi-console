@@ -26,7 +26,7 @@ function M.confirm_abort_active_run(ctx, action, proceed)
 		.. ". "
 		.. action
 		.. " will abort the current run. Continue?"
-	vim.ui.select({ "Continue", "Cancel" }, { prompt = prompt }, function(choice)
+	vim.ui.select({ "Continue", "Cancel" }, { prompt = prompt, pi_select_layout = "compact" }, function(choice)
 		if choice == "Continue" then
 			proceed()
 		end

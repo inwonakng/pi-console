@@ -1,12 +1,15 @@
 local guard = require("pi-integration.utils.guard")
 local runtime = require("pi-integration.runtime")
+local pending_picker = require("pi-integration.pending-picker")
 
 local M = {}
 
 local function reset_conversation(ctx, keep_transcript, keep_pending_messages)
 	local state = ctx.state
 	local pending_user_messages = keep_pending_messages and state.pending_user_messages or {}
+	pending_picker.clear(ctx, false)
 	state.pending_ui_requests = {}
+	state.active_ui_request_id = nil
 	state.pending_user_messages = pending_user_messages
 	state.session_name = nil
 	state.message_count = 0
@@ -113,6 +116,7 @@ end
 
 function M.new_session(ctx)
 	local function proceed()
+		pending_picker.clear(ctx, true)
 		if not (ctx.state.job and ctx.state.job > 0) then
 			M.apply_state(ctx, { messageCount = 0 }, true)
 			ctx.transcript.append_status(ctx.notices.empty_session)
@@ -140,6 +144,7 @@ end
 
 function M.switch_session(ctx, path)
 	local function proceed()
+		pending_picker.clear(ctx, true)
 		if not (ctx.state.job and ctx.state.job > 0) then
 			ctx.state.pending_session_file = path
 			M.sync(ctx, {

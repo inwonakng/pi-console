@@ -278,7 +278,7 @@ function M.open(config)
 		if not entry then
 			return
 		end
-		vim.ui.select(values, { prompt = prompt }, function(choice)
+		vim.ui.select(values, { prompt = prompt, pi_select_layout = "compact" }, function(choice)
 			if choice then
 				report(runtime.control(entry, action, choice))
 			end
@@ -313,7 +313,7 @@ function M.open(config)
 			return
 		end
 		if runtime.kill_needs_confirmation(current) then
-			vim.ui.select({ "Yes", "No" }, { prompt = "Kill running conversation " .. text(current.title) .. " and close its window?" }, function(choice)
+			vim.ui.select({ "Yes", "No" }, { prompt = "Kill running conversation " .. text(current.title) .. " and close its window?", pi_select_layout = "compact" }, function(choice)
 				if choice == "Yes" then
 					report(runtime.kill(current, true))
 				end
@@ -350,9 +350,9 @@ function M.open(config)
 	map("<leader>n", function()
 		control_selected("toggle_notifications")
 	end, "Toggle selected conversation notifications")
-	map("<leader>h", function()
+	map("<leader>s", function()
 		sessions.pick(history_ctx)
-	end, "Session history")
+	end, "Pick session")
 	map("<leader>pn", function()
 		vim.ui.input({ prompt = "New conversation directory: ", default = vim.fn.getcwd(), completion = "dir" }, function(cwd)
 			if cwd and vim.trim(cwd) ~= "" then

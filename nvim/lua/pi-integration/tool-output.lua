@@ -457,6 +457,7 @@ local function open_spawn_artifacts(ctx, output)
 	end
 	vim.ui.select(choices, {
 		prompt = "Open spawn artifact",
+		pi_select_layout = "compact",
 		format_item = function(item)
 			return item.label .. "  " .. item.path
 		end,

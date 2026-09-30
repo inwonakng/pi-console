@@ -765,6 +765,10 @@ function M.pick_command()
 	pi_pickers.pick_command(integration_ctx())
 end
 
+function M.restore_pending_action()
+	require("pi-integration.pending-picker").restore(integration_ctx())
+end
+
 function M.get_commands(callback)
 	send({ type = "get_commands" }, function(event)
 		local commands = event.success and event.data and event.data.commands or {}

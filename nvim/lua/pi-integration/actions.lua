@@ -220,6 +220,7 @@ function M.submit_prompt(ctx)
 end
 
 function M.abort(ctx)
+	require("pi-integration.pending-picker").clear(ctx, true)
 	ctx.state.abort_requested = true
 	ctx.rpc.send({ type = "abort" })
 end

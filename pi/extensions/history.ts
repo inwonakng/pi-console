@@ -579,7 +579,10 @@ export default function historyExtension(pi: ExtensionAPI) {
 			if (!entry) {
 				return;
 			}
-			const action = await ctx.ui.select("History action", ["Revert (undoes related file changes)", "Fork"]);
+			const title = ctx.mode === "rpc"
+				? JSON.stringify({ kind: "pi_compact_select", prompt: "History action" })
+				: "History action";
+			const action = await ctx.ui.select(title, ["Revert (undoes related file changes)", "Fork"]);
 			if (action === "Fork") {
 				const text = messageText(entry);
 				await ctx.fork(entry.id, {

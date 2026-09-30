@@ -145,6 +145,9 @@ local function tool_quote_highlight(line)
 	if line:find("> 󰇥 Tool: edit", 1, true) == 1 or line:find("> 󰇥 Tool: write", 1, true) == 1 then
 		return "PiToolEditQuote"
 	end
+	if line:find("> 󰇥 Tool: workspace", 1, true) == 1 then
+		return "PiToolWorkspaceQuote"
+	end
 	if line:find("> 󰇥 Subagent", 1, true) == 1 then
 		return "PiSubagentQuote"
 	end

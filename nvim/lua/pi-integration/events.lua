@@ -4,6 +4,7 @@ local json = require("pi-integration.utils.json")
 local message_utils = require("pi-integration.utils.message")
 local pi_skills = require("pi-integration.skills")
 local pi_usage = require("pi-integration.usage")
+local pending_picker = require("pi-integration.pending-picker")
 
 local function partial_result_text(partial_result)
 	if type(partial_result) ~= "table" then
@@ -346,6 +347,9 @@ function M.render_message(ctx, message)
 end
 
 local function send_extension_ui_response(ctx, id, response)
+	if not ctx.state.pending_ui_requests[id] then
+		return
+	end
 	ctx.state.pending_ui_requests[id] = nil
 	if ctx.state.active_ui_request_id == id then
 		ctx.state.active_ui_request_id = nil
@@ -372,6 +376,14 @@ local function decode_question_payload(title, expected_kind)
 	end
 	local payload = json.decode_object(title)
 	if not payload or payload.kind ~= expected_kind or type(payload.question) ~= "string" then
+		return nil
+	end
+	return payload
+end
+
+local function decode_compact_select_payload(title)
+	local payload = type(title) == "string" and json.decode_object(title)
+	if not payload or payload.kind ~= "pi_compact_select" or type(payload.prompt) ~= "string" then
 		return nil
 	end
 	return payload
@@ -427,7 +439,8 @@ local function summarize_ui_request(event)
 		}
 	end
 
-	local title = compact_request_text(event.title, 360)
+	local compact_select = decode_compact_select_payload(event.title)
+	local title = compact_request_text(compact_select and compact_select.prompt or event.title, 360)
 	local message = compact_request_text(event.message, 360)
 	if request_has_option(event, "Integrate and return") then
 		return {
@@ -460,15 +473,29 @@ local function summarize_ui_request(event)
 	}
 end
 
-local function approval_preview_text(payload, prompt)
-	local sections = { prompt }
-	if type(payload.summary) == "string" and payload.summary ~= "" and payload.summary ~= prompt then
-		table.insert(sections, payload.summary)
+local function approval_select_opts(payload, prompt)
+	local header = {}
+	local function field(key, value)
+		if type(value) == "string" and value ~= "" then
+			table.insert(header, { key, (value:gsub("[\r\n]+", " ")) })
+		end
 	end
-	if type(payload.preview) == "string" and payload.preview ~= "" then
-		table.insert(sections, payload.preview)
+	field("Tool", payload.tool or "tool")
+	field("Request", payload.request or prompt)
+	field("File", payload.path)
+	field("Directory", payload.directory)
+	field("Mode", payload.mode)
+	if not payload.request and payload.summary ~= prompt then
+		field("Details", payload.summary)
 	end
-	return table.concat(sections, "\n\n")
+	return {
+		prompt = prompt,
+		prompt_label = "Permission",
+		pi_select_layout = "compact",
+		preview_header = header,
+		preview_text = type(payload.preview) == "string" and payload.preview or "",
+		preview_filetype = payload.preview_filetype,
+	}
 end
 
 local function confirm_with_preview(ctx, event)
@@ -477,37 +504,11 @@ local function confirm_with_preview(ctx, event)
 		return false
 	end
 
-	local responded = false
-	local function respond_once(response)
-		if responded then
-			return
-		end
-		responded = true
-		send_extension_ui_response(ctx, event.id, response)
-	end
-
-	local function deny_if_unanswered()
-		vim.defer_fn(function()
-			respond_once({ confirmed = false })
-		end, 50)
-	end
-
 	local prompt = type(event.title) == "string" and event.title ~= "" and event.title
 		or (payload.tool and ("Allow " .. payload.tool .. "?") or "Pi confirm")
-	local ok, err = pcall(vim.ui.select, { "Allow", "Deny" }, {
-		prompt = prompt,
-		prompt_label = "Permission",
-		preview_text = approval_preview_text(payload, prompt),
-		preview_filetype = payload.preview_filetype,
-		no_hide = true,
-		on_close = deny_if_unanswered,
-	}, function(choice)
-		respond_once({ confirmed = choice == "Allow" })
+	pending_picker.select(ctx, event.id, { "Allow", "Deny" }, approval_select_opts(payload, prompt), function(choice)
+		send_extension_ui_response(ctx, event.id, { confirmed = choice == "Allow" })
 	end)
-	if not ok then
-		ctx.logs.add("error", "Approval picker failed", tostring(err))
-		respond_once({ confirmed = false })
-	end
 	return true
 end
 
@@ -517,38 +518,11 @@ local function select_capability_approval(ctx, event)
 		return false
 	end
 
-	local responded = false
-	local function respond_once(response)
-		if responded then
-			return
-		end
-		responded = true
-		send_extension_ui_response(ctx, event.id, response)
-	end
-
-	local prompt = type(payload.summary) == "string" and payload.summary ~= "" and payload.summary or "Allow bash?"
-	local ok, err = pcall(vim.ui.select, event.options or {}, {
-		prompt = prompt,
-		prompt_label = "Permission",
-		preview_text = approval_preview_text(payload, prompt),
-		preview_filetype = payload.preview_filetype,
-		no_hide = true,
-		on_close = function()
-			vim.defer_fn(function()
-				respond_once({ cancelled = true })
-			end, 50)
-		end,
-	}, function(choice)
-		if choice then
-			respond_once({ value = choice })
-		else
-			respond_once({ cancelled = true })
-		end
+	local tool = type(payload.tool) == "string" and payload.tool ~= "" and payload.tool or "tool"
+	local prompt = "Allow " .. tool .. "?"
+	pending_picker.select(ctx, event.id, event.options or {}, approval_select_opts(payload, prompt), function(choice)
+		send_extension_ui_response(ctx, event.id, choice and { value = choice } or { cancelled = true })
 	end)
-	if not ok then
-		ctx.logs.add("error", "Approval picker failed", tostring(err))
-		respond_once({ cancelled = true })
-	end
 	return true
 end
 
@@ -715,27 +689,13 @@ local function update_workspace_from_status(ctx, text)
 	ctx.transcript.refresh_ui()
 end
 
-local function picker_response(ctx, id, close_response)
-	local responded = false
-	local function respond(response)
-		if responded then
-			return
-		end
-		responded = true
-		send_extension_ui_response(ctx, id, response)
-	end
-	local function on_close()
-		-- fzf-lua closes its window before scheduling the choice callback.
-		vim.defer_fn(function()
-			respond(close_response)
-		end, 50)
-	end
-	return respond, on_close
-end
-
 function M.handle_extension_ui_request(ctx, event)
 	local state = ctx.state
-	if event.id and (event.method == "select" or event.method == "confirm" or event.method == "input") then
+	if event.id and (event.method == "select" or event.method == "confirm" or event.method == "input" or event.method == "editor") then
+		if not pending_picker.can_open(event.id) then
+			ctx.rpc.send({ type = "extension_ui_response", id = event.id, cancelled = true })
+			return
+		end
 		local request = summarize_ui_request(event)
 		request.expires = type(event.timeout) == "number" and (vim.uv.now() + event.timeout) or nil
 		state.pending_ui_requests[event.id] = request
@@ -783,16 +743,21 @@ function M.handle_extension_ui_request(ctx, event)
 		if select_capability_approval(ctx, event) then
 			return
 		end
-		local respond, on_close = picker_response(ctx, event.id, { cancelled = true })
 		local question = decode_question_payload(event.title, "pi_question_select")
-		local select_opts = { prompt = event.title or "Pi select", no_hide = true, on_close = on_close }
+		local compact_select = decode_compact_select_payload(event.title)
+		local select_opts = { prompt = event.title or "Pi select" }
+		if compact_select then
+			select_opts.prompt = compact_select.prompt
+			select_opts.pi_select_layout = "compact"
+		end
 		if question then
 			select_opts.prompt = question.question
 			select_opts.prompt_label = "Question"
+			select_opts.pi_select_layout = "compact"
 			select_opts.preview_text = question.question
 		end
-		vim.ui.select(event.options or {}, select_opts, function(choice)
-			respond(choice and { value = choice } or { cancelled = true })
+		pending_picker.select(ctx, event.id, event.options or {}, select_opts, function(choice)
+			send_extension_ui_response(ctx, event.id, choice and { value = choice } or { cancelled = true })
 		end)
 	elseif event.method == "confirm" then
 		if confirm_with_preview(ctx, event) then
@@ -803,15 +768,13 @@ function M.handle_extension_ui_request(ctx, event)
 		if type(event.message) == "string" and event.message ~= "" then
 			preview_text = preview_text .. "\n\n" .. event.message
 		end
-		local respond, on_close = picker_response(ctx, event.id, { confirmed = false })
-		vim.ui.select({ "Yes", "No" }, {
+		pending_picker.select(ctx, event.id, { "Yes", "No" }, {
 			prompt = prompt,
 			prompt_label = "Confirmation",
+			pi_select_layout = "compact",
 			preview_text = preview_text,
-			no_hide = true,
-			on_close = on_close,
 		}, function(choice)
-			respond({ confirmed = choice == "Yes" })
+			send_extension_ui_response(ctx, event.id, { confirmed = choice == "Yes" })
 		end)
 	elseif event.method == "input" then
 		if markdown_input_float(ctx, event) then

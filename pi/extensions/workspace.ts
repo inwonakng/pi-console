@@ -19,7 +19,7 @@ import {
 import { getInteractionMode } from "./shared/interaction-mode";
 import { notifyPiWorkspaceIntegration, suppressNextInputNotification } from "./shared/notifications";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
-import { activeLocation, moveToLocation } from "./shared/workspace-navigation";
+import { activeLocation, moveToLocation, publishWorkspaceState } from "./shared/workspace-navigation";
 import {
   createWorkspace,
   findGitRoot,
@@ -143,17 +143,6 @@ function sessionFile(ctx: ExtensionContext): string | undefined {
 function displayLabel(state: WorkspaceDisplayState): string {
   const branch = state.branch ? ` (${state.branch})` : "";
   return `${state.name}${branch}`;
-}
-
-function publishWorkspaceState(ctx: ExtensionContext): void {
-  const state = {
-    ...workspaceDisplayState(ctx.cwd, sessionFile(ctx)),
-    transitionPending: getPendingWorkspaceId() !== undefined,
-  };
-  ctx.ui.setStatus(
-    "pi-workspace",
-    ctx.mode === "rpc" ? JSON.stringify(state) : `Workspace: ${displayLabel(state)}`,
-  );
 }
 
 function publishIntegrationMode(ctx: ExtensionContext): void {
@@ -675,8 +664,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         if (integrationMode === "ask" && getInteractionMode(ctx) === "interactive") {
           while (true) {
             notifyPiWorkspaceIntegration(ctx);
+            const prompt = `Apply ${selected.label} to ${selected.destinationRoot}?${ignoredReviewNote(selected)}`;
             decision = await ctx.ui.select(
-              `Apply ${selected.label} to ${selected.destinationRoot}?${ignoredReviewNote(selected)}`,
+              ctx.mode === "rpc" ? JSON.stringify({ kind: "pi_compact_select", prompt }) : prompt,
               [INTEGRATE_ACTION, REVIEW_ACTION, RETURN_ACTION],
               { signal: ctx.signal },
             ) ?? RETURN_ACTION;
