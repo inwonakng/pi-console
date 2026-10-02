@@ -16,6 +16,7 @@ M.specs = {
 		{ lhs = "<leader>pc", action = "change_cwd", desc = "Change CWD" },
 		{ lhs = "<leader>pd", action = "show_workspace_diff", desc = "Diff" },
 		{ lhs = "<leader>pr", action = "restart", desc = "Restart Pi" },
+		{ lhs = "<leader>pR", action = "restart_console", desc = "Restart pi-console and Pi" },
 		{ lhs = "<leader>pt", action = "show_transcript", desc = "Show Pi transcript" },
 		{ lhs = "<leader>pl", action = "show_logs", desc = "Show Pi logs" },
 		{ lhs = "<leader>pu", action = "show_usage", desc = "Show Codex usage" },

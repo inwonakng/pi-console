@@ -58,6 +58,10 @@ vim.api.nvim_create_user_command("PiRestart", function()
 	require("pi-integration").restart()
 end, { desc = "Restart Pi" })
 
+vim.api.nvim_create_user_command("PiConsoleRestart", function()
+	require("pi-integration").restart_console()
+end, { desc = "Restart pi-console and Pi" })
+
 vim.api.nvim_create_user_command("PiLogs", function()
 	require("pi-integration").show_logs()
 end, { desc = "Show pi-console runtime logs" })

@@ -548,11 +548,16 @@ function M.setup(opts)
 	pi_statusline.setup(integration_ctx())
 end
 
-function M.open(session_file)
+function M.open(session_file, restart_state)
 	if session_file then
 		state.pending_session_file = require("pi-integration.runtime").canonical_path(session_file)
 	end
 	pi_layout.open(integration_ctx())
+	if restart_state then
+		state.pending_access_mode = restart_state.access_mode
+		state.pending_integration_mode = restart_state.integration_mode
+		vim.api.nvim_buf_set_lines(state.input_buf, 0, -1, false, restart_state.input_lines)
+	end
 	require("pi-integration.runtime").start(state)
 	pi_rpc.start(integration_ctx())
 end
@@ -819,6 +824,10 @@ end
 
 function M.restart()
 	pi_rpc.restart(integration_ctx())
+end
+
+function M.restart_console()
+	require("pi-integration.console-restart").request(integration_ctx())
 end
 
 function M.pick_session()

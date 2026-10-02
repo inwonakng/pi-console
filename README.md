@@ -159,6 +159,13 @@ directories, oldest to newest, while retaining your current input for editing.
 Directory history persists across launches and accumulates as Pi sessions open
 or change working directory.
 
+Use `:PiConsoleRestart` or `<leader>pR` to restart both Neovim and Pi in the
+same terminal/pane, preserving the conversation, working directory, unsent
+prompt, and access/integration modes. Restart is refused while Pi work or
+requests are pending; save or discard modified file buffers first. This
+requires starting through `pi-console`. `:PiRestart` / `<leader>pr` continues
+to restart only Pi.
+
 ## Configuration
 
 Optional extension overrides may be copied from

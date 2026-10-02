@@ -37,12 +37,23 @@ local function archive_after_days()
 	return nil
 end
 
-local integration = require("pi-integration")
 local overview = vim.env.PI_CONSOLE_OVERVIEW == "1"
 local session_file = vim.env.PI_CONSOLE_SESSION
+local restart_file = vim.env.PI_CONSOLE_RESTART_FILE
 -- Startup choices must not leak into tools or subsequently launched editors.
 vim.env.PI_CONSOLE_OVERVIEW = nil
 vim.env.PI_CONSOLE_SESSION = nil
+vim.env.PI_CONSOLE_RESTART_FILE = nil
+local restart_state
+local restore_file = restart_file and (restart_file .. ".restore")
+if restore_file and vim.fn.filereadable(restore_file) == 1 then
+	local lines = vim.fn.readfile(restore_file)
+	assert(vim.fn.delete(restore_file) == 0, "Could not consume pi-console restart state")
+	restart_state = vim.json.decode(table.concat(lines, "\n"))
+	vim.api.nvim_set_current_dir(restart_state.cwd)
+	session_file = restart_state.session_file
+end
+local integration = require("pi-integration")
 vim.g.pi_overview = overview
 local config = vim.tbl_deep_extend("force", integration.config, {
 	binary = vim.env.PI_BINARY or "pi",
@@ -53,6 +64,7 @@ local config = vim.tbl_deep_extend("force", integration.config, {
 	archive_after_days = archive_after_days(),
 	show_thinking = true,
 	launcher = vim.fs.joinpath(app_root, "bin", "pi-console"),
+	restart_file = restart_file,
 })
 
 if not overview then
@@ -65,7 +77,7 @@ vim.api.nvim_create_autocmd("VimEnter", {
 		if overview then
 			require("pi-integration.overview").open(config)
 		else
-			integration.open(session_file)
+			integration.open(session_file, restart_state)
 		end
 	end,
 })

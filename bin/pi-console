@@ -55,4 +55,22 @@ case "$#" in
         ;;
 esac
 
-nvim -u "$app_root/nvim/init.lua"
+# A private handoff file lets Neovim request a relaunch without shell-parsing
+# session paths or prompt text. Each launcher owns its own restart state.
+restart_dir=$(mktemp -d "${TMPDIR:-/tmp}/pi-console-restart.XXXXXX")
+trap 'rm -rf -- "$restart_dir"' EXIT
+export PI_CONSOLE_RESTART_FILE="$restart_dir/request.json"
+
+while :; do
+    if nvim -u "$app_root/nvim/init.lua"; then
+        status=0
+    else
+        status=$?
+    fi
+    if [ "$status" -ne 0 ] || [ ! -f "$PI_CONSOLE_RESTART_FILE" ]; then
+        exit "$status"
+    fi
+    # Consume the request before launching, so startup errors cannot turn a
+    # single restart request into a relaunch loop.
+    mv -- "$PI_CONSOLE_RESTART_FILE" "$PI_CONSOLE_RESTART_FILE.restore"
+done
