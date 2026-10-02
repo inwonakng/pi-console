@@ -567,18 +567,6 @@ function M.collect_message_lines(ctx, messages)
 		end
 	end
 
-	for _, pending in ipairs(ctx.state.pending_user_messages or {}) do
-		if pending.status == "queued" or pending.status == "sending" or pending.status == "failed" then
-			close_assistant_block()
-			local role = pending.status == "queued" and "User · Queued"
-				or pending.status == "sending" and "User · Sending"
-				or "User · Failed"
-			pending.header_line = append_text_message(lines, { role = role }, pending.text, has_body)
-			has_body = true
-			last_rendered_kind = "message"
-		end
-	end
-
 	if not has_body then
 		vim.list_extend(lines, { "", "> " .. ctx.notices.empty_session })
 	end

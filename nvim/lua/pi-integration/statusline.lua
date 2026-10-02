@@ -199,27 +199,34 @@ local function current_thinking_level_label(state)
 end
 
 local function activity_statusline_label(state)
+	local queued, next_pending = 0, nil
+	for _, pending in ipairs(state.pending_user_messages or {}) do
+		if pending.status == "queued" or pending.status == "sending" then
+			queued = queued + 1
+			next_pending = next_pending or pending
+		end
+	end
+	local suffix = queued > 0 and (" · " .. tostring(queued) .. " queued") or ""
 	local request = state.active_ui_request_id and (state.pending_ui_requests or {})[state.active_ui_request_id]
 	if request and (not request.expires or request.expires > vim.uv.now()) then
-		return " waiting · " .. request.label .. (request.hidden and " · <leader>pa" or "")
+		return " waiting · " .. request.label .. suffix .. (request.hidden and " · <leader>pa" or "")
 	end
-	if not state.is_loading and not state.is_streaming and not state.is_retrying and not state.awaiting_agent_output then
-		return ""
+	if not state.is_loading and not state.is_agent_running and not state.is_streaming
+		and not state.is_retrying and not state.awaiting_agent_output then
+		if next_pending and next_pending.edit_buf then
+			return " waiting · editing queued message" .. suffix
+		end
+		return suffix
 	end
 	local label
 	if state.is_loading then
-		local queued = 0
-		for _, pending in ipairs(state.pending_user_messages or {}) do
-			if pending.status == "queued" then
-				queued = queued + 1
-			end
-		end
-		label = queued > 0 and ("loading · " .. tostring(queued) .. " queued") or "loading"
+		label = "loading"
 	elseif state.is_retrying then
 		label = "retry"
 	else
 		label = state.activity_label or "work"
 	end
+	label = label .. suffix
 	local tick = tonumber(state.activity_spinner_tick) or 1
 	local frame = activity_spinner_frames[((tick - 1) % #activity_spinner_frames) + 1]
 	return " " .. frame .. " " .. label

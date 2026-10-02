@@ -7,6 +7,9 @@ local M = {}
 local function reset_conversation(ctx, keep_transcript, keep_pending_messages)
 	local state = ctx.state
 	local pending_user_messages = keep_pending_messages and state.pending_user_messages or {}
+	if not keep_pending_messages then
+		require("pi-integration.queue").close_editors(ctx)
+	end
 	pending_picker.clear(ctx, false)
 	state.pending_ui_requests = {}
 	state.active_ui_request_id = nil
@@ -23,6 +26,8 @@ local function reset_conversation(ctx, keep_transcript, keep_pending_messages)
 	state.spawn_running_count = 0
 	state.spawn_run_lines = {}
 	state.spawn_run_output_by_id = {}
+	state.is_agent_running = false
+	state.refresh_transcript_after_settled = false
 	state.is_retrying = false
 	state.pending_retry_error = nil
 	state.assistant_block_open = false
@@ -47,7 +52,7 @@ function M.apply_state(ctx, data, new_session)
 	local previous_leaf_id = state.tree_leaf_id
 	local sent_before_sync = state.has_sent_message
 	if new_session or session_changed then
-		reset_conversation(ctx, restore_transcript, state.is_loading and not new_session)
+		reset_conversation(ctx, restore_transcript, state.is_loading and not new_session and not state.session_replacement_pending)
 	end
 	state.session_file = data.sessionFile
 	state.pending_session_file = nil
@@ -55,6 +60,9 @@ function M.apply_state(ctx, data, new_session)
 	state.message_count = data.messageCount or state.message_count
 	state.has_sent_message = (not new_session and sent_before_sync) or (tonumber(state.message_count) or 0) > 0
 	state.is_streaming = data.isStreaming or false
+	-- isStreaming can be false between agent_end and agent_settled. An ordinary
+	-- state sync must not release the queue before the settlement event.
+	state.is_agent_running = state.is_agent_running or state.is_streaming
 	state.is_compacting = data.isCompacting or false
 	state.thinking_level = data.thinkingLevel or data.thinking_level or state.thinking_level
 	ctx.session.set_model_metadata(data.provider or data.providerId or data.providerName, data.model or data.modelId)
@@ -71,6 +79,7 @@ function M.sync(ctx, options)
 	state.session_sync_generation = (state.session_sync_generation or 0) + 1
 	local generation = state.session_sync_generation
 	local function fail_sync(message)
+		state.session_replacement_pending = false
 		state.session_sync_complete = false
 		ctx.events.set_loading(false)
 		state.loading_error = message
@@ -101,6 +110,7 @@ function M.sync(ctx, options)
 				end
 			end
 			state.session_sync_complete = true
+			state.session_replacement_pending = false
 			ctx.actions.finish_loading_if_ready()
 			ctx.actions.refresh_messages()
 			ctx.actions.refresh_session_stats()
@@ -122,11 +132,16 @@ function M.new_session(ctx)
 			ctx.transcript.append_status(ctx.notices.empty_session)
 			return
 		end
+		ctx.state.session_replacement_pending = true
 		ctx.rpc.send({ type = "new_session" }, function(event)
 			if event.success and not (event.data and event.data.cancelled) then
 				M.sync(ctx, { new_session = true, publish_workspace = true })
-			elseif not event.success then
-				ctx.ui.notify(event.error or "Could not start a new session", vim.log.levels.ERROR)
+			else
+				ctx.state.session_replacement_pending = false
+				if not event.success then
+					ctx.ui.notify(event.error or "Could not start a new session", vim.log.levels.ERROR)
+				end
+				ctx.actions.flush_queued_prompts()
 			end
 		end)
 	end
@@ -145,6 +160,7 @@ end
 function M.switch_session(ctx, path)
 	local function proceed()
 		pending_picker.clear(ctx, true)
+		ctx.state.session_replacement_pending = true
 		if not (ctx.state.job and ctx.state.job > 0) then
 			ctx.state.pending_session_file = path
 			M.sync(ctx, {
@@ -164,7 +180,9 @@ function M.switch_session(ctx, path)
 					end,
 				})
 			else
+				ctx.state.session_replacement_pending = false
 				ctx.ui.notify("Session switch cancelled or failed", vim.log.levels.ERROR)
+				ctx.actions.flush_queued_prompts()
 			end
 		end)
 	end

@@ -97,7 +97,17 @@ function M.toggle(ctx)
 		"",
 		"## Streaming",
 		"",
-		"When a run is already streaming, submitting another prompt is sent as PI steering for the active run.",
+		"Submitting while Pi is working queues the message until the active run fully finishes, including retries.",
+		"The statusline shows the number of queued messages next to the activity indicator.",
+		"",
+		"## Message Queue",
+		"",
+		"- `<leader>pq` opens queued messages in submission order, with full-text previews.",
+		"- `<CR>` edits a message in a floating buffer; `:wq` saves and closes it.",
+		"- `:q!` closes the editor without saving; normal Vim keys are unchanged.",
+		"- `<C-x>` in the queue picker deletes the selected message.",
+		"- If the next message is being edited, dispatch waits; later messages cannot overtake it.",
+		"- Failed messages remain in the picker; saving an edit queues them again.",
 	})
 	M.toggle_window(ctx.state, {
 		name = "pi://help",

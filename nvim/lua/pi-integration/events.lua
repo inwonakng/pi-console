@@ -108,7 +108,8 @@ end
 local function schedule_transcript_refresh(ctx)
 	local state = ctx.state
 	vim.defer_fn(function()
-		if not state.is_streaming and not state.is_retrying then
+		if not state.is_agent_running and not state.is_streaming and not state.is_retrying
+			and not state.awaiting_agent_output and not state.is_loading and not state.is_compacting then
 			ctx.actions.refresh_messages()
 		end
 	end, 50)
@@ -131,7 +132,7 @@ local function start_activity(ctx, label, tool_call_id)
 		if state.activity_timer ~= timer then
 			return
 		end
-		if not state.is_streaming and not state.is_retrying and not state.is_loading and not state.awaiting_agent_output then
+		if not state.is_agent_running and not state.is_streaming and not state.is_retrying and not state.is_loading and not state.awaiting_agent_output then
 			stop_activity(ctx)
 			return
 		end
@@ -158,7 +159,7 @@ function M.set_loading(ctx, loading)
 	if ctx.state.is_loading then
 		ctx.state.loading_error = nil
 		start_activity(ctx, "loading")
-	elseif not ctx.state.is_streaming and not ctx.state.is_retrying and not ctx.state.awaiting_agent_output then
+	elseif not ctx.state.is_agent_running and not ctx.state.is_streaming and not ctx.state.is_retrying and not ctx.state.awaiting_agent_output then
 		stop_activity(ctx)
 	else
 		ctx.transcript.update_statusline()
@@ -532,48 +533,16 @@ local function markdown_input_float(ctx, event)
 		return false
 	end
 
-	local title = " Answer question (:wq to submit, :q! to return) "
-	local buf = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_buf_set_name(buf, "pi://question-response/" .. tostring(event.id))
-	vim.bo[buf].buftype = "acwrite"
-	vim.bo[buf].bufhidden = "wipe"
-	vim.bo[buf].swapfile = false
-	vim.bo[buf].filetype = "markdown"
-	local width = math.max(1, math.min(80, vim.o.columns - 4))
-	local height = math.max(1, math.min(8, vim.o.lines - 4))
-	local win = vim.api.nvim_open_win(buf, true, {
-		relative = "editor",
-		width = width,
-		height = height,
-		row = math.max(0, math.floor((vim.o.lines - height) / 2)),
-		col = math.floor((vim.o.columns - width) / 2),
-		style = "minimal",
-		border = "rounded",
-		title = title,
-		title_pos = "center",
-	})
-	local saved_text
-	vim.api.nvim_create_autocmd("BufWriteCmd", {
-		buffer = buf,
-		callback = function()
-			saved_text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-			vim.bo[buf].modified = false
-		end,
-	})
-	vim.api.nvim_create_autocmd("WinClosed", {
-		pattern = tostring(win),
-		once = true,
-		callback = function()
-			local text = saved_text
-			vim.schedule(function()
-				if text then
-					send_extension_ui_response(ctx, event.id, { value = text })
-				else
-					send_extension_ui_response(ctx, event.id, { cancelled = true })
-				end
-			end)
-		end,
-	})
+	require("pi-integration.utils.markdown-editor").open({
+		name = "pi://question-response/" .. tostring(event.id),
+		title = " Answer question (:wq to submit, :q! to return) ",
+	}, function(text)
+		if text then
+			send_extension_ui_response(ctx, event.id, { value = text })
+		else
+			send_extension_ui_response(ctx, event.id, { cancelled = true })
+		end
+	end)
 	vim.cmd.startinsert()
 	return true
 end
@@ -886,6 +855,8 @@ function M.handle_event(ctx, event)
 	if event.type == "response" then
 		ctx.rpc.handle_response(event)
 	elseif event.type == "agent_start" then
+		state.is_agent_running = true
+		state.refresh_transcript_after_settled = false
 		state.is_loading = false
 		state.is_streaming = true
 		state.is_retrying = false
@@ -925,8 +896,6 @@ function M.handle_event(ctx, event)
 		state.awaiting_agent_output = false
 		if state.is_loading then
 			start_activity(ctx, "loading")
-		else
-			stop_activity(ctx)
 		end
 		if message and not state.error_rendered_for_active_run then
 			ctx.transcript.render_error_message("Agent Error", message)
@@ -940,14 +909,24 @@ function M.handle_event(ctx, event)
 		else
 			ctx.transcript.clear_assistant_placeholder()
 		end
-		local should_refresh_from_file = not state.error_rendered_for_active_run and not abort_requested
+		state.refresh_transcript_after_settled = not state.error_rendered_for_active_run and not abort_requested
 		state.abort_requested = false
 		ctx.transcript.touch()
 		ctx.transcript.refresh_ui()
 		ctx.actions.refresh_session_stats()
-		if should_refresh_from_file then
+	elseif event.type == "agent_settled" then
+		state.is_agent_running = false
+		state.is_streaming = false
+		state.is_retrying = false
+		if state.is_loading then
+			start_activity(ctx, "loading")
+		else
+			stop_activity(ctx)
+		end
+		if state.refresh_transcript_after_settled then
 			schedule_transcript_refresh(ctx)
 		end
+		state.refresh_transcript_after_settled = false
 		ctx.actions.flush_queued_prompts()
 		ctx.ui.notify("Pi finished")
 	elseif event.type == "auto_retry_start" then
@@ -966,7 +945,7 @@ function M.handle_event(ctx, event)
 		state.is_retrying = false
 		ctx.logs.add(event.success == false and "error" or "info", event.success == false and "Pi retry failed" or "Pi retry recovered", event.finalError)
 		state.pending_retry_error = nil
-		if state.is_streaming then
+		if state.is_agent_running or state.is_streaming then
 			start_activity(ctx, "work")
 		else
 			stop_activity(ctx)
@@ -983,6 +962,7 @@ function M.handle_event(ctx, event)
 		if not event.aborted and not event.willRetry then
 			schedule_transcript_refresh(ctx)
 		end
+		ctx.actions.flush_queued_prompts()
 	elseif event.type == "message_update" then
 		M.handle_message_update(ctx, event)
 	elseif event.type == "message_end" then
@@ -999,14 +979,13 @@ function M.handle_event(ctx, event)
 				end
 			end
 			if fallback_index then
-				local pending = state.pending_user_messages[fallback_index]
-				if pending.header_line then
-					ctx.transcript.set_line(pending.header_line, "## User")
-				end
 				table.remove(state.pending_user_messages, fallback_index)
 				ctx.transcript.update_statusline()
-				return
 			end
+			state.current_message_started = false
+			state.current_thinking_rendered = false
+			M.render_message(ctx, event.message)
+			return
 		end
 		if event.message and event.message.role == "toolResult" then
 			if pi_skills.tool_result_skill_name(state, event.message) then

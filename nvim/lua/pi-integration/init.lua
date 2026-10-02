@@ -105,7 +105,7 @@ local function touch_transcript()
 end
 
 local function is_agent_active()
-	return state.is_streaming or state.is_retrying
+	return state.is_agent_running or state.is_streaming or state.is_retrying or state.awaiting_agent_output
 end
 
 local function transcript_line_count()
@@ -696,7 +696,12 @@ function M.refresh_messages()
 	end
 
 	if state.job and state.job > 0 then
+		local session_file = state.session_file
+		local generation = state.session_sync_generation
 		send({ type = "get_entries" }, function(event)
+			if is_agent_active() or session_file ~= state.session_file or generation ~= state.session_sync_generation then
+				return
+			end
 			if not event.success or not event.data then
 				notify("Could not get session entries", vim.log.levels.ERROR)
 				return
@@ -768,6 +773,10 @@ end
 
 function M.pick_command()
 	pi_pickers.pick_command(integration_ctx())
+end
+
+function M.pick_queue()
+	require("pi-integration.queue").pick(integration_ctx())
 end
 
 function M.restore_pending_action()

@@ -89,6 +89,9 @@ end
 local function reset_runtime_state(ctx)
 	local state = ctx.state
 	state.job = nil
+	state.is_agent_running = false
+	state.refresh_transcript_after_settled = false
+	state.session_replacement_pending = false
 	state.is_streaming = false
 	state.is_retrying = false
 	state.is_compacting = false
@@ -261,7 +264,7 @@ end
 function M.restart(ctx, options)
 	local state = ctx.state
 	options = options or {}
-	if state.is_streaming or state.is_retrying or state.awaiting_agent_output then
+	if state.is_agent_running or state.is_streaming or state.is_retrying or state.awaiting_agent_output then
 		ctx.ui.notify("Wait for the current Pi response to finish before restarting.", vim.log.levels.WARN)
 		return
 	end

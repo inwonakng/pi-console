@@ -197,7 +197,7 @@ local function snapshot(state)
 		status = "Retrying"
 	elseif state.is_compacting then
 		status = "Compacting"
-	elseif state.is_streaming or state.awaiting_agent_output then
+	elseif state.is_agent_running or state.is_streaming or state.awaiting_agent_output then
 		status = "Working"
 	elseif state.error_rendered_for_active_run then
 		status = "Error"

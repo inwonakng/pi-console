@@ -70,23 +70,6 @@ local function clear_input(ctx)
 	replace_all_lines(ctx, ctx.state.input_buf, { "" })
 end
 
-local function pending_header(status)
-	if status == "queued" then
-		return "User · Queued"
-	elseif status == "sending" then
-		return "User · Sending"
-	elseif status == "failed" then
-		return "User · Failed"
-	end
-	return "User"
-end
-
-local function update_pending_header(ctx, pending)
-	if pending.header_line then
-		ctx.transcript.set_line(pending.header_line, "## " .. pending_header(pending.status))
-	end
-end
-
 local function remove_pending(state, target)
 	for index, pending in ipairs(state.pending_user_messages or {}) do
 		if pending == target then
@@ -101,16 +84,15 @@ local function is_extension_command(state, text)
 	return name ~= nil and state.command_sources and state.command_sources[name] == "extension"
 end
 
-local function send_pending_prompt(ctx, pending, streaming_behavior)
+local function send_pending_prompt(ctx, pending)
 	local state = ctx.state
 	pending.status = "sending"
-	update_pending_header(ctx, pending)
+	state.abort_requested = false
+	state.error_rendered_for_active_run = false
 	ctx.transcript.update_statusline()
 
 	local cmd = { type = "prompt", message = pending.text }
-	if streaming_behavior then
-		cmd.streamingBehavior = streaming_behavior
-	elseif not is_extension_command(state, pending.text) then
+	if not is_extension_command(state, pending.text) then
 		state.awaiting_agent_output = true
 		ctx.events.start_activity("work")
 	end
@@ -118,7 +100,6 @@ local function send_pending_prompt(ctx, pending, streaming_behavior)
 		if not event.success then
 			pending.status = "failed"
 			state.awaiting_agent_output = false
-			update_pending_header(ctx, pending)
 			if get_input(ctx) == "" then
 				replace_all_lines(ctx, state.input_buf, vim.split(pending.text, "\n", { plain = true }))
 			end
@@ -127,10 +108,13 @@ local function send_pending_prompt(ctx, pending, streaming_behavior)
 			M.flush_queued_prompts(ctx)
 			return
 		end
-		if is_extension_command(state, pending.text) then
-			pending.status = "acknowledged"
-			update_pending_header(ctx, pending)
+		if is_extension_command(state, pending.text) or (event.data and event.data.disposition == "handled") then
 			remove_pending(state, pending)
+			if not state.is_agent_running then
+				state.awaiting_agent_output = false
+				ctx.events.set_loading(false)
+			end
+			ctx.transcript.update_statusline()
 			M.flush_queued_prompts(ctx)
 		end
 	end)
@@ -143,7 +127,6 @@ function M.fail_pending_prompts(ctx)
 		if pending.status == "queued" or pending.status == "sending" then
 			pending.status = "failed"
 			restore_text = restore_text or pending.text
-			update_pending_header(ctx, pending)
 		end
 	end
 	state.awaiting_agent_output = false
@@ -155,11 +138,21 @@ end
 
 function M.flush_queued_prompts(ctx)
 	local state = ctx.state
-	if state.is_loading or state.is_streaming or state.is_retrying or state.awaiting_agent_output then
+	if state.loading_error or state.is_loading or state.session_replacement_pending
+		or state.is_agent_running or state.is_streaming or state.is_retrying
+		or state.is_compacting or state.awaiting_agent_output then
 		return
 	end
 	for _, pending in ipairs(state.pending_user_messages or {}) do
+		if pending.status == "sending" then
+			return
+		end
+	end
+	for _, pending in ipairs(state.pending_user_messages or {}) do
 		if pending.status == "queued" then
+			if pending.edit_buf then
+				return
+			end
 			send_pending_prompt(ctx, pending)
 			return
 		end
@@ -188,12 +181,10 @@ function M.submit_prompt(ctx)
 		ctx.ui.notify("Pi is not ready: " .. state.loading_error, vim.log.levels.ERROR)
 		return
 	end
-	if state.is_retrying then
-		ctx.ui.notify("Pi is retrying; wait or abort before sending another prompt.", vim.log.levels.WARN)
+	if state.session_replacement_pending then
+		ctx.ui.notify("Pi is switching sessions; wait before submitting.", vim.log.levels.WARN)
 		return
 	end
-	state.abort_requested = false
-	state.error_rendered_for_active_run = false
 	state.has_sent_message = true
 	clear_input(ctx)
 	ctx.transcript.remove_status(ctx.notices.empty_session)
@@ -203,20 +194,8 @@ function M.submit_prompt(ctx)
 		status = "queued",
 	}
 	table.insert(state.pending_user_messages, pending)
-	ctx.transcript.touch()
-	ctx.transcript.append_message_header(pending_header(pending.status))
-	pending.header_line = ctx.transcript.line_count() - 2
-	ctx.transcript.append_text(text)
 	ctx.transcript.update_statusline()
-
-	if state.is_loading then
-		return
-	end
-	if state.is_streaming then
-		send_pending_prompt(ctx, pending, "steer")
-	else
-		M.flush_queued_prompts(ctx)
-	end
+	M.flush_queued_prompts(ctx)
 end
 
 function M.abort(ctx)
