@@ -199,6 +199,7 @@ function M.start(ctx)
 	ctx.session.sync({
 		publish_workspace = true,
 		on_success = function()
+			require("pi-integration.directory-history").record(vim.fn.getcwd())
 			ctx.actions.maybe_prompt_session_archive()
 		end,
 	})

@@ -807,11 +807,14 @@ function M.change_cwd(path)
 	end
 
 	local cwd = (state.workspace and state.workspace.cwd) or vim.fn.getcwd()
-	vim.ui.input({ prompt = "Pi CWD: ", default = cwd, completion = "dir" }, function(selected)
-		if selected and vim.trim(selected) ~= "" then
-			restart_in_cwd(vim.trim(selected))
+	require("pi-integration.directory-history").input(
+		{ prompt = "Pi CWD: ", default = cwd, completion = "dir" },
+		function(selected)
+			if selected and vim.trim(selected) ~= "" then
+				restart_in_cwd(vim.trim(selected))
+			end
 		end
-	end)
+	)
 end
 
 function M.restart()

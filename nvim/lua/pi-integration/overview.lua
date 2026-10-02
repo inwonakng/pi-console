@@ -354,11 +354,14 @@ function M.open(config)
 		sessions.pick(history_ctx)
 	end, "Pick session")
 	map("<leader>pn", function()
-		vim.ui.input({ prompt = "New conversation directory: ", default = vim.fn.getcwd(), completion = "dir" }, function(cwd)
-			if cwd and vim.trim(cwd) ~= "" then
-				report(runtime.launch(config.launcher, vim.fn.fnamemodify(vim.fn.expand(cwd), ":p")))
+		require("pi-integration.directory-history").input(
+			{ prompt = "New conversation directory: ", default = vim.fn.getcwd(), completion = "dir" },
+			function(cwd)
+				if cwd and vim.trim(cwd) ~= "" then
+					report(runtime.launch(config.launcher, vim.fn.fnamemodify(vim.fn.expand(cwd), ":p")))
+				end
 			end
-		end)
+		)
 	end, "New conversation with chosen directory")
 	map("<leader>pN", function()
 		local entry = require_selected()

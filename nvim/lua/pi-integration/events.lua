@@ -670,6 +670,9 @@ local function update_workspace_from_status(ctx, text)
 			)
 		end
 	end
+	if cwd_changed or not state.workspace_status_received then
+		require("pi-integration.directory-history").record(payload.cwd)
+	end
 	state.workspace = payload
 	state.workspace_status_received = true
 	if transition_pending then

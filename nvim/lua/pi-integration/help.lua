@@ -73,6 +73,7 @@ function M.toggle(ctx)
 		"## Commands",
 		"",
 		"- `:PiCd [directory]` change CWD before sending the first message.",
+		"- `<C-f>` in a directory prompt opens up to 10 unique recently used Pi directories, newest last.",
 		"",
 		"## Access Modes",
 		"",

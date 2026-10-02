@@ -154,6 +154,10 @@ integration. Reload tmux, then use:
 
 You can also run `pi-console` directly from a project directory. Inside
 pi-console, `<leader>?` shows the complete context-sensitive key list.
+In directory prompts, `<C-f>` opens up to 10 unique recently used Pi working
+directories, oldest to newest, while retaining your current input for editing.
+Directory history persists across launches and accumulates as Pi sessions open
+or change working directory.
 
 ## Configuration
 
