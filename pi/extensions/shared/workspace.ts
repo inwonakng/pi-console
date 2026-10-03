@@ -506,6 +506,23 @@ function snapshotWorkspaceResult(record: WorkspaceRecord): WorkspaceRecord {
   return record;
 }
 
+export function workspaceDiscardWarning(records: WorkspaceRecord[]): string {
+  if (records.length === 0) return "";
+  const lines = ["The following worktrees will also be removed. Unintegrated changes will be discarded; existing destination changes will not be reverted:"];
+  for (const record of records) {
+    lines.push(`- ${record.label} (${record.lifecycle}): ${record.worktreePath}`);
+    lines.push(`  changed files: ${record.changedFiles.length > 0 ? record.changedFiles.join(", ") : "(none)"}`);
+    lines.push(`  recovery patch: ${record.resultPatchPath}`);
+    if (record.includedIgnoredFiles?.length) {
+      lines.push(`  included ignored files (not in patch): ${record.includedIgnoredFiles.map((file) => file.path).join(", ")}`);
+    }
+    if (record.unpreservedFiles?.length) {
+      lines.push(`  ignored untracked files (not in patch): ${record.unpreservedFiles.join(", ")}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 export function prepareWorkspaceDiscard(id: string): WorkspaceRecord {
   const record = loadWorkspace(id);
   if (!record) {
@@ -745,31 +762,47 @@ export async function integrateWorkspace(id: string): Promise<WorkspaceRecord> {
   });
 }
 
+function cleanupGitDirectory(record: WorkspaceRecord): string {
+  const visited = new Set<string>();
+  let current: WorkspaceRecord | undefined = record;
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    for (const path of [current.worktreePath, current.destinationRoot]) {
+      if (!existsSync(path)) continue;
+      const commonDir = gitTextOrUndefined(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+      if (commonDir) return commonDir;
+    }
+    // Older records can outlive both their worktree and their parent worktree.
+    current = current.parentWorkspaceId ? loadWorkspace(current.parentWorkspaceId) : undefined;
+  }
+  throw new Error(`Could not locate the Git repository for ${record.label}.`);
+}
+
 export function removeWorkspace(id: string, finalLifecycle: "integrated" | "discarded"): WorkspaceRecord {
   const record = loadWorkspace(id);
   if (!record) {
     throw new Error(`Unknown workspace: ${id}`);
   }
-  if (record.retained && existsSync(record.worktreePath)) {
-    const result = gitResult(record.destinationRoot, ["worktree", "remove", "--force", record.worktreePath]);
-    if (result.status !== 0) {
-      record.lifecycle = "cleanup_failed";
-      record.integrationReason = result.stderr.toString("utf8").trim() || "git worktree remove failed";
-      saveWorkspace(record);
-      return record;
-    }
-  }
-  record.retained = false;
-  record.lifecycle = finalLifecycle;
-  saveWorkspace(record);
   try {
-    deleteRef(record.destinationRoot, record.baselineRef);
-    deleteRef(record.destinationRoot, record.resultRef);
+    if (retainedChildWorkspaces(record.id).length > 0) {
+      throw new Error(`Join or discard child workspaces before removing ${record.label}.`);
+    }
+    // Cleanup only needs the shared repository, not the integration destination.
+    const gitDir = cleanupGitDirectory(record);
+    if (record.retained && existsSync(record.worktreePath)) {
+      gitBuffer(gitDir, ["worktree", "remove", "--force", record.worktreePath]);
+    }
+    record.retained = false;
+    record.lifecycle = finalLifecycle;
+    saveWorkspace(record);
+    deleteRef(gitDir, record.baselineRef);
+    deleteRef(gitDir, record.resultRef);
+    delete record.integrationReason;
   } catch (error) {
     record.lifecycle = "cleanup_failed";
     record.integrationReason = error instanceof Error ? error.message : String(error);
-    saveWorkspace(record);
   }
+  saveWorkspace(record);
   return record;
 }
 

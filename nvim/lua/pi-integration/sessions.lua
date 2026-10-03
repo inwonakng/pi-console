@@ -7,6 +7,7 @@ local pi_thinking_output = require("pi-integration.thinking-output")
 local pi_tool_output = require("pi-integration.tool-output")
 local pi_transcript = require("pi-integration.transcript")
 local runtime = require("pi-integration.runtime")
+local session_service = require("pi-integration.session-service")
 
 local M = {}
 
@@ -147,6 +148,7 @@ local function read_candidate(path)
 		mtime = vim.fn.getftime(path),
 		title = nil,
 		cwd = nil,
+		fingerprint = file_fingerprint(path),
 	}
 	local first_user_title = nil
 
@@ -186,6 +188,7 @@ local function cached_candidate(path)
 			mtime = fingerprint.mtime_sec,
 			title = cached.title,
 			cwd = cached.cwd,
+			fingerprint = fingerprint,
 		}
 	end
 
@@ -347,12 +350,13 @@ local function refresh_selection(ctx, selected)
 		local current = by_path[canonical_session_path(group.head.path)]
 		local original_files = {}
 		for _, member in ipairs(group.members) do
-			original_files[canonical_session_path(member.path)] = true
+			original_files[canonical_session_path(member.path)] = member.fingerprint
 		end
 		local same_files = current and #current.members == #group.members
 		if same_files then
 			for _, member in ipairs(current.members) do
-				if not original_files[canonical_session_path(member.path)] then
+				local path = canonical_session_path(member.path)
+				if not same_fingerprint(original_files[path], member.fingerprint) then
 					same_files = false
 					break
 				end
@@ -380,7 +384,28 @@ local function item_label(candidate)
 	return string.format("%s  %s", item_title(candidate), time)
 end
 
-local function protected_session_paths(ctx)
+local function path_inside(root, path)
+	root = canonical_session_path(root)
+	path = canonical_session_path(path)
+	return root and path and (root == path or path:sub(1, #root + 1) == root .. "/")
+end
+
+local function linked_workspaces(selected)
+	local paths = {}
+	for _, group in ipairs(selected) do
+		for _, member in ipairs(group.members) do
+			paths[canonical_session_path(regular_session_path(member.path))] = true
+		end
+	end
+	return vim.tbl_filter(function(record)
+		local source = canonical_session_path(record.sourceSessionFile)
+		local target = canonical_session_path(record.targetSessionFile)
+		return (record.retained == true or record.lifecycle == "cleanup_failed")
+			and ((source and paths[source]) or (target and paths[target]))
+	end, workspace_records())
+end
+
+local function protected_session_paths(ctx, deleting)
 	local protected = {}
 	local function add(path)
 		path = canonical_session_path(regular_session_path(path))
@@ -401,17 +426,23 @@ local function protected_session_paths(ctx)
 	end
 	for _, record in ipairs(workspace_records()) do
 		if record.retained == true then
-			add(record.sourceSessionFile)
-			if record.kind == "child" then
-				add(record.targetSessionFile)
+			local in_use = not deleting or path_inside(record.worktreePath, vim.fn.getcwd())
+			for _, instance in ipairs(instances) do
+				in_use = in_use or instance.workspace_id == record.id or path_inside(record.worktreePath, instance.cwd)
+			end
+			if in_use then
+				add(record.sourceSessionFile)
+				if deleting or record.kind == "child" then
+					add(record.targetSessionFile)
+				end
 			end
 		end
 	end
 	return protected
 end
 
-local function partition_protected(ctx, selected)
-	local protected_paths = protected_session_paths(ctx)
+local function partition_protected(ctx, selected, deleting)
+	local protected_paths = protected_session_paths(ctx, deleting)
 	if not protected_paths then
 		return {}, selected
 	end
@@ -768,7 +799,7 @@ function M.pick(ctx, opts)
 	local function reopen_current()
 		reopen(ctx, reopen_opts)
 	end
-	local function eligible(selected, refresh)
+	local function eligible(selected, refresh, deleting)
 		if refresh then
 			local changed
 			selected, changed = refresh_selection(ctx, selected)
@@ -776,9 +807,10 @@ function M.pick(ctx, opts)
 				ctx.ui.notify(string.format("Skipped %d conversation(s) whose files changed while confirming.", changed), vim.log.levels.WARN)
 			end
 		end
-		local allowed, skipped = partition_protected(ctx, selected)
+		local allowed, skipped = partition_protected(ctx, selected, deleting)
 		if #skipped > 0 then
-			ctx.ui.notify(string.format("Skipped %d active or workspace-linked conversation(s).", #skipped), vim.log.levels.WARN)
+			ctx.ui.notify(string.format(deleting and "Skipped %d open conversation(s) or conversation(s) with workspaces in use. Close them before deleting."
+				or "Skipped %d active or workspace-linked conversation(s).", #skipped), vim.log.levels.WARN)
 		end
 		return allowed
 	end
@@ -814,24 +846,26 @@ function M.pick(ctx, opts)
 		end)
 	end
 	local function delete_selected(items)
-		local allowed = eligible(selected_groups(items))
+		local allowed = eligible(selected_groups(items), false, true)
 		if #allowed == 0 then
-			reopen_current()
-			return
+			return -- leave the blocker visible instead of covering it with the picker
+		end
+		local paths = {}
+		for _, candidate in ipairs(session_files(allowed)) do
+			table.insert(paths, candidate.path)
 		end
 		local command = trash_command()
 		local action = command and "Move" or "Permanently delete"
 		local destination = command and " to trash" or ""
 		local noun = #allowed == 1 and "conversation" or "conversations"
 		local prompt = string.format("%s %d %s (%d files)%s?%s", action, #allowed, noun, #session_files(allowed), destination, selected_title(allowed))
-		confirm(prompt, function(confirmed)
-			if not confirmed then
-				reopen_current()
+		local function delete_files()
+			allowed = eligible(allowed, true, true)
+			if #allowed == 0 then
 				return
 			end
-			allowed = eligible(allowed, true)
-			if #allowed == 0 then
-				reopen_current()
+			if #linked_workspaces(allowed) > 0 then
+				ctx.ui.notify("Linked workspaces changed; session files were kept. Select the sessions again.", vim.log.levels.WARN)
 				return
 			end
 			delete_sessions(session_files(allowed), command, function(deleted, failures)
@@ -852,7 +886,71 @@ function M.pick(ctx, opts)
 					ctx.ui.notify(string.format("%s %d conversation(s) (%d files).", command and "Trashed" or "Deleted", fully_deleted, deleted))
 				end
 				notify_failures(ctx, failures)
+				if #failures == 0 then
+					reopen_current()
+				end
+			end)
+		end
+		local workspaces = linked_workspaces(allowed)
+		local expected_ids = {}
+		if #workspaces > 0 then
+			local warning = {
+				"The following workspaces will also be cleaned up. Remaining worktrees will be removed and unintegrated changes discarded; existing destination changes will not be reverted:",
+			}
+			for _, record in ipairs(workspaces) do
+				table.insert(expected_ids, record.id)
+				if record.retained then
+					table.insert(warning, string.format("- %s: %s", record.label, record.worktreePath))
+				else
+					table.insert(warning, string.format("- %s: retrying incomplete Git cleanup (worktree already removed)", record.label))
+				end
+				table.insert(warning, "  recovery patch: " .. record.resultPatchPath)
+			end
+			table.insert(warning, "Recovery patches for remaining worktrees will be prepared after confirmation; cleanup retries reuse existing patches. Ignored untracked files, including copied ignored files, are not included in patches and will be removed with the worktrees.")
+			prompt = prompt .. "\n\n" .. table.concat(warning, "\n")
+		end
+		table.sort(expected_ids)
+		confirm(prompt, function(confirmed)
+			if not confirmed then
 				reopen_current()
+				return
+			end
+			local refreshed = eligible(allowed, true, true)
+			if #refreshed ~= #allowed then
+				return -- do not clean up workspaces for a changed or newly opened session
+			end
+			allowed = refreshed
+			local current_ids = {}
+			for _, record in ipairs(linked_workspaces(allowed)) do
+				table.insert(current_ids, record.id)
+			end
+			table.sort(current_ids)
+			if not vim.deep_equal(current_ids, expected_ids) then
+				ctx.ui.notify("Linked workspaces changed while confirming. Select the sessions again.", vim.log.levels.WARN)
+				return
+			end
+			if #current_ids == 0 then
+				delete_files()
+				return
+			end
+			ctx.ui.notify(string.format("Preparing recovery patches for remaining worktrees and finishing cleanup for %d workspace(s)...", #current_ids))
+			session_service.request(ctx.config.binary, workspace_root(), { action = "remove", paths = paths, workspaceIds = current_ids }, function(removed)
+				if not removed.success then
+					ctx.ui.notify(removed.error, vim.log.levels.ERROR)
+					return
+				end
+				delete_files()
+			end, function()
+				local final = eligible(allowed, true, true)
+				if #final ~= #allowed then
+					return false
+				end
+				local ids = {}
+				for _, record in ipairs(linked_workspaces(final)) do
+					table.insert(ids, record.id)
+				end
+				table.sort(ids)
+				return vim.deep_equal(ids, current_ids)
 			end)
 		end)
 	end

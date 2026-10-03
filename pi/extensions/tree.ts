@@ -8,6 +8,7 @@ import {
 	removeWorkspace,
 	retainedChildWorkspaces,
 	sameSessionFile,
+	workspaceDiscardWarning,
 	type WorkspaceRecord,
 } from "./shared/workspace";
 import { hasRunningSubagents } from "./spawn";
@@ -131,18 +132,7 @@ function deletionConfirmation(entryId: string, deleteCount: number, workspaces: 
 		`Delete entry ${entryId} and ${descendants} descendant entr${descendants === 1 ? "y" : "ies"}?`,
 	];
 	if (workspaces.length === 0) return lines[0]!;
-	lines.push("", "The following worktrees will also be removed. Unintegrated changes will be discarded; existing destination changes will not be reverted:");
-	for (const record of workspaces) {
-		lines.push(`- ${record.label} (${record.lifecycle}): ${record.worktreePath}`);
-		lines.push(`  changed files: ${record.changedFiles.length > 0 ? record.changedFiles.join(", ") : "(none)"}`);
-		lines.push(`  recovery patch: ${record.resultPatchPath}`);
-		if (record.includedIgnoredFiles?.length) {
-			lines.push(`  included ignored files (not in patch): ${record.includedIgnoredFiles.map((file) => file.path).join(", ")}`);
-		}
-		if (record.unpreservedFiles?.length) {
-			lines.push(`  ignored untracked files (not in patch): ${record.unpreservedFiles.join(", ")}`);
-		}
-	}
+	lines.push("", workspaceDiscardWarning(workspaces));
 	return lines.join("\n");
 }
 
