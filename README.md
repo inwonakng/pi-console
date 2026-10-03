@@ -174,6 +174,29 @@ Optional extension overrides may be copied from
 [`pi/pi-console-config.example.yaml`](pi/pi-console-config.example.yaml) to
 `~/.pi/agent/pi-console-config.yaml`.
 
+Access defaults can be changed with:
+
+```yaml
+access-mode:
+  read-paths: ["/"]
+  write-paths: ["/tmp"]
+  # temp-dir-prefix: /tmp/pi-console-
+```
+
+Omitted path lists use the defaults shown. Lists contain absolute or `~/` paths,
+not wildcards, and include descendants. They add to workspace/system reads and
+mode-specific writes. `read-paths: []` restricts reads to that baseline;
+`write-paths: []` removes automatic `/tmp` writes. Writable paths are also
+readable. Read/write changes apply to subsequent tool calls.
+
+Each Pi process creates a unique scratch directory under the OS temp directory
+(`os.tmpdir()`, normally under `/var/folders/…` on macOS). An optional full
+`temp-dir-prefix` changes where it is generated on the next Pi session:
+`/tmp/pi-console-` becomes `/tmp/pi-console-XXXXXX`. Missing parent directories
+are created. The scratch directory becomes Bash's `$TMPDIR`, is automatically
+writable by both Bash and file tools in every mode, and is removed on shutdown.
+Only the generated directory is removed, not its configured parent.
+
 pi-console uses the existing Pi agent directory, including credentials,
 instructions, skills, prompts, models, and other packages. Its dedicated
 Neovim application is named `pi-console-nvim`, so its Neovim configuration,
@@ -202,23 +225,31 @@ sessions:
 
 The access modes are:
 
-- `readonly`: project reads with persistent writes and shell network access denied;
-- `ask`: the read-only baseline, with approval for additional read, write, and shell network access;
-- `edit`: automatic workspace writes, with approval for additional access elsewhere; and
+- `readonly`: configured reads and scratch writes; other writes and shell network access denied;
+- `ask`: configured reads, configured writes (default `/tmp`), and scratch writes;
+  approval for additional writes, restricted reads, and shell network access;
+- `edit`: the same as `ask`, plus automatic workspace writes; and
 - `full`: unrestricted host-user filesystem and network access.
 
-There is one permission rule: access allowed by the mode or an existing grant
-proceeds; additional access asks in interactive `ask`/`edit` and is denied
-explicitly in `readonly`. There is no special-directory or credential-name
-blacklist: session logs, configuration, and credential files use the same rules.
-The shell inherits its normal environment without secret-name filtering.
+There is one permission rule: access allowed by the configuration, mode, or an
+existing grant proceeds; additional access asks in interactive `ask`/`edit` and
+is denied explicitly in `readonly`. Configured write paths and remembered grants
+do not permit non-scratch writes in `readonly`.
 
-File tools request access to their target automatically. For bash, declare
-`readPaths` and `writePaths` before execution, including paths outside the working
-directory. A write grant includes the reads needed to edit that path. Directory
-grants cover descendants. `workspaceWriteAccess: true` is shorthand for including
-the current directory in `writePaths`; `broadReadAccess: true` requests all
-filesystem reads for that command only, without granting writes or network access.
+**Reads are unrestricted by default, including credentials and private files.**
+There is no special-directory or credential-name blacklist. The shell inherits
+its normal environment without secret-name filtering.
+
+Bash and file tools share read/write permissions, including the scratch directory.
+File tools request additional access to their target automatically. For Bash,
+declare only additional `writePaths` before execution. `readPaths` is needed
+only when reads are configured to be restricted; request specific required paths,
+not whole-filesystem access for incidental configuration lookups. A write grant
+includes reads of that path. Directory grants cover descendants.
+`workspaceWriteAccess: true` is shorthand for including the current directory in
+`writePaths`. The existing `broadReadAccess: true` explicitly requests all reads
+for one command when configured reads are restricted; it is unnecessary with the
+default configuration and grants neither writes nor network access.
 `networkAccess: true` requests outbound network access to any host **for that
 command only**, before execution. This can send data the command can read,
 including inherited environment values; it does not lift filesystem restrictions
@@ -230,9 +261,12 @@ Scoped filesystem approvals offer Allow once, Allow for session, or Deny.
 Network access offers Allow once or Deny and is never saved. Existing saved
 read/write and host-specific network grants are retained on resume, but not
 inherited by new/forked sessions or subagents. A saved host grant does not grant
-access to other hosts. User-entered `!` commands have no declaration fields,
-so interactive `ask`/`edit` requests command-only broader reads and network access
-upfront; `ask` also requests workspace writes.
+access to other hosts. Approval previews distinguish the **Access scope** being
+requested from the **Command CWD** where the command starts.
+
+Explicitly user-entered `!`/`!!` commands run through Pi's normal shell path with
+host-user permissions, without this extension's sandbox or approval checks.
+Agent-generated Bash commands remain access-controlled.
 
 Bash has no default execution timeout. The agent is instructed to omit `timeout`
 unless the user requests an execution deadline, and to use that harness-enforced

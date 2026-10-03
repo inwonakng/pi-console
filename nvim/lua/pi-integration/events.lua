@@ -483,8 +483,8 @@ local function approval_select_opts(payload, prompt)
 	end
 	field("Tool", payload.tool or "tool")
 	field("Request", payload.request or prompt)
-	field("File", payload.path)
-	field("Directory", payload.directory)
+	field("Access scope", payload.path)
+	field("Command CWD", payload.directory)
 	field("Mode", payload.mode)
 	if not payload.request and payload.summary ~= prompt then
 		field("Details", payload.summary)

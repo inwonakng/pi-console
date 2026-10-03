@@ -17,13 +17,13 @@ import {
 import {
   canonicalPath,
   getSessionGrants,
+  hasPermission,
   pathInside,
   requestPermission,
   resolveToolPath,
   restorePermissionGrants,
   type Permission,
 } from "./shared/permissions";
-import { getInteractionMode } from "./shared/interaction-mode";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 
 const READONLY_TOOLS = new Set(["web_search", "web_fetch", "todowrite", "question"]);
@@ -183,7 +183,7 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     ...defaultBash,
     label: "bash (sandboxed)",
     executionMode: "sequential",
-    description: `${defaultBash.description} Request needed access before execution with readPaths, writePaths, or networkAccess. networkAccess requests outbound access to any host for this command only, without lifting filesystem restrictions. Unknown read scopes can request broadReadAccess for this command only. workspaceWriteAccess requests writing the current directory. If granular sandbox permissions cannot support the operation, request unsandboxed for unrestricted access for this invocation only. Omit timeout by default; use it for a user-requested execution deadline.`,
+    description: `${defaultBash.description} Reads are unrestricted by default. Temporary space and configured write paths are writable without approval; edit mode also allows workspace writes. Request additional writePaths before execution, and narrow readPaths only when read access is configured to be restricted. networkAccess requests outbound access to any host for this command only, without lifting filesystem restrictions. workspaceWriteAccess requests writing the current directory. If granular sandbox permissions cannot support the operation, request unsandboxed for unrestricted access for this invocation only. Omit timeout by default; use it for a user-requested execution deadline.`,
     outputSchema: Type.Intersect([defaultBash.outputSchema!, Type.Object({
       sandbox_blocked: Type.Optional(Type.Boolean({ description: "The sandbox detected denied access; output may be partial even when exit_code is zero." })),
     })]),
@@ -196,13 +196,13 @@ export default function accessModeExtension(pi: ExtensionAPI) {
         description: "Request outbound network access to any host for this command only. Prompts before execution; never remembered. The command can send data it can read, including inherited environment values. Filesystem restrictions and sandbox network safeguards remain in place.",
       })),
       readPaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
-        description: "External files or directories needed by this command. Prompts before execution; directory approval covers descendants. Session grants are shared with file tools.",
+        description: "Specific additional read paths when configured read access is restricted. Unnecessary with the default unrestricted reads. Directory approval covers descendants; session grants are shared with file tools.",
       })),
       writePaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
-        description: "Files or directories this command needs to read and write, including outside the working directory. Requests approval before execution; session grants are shared with edit/write tools.",
+        description: "Additional files or directories this command needs to write beyond configured paths, temporary space, and mode permissions. Requests approval before execution; session grants are shared with edit/write tools.",
       })),
       broadReadAccess: Type.Optional(Type.Boolean({
-        description: "Request all filesystem reads for this command only when required paths are unknown. Does not grant writes or network access. No credential-path exclusions.",
+        description: "Explicitly request all filesystem reads for one command when configured reads are restricted. Prefer specific readPaths; uncertainty about incidental reads is not a reason to request this. Unnecessary with the default unrestricted reads. Does not grant writes or network access.",
       })),
       workspaceWriteAccess: Type.Optional(Type.Boolean({
         description: "Request reading and writing the current working directory before execution; equivalent to including it in writePaths.",
@@ -213,7 +213,7 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     }),
     promptGuidelines: [
       ...(defaultBash.promptGuidelines ?? []),
-      "Declare readPaths and writePaths before shell inspection or mutation. All paths, including session logs and credential files, can be approved. In ask mode, workspaceWriteAccess=true requests writing the current directory. Unknown read paths can request broadReadAccess=true for this command only.",
+      "Reads are unrestricted by default, including session logs and credential files; do not request read access for routine inspection. Scratch space and configured write paths are already writable; edit mode also permits workspace writes. Declare only additional writePaths before mutation. In ask mode, workspaceWriteAccess=true requests writing the current directory. If configured reads are restricted, request specific required readPaths rather than broadReadAccess for incidental configuration lookups.",
       "Request networkAccess=true upfront for commands that need outbound connections, such as dependency downloads or remote API calls. It grants access to any host for that command only, not filesystem access. Undeclared access is denied during execution; the proxy never opens a permission prompt. Existing saved host grants still apply.",
       "Omit bash.timeout by default. Do not add command-level timeouts such as curl --max-time, curl --connect-timeout, or the timeout utility unless the user requested them or you are specifically testing timeout behavior. For a user-requested execution deadline, use bash.timeout instead.",
       "If an operation cannot be supported by granular sandbox permissions, request unsandboxed=true to ask for unrestricted host access for one command, without changing the session's mode.",
@@ -236,18 +236,6 @@ export default function accessModeExtension(pi: ExtensionAPI) {
           : result.structuredContent,
       } : result;
     },
-  });
-
-  pi.on("user_bash", (_event, ctx) => {
-    const mode = getAccessMode();
-    const interactive = getInteractionMode(ctx) === "interactive";
-    // User shell input has no path declaration fields. Ask upfront rather than
-    // retrying a partially executed command after a filesystem denial.
-    return { operations: createAccessControlledBashOperations(ctx, {
-      broadReadAccess: interactive && (mode === "ask" || mode === "edit"),
-      networkAccess: interactive && (mode === "ask" || mode === "edit"),
-      workspaceWriteAccess: interactive && mode === "ask",
-    }, () => saveAccessState(pi)) };
   });
 
   pi.on("session_start", async (event, ctx) => {
@@ -283,7 +271,8 @@ export default function accessModeExtension(pi: ExtensionAPI) {
         // Execute against the same target that was approved, not a retargeted alias.
         input.path = path;
         const writing = MUTATION_TOOLS.has(event.toolName);
-        const scope = writing && pathInside(canonicalPath(ctx.cwd), path) ? canonicalPath(ctx.cwd) : path;
+        const scope = writing && pathInside(canonicalPath(ctx.cwd), path)
+          && !hasPermission({ kind: "write", scope: path }, ctx.cwd) ? canonicalPath(ctx.cwd) : path;
         await requestPermission(ctx, { kind: writing ? "write" : "read", scope }, event.toolName,
           () => previewForTool(event, ctx), () => saveAccessState(pi));
       } catch (error) {

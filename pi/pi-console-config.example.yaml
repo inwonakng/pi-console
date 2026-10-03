@@ -2,6 +2,17 @@
 # Copy this file to ~/.pi/agent/pi-console-config.yaml and change only the
 # values you want to override. Extension changes are read on demand.
 
+access-mode:
+  # Defaults: all reads (including credentials), and writes under /tmp.
+  # These lists add to workspace/system reads and mode-specific writes.
+  # Use read-paths: [] to restrict reads, or write-paths: [] to remove /tmp.
+  read-paths: ["/"]
+  write-paths: ["/tmp"]
+  # Optional absolute or ~/ prefix for unique scratch directories.
+  # Omitted: use the OS temp directory. Takes effect on the next Pi session.
+  # The generated directory is always writable and removed on shutdown.
+  # temp-dir-prefix: /tmp/pi-console-
+
 session-picker:
   archive-after-days: 180
 

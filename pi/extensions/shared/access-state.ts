@@ -12,13 +12,14 @@ export function parseAccessMode(input: string | undefined): AccessMode | undefin
 
 type AccessState = {
   accessMode: AccessMode;
+  scratchDirectory?: string;
 };
 
 const ACCESS_STATE_KEY = Symbol.for("pi.agent.extensions.access-mode-state");
 const globalAccessState = globalThis as typeof globalThis & Record<symbol, AccessState | undefined>;
 
-// Pi loads each extension entrypoint independently. Keep access mode in a
-// process-global slot so access-mode.ts and spawn.ts share the same live state
+// Pi loads each extension entrypoint independently. Keep access mode and scratch
+// space in a process-global slot so the extensions share the same live state
 // even when their shared imports are evaluated as separate module instances.
 const state = globalAccessState[ACCESS_STATE_KEY] ??= {
   accessMode: parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE) ?? "ask",
@@ -30,4 +31,12 @@ export function getAccessMode(): AccessMode {
 
 export function setAccessMode(mode: AccessMode): void {
   state.accessMode = mode;
+}
+
+export function getScratchDirectory(): string | undefined {
+  return state.scratchDirectory;
+}
+
+export function setScratchDirectory(path: string | undefined): void {
+  state.scratchDirectory = path;
 }

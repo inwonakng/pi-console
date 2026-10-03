@@ -3,7 +3,8 @@ import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAccessMode } from "./access-state";
+import { getAccessMode, getScratchDirectory } from "./access-state";
+import { loadExtensionSettings } from "./extension-settings";
 import { getInteractionMode } from "./interaction-mode";
 import { notifyPiToolApproval } from "./notifications";
 
@@ -68,7 +69,22 @@ export function baselineReadPaths(cwd: string): string[] {
     ? ["/bin", "/dev", "/etc", "/Library", "/private/etc", "/private/var/db/timezone", "/sbin", "/System", "/usr"]
     : ["/bin", "/dev", "/etc", "/lib", "/lib64", "/nix/store", "/proc", "/sbin", "/usr"];
   return [cwd, ...system, "/opt", "/usr/lib/node_modules", "/usr/local/lib/node_modules",
-    join(agentDir, "AGENTS.md"), join(agentDir, "agents"), join(agentDir, "prompts"), join(agentDir, "skills")];
+    join(agentDir, "AGENTS.md"), join(agentDir, "agents"), join(agentDir, "prompts"), join(agentDir, "skills"),
+    ...(loadExtensionSettings()["access-mode"]?.["read-paths"] ?? ["/"]).map((path) => resolveToolPath(path, cwd)),
+    ...baselineWritePaths(cwd)];
+}
+
+export function baselineWritePaths(cwd: string): string[] {
+  const configured = loadExtensionSettings()["access-mode"]?.["write-paths"] ?? ["/tmp"];
+  const scratch = getScratchDirectory();
+  if (scratch && canonicalPath(scratch) !== scratch) {
+    throw new Error("Scratch directory no longer resolves to its generated path; start a new Pi session.");
+  }
+  return [
+    ...(scratch ? [scratch] : []),
+    ...(getAccessMode() === "readonly" ? [] : configured.map((path) => resolveToolPath(path, cwd))),
+    ...(getAccessMode() === "edit" ? [cwd] : []),
+  ];
 }
 
 export function getSessionGrants(): Permission[] {
@@ -107,7 +123,7 @@ export function hasPermission(permission: Permission, cwd: string): boolean {
   const { kind } = permission;
   const scope = kind === "read" || kind === "write" ? canonicalPath(permission.scope) : permission.scope;
   if (kind === "read" && baselineReadPaths(cwd).some((path) => pathInside(canonicalPath(path), scope))) return true;
-  if (kind === "write" && mode === "edit" && pathInside(canonicalPath(cwd), scope)) return true;
+  if (kind === "write" && baselineWritePaths(cwd).some((path) => pathInside(canonicalPath(path), scope))) return true;
   if (mode === "readonly" || kind === "unsandboxed") return false;
   return sessionGrants.some((grant) => {
     if (grant.kind !== kind && !(kind === "read" && grant.kind === "write")) return false;

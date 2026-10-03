@@ -1,11 +1,12 @@
 import { SandboxManager, getDefaultWritePaths, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations, type BashOperations, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { getAccessMode } from "./access-state";
-import { baselineReadPaths, canonicalPath, getGrantedScopes, pathInside, requestPermission, resolveToolPath } from "./permissions";
+import { dirname, join } from "node:path";
+import { getAccessMode, getScratchDirectory, setScratchDirectory } from "./access-state";
+import { loadExtensionSettings } from "./extension-settings";
+import { baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, pathInside, requestPermission, resolveToolPath } from "./permissions";
 
 export type BashAccessRequest = {
   readPaths?: string[];
@@ -19,7 +20,6 @@ export type BashAccessRequest = {
 const localBash = createLocalBashOperations();
 let sandboxConfig: SandboxRuntimeConfig | undefined;
 let sandboxError: string | undefined;
-let sandboxTempDir: string | undefined;
 let commandQueue: Promise<void> = Promise.resolve();
 let commandNetworkAccess = false;
 
@@ -45,11 +45,11 @@ async function allowApprovedNetwork(): Promise<boolean> {
 }
 
 function filesystemConfig(cwd: string, reads: string[], writes: string[]): SandboxRuntimeConfig["filesystem"] {
-  const allowWrite = [...new Set([...(sandboxTempDir ? [sandboxTempDir] : []), ...writes])];
+  const allowWrite = [...new Set([...baselineWritePaths(cwd), ...writes].map(canonicalPath))];
+  const allowRead = [...new Set([...baselineReadPaths(cwd), ...reads, ...allowWrite].map(canonicalPath))];
   return {
-    denyRead: [...reads, ...writes].includes("/") ? [] : ["/"],
-    allowRead: [...new Set([...baselineReadPaths(cwd).map(canonicalPath), ...(sandboxTempDir ? [sandboxTempDir] : []),
-      ...reads, ...writes])].filter((path) => path !== "/"),
+    denyRead: allowRead.includes("/") ? [] : ["/"],
+    allowRead: allowRead.filter((path) => path !== "/"),
     allowWrite,
     // Suppress the runtime's implicit writable caches unless covered by an
     // actual write grant. These are enforcement carve-outs, not ungrantable paths.
@@ -78,7 +78,7 @@ function reportBlockedCommand(lines: string[], onData: (data: Buffer) => void): 
   const diagnostics = lines.length ? lines.slice(0, 20).join("\n") : "Permission-denied output detected; operation and path could not be determined.";
   onData(Buffer.from(`\n[Access blocked; command may have partially executed]\n${diagnostics}\n`
     + "Files may already have been written. No automatic retry was performed. Inspect partial output and state before continuing.\n"
-    + "For filesystem denials, declare readPaths/writePaths for the needed paths, or broadReadAccess=true for unknown reads. "
+    + "For filesystem denials, request only the specific readPaths/writePaths that the operation needs. "
     + "For a proxy network allowlist denial, request networkAccess=true on your continuation command; approval happens before it starts. "
     + "Network approval does not lift filesystem restrictions or fix DNS, TLS, or server errors. "
     + "If the sandbox cannot support the operation, request unsandboxed=true for explicitly approved, unrestricted access for one command. "
@@ -109,12 +109,13 @@ async function runSandboxed(
   onBlocked: () => void,
 ): Promise<{ exitCode: number | null }> {
   const commandId = randomUUID();
+  const scratch = getScratchDirectory();
   let wrappedCommand = false;
   commandNetworkAccess = networkAccess;
   try {
     updateNetworkConfig();
     const previousTempDir = process.env.CLAUDE_CODE_TMPDIR;
-    if (sandboxTempDir) process.env.CLAUDE_CODE_TMPDIR = sandboxTempDir;
+    if (scratch) process.env.CLAUDE_CODE_TMPDIR = scratch;
     let wrapped: string;
     try {
       wrapped = await SandboxManager.wrapWithSandbox(`export NO_PROXY= no_proxy=; ${command}`, undefined,
@@ -133,7 +134,7 @@ async function runSandboxed(
     }
     wrappedCommand = true;
     const env = { ...options.env,
-      ...(sandboxTempDir ? { TMPDIR: sandboxTempDir, TMP: sandboxTempDir, TEMP: sandboxTempDir } : {}) };
+      ...(scratch ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : {}) };
     let permissionDenied = false;
     let outputTail = "";
     const onData = (data: Buffer) => {
@@ -183,9 +184,11 @@ async function executeRestricted(
   const paths = (values: string[] = []) => [...new Set(values.map((path) => canonicalPath(resolveToolPath(path, root))))];
   const reads = paths(request.readPaths);
   const writes = paths([...(request.writePaths ?? []), ...(request.workspaceWriteAccess ? [root] : [])]);
+  // Validate the configured policy before considering an unrestricted fallback.
+  const baselinePaths = baselineReadPaths(root);
   const globShaped = (path: string) => /[*?\[\]]/.test(path);
   if (request.unsandboxed || !sandboxConfig || !SandboxManager.isSandboxingEnabled()
-    || [...baselineReadPaths(root), ...reads, ...writes].some(globShaped)) {
+    || [...baselinePaths, ...reads, ...writes].some(globShaped)) {
     return runUnsandboxed(command, root, options, context, onSessionGrant);
   }
   const preview = { text: command, filetype: "sh" };
@@ -203,13 +206,12 @@ async function executeRestricted(
   }
   reads.push(...getGrantedScopes("read").filter((path) => !globShaped(path)));
   writes.push(...getGrantedScopes("write").filter((path) => !globShaped(path)));
-  if (getAccessMode() === "edit") writes.push(root);
   if (options.signal?.aborted) throw new Error("aborted");
   const filesystem = filesystemConfig(root, reads, writes);
   // The runtime's default write roots cannot be narrowed to an approved child
   // without a parent deny overriding that child. Offer the explicit fallback
   // before execution rather than silently widening or blocking the grant.
-  if (writes.some((write) => filesystem.denyWrite.some((denied) => pathInside(denied, write)))) {
+  if (filesystem.allowWrite.some((write) => filesystem.denyWrite.some((denied) => pathInside(denied, write)))) {
     return runUnsandboxed(command, root, options, context, onSessionGrant);
   }
   if (request.networkAccess) {
@@ -236,14 +238,15 @@ export function createAccessControlledBashOperations(
 }
 
 export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void> {
+  const prefix = resolveToolPath(loadExtensionSettings()["access-mode"]?.["temp-dir-prefix"]
+    ?? join(tmpdir(), "pi-console-sandbox-"), ctx.cwd);
   sandboxError = undefined;
   sandboxConfig = undefined;
   try {
-    if (SandboxManager.isSandboxingEnabled()) await SandboxManager.reset();
-    if (sandboxTempDir && existsSync(sandboxTempDir)) rmSync(sandboxTempDir, { recursive: true, force: true });
-    sandboxTempDir = undefined;
+    await shutdownBashSandbox();
     if (process.platform !== "darwin" && process.platform !== "linux") throw new Error(`unsupported platform ${process.platform}`);
-    sandboxTempDir = canonicalPath(mkdtempSync(join(tmpdir(), "pi-console-sandbox-")));
+    mkdirSync(dirname(prefix), { recursive: true });
+    setScratchDirectory(canonicalPath(mkdtempSync(prefix)));
     sandboxConfig = { network: networkConfig(), filesystem: filesystemConfig(canonicalPath(ctx.cwd), [], []) };
     await SandboxManager.initialize(sandboxConfig, allowApprovedNetwork, true);
     if (process.platform === "darwin") await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
@@ -259,9 +262,13 @@ export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void
 
 export async function shutdownBashSandbox(): Promise<void> {
   await commandQueue;
-  if (SandboxManager.isSandboxingEnabled()) await SandboxManager.reset();
-  if (sandboxTempDir && existsSync(sandboxTempDir)) rmSync(sandboxTempDir, { recursive: true, force: true });
-  sandboxTempDir = undefined;
-  sandboxConfig = undefined;
-  commandNetworkAccess = false;
+  try {
+    if (SandboxManager.isSandboxingEnabled()) await SandboxManager.reset();
+  } finally {
+    const scratch = getScratchDirectory();
+    setScratchDirectory(undefined);
+    sandboxConfig = undefined;
+    commandNetworkAccess = false;
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
+  }
 }

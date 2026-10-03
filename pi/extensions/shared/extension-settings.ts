@@ -1,9 +1,14 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { parseDocument } from "yaml";
 
 export interface ExtensionSettings {
+	"access-mode"?: {
+		"read-paths"?: string[];
+		"write-paths"?: string[];
+		"temp-dir-prefix"?: string;
+	};
 	"auto-title"?: {
 		"provider-models"?: Record<string, string>;
 	};
@@ -27,6 +32,15 @@ function requireKnownKeys(value: Record<string, unknown>, keys: string[], path: 
 	}
 }
 
+function requirePath(value: unknown, path: string): string {
+	if (typeof value !== "string" || !value.trim()
+		|| !(isAbsolute(value) || value === "~" || value.startsWith("~/"))
+		|| /[*?\[\]\0]/.test(value)) {
+		throw new Error(`${path} must be an absolute or home-relative path without wildcards`);
+	}
+	return value;
+}
+
 // Read on demand so every extension sees edits without a watcher or reload cache.
 // Add each new extension's section and validation here as it adopts this file.
 export function loadExtensionSettings(): ExtensionSettings {
@@ -48,8 +62,26 @@ export function loadExtensionSettings(): ExtensionSettings {
 		const value: unknown = document.toJS();
 		if (value === null && document.contents === null) return {};
 		const root = requireMapping(value, "settings");
-		requireKnownKeys(root, ["auto-title", "session-picker"], "settings");
+		requireKnownKeys(root, ["access-mode", "auto-title", "session-picker"], "settings");
 		const settings: ExtensionSettings = {};
+
+		if (Object.hasOwn(root, "access-mode")) {
+			const accessMode = requireMapping(root["access-mode"], "access-mode");
+			requireKnownKeys(accessMode, ["read-paths", "write-paths", "temp-dir-prefix"], "access-mode");
+			const parsedAccessMode: NonNullable<ExtensionSettings["access-mode"]> = {};
+			for (const key of ["read-paths", "write-paths"] as const) {
+				if (!Object.hasOwn(accessMode, key)) continue;
+				const paths = accessMode[key];
+				if (!Array.isArray(paths)) throw new Error(`access-mode.${key} must be a list of paths`);
+				parsedAccessMode[key] = paths.map((value, index) => requirePath(value, `access-mode.${key}[${index}]`));
+			}
+			if (Object.hasOwn(accessMode, "temp-dir-prefix")) {
+				const prefix = requirePath(accessMode["temp-dir-prefix"], "access-mode.temp-dir-prefix");
+				if (prefix.endsWith("/")) throw new Error("access-mode.temp-dir-prefix must include a directory-name prefix, for example /tmp/pi-console-");
+				parsedAccessMode["temp-dir-prefix"] = prefix;
+			}
+			settings["access-mode"] = parsedAccessMode;
+		}
 
 		if (Object.hasOwn(root, "auto-title")) {
 			const autoTitle = requireMapping(root["auto-title"], "auto-title");
