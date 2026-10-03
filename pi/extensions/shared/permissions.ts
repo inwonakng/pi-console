@@ -1,0 +1,182 @@
+import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { getAccessMode } from "./access-state";
+import { getInteractionMode } from "./interaction-mode";
+import { notifyPiToolApproval } from "./notifications";
+
+export type Permission = {
+  kind: "read" | "write" | "network" | "tool" | "unsandboxed";
+  scope: string;
+};
+
+export type PermissionPreview = { text: string; filetype: string };
+
+const sessionGrants: Permission[] = [];
+let approvalQueue: Promise<void> = Promise.resolve();
+let generation = 0;
+let approvalLifetime = new AbortController();
+
+export function resolveToolPath(path: string, cwd: string): string {
+  // Match Pi's file-tool normalization, including local file URLs.
+  let normalized = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ");
+  if (normalized.startsWith("@")) normalized = normalized.slice(1);
+  if (normalized === "~") return homedir();
+  if (normalized.startsWith("~/")) return join(homedir(), normalized.slice(2));
+  if (normalized.startsWith("file://")) normalized = fileURLToPath(normalized);
+  return resolve(cwd, normalized);
+}
+
+export function canonicalPath(path: string): string {
+  const resolveLinks = (candidate: string, remainingLinks: number): string => {
+    let current = resolve(candidate);
+    const suffix: string[] = [];
+    while (!existsSync(current)) {
+      // existsSync follows symlinks: a dangling link must not be mistaken for
+      // a new file inside the workspace when its target is actually outside.
+      try {
+        if (lstatSync(current).isSymbolicLink()) {
+          if (remainingLinks === 0) throw new Error(`Too many symlinks while resolving ${path}`);
+          return resolveLinks(resolve(dirname(current), readlinkSync(current), ...suffix), remainingLinks - 1);
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      }
+      const parent = dirname(current);
+      if (parent === current) throw new Error(`Cannot resolve path: ${path}`);
+      suffix.unshift(basename(current));
+      current = parent;
+    }
+    return resolve(realpathSync.native(current), ...suffix);
+  };
+  return resolveLinks(path, 40);
+}
+
+export function pathInside(parent: string, child: string): boolean {
+  // Scopes are canonicalized when approved, not re-resolved afterward. A
+  // remembered scope must not follow a newly planted symlink to another target.
+  const rel = relative(parent, child);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith(sep));
+}
+
+export function baselineReadPaths(cwd: string): string[] {
+  const agentDir = getAgentDir();
+  const system = process.platform === "darwin"
+    ? ["/bin", "/dev", "/etc", "/Library", "/private/etc", "/private/var/db/timezone", "/sbin", "/System", "/usr"]
+    : ["/bin", "/dev", "/etc", "/lib", "/lib64", "/nix/store", "/proc", "/sbin", "/usr"];
+  return [cwd, ...system, "/opt", "/usr/lib/node_modules", "/usr/local/lib/node_modules",
+    join(agentDir, "AGENTS.md"), join(agentDir, "agents"), join(agentDir, "prompts"), join(agentDir, "skills")];
+}
+
+export function getSessionGrants(): Permission[] {
+  return sessionGrants.map((grant) => ({ ...grant }));
+}
+
+export function getGrantedScopes(kind: "read" | "write" | "network"): string[] {
+  if (getAccessMode() === "readonly") return [];
+  return sessionGrants.filter((grant) => grant.kind === kind || (kind === "read" && grant.kind === "write"))
+    .filter((grant) => grant.kind === "network" || canonicalPath(grant.scope) === grant.scope)
+    .map((grant) => grant.scope);
+}
+
+export function restorePermissionGrants(values: unknown): void {
+  generation++;
+  approvalLifetime.abort();
+  approvalLifetime = new AbortController();
+  sessionGrants.length = 0;
+  if (!Array.isArray(values)) return;
+  for (const value of values) {
+    if (typeof value !== "object" || value === null) continue;
+    const { kind, scope } = value as Record<string, unknown>;
+    if (typeof scope !== "string" || !scope) continue;
+    if ((kind === "read" || kind === "write") && scope.startsWith("/")) {
+      sessionGrants.push({ kind, scope: resolve(scope) });
+    } else if (kind === "network" || kind === "tool") {
+      sessionGrants.push({ kind, scope });
+    }
+    // Unrestricted execution is always approved for one invocation, never restored.
+  }
+}
+
+export function hasPermission(permission: Permission, cwd: string): boolean {
+  const mode = getAccessMode();
+  if (mode === "full") return true;
+  const { kind } = permission;
+  const scope = kind === "read" || kind === "write" ? canonicalPath(permission.scope) : permission.scope;
+  if (kind === "read" && baselineReadPaths(cwd).some((path) => pathInside(canonicalPath(path), scope))) return true;
+  if (kind === "write" && mode === "edit" && pathInside(canonicalPath(cwd), scope)) return true;
+  if (mode === "readonly" || kind === "unsandboxed") return false;
+  return sessionGrants.some((grant) => {
+    if (grant.kind !== kind && !(kind === "read" && grant.kind === "write")) return false;
+    if (kind === "read" || kind === "write") return pathInside(grant.scope, scope);
+    if (kind === "network") return grant.scope === scope || scope.startsWith(`${grant.scope}:`);
+    return grant.scope === scope;
+  });
+}
+
+function permissionSummary(permission: Permission): string {
+  switch (permission.kind) {
+    case "read": return `Allow reading ${permission.scope}? Directory approval includes descendants.`;
+    case "write": return `Allow reading and writing ${permission.scope}? Directory approval includes descendants.`;
+    case "network": return permission.scope === "*"
+      ? "Allow outbound network access to any host for this command only? The command can send data it can read, including inherited environment values. Filesystem restrictions and sandbox network safeguards remain in place."
+      : `Allow network access to ${permission.scope}?`;
+    case "tool": return `Allow running ${permission.scope}?`;
+    case "unsandboxed": return "Run this command outside the sandbox once? This grants unrestricted host filesystem, environment, and network access for this invocation only.";
+  }
+}
+
+export function requestPermission(
+  ctx: ExtensionContext,
+  permission: Permission,
+  tool: string,
+  preview: PermissionPreview | (() => PermissionPreview),
+  onSessionGrant: () => void,
+  remember = true,
+): Promise<void> {
+  const requestedGeneration = generation;
+  const scopeLabel = permission.kind === "network" && permission.scope === "*"
+    ? "outbound network access to any host (this command only)" : permission.scope;
+  const signal = ctx.signal ? AbortSignal.any([ctx.signal, approvalLifetime.signal]) : approvalLifetime.signal;
+  const run = async () => {
+    const assertCurrent = () => {
+      if (generation !== requestedGeneration) throw new Error("Permission request cancelled because the active session or branch changed.");
+      if (signal.aborted) throw new Error("aborted");
+    };
+    assertCurrent();
+    if (hasPermission(permission, ctx.cwd)) return;
+    if (getAccessMode() === "readonly") throw new Error(`${permission.kind} access is blocked in readonly mode: ${scopeLabel}`);
+    if (getInteractionMode(ctx) !== "interactive") {
+      throw new Error(`${permission.kind} access requires approval, but interaction mode is noninteractive: ${scopeLabel}`);
+    }
+    const canRemember = remember && permission.kind !== "unsandboxed"
+      && !(permission.kind === "network" && permission.scope === "*");
+    const summary = permissionSummary(permission);
+    const contents = typeof preview === "function" ? preview() : preview;
+    const title = ctx.mode === "rpc" ? JSON.stringify({
+      kind: "pi_approval_preview", tool, mode: getAccessMode(), summary: scopeLabel,
+      request: summary, directory: ctx.cwd,
+      path: permission.kind === "read" || permission.kind === "write" ? permission.scope : undefined,
+      preview_filetype: contents.filetype, preview: contents.text,
+    }) : `${summary}\n${contents.text}`;
+    notifyPiToolApproval(ctx);
+    const choices = canRemember ? ["Allow once", "Allow for session", "Deny"] : ["Allow once", "Deny"];
+    const choice = await ctx.ui.select(title, choices, { signal });
+    assertCurrent();
+    if (getAccessMode() === "readonly") throw new Error("Permission request cancelled because access mode changed to readonly.");
+    if (choice !== "Allow once" && !(canRemember && choice === "Allow for session")) {
+      throw new Error(`${permission.kind} access denied by user: ${scopeLabel}`);
+    }
+    if (choice === "Allow for session") {
+      sessionGrants.push({ ...permission });
+      onSessionGrant();
+    }
+  };
+  // All file-tool and network requests share the frontend's one active picker.
+  const current = approvalQueue.then(run, run);
+  approvalQueue = current.then(() => undefined, () => undefined);
+  return current;
+}

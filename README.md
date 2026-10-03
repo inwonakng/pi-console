@@ -203,9 +203,59 @@ sessions:
 The access modes are:
 
 - `readonly`: project reads with persistent writes and shell network access denied;
-- `ask`: the read-only baseline, with capability prompts after a sandbox denial;
-- `edit`: automatic workspace writes with prompts for shell network access; and
+- `ask`: the read-only baseline, with approval for additional read, write, and shell network access;
+- `edit`: automatic workspace writes, with approval for additional access elsewhere; and
 - `full`: unrestricted host-user filesystem and network access.
+
+There is one permission rule: access allowed by the mode or an existing grant
+proceeds; additional access asks in interactive `ask`/`edit` and is denied
+explicitly in `readonly`. There is no special-directory or credential-name
+blacklist: session logs, configuration, and credential files use the same rules.
+The shell inherits its normal environment without secret-name filtering.
+
+File tools request access to their target automatically. For bash, declare
+`readPaths` and `writePaths` before execution, including paths outside the working
+directory. A write grant includes the reads needed to edit that path. Directory
+grants cover descendants. `workspaceWriteAccess: true` is shorthand for including
+the current directory in `writePaths`; `broadReadAccess: true` requests all
+filesystem reads for that command only, without granting writes or network access.
+`networkAccess: true` requests outbound network access to any host **for that
+command only**, before execution. This can send data the command can read,
+including inherited environment values; it does not lift filesystem restrictions
+or the runtime's network safeguards. Network access is routed through the sandbox
+proxy; it never opens a permission prompt while a command is running. Undeclared
+access is denied, with the destination reported when available.
+
+Scoped filesystem approvals offer Allow once, Allow for session, or Deny.
+Network access offers Allow once or Deny and is never saved. Existing saved
+read/write and host-specific network grants are retained on resume, but not
+inherited by new/forked sessions or subagents. A saved host grant does not grant
+access to other hosts. User-entered `!` commands have no declaration fields,
+so interactive `ask`/`edit` requests command-only broader reads and network access
+upfront; `ask` also requests workspace writes.
+
+Bash has no default execution timeout. The agent is instructed to omit `timeout`
+unless the user requests an execution deadline, and to use that harness-enforced
+deadline instead of embedding timeouts in shell commands. Command-level timeouts
+are reserved for explicit user requests or testing timeout behavior. All upfront
+approvals finish before the shell and its execution timer start.
+
+If granular permissions cannot support an operation (for example, raw networking
+or a literal path containing sandbox wildcard characters), request
+`unsandboxed: true`. This explicitly asks to run that command with unrestricted
+host filesystem, environment, and network access **once**, without changing the
+session's mode. The same fallback is offered when the sandbox is unavailable or
+cannot prepare a command before execution. It is never remembered, implicitly
+granted, or offered as an automatic rerun after partial execution.
+
+Detected sandbox denials are reported with available diagnostics and partial
+output, even when the command exits zero. Commands are never automatically
+rerun after a sandbox block: inspect what already happened, then request the
+needed access with an appropriate continuation command (`networkAccess: true`
+for a proxy allowlist denial, `readPaths`/`writePaths` for filesystem denials).
+Network permission does not fix DNS, TLS, or server errors. Detection is best-effort;
+suppressed errors may not be observable. `readonly` and noninteractive sessions
+do not prompt for additional access.
 
 The package registers the tool names `bash`, `question`, `spawn`, `spawn_control`,
 `todowrite`, `web_search`, `web_fetch`, and `workspace`. Pi resolves duplicate

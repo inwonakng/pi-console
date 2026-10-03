@@ -1,23 +1,29 @@
 import {
   createBashToolDefinition,
   generateUnifiedPatch,
-  getAgentDir,
   type ExtensionAPI,
   type ExtensionContext,
   type ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 import assert from "node:assert";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { Type } from "typebox";
 import { getAccessMode, parseAccessMode, setAccessMode } from "./shared/access-state";
 import {
   createAccessControlledBashOperations,
   initializeBashSandbox,
   shutdownBashSandbox,
 } from "./shared/bash-sandbox";
+import {
+  canonicalPath,
+  getSessionGrants,
+  pathInside,
+  requestPermission,
+  resolveToolPath,
+  restorePermissionGrants,
+  type Permission,
+} from "./shared/permissions";
 import { getInteractionMode } from "./shared/interaction-mode";
-import { notifyPiToolApproval } from "./shared/notifications";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 
 const READONLY_TOOLS = new Set(["web_search", "web_fetch", "todowrite", "question"]);
@@ -34,12 +40,13 @@ const KNOWN_TOOLS = new Set([
 ]);
 const READONLY_WORKSPACE_ACTIONS = new Set(["status", "list"]);
 const READONLY_SPAWN_CONTROL_ACTIONS = new Set(["list", "status", "join", "join_all"]);
-const sessionCapabilityGrants = new Set<string>();
 const ACCESS_SETTING = "access";
 
 type PersistedAccessState = {
   mode?: string;
   grants?: unknown[];
+  readPaths?: unknown[];
+  permissions?: unknown[];
 };
 
 function jsonPreview(value: unknown): string {
@@ -61,7 +68,7 @@ function exactEditPreview(cwd: string, input: Record<string, unknown>): string {
     return jsonPreview(input);
   }
 
-  const original = readFileSync(resolve(cwd, path), "utf-8");
+  const original = readFileSync(resolveToolPath(path, cwd), "utf-8");
   const replacements: Array<{ index: number; oldText: string; newText: string }> = [];
   for (const edit of edits) {
     assertEdit(edit);
@@ -95,7 +102,7 @@ function writePreview(cwd: string, input: Record<string, unknown>): { text: stri
     return { text: jsonPreview(input), filetype: "json" };
   }
 
-  const absolutePath = resolve(cwd, path);
+  const absolutePath = resolveToolPath(path, cwd);
   if (!existsSync(absolutePath)) {
     return {
       text: content,
@@ -108,129 +115,19 @@ function writePreview(cwd: string, input: Record<string, unknown>): { text: stri
 
 function previewForTool(event: ToolCallEvent, ctx: ExtensionContext): { text: string; filetype: string } {
   const input = event.input as Record<string, unknown>;
-  if (event.toolName === "edit") {
-    return { text: exactEditPreview(ctx.cwd, input), filetype: "diff" };
-  }
-  if (event.toolName === "write") {
-    return writePreview(ctx.cwd, input);
+  try {
+    if (event.toolName === "edit") return { text: exactEditPreview(ctx.cwd, input), filetype: "diff" };
+    if (event.toolName === "write") return writePreview(ctx.cwd, input);
+  } catch (error) {
+    // Preview errors can reveal existing file contents (for example, edit match
+    // counts). Show them only to the user, never as a pre-approval tool error.
+    return { text: `Preview unavailable: ${error instanceof Error ? error.message : String(error)}\n\n${jsonPreview(input)}`, filetype: "text" };
   }
   return { text: jsonPreview(input), filetype: "json" };
 }
 
-function approvalPayload(event: ToolCallEvent, ctx: ExtensionContext): string {
-  const preview = previewForTool(event, ctx);
-  const input = event.input as Record<string, unknown>;
-  const summary = typeof input.path === "string" ? input.path : JSON.stringify(input);
-  return JSON.stringify({
-    kind: "pi_approval_preview",
-    tool: event.toolName,
-    mode: getAccessMode(),
-    summary,
-    request: MUTATION_TOOLS.has(event.toolName)
-      ? "Workspace file writes"
-      : `Run ${event.toolName}${typeof input.action === "string" ? `: ${input.action}` : ""}`,
-    directory: ctx.cwd,
-    path: typeof input.path === "string" ? input.path : undefined,
-    preview_filetype: preview.filetype,
-    preview: preview.text,
-  });
-}
-
 function workspaceManagesApproval(input: Record<string, unknown>): boolean {
   return input.action === "integrate" || input.action === "discard";
-}
-
-function sessionCapabilityKey(event: ToolCallEvent, ctx: ExtensionContext): string {
-  if (MUTATION_TOOLS.has(event.toolName)) return `workspace-files:${canonicalPath(ctx.cwd)}`;
-  const input = event.input as Record<string, unknown>;
-  const action = typeof input.action === "string" ? `:${input.action}` : "";
-  return `${event.toolName}${action}`;
-}
-
-function resolveToolPath(path: string, cwd: string): string {
-  const normalized = path.startsWith("@") ? path.slice(1) : path;
-  if (normalized === "~") return homedir();
-  if (normalized.startsWith("~/")) return join(homedir(), normalized.slice(2));
-  return resolve(cwd, normalized);
-}
-
-function canonicalPath(path: string): string {
-  let current = resolve(path);
-  const suffix: string[] = [];
-  while (!existsSync(current)) {
-    const parent = dirname(current);
-    if (parent === current) return resolve(path);
-    suffix.unshift(basename(current));
-    current = parent;
-  }
-  return resolve(realpathSync.native(current), ...suffix);
-}
-
-function pathInside(parent: string, child: string): boolean {
-  const rel = relative(canonicalPath(parent), canonicalPath(child));
-  return rel === "" || (!rel.startsWith("..") && !rel.startsWith(sep));
-}
-
-function agentPathReadable(path: string): boolean {
-  const agentDir = getAgentDir();
-  return [
-    join(agentDir, "AGENTS.md"),
-    join(agentDir, "agents"),
-    join(agentDir, "prompts"),
-    join(agentDir, "skills"),
-  ].some((allowed) => pathInside(allowed, path));
-}
-
-function sensitiveReadPaths(): string[] {
-  const home = homedir();
-  const agentDir = getAgentDir();
-  return [
-    join(agentDir, "auth.json"),
-    join(agentDir, "bash-access.json"),
-    join(agentDir, "history"),
-    join(agentDir, "models-store.json"),
-    join(agentDir, "pi-console-config.yaml"),
-    join(agentDir, "sessions"),
-    join(agentDir, "settings.json"),
-    join(home, ".pi", "sessions"),
-    join(home, ".aws"),
-    join(home, ".config", "gcloud"),
-    join(home, ".config", "gh"),
-    join(home, ".docker", "config.json"),
-    join(home, ".netrc"),
-    join(home, ".npmrc"),
-    join(home, ".ssh"),
-  ];
-}
-
-function sensitiveReadPath(path: string, recursive: boolean): boolean {
-  return sensitiveReadPaths().some((sensitive) =>
-    pathInside(sensitive, path) || (recursive && pathInside(path, sensitive)));
-}
-
-function installedResourceReadable(path: string): boolean {
-  return ["/opt", "/usr/lib/node_modules", "/usr/local/lib/node_modules"]
-    .some((allowed) => pathInside(allowed, path));
-}
-
-function pathBoundaryReason(toolName: string, input: Record<string, unknown>, cwd: string): string | undefined {
-  if (!PATH_READ_TOOLS.has(toolName) && !MUTATION_TOOLS.has(toolName)) return undefined;
-  const requested = typeof input.path === "string" ? input.path : ".";
-  const path = resolveToolPath(requested, cwd);
-
-  if (MUTATION_TOOLS.has(toolName) && !pathInside(cwd, path)) {
-    return `writes outside the working directory require full mode: ${path}`;
-  }
-  if (PATH_READ_TOOLS.has(toolName)) {
-    const recursive = toolName !== "read";
-    if (sensitiveReadPath(path, recursive)) {
-      return `sensitive credential paths require full mode: ${path}`;
-    }
-    if (!pathInside(cwd, path) && !agentPathReadable(path) && !installedResourceReadable(path)) {
-      return `reads outside the project and approved Pi resource directories require full mode: ${path}`;
-    }
-  }
-  return undefined;
 }
 
 function readonlyToolBlockReason(toolName: string, input: Record<string, unknown>): string | undefined {
@@ -258,7 +155,7 @@ function setStatus(ctx: ExtensionContext): void {
 function saveAccessState(pi: ExtensionAPI): void {
   saveSessionSetting(pi, ACCESS_SETTING, {
     mode: getAccessMode(),
-    grants: [...sessionCapabilityGrants],
+    permissions: getSessionGrants(),
   });
 }
 
@@ -266,12 +163,17 @@ function restoreAccessState(ctx: ExtensionContext, restoreGrants = true): void {
   const stored = loadSessionSetting(ctx, ACCESS_SETTING) as PersistedAccessState | undefined;
   const spawnMode = parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE);
   setAccessMode(spawnMode ?? parseAccessMode(stored?.mode) ?? "ask");
-  sessionCapabilityGrants.clear();
-  if (!spawnMode && restoreGrants && Array.isArray(stored?.grants)) {
-    for (const grant of stored.grants) {
-      if (typeof grant === "string" && grant.length > 0) sessionCapabilityGrants.add(grant);
-    }
+  const legacy: Permission[] = [];
+  for (const path of Array.isArray(stored?.readPaths) ? stored.readPaths : []) {
+    if (typeof path === "string" && path.startsWith("/")) legacy.push({ kind: "read", scope: path });
   }
+  for (const grant of Array.isArray(stored?.grants) ? stored.grants : []) {
+    if (typeof grant !== "string" || !grant) continue;
+    legacy.push(grant.startsWith("workspace-files:")
+      ? { kind: "write", scope: grant.slice("workspace-files:".length) }
+      : { kind: "tool", scope: grant });
+  }
+  restorePermissionGrants(!spawnMode && restoreGrants ? stored?.permissions ?? legacy : undefined);
   setStatus(ctx);
 }
 
@@ -281,15 +183,72 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     ...defaultBash,
     label: "bash (sandboxed)",
     executionMode: "sequential",
+    description: `${defaultBash.description} Request needed access before execution with readPaths, writePaths, or networkAccess. networkAccess requests outbound access to any host for this command only, without lifting filesystem restrictions. Unknown read scopes can request broadReadAccess for this command only. workspaceWriteAccess requests writing the current directory. If granular sandbox permissions cannot support the operation, request unsandboxed for unrestricted access for this invocation only. Omit timeout by default; use it for a user-requested execution deadline.`,
+    outputSchema: Type.Intersect([defaultBash.outputSchema!, Type.Object({
+      sandbox_blocked: Type.Optional(Type.Boolean({ description: "The sandbox detected denied access; output may be partial even when exit_code is zero." })),
+    })]),
+    parameters: Type.Object({
+      ...defaultBash.parameters.properties,
+      timeout: Type.Optional(Type.Number({
+        description: "Harness-enforced execution deadline in seconds, starting after approvals. Omit by default; set when the user requests a deadline.",
+      })),
+      networkAccess: Type.Optional(Type.Boolean({
+        description: "Request outbound network access to any host for this command only. Prompts before execution; never remembered. The command can send data it can read, including inherited environment values. Filesystem restrictions and sandbox network safeguards remain in place.",
+      })),
+      readPaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
+        description: "External files or directories needed by this command. Prompts before execution; directory approval covers descendants. Session grants are shared with file tools.",
+      })),
+      writePaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
+        description: "Files or directories this command needs to read and write, including outside the working directory. Requests approval before execution; session grants are shared with edit/write tools.",
+      })),
+      broadReadAccess: Type.Optional(Type.Boolean({
+        description: "Request all filesystem reads for this command only when required paths are unknown. Does not grant writes or network access. No credential-path exclusions.",
+      })),
+      workspaceWriteAccess: Type.Optional(Type.Boolean({
+        description: "Request reading and writing the current working directory before execution; equivalent to including it in writePaths.",
+      })),
+      unsandboxed: Type.Optional(Type.Boolean({
+        description: "Ask to execute this command outside the sandbox once, with unrestricted host filesystem, environment, and network access. Never remembered; does not change the session's access mode.",
+      })),
+    }),
+    promptGuidelines: [
+      ...(defaultBash.promptGuidelines ?? []),
+      "Declare readPaths and writePaths before shell inspection or mutation. All paths, including session logs and credential files, can be approved. In ask mode, workspaceWriteAccess=true requests writing the current directory. Unknown read paths can request broadReadAccess=true for this command only.",
+      "Request networkAccess=true upfront for commands that need outbound connections, such as dependency downloads or remote API calls. It grants access to any host for that command only, not filesystem access. Undeclared access is denied during execution; the proxy never opens a permission prompt. Existing saved host grants still apply.",
+      "Omit bash.timeout by default. Do not add command-level timeouts such as curl --max-time, curl --connect-timeout, or the timeout utility unless the user requested them or you are specifically testing timeout behavior. For a user-requested execution deadline, use bash.timeout instead.",
+      "If an operation cannot be supported by granular sandbox permissions, request unsandboxed=true to ask for unrestricted host access for one command, without changing the session's mode.",
+      "Denied access is not task completion. A sandbox-blocked command may have partially executed and written files, even when its exit code is zero. Inspect partial output and state, then request needed access with an appropriate continuation. Do not blindly rerun. Permissions are requested through tool arguments, not the question tool.",
+    ],
     async execute(id, params, signal, onUpdate, ctx) {
+      let sandboxBlocked = false;
       const sandboxedBash = createBashToolDefinition(ctx.cwd, {
-        operations: createAccessControlledBashOperations(ctx),
+        operations: createAccessControlledBashOperations(ctx, params, () => saveAccessState(pi), () => {
+          sandboxBlocked = true;
+        }),
       });
-      return sandboxedBash.execute(id, params, signal, onUpdate, ctx);
+      const result = await sandboxedBash.execute(id, params, signal, onUpdate, ctx);
+      return sandboxBlocked ? {
+        ...result,
+        isError: true,
+        details: { ...result.details, sandboxBlocked: true },
+        structuredContent: result.structuredContent && typeof result.structuredContent === "object" && !Array.isArray(result.structuredContent)
+          ? { ...result.structuredContent, sandbox_blocked: true }
+          : result.structuredContent,
+      } : result;
     },
   });
 
-  pi.on("user_bash", (_event, ctx) => ({ operations: createAccessControlledBashOperations(ctx) }));
+  pi.on("user_bash", (_event, ctx) => {
+    const mode = getAccessMode();
+    const interactive = getInteractionMode(ctx) === "interactive";
+    // User shell input has no path declaration fields. Ask upfront rather than
+    // retrying a partially executed command after a filesystem denial.
+    return { operations: createAccessControlledBashOperations(ctx, {
+      broadReadAccess: interactive && (mode === "ask" || mode === "edit"),
+      networkAccess: interactive && (mode === "ask" || mode === "edit"),
+      workspaceWriteAccess: interactive && mode === "ask",
+    }, () => saveAccessState(pi)) };
+  });
 
   pi.on("session_start", async (event, ctx) => {
     const startsAnotherSession = event.reason === "new" || event.reason === "fork";
@@ -318,16 +277,19 @@ export default function accessModeExtension(pi: ExtensionAPI) {
         : undefined;
     }
 
-    const boundaryReason = pathBoundaryReason(event.toolName, input, ctx.cwd);
-    if (boundaryReason) {
-      return { block: true, reason: `Tool "${event.toolName}" is blocked in ${mode} mode (${boundaryReason}).` };
-    }
-
-    if (!KNOWN_TOOLS.has(event.toolName)) {
-      return {
-        block: true,
-        reason: `Tool "${event.toolName}" is not covered by the ${mode} capability policy; use full mode to run it.`,
-      };
+    if (PATH_READ_TOOLS.has(event.toolName) || MUTATION_TOOLS.has(event.toolName)) {
+      try {
+        const path = canonicalPath(resolveToolPath(typeof input.path === "string" ? input.path : ".", ctx.cwd));
+        // Execute against the same target that was approved, not a retargeted alias.
+        input.path = path;
+        const writing = MUTATION_TOOLS.has(event.toolName);
+        const scope = writing && pathInside(canonicalPath(ctx.cwd), path) ? canonicalPath(ctx.cwd) : path;
+        await requestPermission(ctx, { kind: writing ? "write" : "read", scope }, event.toolName,
+          () => previewForTool(event, ctx), () => saveAccessState(pi));
+      } catch (error) {
+        return { block: true, reason: error instanceof Error ? error.message : String(error) };
+      }
+      return undefined;
     }
 
     if (event.toolName === "spawn") {
@@ -345,31 +307,16 @@ export default function accessModeExtension(pi: ExtensionAPI) {
       }
     }
 
-    if (mode === "edit") return undefined;
-
-    const reason = readonlyToolBlockReason(event.toolName, input);
-    if (!reason) return undefined;
-    if (mode === "readonly") {
-      return { block: true, reason: `Tool "${event.toolName}" is blocked in readonly mode (${reason}).` };
+    if (mode === "edit" && KNOWN_TOOLS.has(event.toolName)) return undefined;
+    if (!readonlyToolBlockReason(event.toolName, input)) return undefined;
+    try {
+      const action = typeof input.action === "string" ? `:${input.action}` : "";
+      await requestPermission(ctx, { kind: "tool", scope: `${event.toolName}${action}` }, event.toolName,
+        () => previewForTool(event, ctx), () => saveAccessState(pi));
+      return undefined;
+    } catch (error) {
+      return { block: true, reason: error instanceof Error ? error.message : String(error) };
     }
-    const capabilityKey = sessionCapabilityKey(event, ctx);
-    if (sessionCapabilityGrants.has(capabilityKey)) return undefined;
-    if (getInteractionMode(ctx) === "noninteractive") {
-      return {
-        block: true,
-        reason: `Tool "${event.toolName}" requires approval (${reason}), but interaction mode is noninteractive.`,
-      };
-    }
-
-    notifyPiToolApproval(ctx);
-    const title = ctx.mode === "rpc" ? approvalPayload(event, ctx) : `Allow ${event.toolName}?`;
-    const choice = await ctx.ui.select(title, ["Allow once", "Allow for session", "Deny"]);
-    if (choice === "Allow for session") {
-      sessionCapabilityGrants.add(capabilityKey);
-      saveAccessState(pi);
-    }
-    if (choice === "Allow once" || choice === "Allow for session") return undefined;
-    return { block: true, reason: `Tool "${event.toolName}" blocked by user.` };
   });
 
   pi.registerCommand("pi-mode", {

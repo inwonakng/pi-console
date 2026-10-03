@@ -1,216 +1,101 @@
-import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import {
-  createLocalBashOperations,
-  getAgentDir,
-  type BashOperations,
-  type ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import { SandboxManager, getDefaultWritePaths, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { createLocalBashOperations, type BashOperations, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { getAccessMode, type AccessMode } from "./access-state";
-import { getInteractionMode } from "./interaction-mode";
-import { notifyPiToolApproval } from "./notifications";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getAccessMode } from "./access-state";
+import { baselineReadPaths, canonicalPath, getGrantedScopes, pathInside, requestPermission, resolveToolPath } from "./permissions";
+
+export type BashAccessRequest = {
+  readPaths?: string[];
+  writePaths?: string[];
+  broadReadAccess?: boolean;
+  workspaceWriteAccess?: boolean;
+  networkAccess?: boolean;
+  unsandboxed?: boolean;
+};
 
 const localBash = createLocalBashOperations();
-const sessionNetworkHosts = new Set<string>();
-const sessionWriteRoots = new Set<string>();
-
 let sandboxConfig: SandboxRuntimeConfig | undefined;
 let sandboxError: string | undefined;
 let sandboxTempDir: string | undefined;
-let activeNetworkRequest: {
-  command: string;
-  cwd: string;
-  ctx: ExtensionContext;
-  mode: AccessMode;
-  allowedHosts: Set<string>;
-} | undefined;
 let commandQueue: Promise<void> = Promise.resolve();
-let networkPromptQueue: Promise<void> = Promise.resolve();
+let commandNetworkAccess = false;
 
-function approvalPayload(command: string, summary: string, mode: AccessMode, cwd: string): string {
-  return JSON.stringify({
-    kind: "pi_approval_preview",
-    tool: "bash",
-    mode,
-    summary,
-    request: summary,
-    directory: cwd,
-    preview_filetype: "sh",
-    preview: command,
-  });
-}
-
-function serializeCommand<T>(run: () => Promise<T>): Promise<T> {
-  const current = commandQueue.then(run, run);
-  commandQueue = current.then(() => undefined, () => undefined);
-  return current;
-}
-
-function serializeNetworkPrompt<T>(run: () => Promise<T>): Promise<T> {
-  const current = networkPromptQueue.then(run, run);
-  networkPromptQueue = current.then(() => undefined, () => undefined);
-  return current;
-}
-
-function canPrompt(ctx: ExtensionContext, mode: AccessMode): boolean {
-  return (mode === "ask" || mode === "edit") && getInteractionMode(ctx) === "interactive";
-}
-
-async function chooseCapability(
-  ctx: ExtensionContext,
-  mode: AccessMode,
-  command: string,
-  summary: string,
-  cwd: string,
-): Promise<"once" | "session" | "deny"> {
-  if (!canPrompt(ctx, mode)) return "deny";
-  notifyPiToolApproval(ctx);
-  const title = ctx.mode === "rpc"
-    ? approvalPayload(command, summary, mode, cwd)
-    : summary;
-  const choice = await ctx.ui.select(title, ["Allow once", "Allow for session", "Deny"]);
-  if (choice === "Allow once") return "once";
-  if (choice === "Allow for session") return "session";
-  return "deny";
-}
-
-function networkConfig(
-  mode: AccessMode,
-  commandHosts: Set<string> = new Set(),
-): SandboxRuntimeConfig["network"] {
-  const interactive = activeNetworkRequest && canPrompt(activeNetworkRequest.ctx, mode);
+function networkConfig(): SandboxRuntimeConfig["network"] {
   return {
-    allowedDomains: mode === "readonly" ? [] : [...new Set([...sessionNetworkHosts, ...commandHosts])],
+    allowedDomains: getGrantedScopes("network"),
     deniedDomains: [],
-    strictAllowlist: mode === "readonly" || !interactive,
+    // The runtime rejects an allowedDomains "*". Its callback checks the
+    // command's upfront grant instead; it never asks for permission at runtime.
+    strictAllowlist: !commandNetworkAccess || getAccessMode() === "readonly",
     allowLocalBinding: false,
   };
 }
 
-function updateNetworkConfig(
-  mode: AccessMode,
-  commandHosts: Set<string> = new Set(),
-): void {
+function updateNetworkConfig(): void {
   if (!sandboxConfig || !SandboxManager.isSandboxingEnabled()) return;
-  sandboxConfig = { ...sandboxConfig, network: networkConfig(mode, commandHosts) };
+  sandboxConfig = { ...sandboxConfig, network: networkConfig() };
   SandboxManager.updateConfig(sandboxConfig);
 }
 
-async function approveNetwork({ host, port }: { host: string; port: number | undefined }): Promise<boolean> {
-  return serializeNetworkPrompt(async () => {
-    const request = activeNetworkRequest;
-    if (!request || request.mode === "readonly") return false;
-
-    const normalizedHost = host.toLowerCase();
-    if (request.allowedHosts.has(normalizedHost) || sessionNetworkHosts.has(normalizedHost)) return true;
-
-    const destination = port === undefined ? normalizedHost : `${normalizedHost}:${port}`;
-    const decision = await chooseCapability(
-      request.ctx,
-      request.mode,
-      request.command,
-      `Allow network access to ${destination}?`,
-      request.cwd,
-    );
-    if (decision === "deny") return false;
-    request.allowedHosts.add(normalizedHost);
-    if (decision === "session") sessionNetworkHosts.add(normalizedHost);
-    updateNetworkConfig(request.mode, request.allowedHosts);
-    return true;
-  });
+async function allowApprovedNetwork(): Promise<boolean> {
+  return commandNetworkAccess && getAccessMode() !== "readonly";
 }
 
-function credentialConfig(): NonNullable<SandboxRuntimeConfig["credentials"]> {
-  const home = homedir();
-  const agentDir = getAgentDir();
-  const files = [
-    join(agentDir, "auth.json"),
-    join(agentDir, "bash-access.json"),
-    join(agentDir, "history"),
-    join(agentDir, "models-store.json"),
-    join(agentDir, "pi-console-config.yaml"),
-    join(agentDir, "sessions"),
-    join(agentDir, "settings.json"),
-    join(home, ".pi", "sessions"),
-    join(home, ".aws"),
-    join(home, ".config", "gcloud"),
-    join(home, ".config", "gh"),
-    join(home, ".docker", "config.json"),
-    join(home, ".netrc"),
-    join(home, ".npmrc"),
-    join(home, ".ssh"),
-  ].map((path) => ({ path, mode: "deny" as const }));
-  const envVars = Object.keys(process.env)
-    .filter((name) => /(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(name))
-    .map((name) => ({ name, mode: "deny" as const }));
-  return { files, envVars };
-}
-
-function systemReadPaths(): string[] {
-  if (process.platform === "darwin") {
-    return [
-      "/bin",
-      "/dev",
-      "/Library",
-      "/opt/homebrew",
-      "/private/etc",
-      "/private/var/db/timezone",
-      "/sbin",
-      "/System",
-      "/usr",
-    ];
-  }
-  return ["/bin", "/dev", "/etc", "/lib", "/lib64", "/nix/store", "/proc", "/sbin", "/usr"];
-}
-
-function filesystemConfig(cwd: string, workspaceWrite: boolean): SandboxRuntimeConfig["filesystem"] {
+function filesystemConfig(cwd: string, reads: string[], writes: string[]): SandboxRuntimeConfig["filesystem"] {
+  const allowWrite = [...new Set([...(sandboxTempDir ? [sandboxTempDir] : []), ...writes])];
   return {
-    denyRead: ["/"],
-    allowRead: [...systemReadPaths(), cwd, ...(sandboxTempDir ? [sandboxTempDir] : [])],
-    allowWrite: [
-      ...(sandboxTempDir ? [sandboxTempDir] : []),
-      ...(workspaceWrite ? [cwd] : []),
-    ],
-    denyWrite: ["/tmp/claude", "/private/tmp/claude", ...(workspaceWrite ? [] : [cwd])],
+    denyRead: [...reads, ...writes].includes("/") ? [] : ["/"],
+    allowRead: [...new Set([...baselineReadPaths(cwd).map(canonicalPath), ...(sandboxTempDir ? [sandboxTempDir] : []),
+      ...reads, ...writes])].filter((path) => path !== "/"),
+    allowWrite,
+    // Suppress the runtime's implicit writable caches unless covered by an
+    // actual write grant. These are enforcement carve-outs, not ungrantable paths.
+    denyWrite: getDefaultWritePaths().filter((path) => !path.startsWith("/dev/")).map(canonicalPath)
+      .filter((path) => !allowWrite.some((allowed) => pathInside(allowed, path))),
   };
 }
 
-async function waitForViolation(
-  commandId: string,
+async function collectViolations(commandId: string, filesystem: SandboxRuntimeConfig["filesystem"]): Promise<string[]> {
+  // macOS diagnostics arrive asynchronously, including for commands that exit zero.
+  if (process.platform === "darwin") await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
+  return [...new Set(SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId)
+    .map((violation) => violation.line).filter((line) => {
+      if (process.platform === "darwin") return /\b(?:file-(?:read|write)|network-)/.test(line);
+      // Linux's observer uses the initial profile rather than the per-command
+      // grants. Do not report granted writes as denied merely from that hint.
+      const attempted = /^deny \S+ (\/.*)$/.exec(line)?.[1];
+      if (!attempted) return true;
+      const path = canonicalPath(attempted);
+      return filesystem.denyWrite.some((denied) => pathInside(denied, path))
+        || !filesystem.allowWrite.some((allowed) => pathInside(allowed, path));
+    }))];
+}
+
+function reportBlockedCommand(lines: string[], onData: (data: Buffer) => void): void {
+  const diagnostics = lines.length ? lines.slice(0, 20).join("\n") : "Permission-denied output detected; operation and path could not be determined.";
+  onData(Buffer.from(`\n[Access blocked; command may have partially executed]\n${diagnostics}\n`
+    + "Files may already have been written. No automatic retry was performed. Inspect partial output and state before continuing.\n"
+    + "For filesystem denials, declare readPaths/writePaths for the needed paths, or broadReadAccess=true for unknown reads. "
+    + "For a proxy network allowlist denial, request networkAccess=true on your continuation command; approval happens before it starts. "
+    + "Network approval does not lift filesystem restrictions or fix DNS, TLS, or server errors. "
+    + "If the sandbox cannot support the operation, request unsandboxed=true for explicitly approved, unrestricted access for one command. "
+    + "Choose a continuation that does not duplicate completed work. Denied access is not task completion.\n", "utf8"));
+}
+
+async function runUnsandboxed(
   command: string,
-  startedAt: Date,
-  matches: (line: string) => boolean,
-): Promise<boolean> {
-  const store = SandboxManager.getSandboxViolationStore();
-  const found = () => {
-    const attributed = store.getViolationsForCommand(commandId);
-    const sessionEvents = store.getViolations().filter((violation) =>
-      violation.timestamp >= startedAt
-      && (violation.command === command
-        || violation.command === `export NO_PROXY= no_proxy=; ${command}`
-        || violation.command === commandId));
-    return [...attributed, ...sessionEvents].some((violation) => matches(violation.line));
-  };
-  if (found()) return true;
-  for (let elapsed = 0; elapsed < 500; elapsed += 25) {
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
-    if (found()) return true;
-  }
-  return false;
-}
-
-function waitForWriteViolation(commandId: string, command: string, startedAt: Date): Promise<boolean> {
-  return waitForViolation(commandId, command, startedAt, (line) => process.platform === "linux"
-    ? !line.includes("network-outbound")
-    : /\bfile-write/.test(line));
-}
-
-function appendViolations(commandId: string, onData: (data: Buffer) => void): void {
-  const annotation = SandboxManager.annotateStderrWithSandboxFailures(commandId, "");
-  if (annotation.trim()) onData(Buffer.from(`\n${annotation.trim()}\n`, "utf8"));
+  cwd: string,
+  options: Parameters<BashOperations["exec"]>[2],
+  ctx: ExtensionContext,
+  onSessionGrant: () => void,
+): Promise<{ exitCode: number | null }> {
+  await requestPermission(ctx, { kind: "unsandboxed", scope: command }, "bash",
+    { text: command, filetype: "sh" }, onSessionGrant, false);
+  if (options.signal?.aborted) throw new Error("aborted");
+  return localBash.exec(command, cwd, options);
 }
 
 async function runSandboxed(
@@ -218,57 +103,68 @@ async function runSandboxed(
   cwd: string,
   options: Parameters<BashOperations["exec"]>[2],
   ctx: ExtensionContext,
-  mode: AccessMode,
-  workspaceWrite: boolean,
-  allowedHosts: Set<string>,
-): Promise<{ exitCode: number | null; commandId: string; startedAt: Date; permissionDenied: boolean }> {
-  if (!sandboxConfig || !SandboxManager.isSandboxingEnabled()) {
-    throw new Error(`Sandbox unavailable: ${sandboxError ?? "not initialized"}. Switch to full mode to run unsandboxed.`);
-  }
-
+  filesystem: SandboxRuntimeConfig["filesystem"],
+  networkAccess: boolean,
+  onSessionGrant: () => void,
+  onBlocked: () => void,
+): Promise<{ exitCode: number | null }> {
   const commandId = randomUUID();
-  const startedAt = new Date();
   let wrappedCommand = false;
-  activeNetworkRequest = { command, cwd, ctx, mode, allowedHosts };
-  updateNetworkConfig(mode, allowedHosts);
+  commandNetworkAccess = networkAccess;
   try {
+    updateNetworkConfig();
     const previousTempDir = process.env.CLAUDE_CODE_TMPDIR;
     if (sandboxTempDir) process.env.CLAUDE_CODE_TMPDIR = sandboxTempDir;
     let wrapped: string;
     try {
-      const proxyLocalNetwork = `export NO_PROXY= no_proxy=; ${command}`;
-      wrapped = await SandboxManager.wrapWithSandbox(
-        proxyLocalNetwork,
-        undefined,
-        { filesystem: filesystemConfig(cwd, workspaceWrite) },
-        options.signal,
-        { commandId, commandText: command },
-      );
+      wrapped = await SandboxManager.wrapWithSandbox(`export NO_PROXY= no_proxy=; ${command}`, undefined,
+        { filesystem }, options.signal, { commandId, commandText: command });
+    } catch (error) {
+      if (options.signal?.aborted) throw new Error("aborted");
+      // Preparation failed before any process was started. It is safe to offer
+      // the explicit one-command fallback here, but never after partial execution.
+      commandNetworkAccess = false;
+      updateNetworkConfig();
+      options.onData(Buffer.from(`Sandbox could not prepare this command: ${error instanceof Error ? error.message : String(error)}. No command was started.\n`));
+      return await runUnsandboxed(command, cwd, options, ctx, onSessionGrant);
     } finally {
       if (previousTempDir === undefined) delete process.env.CLAUDE_CODE_TMPDIR;
       else process.env.CLAUDE_CODE_TMPDIR = previousTempDir;
     }
     wrappedCommand = true;
-    const env = {
-      ...options.env,
-      ...(sandboxTempDir ? { TMPDIR: sandboxTempDir, TMP: sandboxTempDir, TEMP: sandboxTempDir } : {}),
-    };
-    // macOS does not report every default-policy write denial through its
-    // asynchronous log stream. This fallback only decides whether to offer a
-    // prompt; approval still retries inside the workspace-only write profile.
+    const env = { ...options.env,
+      ...(sandboxTempDir ? { TMPDIR: sandboxTempDir, TMP: sandboxTempDir, TEMP: sandboxTempDir } : {}) };
     let permissionDenied = false;
+    let outputTail = "";
     const onData = (data: Buffer) => {
-      if (/(?:operation not permitted|read-only file system)(?:\r?\n|$)/i.test(data.toString("utf8"))) {
-        permissionDenied = true;
-      }
+      const text = outputTail + data.toString("utf8");
+      if (/operation not permitted|permission denied|read-only file system/i.test(text)) permissionDenied = true;
+      outputTail = text.slice(-4096);
       options.onData(data);
     };
-    const result = await localBash.exec(wrapped, cwd, { ...options, env, onData });
-    return { ...result, commandId, startedAt, permissionDenied };
+    const report = async () => {
+      const lines = await collectViolations(commandId, filesystem);
+      if (permissionDenied || lines.length) {
+        reportBlockedCommand(lines, options.onData);
+        onBlocked();
+      }
+    };
+    try {
+      const result = await localBash.exec(wrapped, cwd, { ...options, env, onData });
+      await report();
+      return result;
+    } catch (error) {
+      // The built-in tool retains streamed output for aborts and timeouts.
+      await report();
+      throw error;
+    }
   } finally {
-    activeNetworkRequest = undefined;
-    updateNetworkConfig("readonly");
-    if (wrappedCommand) SandboxManager.cleanupAfterCommand();
+    commandNetworkAccess = false;
+    try {
+      updateNetworkConfig();
+    } finally {
+      if (wrappedCommand) SandboxManager.cleanupAfterCommand();
+    }
   }
 }
 
@@ -277,87 +173,87 @@ async function executeRestricted(
   cwd: string,
   options: Parameters<BashOperations["exec"]>[2],
   ctx: ExtensionContext,
+  request: BashAccessRequest,
+  onSessionGrant: () => void,
+  onBlocked: () => void,
 ): Promise<{ exitCode: number | null }> {
-  const mode = getAccessMode();
-  if (mode === "full") return localBash.exec(command, cwd, options);
-
-  const canonicalCwd = resolve(cwd);
-  let workspaceWrite = mode === "edit" || (mode === "ask" && sessionWriteRoots.has(canonicalCwd));
-  const allowedHosts = new Set<string>();
-
-  for (let attemptNumber = 0; attemptNumber < 2; attemptNumber++) {
-    const attempt = await runSandboxed(command, canonicalCwd, options, ctx, mode, workspaceWrite, allowedHosts);
-    if (attempt.exitCode === 0) return { exitCode: attempt.exitCode };
-
-    if (mode === "ask" && !workspaceWrite
-      && (attempt.permissionDenied
-        || await waitForWriteViolation(attempt.commandId, command, attempt.startedAt))) {
-      const decision = await chooseCapability(
-        ctx,
-        mode,
-        command,
-        `Allow workspace writes for this command in ${canonicalCwd}?`,
-        canonicalCwd,
-      );
-      if (decision === "deny") {
-        appendViolations(attempt.commandId, options.onData);
-        return { exitCode: attempt.exitCode };
-      }
-      workspaceWrite = true;
-      if (decision === "session") sessionWriteRoots.add(canonicalCwd);
-      options.onData(Buffer.from("\n[Retrying with workspace write access]\n", "utf8"));
-      continue;
-    }
-
-    appendViolations(attempt.commandId, options.onData);
-    return { exitCode: attempt.exitCode };
+  if (getAccessMode() === "full") return localBash.exec(command, cwd, options);
+  const root = canonicalPath(cwd);
+  const context = { ...ctx, cwd: root, signal: options.signal ?? ctx.signal };
+  const paths = (values: string[] = []) => [...new Set(values.map((path) => canonicalPath(resolveToolPath(path, root))))];
+  const reads = paths(request.readPaths);
+  const writes = paths([...(request.writePaths ?? []), ...(request.workspaceWriteAccess ? [root] : [])]);
+  const globShaped = (path: string) => /[*?\[\]]/.test(path);
+  if (request.unsandboxed || !sandboxConfig || !SandboxManager.isSandboxingEnabled()
+    || [...baselineReadPaths(root), ...reads, ...writes].some(globShaped)) {
+    return runUnsandboxed(command, root, options, context, onSessionGrant);
   }
-
-  throw new Error("Sandbox capability retry limit exceeded.");
+  const preview = { text: command, filetype: "sh" };
+  for (const scope of writes) {
+    await requestPermission(context, { kind: "write", scope }, "bash", preview, onSessionGrant);
+  }
+  for (const scope of reads) {
+    if (!writes.some((path) => pathInside(path, scope))) {
+      await requestPermission(context, { kind: "read", scope }, "bash", preview, onSessionGrant);
+    }
+  }
+  if (request.broadReadAccess) {
+    await requestPermission(context, { kind: "read", scope: "/" }, "bash", preview, onSessionGrant, false);
+    reads.push("/");
+  }
+  reads.push(...getGrantedScopes("read").filter((path) => !globShaped(path)));
+  writes.push(...getGrantedScopes("write").filter((path) => !globShaped(path)));
+  if (getAccessMode() === "edit") writes.push(root);
+  if (options.signal?.aborted) throw new Error("aborted");
+  const filesystem = filesystemConfig(root, reads, writes);
+  // The runtime's default write roots cannot be narrowed to an approved child
+  // without a parent deny overriding that child. Offer the explicit fallback
+  // before execution rather than silently widening or blocking the grant.
+  if (writes.some((write) => filesystem.denyWrite.some((denied) => pathInside(denied, write)))) {
+    return runUnsandboxed(command, root, options, context, onSessionGrant);
+  }
+  if (request.networkAccess) {
+    await requestPermission(context, { kind: "network", scope: "*" }, "bash", preview, onSessionGrant, false);
+  }
+  if (options.signal?.aborted) throw new Error("aborted");
+  return runSandboxed(command, root, options, context, filesystem, request.networkAccess === true, onSessionGrant, onBlocked);
 }
 
-export function createAccessControlledBashOperations(ctx: ExtensionContext): BashOperations {
+export function createAccessControlledBashOperations(
+  ctx: ExtensionContext,
+  request: BashAccessRequest = {},
+  onSessionGrant: () => void = () => {},
+  onBlocked: () => void = () => {},
+): BashOperations {
   return {
     exec(command, cwd, options) {
-      return serializeCommand(() => executeRestricted(command, cwd, options, ctx));
+      const run = () => executeRestricted(command, cwd, options, ctx, request, onSessionGrant, onBlocked);
+      const current = commandQueue.then(run, run);
+      commandQueue = current.then(() => undefined, () => undefined);
+      return current;
     },
   };
 }
 
 export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void> {
-  sessionNetworkHosts.clear();
-  sessionWriteRoots.clear();
   sandboxError = undefined;
   sandboxConfig = undefined;
-
   try {
     if (SandboxManager.isSandboxingEnabled()) await SandboxManager.reset();
     if (sandboxTempDir && existsSync(sandboxTempDir)) rmSync(sandboxTempDir, { recursive: true, force: true });
     sandboxTempDir = undefined;
-    if (process.platform !== "darwin" && process.platform !== "linux") {
-      throw new Error(`unsupported platform ${process.platform}`);
-    }
-    sandboxTempDir = mkdtempSync(join(tmpdir(), "pi-console-sandbox-"));
-    sandboxConfig = {
-      network: networkConfig("readonly"),
-      filesystem: filesystemConfig(resolve(ctx.cwd), false),
-      credentials: credentialConfig(),
-    };
-    await SandboxManager.initialize(sandboxConfig, approveNetwork, true);
-    if (process.platform === "darwin") {
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
-    }
+    if (process.platform !== "darwin" && process.platform !== "linux") throw new Error(`unsupported platform ${process.platform}`);
+    sandboxTempDir = canonicalPath(mkdtempSync(join(tmpdir(), "pi-console-sandbox-")));
+    sandboxConfig = { network: networkConfig(), filesystem: filesystemConfig(canonicalPath(ctx.cwd), [], []) };
+    await SandboxManager.initialize(sandboxConfig, allowApprovedNetwork, true);
+    if (process.platform === "darwin") await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   } catch (error) {
     sandboxError = error instanceof Error ? error.message : String(error);
     sandboxConfig = undefined;
     if (SandboxManager.isSandboxingEnabled()) {
-      try {
-        await SandboxManager.reset();
-      } catch {
-        // The original initialization error is more useful to the user.
-      }
+      try { await SandboxManager.reset(); } catch { /* Keep the initialization error. */ }
     }
-    ctx.ui.notify(`Access sandbox unavailable: ${sandboxError}. Restricted modes will fail closed.`, "error");
+    ctx.ui.notify(`Sandbox unavailable: ${sandboxError}. Shell commands require explicit one-command unrestricted approval; readonly mode cannot grant it.`, "warning");
   }
 }
 
@@ -367,5 +263,5 @@ export async function shutdownBashSandbox(): Promise<void> {
   if (sandboxTempDir && existsSync(sandboxTempDir)) rmSync(sandboxTempDir, { recursive: true, force: true });
   sandboxTempDir = undefined;
   sandboxConfig = undefined;
-  activeNetworkRequest = undefined;
+  commandNetworkAccess = false;
 }
