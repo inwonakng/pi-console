@@ -7,6 +7,16 @@ local function history_path()
 	return vim.fs.joinpath(vim.fn.stdpath("state"), "pi-console", "recent-directories.json")
 end
 
+local function is_workspace_directory(path)
+	local root = vim.env.PI_WORKSPACE_ROOT
+		or vim.fs.joinpath(vim.env.XDG_STATE_HOME or vim.fn.expand("~/.local/state"), "pi", "workspaces")
+	local trees = vim.fn.fnamemodify(vim.fs.joinpath(root, "trees"), ":p")
+	trees = vim.fs.normalize(vim.uv.fs_realpath(trees) or vim.fn.resolve(trees)):gsub("/+$", "")
+	-- Deleted workspaces still need filtering from saved history.
+	path = vim.fs.normalize(vim.uv.fs_realpath(path) or vim.fn.resolve(path))
+	return path == trees or path:sub(1, #trees + 1) == trees .. "/"
+end
+
 local function add_recent(directories, path)
 	for i = #directories, 1, -1 do
 		if directories[i] == path then
@@ -26,7 +36,12 @@ local function load()
 	local directories = {}
 	if type(decoded) == "table" and vim.islist(decoded) then
 		for _, path in ipairs(decoded) do
-			if type(path) == "string" and path ~= "" and not path:find("\n", 1, true) then
+			if
+				type(path) == "string"
+				and path ~= ""
+				and not path:find("\n", 1, true)
+				and not is_workspace_directory(path)
+			then
 				add_recent(directories, path)
 			end
 		end
@@ -36,7 +51,7 @@ end
 
 function M.record(cwd)
 	local path = vim.uv.fs_realpath(cwd)
-	if not path or path:find("\n", 1, true) or vim.fn.isdirectory(path) ~= 1 then
+	if not path or path:find("\n", 1, true) or vim.fn.isdirectory(path) ~= 1 or is_workspace_directory(path) then
 		return
 	end
 	local directories = load()
