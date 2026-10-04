@@ -1309,16 +1309,17 @@ export default function spawnExtension(pi: ExtensionAPI) {
     name: "spawn",
     label: "Spawn Subagent",
     description: "Spawn a bounded isolated pi subagent. Defaults to background mode and returns a handle immediately. If the parent answer depends on the result, call spawn_control join or join_all. Named profiles load from ~/.pi/agent/agents/*.md and trusted .pi/agents/*.md; run artifacts are stored with Pi workspace state.",
-    promptSnippet: "Spawn background or foreground pi subagents for research, planning, review, verification, or bounded implementation.",
+    promptSnippet: "Spawn background or foreground pi subagents, primarily for read-heavy research, investigation, summarization, review, and verification; worker handles self-contained tasks requiring file changes.",
     promptGuidelines: [
-      "Use spawn when the user says 'use subagents' or when bounded isolated work would help.",
+      "Use spawn when the user asks for subagents or when bounded read-heavy work would help: research, investigation, summarization, review, or verification.",
+      "The main agent normally implements changes. Delegate writing only when the user approved implementation, requirements are settled, ownership is non-overlapping, the result can be verified independently, and the benefit outweighs briefing and integration overhead. Keep tightly coupled changes and evolving design decisions in the main session.",
       "spawn defaults to background. If your response depends on the subagent result, call spawn_control with action=join or join_all before answering.",
-      "Prefer named subagent profiles such as researcher, planner, reviewer, or verifier when they match.",
-      "Use accessMode=readonly for investigation/review/verification. Use accessMode=edit only for bounded implementation; edit agents default to isolated git worktrees and their changes are reconciled at join. Use accessMode=full only when the parent is in full mode and unrestricted host access is required.",
+      "Prefer researcher for investigation and summarization, reviewer for review, verifier for verification, and worker for self-contained tasks requiring file changes.",
+      "Use accessMode=readonly for research/planning/investigation/summarization/review/verification. Use accessMode=edit for approved writing tasks that meet the delegation criteria; edit agents use isolated git worktrees and their changes are reconciled at join. Use accessMode=full only when the parent is in full mode and unrestricted host access is required.",
     ],
     parameters: Type.Object({
       prompt: Type.String({ description: "The complete bounded prompt/task for the subagent." }),
-      agent: Type.Optional(Type.String({ description: "Named subagent profile to load from ~/.pi/agent/agents/*.md or trusted .pi/agents/*.md, e.g. researcher, planner, reviewer, verifier." })),
+      agent: Type.Optional(Type.String({ description: "Named subagent profile to load from ~/.pi/agent/agents/*.md or trusted .pi/agents/*.md, e.g. researcher, reviewer, verifier, worker." })),
       role: Type.Optional(Type.String({ description: "Backward-compatible role/instructions label. If it matches a subagent profile and agent is omitted, that profile is loaded." })),
       mode: Type.Optional(Type.Union([
         Type.Literal("background"),

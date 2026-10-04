@@ -310,6 +310,15 @@ placed in `~/.pi/agent/agents/` or a trusted project's `.pi/agents/` directory.
 A user profile overrides a bundled profile with the same name, and a project
 profile overrides both.
 
+Delegation primarily serves read-heavy work: research, investigation,
+summarization, review, and verification. The bundled `researcher`, `reviewer`,
+and `verifier` profiles default to read-only access. The main agent normally
+implements changes; `worker` defaults to edit access in an isolated child worktree
+for approved, self-contained tasks with settled requirements, non-overlapping
+ownership, and independently verifiable results. Delegate writing only when its
+benefit outweighs briefing and integration overhead; keep tightly coupled changes
+and evolving design decisions in the main session.
+
 ## Development
 
 For a checkout-based setup, run [`scripts/install-dev.sh`](scripts/install-dev.sh)
