@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { parseDocument } from "yaml";
 
+export const WEB_PROVIDERS = ["exa", "parallel", "firecrawl", "keenable"] as const;
+export type WebProvider = typeof WEB_PROVIDERS[number];
+
 export interface ExtensionSettings {
+	"web-search"?: {
+		providers?: WebProvider[];
+	};
 	"access-mode"?: {
 		"read-paths"?: string[];
 		"write-paths"?: string[];
@@ -62,7 +68,7 @@ export function loadExtensionSettings(): ExtensionSettings {
 		const value: unknown = document.toJS();
 		if (value === null && document.contents === null) return {};
 		const root = requireMapping(value, "settings");
-		requireKnownKeys(root, ["access-mode", "auto-title", "session-picker"], "settings");
+		requireKnownKeys(root, ["access-mode", "auto-title", "session-picker", "web-search"], "settings");
 		const settings: ExtensionSettings = {};
 
 		if (Object.hasOwn(root, "access-mode")) {
@@ -112,6 +118,27 @@ export function loadExtensionSettings(): ExtensionSettings {
 				parsedSessionPicker["archive-after-days"] = archiveAfterDays;
 			}
 			settings["session-picker"] = parsedSessionPicker;
+		}
+
+		if (Object.hasOwn(root, "web-search")) {
+			const webSearch = requireMapping(root["web-search"], "web-search");
+			requireKnownKeys(webSearch, ["providers"], "web-search");
+			const parsedWebSearch: NonNullable<ExtensionSettings["web-search"]> = {};
+			if (Object.hasOwn(webSearch, "providers")) {
+				const providers = webSearch.providers;
+				if (!Array.isArray(providers) || providers.length === 0) {
+					throw new Error("web-search.providers must be a non-empty list");
+				}
+				parsedWebSearch.providers = providers.map((provider: unknown) => {
+					const known = WEB_PROVIDERS.find(name => name === provider);
+					if (!known) throw new Error(`web-search.providers must contain only: ${WEB_PROVIDERS.join(", ")}`);
+					return known;
+				});
+				if (new Set(providers).size !== providers.length) {
+					throw new Error("web-search.providers must not contain duplicates");
+				}
+			}
+			settings["web-search"] = parsedWebSearch;
 		}
 
 		return settings;

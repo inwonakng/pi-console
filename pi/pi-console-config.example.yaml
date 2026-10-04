@@ -16,6 +16,11 @@ access-mode:
 session-picker:
   archive-after-days: 180
 
+# web-search:
+#   # All four are enabled by default. Searches aggregate them concurrently.
+#   # This order also controls hosted web_fetch fallback after direct retrieval.
+#   providers: [exa, parallel, firecrawl, keenable]
+
 # auto-title:
 #   provider-models:
 #     provider-id: model-id
