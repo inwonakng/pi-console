@@ -672,7 +672,7 @@ local function session_preview_context(ctx, candidate)
 			store_output = function(tool_name, text, filetype, details, message)
 				local tool_call_id = message_utils.tool_call_id(message)
 				local display = pi_tool_output.display_for_result(state, message)
-				return pi_tool_output.store(state, tool_name, text, filetype, details, display, tool_call_id)
+				return pi_tool_output.store(state, tool_name, text, filetype, details, display, tool_call_id, message and message.isError)
 			end,
 			store_or_update_spawn_run_output = function(run, text)
 				return pi_tool_output.store_or_update_spawn_run(state, run, text)
@@ -738,7 +738,8 @@ local function session_previewer(ctx, by_id)
 				end
 				local preview_ctx = session_preview_context(ctx, candidate)
 				local messages = pi_messages.load_session_messages_from_file(preview_ctx, candidate.path)
-				local lines = pi_messages.collect_message_lines(preview_ctx, messages)
+				local lines, items = pi_messages.collect_message_lines(preview_ctx, messages)
+				lines = require("pi-integration.tool-groups").preview_lines(lines, items)
 				local preview_entry = {
 					cache_key = candidate.path,
 					content = lines,

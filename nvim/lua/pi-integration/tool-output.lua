@@ -536,6 +536,9 @@ local function rendered_output(output)
 	if not output then
 		return "", "text"
 	end
+	if output.is_error then
+		return output.text or "", "text"
+	end
 	if output.name == "edit" then
 		local details = type(output.details) == "table" and output.details or {}
 		if type(details.patch) == "string" and details.patch ~= "" then
@@ -739,13 +742,14 @@ local function open_edit_diff_float(ctx, output)
 	return true
 end
 
-function M.store(state, tool_name, text, filetype, details, display, tool_call_id)
+function M.store(state, tool_name, text, filetype, details, display, tool_call_id, is_error)
 	state.next_tool_output_id = state.next_tool_output_id + 1
 	local id = state.next_tool_output_id
 	local call = tool_call_id and state.tool_calls and state.tool_calls[tool_call_id]
 	state.tool_outputs[id] = {
 		name = tool_name or "tool",
 		text = text or "",
+		is_error = is_error == true,
 		filetype = filetype or infer_filetype(tool_name, text),
 		details = details,
 		display = display or (call and call.display),
@@ -763,13 +767,16 @@ function M.store(state, tool_name, text, filetype, details, display, tool_call_i
 	return id
 end
 
-function M.store_or_update_live(state, tool_name, tool_call_id, text, filetype, details, display)
+function M.store_or_update_live(state, tool_name, tool_call_id, text, filetype, details, display, is_error)
 	state.live_tool_output_by_call = state.live_tool_output_by_call or {}
 	local output_id = tool_call_id and state.live_tool_output_by_call[tool_call_id]
 	if output_id and state.tool_outputs[output_id] then
 		local output = state.tool_outputs[output_id]
 		output.name = tool_name or output.name or "tool"
 		output.text = text or output.text or ""
+		if is_error ~= nil then
+			output.is_error = is_error == true
+		end
 		output.filetype = filetype or output.filetype or infer_filetype(tool_name, text)
 		output.details = merge_details(output.details, details)
 		output.display = display or output.display
@@ -780,7 +787,7 @@ function M.store_or_update_live(state, tool_name, tool_call_id, text, filetype, 
 		end
 		return output_id, true
 	end
-	return M.store(state, tool_name, text, filetype, details, display, tool_call_id), false
+	return M.store(state, tool_name, text, filetype, details, display, tool_call_id, is_error), false
 end
 
 function M.bind_spawn_run(state, run, output_id, line)
@@ -837,7 +844,7 @@ function M.summary_lines(state, output_id)
 	local lines = line_count_text(rendered_text)
 	local line_label = lines == 1 and "1 line" or (tostring(lines) .. " lines")
 	local label = "Tool: " .. tostring(output.name or "tool")
-	if output.name == "spawn" or output.name == "spawn_control" then
+	if not output.is_error and (output.name == "spawn" or output.name == "spawn_control") then
 		label = "Subagent"
 		local details = type(output.details) == "table" and output.details or {}
 		if type(details.agent) == "string" and details.agent ~= "" then
@@ -872,13 +879,13 @@ function M.summary_lines(state, output_id)
 			table.insert(parts, "artifacts")
 		end
 		return { table.concat(parts, " · ") }
-	elseif is_todo_tool_name(output.name) then
+	elseif not output.is_error and is_todo_tool_name(output.name) then
 		local status = type(state.todo_status) == "string" and state.todo_status ~= "" and state.todo_status or nil
 		return { "> 󰇥 Todo: " .. (status or line_label) }
 	elseif output.display and output.display.kind == "bash" and output.display.command then
 		label = "Bash: " .. markdown_code_span(command_preview(output.display.command))
 		local details = type(output.details) == "table" and output.details or {}
-		if details.status == "running" then
+		if not output.is_error and details.status == "running" then
 			local running_label = lines > 0 and ("running · " .. line_label) or "running"
 			return { "> 󰇥 " .. label .. " · " .. running_label }
 		end
@@ -886,6 +893,10 @@ function M.summary_lines(state, output_id)
 		label = label .. ": " .. markdown_code_span(output.display.path)
 	elseif (output.name == "edit" or output.name == "write") and output_path(output) then
 		label = label .. ": " .. markdown_code_span(path_for_display(state, output_path(output)))
+	end
+	if output.is_error then
+		local reason = truncate_spawn_text(output.text, 120)
+		return { "> 󰇥 " .. label .. " · ✗ failed" .. (reason ~= "" and (" · " .. markdown_code_span(reason)) or "") }
 	end
 	local artifact_label = output.spawn and " · artifacts" or ""
 	local edit_label = output.name == "edit" and edit_change_label(output.args) or nil
@@ -904,7 +915,7 @@ function M.open_float(ctx, output_id)
 	if output.spawn and open_spawn_artifacts(ctx, output) then
 		return true
 	end
-	if output.name == "edit" and open_edit_diff_float(ctx, output) then
+	if output.name == "edit" and not output.is_error and open_edit_diff_float(ctx, output) then
 		return true
 	end
 

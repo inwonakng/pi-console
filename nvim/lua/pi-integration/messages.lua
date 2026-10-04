@@ -571,6 +571,7 @@ function M.collect_message_lines(ctx, messages)
 		vim.list_extend(lines, { "", "> " .. ctx.notices.empty_session })
 	end
 
+	require("pi-integration.tool-groups").collect(ctx.state, lines, items)
 	return lines, items
 end
 

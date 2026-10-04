@@ -12,8 +12,11 @@ This is a work in progress. The main reason for sharing this repository is to se
 
 - **Conversations in Neovim.** Editable Markdown prompts and rendered
   transcripts, with tool output and thinking available to open when you need
-  them. Switch models and thinking levels, or queue prompts while a run is
-  active. Use `<leader>pq` to preview, edit, or delete queued messages; the
+  them. Consecutive reads, edits, and writes of the same tool type form inline
+  groups: `<CR>` toggles a group or opens an individual output. Single calls
+  open directly. Groups stay expanded during a run and collapse when it finishes,
+  unless manually toggled; failed calls remain labeled in collapsed summaries.
+  Switch models and thinking levels, or queue prompts while a run is active. Use `<leader>pq` to preview, edit, or delete queued messages; the
   statusline shows the queue count. Messages run in order after the active run
   finishes, waiting if the next message is being edited.
 - **Multiple sessions without losing your place.** A persistent tmux session

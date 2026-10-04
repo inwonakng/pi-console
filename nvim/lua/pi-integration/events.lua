@@ -27,7 +27,8 @@ local function render_or_update_live_tool(ctx, event, text, details)
 		text or "",
 		nil,
 		details,
-		nil
+		nil,
+		event.isError
 	)
 	local output = state.tool_outputs and state.tool_outputs[output_id]
 	local run_details = output and output.details or details
@@ -312,7 +313,7 @@ function M.render_message(ctx, message)
 		local tool_call_id = message_utils.tool_call_id(message)
 		local live_output_id = ctx.tools.live_output_id(tool_call_id)
 		if live_output_id then
-			ctx.tools.store_or_update_live_output(name, tool_call_id, text, nil, message.details, ctx.tools.store_display and ctx.tools.store_display(message) or nil)
+			ctx.tools.store_or_update_live_output(name, tool_call_id, text, nil, message.details, ctx.tools.store_display and ctx.tools.store_display(message) or nil, message.isError)
 			local line = ctx.state.live_tool_lines and ctx.state.live_tool_lines[tool_call_id]
 			if line then
 				if name == "spawn" or name == "spawn_control" then
@@ -330,6 +331,9 @@ function M.render_message(ctx, message)
 		ctx.transcript.begin_trace_item()
 		ctx.transcript.append_lines(ctx.tools.summary_lines(output_id))
 		local line = ctx.transcript.line_count()
+		if tool_call_id then
+			ctx.state.live_tool_lines[tool_call_id] = line
+		end
 		if name == "spawn" or name == "spawn_control" then
 			bind_spawn_run_line(ctx, message.details, output_id, line)
 		end
@@ -918,6 +922,8 @@ function M.handle_event(ctx, event)
 		state.is_agent_running = false
 		state.is_streaming = false
 		state.is_retrying = false
+		require("pi-integration.tool-groups").settle(state)
+		ctx.transcript.refresh_ui()
 		if state.is_loading then
 			start_activity(ctx, "loading")
 		else

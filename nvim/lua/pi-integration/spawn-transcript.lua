@@ -19,16 +19,23 @@ local function extract_text(message)
 	return message_utils.extract_text(message)
 end
 
-local function read_messages(path)
+local function read_messages(state, path)
 	local messages = {}
+	state.is_agent_running = false
 	if not path or vim.fn.filereadable(path) ~= 1 then
 		return messages
 	end
 	for _, line in ipairs(vim.fn.readfile(path)) do
 		local record = decode_json(line)
 		local event = type(record) == "table" and record.event or nil
-		if type(event) == "table" and event.type == "message_end" and type(event.message) == "table" then
-			table.insert(messages, event.message)
+		if type(event) == "table" then
+			if event.type == "agent_start" then
+				state.is_agent_running = true
+			elseif event.type == "agent_settled" then
+				state.is_agent_running = false
+			elseif event.type == "message_end" and type(event.message) == "table" then
+				table.insert(messages, event.message)
+			end
 		end
 	end
 	return messages
@@ -64,7 +71,7 @@ local function make_render_ctx(state, path)
 			end,
 			store_output = function(tool_name, text, filetype, details, message)
 				local tool_call_id = message_utils.tool_call_id(message)
-				return pi_tool_output.store(state, tool_name, text, filetype, details, pi_tool_output.display_for_result(state, message), tool_call_id)
+				return pi_tool_output.store(state, tool_name, text, filetype, details, pi_tool_output.display_for_result(state, message), tool_call_id, message and message.isError)
 			end,
 			store_or_update_spawn_run_output = function(run, text)
 				return pi_tool_output.store_or_update_spawn_run(state, run, text)
@@ -103,7 +110,7 @@ local function render_lines(path, state)
 	pi_tool_output.reset(state)
 	pi_thinking_output.reset(state)
 	pi_skills.reset(state)
-	local lines, items = pi_messages.collect_message_lines(make_render_ctx(state, path), read_messages(path))
+	local lines, items = pi_messages.collect_message_lines(make_render_ctx(state, path), read_messages(state, path))
 	state.transcript_items = items or {}
 	return lines
 end
@@ -152,7 +159,11 @@ local function open_item(ctx, state, parent_win)
 			parent = parent_win,
 		},
 	}
-	if item.kind == "tool" then
+	if item.kind == "tool_group" then
+		require("pi-integration.tool-groups").toggle(transcript_ctx(state), item)
+		render_transcript_ui(state)
+		return true
+	elseif item.kind == "tool" then
 		return pi_tool_output.open_float(child_ctx, item.output_id)
 	elseif item.kind == "thinking" then
 		return pi_thinking_output.open_float(child_ctx, item.output_id)

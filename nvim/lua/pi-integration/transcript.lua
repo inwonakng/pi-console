@@ -1,4 +1,5 @@
 local markdown_render = require("pi-integration.markdown-render")
+local tool_groups = require("pi-integration.tool-groups")
 
 local M = {}
 
@@ -219,6 +220,14 @@ function M.apply_quote_highlights_to_buffer(buf)
 				priority = 300,
 			})
 			apply_edit_stat_highlights(buf, index, line)
+			local failure_start = line:find("✗ failed", 1, true) or line:find("%d+ failed$")
+			if failure_start then
+				vim.api.nvim_buf_set_extmark(buf, quote_ns, index - 1, failure_start - 1, {
+					end_col = #line,
+					hl_group = "DiagnosticError",
+					priority = 325,
+				})
+			end
 		end
 	end
 end
@@ -229,6 +238,7 @@ function M.apply_quote_highlights(ctx)
 		return
 	end
 	M.apply_quote_highlights_to_buffer(state.transcript_buf)
+	tool_groups.apply_highlights(state, state.transcript_buf, quote_ns)
 end
 
 function M.render(ctx)
@@ -242,6 +252,7 @@ function M.render(ctx)
 
 	vim.schedule(function()
 		if ctx.buffer.valid(state.transcript_buf) and M.win_valid(ctx) then
+			tool_groups.update(ctx)
 			markdown_render.render(state.transcript_buf, state.transcript_win, { latex = true, event = "PiNvim" })
 			M.apply_quote_highlights(ctx)
 		end
@@ -444,6 +455,7 @@ end
 
 function M.clear_transcript_items(ctx)
 	ctx.state.transcript_items = {}
+	ctx.state.tool_group_expanded = {}
 end
 
 function M.apply_collected_transcript_items(ctx, items)

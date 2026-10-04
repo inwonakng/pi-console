@@ -171,11 +171,11 @@ end
 
 local function store_tool_output(tool_name, text, filetype, details, message)
 	local tool_call_id = message_utils.tool_call_id(message)
-	return pi_tool_output.store(state, tool_name, text, filetype, details, pi_tool_output.display_for_result(state, message), tool_call_id)
+	return pi_tool_output.store(state, tool_name, text, filetype, details, pi_tool_output.display_for_result(state, message), tool_call_id, message and message.isError)
 end
 
-local function store_or_update_live_tool_output(tool_name, tool_call_id, text, filetype, details, display)
-	return pi_tool_output.store_or_update_live(state, tool_name, tool_call_id, text, filetype, details, display)
+local function store_or_update_live_tool_output(tool_name, tool_call_id, text, filetype, details, display, is_error)
+	return pi_tool_output.store_or_update_live(state, tool_name, tool_call_id, text, filetype, details, display, is_error)
 end
 
 local function store_or_update_spawn_run_output(run, text)
@@ -252,8 +252,12 @@ local function open_transcript_item_under_cursor()
 	if not item then
 		return false
 	end
-	if item.kind == "tool" then
-		return pi_tool_output.open_float(tool_output_ctx(), item.output_id)
+	if item.kind == "tool_group" then
+		require("pi-integration.tool-groups").toggle(transcript_ctx(), item)
+		render_transcript()
+		return true
+	elseif item.kind == "tool" then
+		return pi_tool_output.open_float(tool_output_ctx(state.transcript_win), item.output_id)
 	elseif item.kind == "thinking" then
 		return pi_thinking_output.open_float(tool_output_ctx(), item.output_id)
 	elseif item.kind == "skill" then
