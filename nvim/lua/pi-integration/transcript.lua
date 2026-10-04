@@ -1,5 +1,6 @@
 local markdown_render = require("pi-integration.markdown-render")
 local tool_groups = require("pi-integration.tool-groups")
+local tool_output = require("pi-integration.tool-output")
 
 local M = {}
 
@@ -139,29 +140,34 @@ function M.has_body(ctx)
 	return false
 end
 
-local function tool_quote_highlight(line)
-	if line:find("> 󰇥 Todo:", 1, true) == 1 then
-		return "PiTodoQuote"
+local function tool_rows(state, preview)
+	local rows = {}
+	for _, item in ipairs(state.transcript_items or {}) do
+		if item.kind == "tool" then
+			rows[item.start_line] = { output_id = item.output_id, stats = true }
+		end
 	end
-	if line:find("> 󰇥 Tool: edit", 1, true) == 1 or line:find("> 󰇥 Tool: write", 1, true) == 1 then
-		return "PiToolEditQuote"
+	for _, group in ipairs(state.transcript_items or {}) do
+		if group.kind == "tool_group" then
+			local output_id = group.children[1].output_id
+			rows[group.start_line] = { output_id = output_id, marker = group.expanded and "▾  " or "▸  " }
+			if not preview then
+				for index, child in ipairs(group.children) do
+					rows[child.start_line].marker = index == #group.children and "└─ " or "├─ "
+					local next_child = group.children[index + 1]
+					if next_child then
+						for line = child.end_line + 1, next_child.start_line - 1 do
+							rows[line] = { output_id = output_id, marker = "│" }
+						end
+					end
+				end
+			end
+		end
 	end
-	if line:find("> 󰇥 Tool: workspace", 1, true) == 1 then
-		return "PiToolWorkspaceQuote"
-	end
-	if line:find("> 󰇥 Subagent", 1, true) == 1 then
-		return "PiSubagentQuote"
-	end
-	if line:find("> 󰇥 ", 1, true) == 1 then
-		return "PiToolQuote"
-	end
-	return nil
+	return rows
 end
 
 local function apply_edit_stat_highlights(buf, line_index, line)
-	if line:find("> 󰇥 Tool: edit", 1, true) ~= 1 then
-		return
-	end
 	local stats_start, _, add_count, remove_count = line:find("%+(%d+)/%-(%d+) · [^·]+$")
 	if not stats_start then
 		return
@@ -192,16 +198,20 @@ local function apply_edit_stat_highlights(buf, line_index, line)
 	})
 end
 
-function M.apply_quote_highlights_to_buffer(buf)
+function M.apply_quote_highlights_to_buffer(buf, state, opts)
 	if type(buf) ~= "number" or not vim.api.nvim_buf_is_valid(buf) then
 		return
 	end
 
 	vim.api.nvim_buf_clear_namespace(buf, quote_ns, 0, -1)
 	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+	local rows = state and tool_rows(state, opts and opts.preview) or {}
 	for index, line in ipairs(lines) do
-		local highlight = tool_quote_highlight(line)
-		if not highlight and line:find("> 󰔛 ", 1, true) == 1 then
+		local row = rows[index]
+		local highlight = row and tool_output.summary_highlight(state, row.output_id)
+		if not highlight and line:find("> 󰇥 ", 1, true) == 1 then
+			highlight = "PiToolQuote"
+		elseif not highlight and line:find("> 󰔛 ", 1, true) == 1 then
 			highlight = "PiThinkingQuote"
 		elseif not highlight and line:find("> 󰗨 Session compacted here", 1, true) == 1 then
 			highlight = "PiThinkingQuote"
@@ -214,12 +224,19 @@ function M.apply_quote_highlights_to_buffer(buf)
 				hl_group = highlight,
 				priority = 250,
 			})
+			local gutter = { { "▋", "PiQuoteBar" } }
+			if row and row.marker then
+				table.insert(gutter, { row.marker, highlight })
+			end
 			vim.api.nvim_buf_set_extmark(buf, quote_ns, index - 1, 0, {
-				virt_text = { { "▋", "PiQuoteBar" } },
+				virt_text = gutter,
 				virt_text_pos = "overlay",
 				priority = 300,
 			})
-			apply_edit_stat_highlights(buf, index, line)
+			local output = row and state.tool_outputs[row.output_id]
+			if row and row.stats and output and output.name == "edit" then
+				apply_edit_stat_highlights(buf, index, line)
+			end
 			local failure_start = line:find("✗ failed", 1, true) or line:find("%d+ failed$")
 			if failure_start then
 				vim.api.nvim_buf_set_extmark(buf, quote_ns, index - 1, failure_start - 1, {
@@ -237,8 +254,7 @@ function M.apply_quote_highlights(ctx)
 	if not ctx.buffer.valid(state.transcript_buf) then
 		return
 	end
-	M.apply_quote_highlights_to_buffer(state.transcript_buf)
-	tool_groups.apply_highlights(state, state.transcript_buf, quote_ns)
+	M.apply_quote_highlights_to_buffer(state.transcript_buf, state)
 end
 
 function M.render(ctx)

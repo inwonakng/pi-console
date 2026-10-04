@@ -17,6 +17,7 @@ require("catppuccin").setup({
 		return {
 			Normal = { bg = M.ui_bg },
 			NormalNC = { bg = M.ui_bg },
+			Folded = { bg = M.ui_bg },
 			SignColumn = { bg = M.ui_bg },
 			EndOfBuffer = { bg = M.ui_bg },
 			PiPaneBorder = { fg = M.pane_border, bg = M.ui_bg },

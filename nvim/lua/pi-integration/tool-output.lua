@@ -866,6 +866,29 @@ function M.live_output_id(state, tool_call_id)
 	return tool_call_id and state.live_tool_output_by_call and state.live_tool_output_by_call[tool_call_id] or nil
 end
 
+-- Group headers and singleton rows share the same presentation policy.
+function M.summary_highlight(state, output_id)
+	local output = state.tool_outputs[output_id]
+	if not output then
+		return "PiToolQuote"
+	end
+	if output.name == "edit" or output.name == "write" then
+		return "PiToolEditQuote"
+	elseif output.name == "workspace" then
+		return "PiToolWorkspaceQuote"
+	end
+	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
+	local pending = call and (call.execution_status == "running" or call.execution_status == "interrupted")
+	if not output.is_error and not pending then
+		if is_spawn_output_name(output.name) then
+			return "PiSubagentQuote"
+		elseif is_todo_tool_name(output.name) then
+			return "PiTodoQuote"
+		end
+	end
+	return "PiToolQuote"
+end
+
 function M.summary_lines(state, output_id)
 	local output = state.tool_outputs[output_id]
 	if not output then

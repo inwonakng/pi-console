@@ -731,6 +731,7 @@ local function session_previewer(ctx, by_id)
 		_ctor = function()
 			local previewer = require("fzf-lua.previewer.builtin").buffer_or_file:extend()
 			local update_render_markdown = previewer.update_render_markdown
+			local preview_buf_post = previewer.preview_buf_post
 			function previewer:parse_entry(entry)
 				local id = entry and entry:match("^(%d+)\t")
 				local candidate = id and by_id[id]
@@ -743,18 +744,26 @@ local function session_previewer(ctx, by_id)
 				local preview_ctx = session_preview_context(ctx, candidate)
 				local messages = pi_messages.load_session_messages_from_file(preview_ctx, candidate.path)
 				local lines, items = pi_messages.collect_message_lines(preview_ctx, messages)
-				lines = require("pi-integration.tool-groups").preview_lines(lines, items)
+				lines, items = require("pi-integration.tool-groups").preview_lines(lines, items)
+				preview_ctx.state.transcript_items = items
 				local preview_entry = {
 					cache_key = candidate.path,
 					content = lines,
 					filetype = "markdown",
+					pi_state = preview_ctx.state,
 				}
 				preview_entries[candidate.path] = preview_entry
 				return preview_entry
 			end
+			function previewer:preview_buf_post(entry, min_winopts)
+				-- Bind styling to the displayed entry, including cached previews.
+				self.pi_preview_state = entry.pi_state
+				preview_buf_post(self, entry, min_winopts)
+				pi_transcript.apply_quote_highlights_to_buffer(self.preview_bufnr, self.pi_preview_state, { preview = true })
+			end
 			function previewer:update_render_markdown()
 				update_render_markdown(self)
-				pi_transcript.apply_quote_highlights_to_buffer(self.preview_bufnr)
+				pi_transcript.apply_quote_highlights_to_buffer(self.preview_bufnr, self.pi_preview_state, { preview = true })
 			end
 			return previewer
 		end,

@@ -165,7 +165,6 @@ function M.apply_folds(state, win)
 		vim.wo.foldcolumn = "0"
 		vim.wo.foldtext = ""
 		vim.opt_local.fillchars:append({ fold = " " })
-		vim.opt_local.winhl:append({ Folded = "PiToolQuote" })
 		vim.cmd("normal! zE")
 		for _, group in ipairs(groups) do
 			local last = fold_end(group)
@@ -227,54 +226,34 @@ function M.toggle(ctx, group)
 	return true
 end
 
-function M.apply_highlights(state, buf, ns)
-	for _, group in ipairs(state.transcript_items or {}) do
-		if group.kind == "tool_group" then
-			vim.api.nvim_buf_set_extmark(buf, ns, group.start_line - 1, 0, {
-				virt_text = { { group.expanded and "▾   " or "▸   ", "PiToolQuote" } },
-				virt_text_pos = "overlay",
-				priority = 310,
-			})
-			for index, child in ipairs(group.children) do
-				local branch = index == #group.children and "└─  " or "├─  "
-				vim.api.nvim_buf_set_extmark(buf, ns, child.start_line - 1, 0, {
-					virt_text = { { branch, "PiToolQuote" } },
-					virt_text_pos = "overlay",
-					priority = 310,
-				})
-				local next_child = group.children[index + 1]
-				if next_child then
-					for line = child.end_line + 1, next_child.start_line - 1 do
-						vim.api.nvim_buf_set_extmark(buf, ns, line - 1, 0, {
-							virt_text = { { "│", "PiToolQuote" } },
-							virt_text_pos = "overlay",
-							priority = 310,
-						})
-					end
-				end
-			end
-		end
-	end
-end
-
 -- Session-picker previews are static text, not interactive transcripts.
 function M.preview_lines(lines, items)
-	local hidden, headers = {}, {}
+	local hidden = {}
 	for _, item in ipairs(items) do
 		if item.kind == "tool_group" then
-			headers[item.start_line] = true
 			for line = item.start_line + 1, fold_end(item) do
 				hidden[line] = true
 			end
 		end
 	end
-	local result = {}
+	local result, line_map = {}, {}
 	for index, line in ipairs(lines) do
 		if not hidden[index] then
-			table.insert(result, headers[index] and (line:gsub("^> 󰇥 ", "> ▸ ")) or line)
+			table.insert(result, line)
+			line_map[index] = #result
 		end
 	end
-	return result
+	local preview_items = {}
+	for _, item in ipairs(items) do
+		if line_map[item.start_line] then
+			local copy = vim.tbl_extend("force", {}, item)
+			copy.start_line = line_map[item.start_line]
+			copy.end_line = line_map[item.end_line]
+			copy.expanded = false
+			table.insert(preview_items, copy)
+		end
+	end
+	return result, preview_items
 end
 
 return M
