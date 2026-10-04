@@ -17,6 +17,17 @@ export type BashAccessRequest = {
   unsandboxed?: boolean;
 };
 
+// The runtime advertises localhost, but macOS Python name resolution can emit
+// a sandbox denial even when the proxy connection succeeds. Use numeric IPv4
+// loopback while preserving the runtime's proxy credentials and ports. Its
+// wrapped command runs in Bash, so parameter substitution needs no subprocess.
+const sandboxEnvironment = [
+  "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy",
+  "GRPC_PROXY", "grpc_proxy", "FTP_PROXY", "ftp_proxy", "RSYNC_PROXY",
+  "DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "GIT_SSH_COMMAND",
+].map((name) => `export ${name}="\${${name}//localhost:/127.0.0.1:}";`).join(" ")
+  + " export CLOUDSDK_PROXY_ADDRESS=127.0.0.1 NO_PROXY= no_proxy=;";
+
 const localBash = createLocalBashOperations();
 let sandboxConfig: SandboxRuntimeConfig | undefined;
 let sandboxError: string | undefined;
@@ -118,7 +129,7 @@ async function runSandboxed(
     if (scratch) process.env.CLAUDE_CODE_TMPDIR = scratch;
     let wrapped: string;
     try {
-      wrapped = await SandboxManager.wrapWithSandbox(`export NO_PROXY= no_proxy=; ${command}`, undefined,
+      wrapped = await SandboxManager.wrapWithSandbox(`${sandboxEnvironment} ${command}`, undefined,
         { filesystem }, options.signal, { commandId, commandText: command });
     } catch (error) {
       if (options.signal?.aborted) throw new Error("aborted");
