@@ -165,13 +165,8 @@ local function record_tool_calls(message)
 	return pi_tool_output.record_calls(state, message)
 end
 
-local function record_tool_execution_call(tool_name, tool_call_id, args)
-	return pi_tool_output.record_execution_call(state, tool_name, tool_call_id, args)
-end
-
-local function store_tool_output(tool_name, text, filetype, details, message)
-	local tool_call_id = message_utils.tool_call_id(message)
-	return pi_tool_output.store(state, tool_name, text, filetype, details, pi_tool_output.display_for_result(state, message), tool_call_id, message and message.isError)
+local function record_tool_execution_call(tool_name, tool_call_id, args, execution_status)
+	return pi_tool_output.record_execution_call(state, tool_name, tool_call_id, args, execution_status)
 end
 
 local function store_or_update_live_tool_output(tool_name, tool_call_id, text, filetype, details, display, is_error)
@@ -474,7 +469,9 @@ local integration_context = {
 	tools = {
 		record_calls = record_tool_calls,
 		record_execution_call = record_tool_execution_call,
-		store_output = store_tool_output,
+		interrupt_executions = function()
+			return pi_tool_output.interrupt_executions(state)
+		end,
 		store_or_update_live_output = store_or_update_live_tool_output,
 		store_or_update_spawn_run_output = store_or_update_spawn_run_output,
 		bind_spawn_run = bind_spawn_run_output,
@@ -700,10 +697,11 @@ function M.refresh_messages()
 	end
 
 	if state.job and state.job > 0 then
+		local job = state.job
 		local session_file = state.session_file
 		local generation = state.session_sync_generation
 		send({ type = "get_entries" }, function(event)
-			if is_agent_active() or session_file ~= state.session_file or generation ~= state.session_sync_generation then
+			if state.job ~= job or is_agent_active() or session_file ~= state.session_file or generation ~= state.session_sync_generation then
 				return
 			end
 			if not event.success or not event.data then

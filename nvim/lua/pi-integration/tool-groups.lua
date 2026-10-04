@@ -2,11 +2,9 @@ local message_utils = require("pi-integration.utils.message")
 
 local M = {}
 
-local labels = { read = "Read", edit = "Edit", write = "Write" }
-
 local function tool_name(state, item)
 	local output = item.kind == "tool" and state.tool_outputs[item.output_id]
-	return output and labels[output.name] and output.name or nil
+	return output and output.name or nil
 end
 
 local function adjacent(lines, left, right)
@@ -43,7 +41,7 @@ local function shift_lines(state, items, at)
 end
 
 local function summary(state, group)
-	local files, failures = {}, 0
+	local files, failures, running = {}, 0, 0
 	for _, child in ipairs(group.children) do
 		local output = state.tool_outputs[child.output_id]
 		local path = output.display and output.display.kind == "file" and output.display.path
@@ -51,14 +49,22 @@ local function summary(state, group)
 		if path then
 			files[path] = true
 		end
-		if output.is_error then
+		local status = type(output.details) == "table" and output.details.status or nil
+		local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
+		local execution = call and call.execution_status
+		if output.is_error or execution == "interrupted" or status == "error" or status == "failed" or status == "aborted" then
 			failures = failures + 1
+		elseif execution == "running" or status == "running" then
+			running = running + 1
 		end
 	end
 	local file_count = vim.tbl_count(files)
-	local text = "> 󰇥 " .. labels[group.name] .. " · " .. #group.children .. " calls"
+	local text = "> 󰇥 " .. group.name .. " · " .. #group.children .. " calls"
 	if file_count > 0 then
 		text = text .. " · " .. file_count .. (file_count == 1 and " file" or " files")
+	end
+	if running > 0 then
+		text = text .. " · " .. running .. " running"
 	end
 	if failures > 0 then
 		text = text .. " · " .. failures .. " failed"
@@ -100,7 +106,6 @@ function M.collect(state, lines, items)
 					kind = "tool_group",
 					name = candidate.name,
 					key = output.tool_call_id,
-					live = state.is_agent_running or state.is_streaming or state.is_retrying or false,
 				}
 				shift_lines(state, items, at)
 				group.start_line, group.end_line = at, at
@@ -124,11 +129,6 @@ function M.collect(state, lines, items)
 	return edits
 end
 
-function M.foldtext()
-	local line = vim.fn.getline(vim.v.foldstart)
-	return (line:gsub("^> 󰇥 ", "▸ "))
-end
-
 local function fold_end(group)
 	return group.children[#group.children].end_line
 end
@@ -144,7 +144,16 @@ function M.apply_folds(state, win)
 			if item.key and state.tool_group_expanded then
 				choice = state.tool_group_expanded[item.key]
 			end
-			item.expanded = choice == true or (choice == nil and item.live == true)
+			local running = false
+			for _, child in ipairs(item.children) do
+				local output = state.tool_outputs[child.output_id]
+				local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
+				if call and call.execution_status == "running" then
+					running = true
+					break
+				end
+			end
+			item.expanded = choice == true or (choice == nil and running)
 			table.insert(groups, item)
 		end
 	end
@@ -154,7 +163,9 @@ function M.apply_folds(state, win)
 		vim.wo.foldenable = true
 		vim.wo.foldlevel = 0
 		vim.wo.foldcolumn = "0"
-		vim.wo.foldtext = "v:lua.require('pi-integration.tool-groups').foldtext()"
+		vim.wo.foldtext = ""
+		vim.opt_local.fillchars:append({ fold = " " })
+		vim.opt_local.winhl:append({ Folded = "PiToolQuote" })
 		vim.cmd("normal! zE")
 		for _, group in ipairs(groups) do
 			local last = fold_end(group)
@@ -216,19 +227,11 @@ function M.toggle(ctx, group)
 	return true
 end
 
-function M.settle(state)
-	for _, item in ipairs(state.transcript_items or {}) do
-		if item.kind == "tool_group" then
-			item.live = false
-		end
-	end
-end
-
 function M.apply_highlights(state, buf, ns)
 	for _, group in ipairs(state.transcript_items or {}) do
 		if group.kind == "tool_group" then
 			vim.api.nvim_buf_set_extmark(buf, ns, group.start_line - 1, 0, {
-				virt_text = { { "▾   ", "PiToolQuote" } },
+				virt_text = { { group.expanded and "▾   " or "▸   ", "PiToolQuote" } },
 				virt_text_pos = "overlay",
 				priority = 310,
 			})

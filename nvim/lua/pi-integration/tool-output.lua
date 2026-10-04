@@ -515,7 +515,7 @@ function M.display_for_result(state, message)
 	return call and call.display or nil
 end
 
-function M.record_execution_call(state, tool_name, tool_call_id, args)
+function M.record_execution_call(state, tool_name, tool_call_id, args, execution_status)
 	if not tool_call_id then
 		return
 	end
@@ -524,7 +524,23 @@ function M.record_execution_call(state, tool_name, tool_call_id, args)
 	call.name = tool_name or call.name
 	call.args = type(args) == "table" and args or call.args
 	call.display = display_for_call(state, call.name, call.args) or call.display
+	-- Execution can finish while details.status still describes a running background job.
+	call.execution_status = execution_status or call.execution_status
 	state.tool_calls[tool_call_id] = call
+end
+
+function M.interrupt_executions(state)
+	local outputs = {}
+	for id, call in pairs(state.tool_calls or {}) do
+		if call.execution_status == "running" then
+			call.execution_status = "interrupted"
+			local output_id = state.live_tool_output_by_call and state.live_tool_output_by_call[id]
+			if output_id then
+				table.insert(outputs, output_id)
+			end
+		end
+	end
+	return outputs
 end
 
 local function call_args_for_id(state, tool_call_id)
@@ -761,7 +777,7 @@ function M.store(state, tool_name, text, filetype, details, display, tool_call_i
 		state.live_tool_output_by_call = state.live_tool_output_by_call or {}
 		state.live_tool_output_by_call[tool_call_id] = id
 	end
-	if is_spawn_output_name(tool_name) then
+	if is_spawn_output_name(tool_name) and not is_error then
 		M.bind_spawn_run(state, details, id)
 	end
 	return id
@@ -778,11 +794,17 @@ function M.store_or_update_live(state, tool_name, tool_call_id, text, filetype, 
 			output.is_error = is_error == true
 		end
 		output.filetype = filetype or output.filetype or infer_filetype(tool_name, text)
-		output.details = merge_details(output.details, details)
+		local call = tool_call_id and state.tool_calls and state.tool_calls[tool_call_id]
+		if call and call.execution_status == "completed" then
+			-- Final results replace progress metadata, including transient running status.
+			output.details = details
+		else
+			output.details = merge_details(output.details, details)
+		end
 		output.display = display or output.display
 		output.args = call_args_for_id(state, tool_call_id) or output.args
 		output.spawn = spawn_artifacts(output.name, output.text, output.details)
-		if is_spawn_output_name(output.name) then
+		if is_spawn_output_name(output.name) and not output.is_error then
 			M.bind_spawn_run(state, output.details, output_id)
 		end
 		return output_id, true
@@ -793,6 +815,12 @@ end
 function M.bind_spawn_run(state, run, output_id, line)
 	local id = run_id(run)
 	if type(id) ~= "string" or id == "" then
+		return false
+	end
+	local output = output_id and state.tool_outputs[output_id]
+	local call = output and output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
+	-- Progress belongs to the executing call, not to the background run's update target.
+	if output and (output.is_error or (call and call.execution_status == "running")) then
 		return false
 	end
 	if output_id then
@@ -819,6 +847,9 @@ function M.store_or_update_spawn_run(state, run, text)
 	local output_text = text or run.progress or ""
 	if output_id and state.tool_outputs[output_id] then
 		local output = state.tool_outputs[output_id]
+		if output.is_error then
+			return nil, false
+		end
 		output.name = output.name == "spawn" and "spawn" or "spawn_control"
 		output.text = output_text
 		output.filetype = infer_filetype(output.name, output_text)
@@ -840,10 +871,22 @@ function M.summary_lines(state, output_id)
 	if not output then
 		return { "> Tool output unavailable." }
 	end
-	local rendered_text = rendered_output(output)
+	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
+	local execution = call and call.execution_status
+	local pending = execution == "running" or execution == "interrupted"
+	local rendered_text = pending and output.text or rendered_output(output)
 	local lines = line_count_text(rendered_text)
 	local line_label = lines == 1 and "1 line" or (tostring(lines) .. " lines")
 	local label = "Tool: " .. tostring(output.name or "tool")
+	if pending then
+		if output.display and output.display.kind == "bash" and output.display.command then
+			label = "Bash: " .. markdown_code_span(command_preview(output.display.command))
+		elseif output.display and output.display.kind == "file" and output.display.path then
+			label = label .. ": " .. markdown_code_span(output.display.path)
+		end
+		local status = execution == "running" and "running" or "✗ interrupted"
+		return { "> 󰇥 " .. label .. " · " .. status .. (lines > 0 and (" · " .. line_label) or "") }
+	end
 	if not output.is_error and (output.name == "spawn" or output.name == "spawn_control") then
 		label = "Subagent"
 		local details = type(output.details) == "table" and output.details or {}
@@ -912,10 +955,12 @@ function M.open_float(ctx, output_id)
 		ctx.ui.notify("Tool output unavailable", vim.log.levels.WARN)
 		return true
 	end
-	if output.spawn and open_spawn_artifacts(ctx, output) then
+	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
+	local pending = call and (call.execution_status == "running" or call.execution_status == "interrupted")
+	if not pending and output.spawn and open_spawn_artifacts(ctx, output) then
 		return true
 	end
-	if output.name == "edit" and not output.is_error and open_edit_diff_float(ctx, output) then
+	if not pending and output.name == "edit" and not output.is_error and open_edit_diff_float(ctx, output) then
 		return true
 	end
 
@@ -932,6 +977,9 @@ function M.open_float(ctx, output_id)
 	vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
 	vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
 	local rendered_text, rendered_filetype = rendered_output(output)
+	if pending then
+		rendered_text, rendered_filetype = output.text, "text"
+	end
 	vim.api.nvim_set_option_value("filetype", rendered_filetype or output.filetype or "text", { buf = buf })
 	local content_lines = vim.split(rendered_text or "", "\n", { plain = true })
 	local path = output_path(output)

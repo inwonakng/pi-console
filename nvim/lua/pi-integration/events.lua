@@ -6,39 +6,39 @@ local pi_skills = require("pi-integration.skills")
 local pi_usage = require("pi-integration.usage")
 local pending_picker = require("pi-integration.pending-picker")
 
-local function partial_result_text(partial_result)
-	if type(partial_result) ~= "table" then
-		return ""
-	end
-	return message_utils.extract_content_text(partial_result.content)
-end
-
 local function bind_spawn_run_line(ctx, run, output_id, line)
 	if ctx.tools.bind_spawn_run then
 		ctx.tools.bind_spawn_run(run, output_id, line)
 	end
 end
 
-local function render_or_update_live_tool(ctx, event, text, details)
+local function render_tool_output(ctx, event, text, details, display)
 	local state = ctx.state
+	local is_error = event.isError
+	if type(event.result) == "table" then
+		is_error = is_error == true or event.result.isError == true
+	end
 	local output_id, updated = ctx.tools.store_or_update_live_output(
 		event.toolName or "tool",
 		event.toolCallId,
 		text or "",
 		nil,
 		details,
-		nil,
-		event.isError
+		display,
+		is_error
 	)
 	local output = state.tool_outputs and state.tool_outputs[output_id]
 	local run_details = output and output.details or details
+	local is_spawn = not output.is_error and (event.toolName == "spawn" or event.toolName == "spawn_control")
 	if updated then
 		local line = state.live_tool_lines and event.toolCallId and state.live_tool_lines[event.toolCallId]
 		if line then
-			bind_spawn_run_line(ctx, run_details, output_id, line)
+			if is_spawn then
+				bind_spawn_run_line(ctx, run_details, output_id, line)
+			end
 			ctx.transcript.set_line(line, ctx.tools.summary_lines(output_id)[1])
 		end
-		return output_id
+		return output_id, line
 	end
 
 	ctx.transcript.ensure_assistant_turn_started("Assistant")
@@ -49,7 +49,9 @@ local function render_or_update_live_tool(ctx, event, text, details)
 	if event.toolCallId then
 		state.live_tool_lines[event.toolCallId] = line
 	end
-	bind_spawn_run_line(ctx, run_details, output_id, line)
+	if is_spawn then
+		bind_spawn_run_line(ctx, run_details, output_id, line)
+	end
 	ctx.transcript.register_item({
 		kind = "tool",
 		start_line = line,
@@ -57,7 +59,7 @@ local function render_or_update_live_tool(ctx, event, text, details)
 		output_id = output_id,
 	})
 	ctx.transcript.end_trace_item()
-	return output_id
+	return output_id, line
 end
 
 local function run_id(run)
@@ -108,7 +110,15 @@ end
 
 local function schedule_transcript_refresh(ctx)
 	local state = ctx.state
+	local job, session, generation = state.job, state.session_file, state.session_sync_generation
+	if not job or job <= 0 then
+		return
+	end
 	vim.defer_fn(function()
+		-- Do not turn a live transcript into an offline cached-branch replay after exit.
+		if state.job ~= job or state.session_file ~= session or state.session_sync_generation ~= generation then
+			return
+		end
 		if not state.is_agent_running and not state.is_streaming and not state.is_retrying
 			and not state.awaiting_agent_output and not state.is_loading and not state.is_compacting then
 			ctx.actions.refresh_messages()
@@ -302,8 +312,8 @@ function M.render_message(ctx, message)
 	if role == "custom" and message.display == false then
 		return
 	end
-	local text = ctx.messages.extract_text(message)
-	if not text or text == "" then
+	local text = ctx.messages.extract_text(message) or ""
+	if role ~= "toolResult" and text == "" then
 		return
 	end
 	ctx.state.awaiting_agent_output = false
@@ -311,40 +321,17 @@ function M.render_message(ctx, message)
 	if role == "toolResult" then
 		local name = message.toolName or "tool"
 		local tool_call_id = message_utils.tool_call_id(message)
-		local live_output_id = ctx.tools.live_output_id(tool_call_id)
-		if live_output_id then
-			ctx.tools.store_or_update_live_output(name, tool_call_id, text, nil, message.details, ctx.tools.store_display and ctx.tools.store_display(message) or nil, message.isError)
-			local line = ctx.state.live_tool_lines and ctx.state.live_tool_lines[tool_call_id]
-			if line then
-				if name == "spawn" or name == "spawn_control" then
-					bind_spawn_run_line(ctx, message.details, live_output_id, line)
-				end
-				ctx.transcript.set_line(line, ctx.tools.summary_lines(live_output_id)[1])
-			end
+		ctx.tools.record_execution_call(name, tool_call_id, nil, "completed")
+		if not message.isError and not ctx.tools.live_output_id(tool_call_id)
+			and update_spawn_details(ctx, name, message.details, text) then
 			return
 		end
-		if update_spawn_details(ctx, name, message.details, text) then
-			return
-		end
-		ctx.transcript.ensure_assistant_turn_started("Assistant")
-		local output_id = ctx.tools.store_output(name, text, nil, message.details, message)
-		ctx.transcript.begin_trace_item()
-		ctx.transcript.append_lines(ctx.tools.summary_lines(output_id))
-		local line = ctx.transcript.line_count()
-		if tool_call_id then
-			ctx.state.live_tool_lines[tool_call_id] = line
-		end
-		if name == "spawn" or name == "spawn_control" then
-			bind_spawn_run_line(ctx, message.details, output_id, line)
-		end
-		ctx.transcript.register_item({
-			kind = "tool",
-			start_line = line,
-			end_line = line,
-			output_id = output_id,
-		})
+		local output_id, line = render_tool_output(ctx, {
+			toolName = name,
+			toolCallId = tool_call_id,
+			isError = message.isError,
+		}, text, message.details, ctx.tools.store_display and ctx.tools.store_display(message) or nil)
 		remember_todo_tool_line(ctx, output_id, line)
-		ctx.transcript.end_trace_item()
 		return
 	end
 	ctx.transcript.append_message_header(role:gsub("^%l", string.upper))
@@ -856,6 +843,15 @@ end
 
 function M.handle_event(ctx, event)
 	local state = ctx.state
+	if (event.type == "agent_end" and not event.willRetry) or event.type == "agent_settled" then
+		for _, output_id in ipairs(ctx.tools.interrupt_executions()) do
+			local output = state.tool_outputs[output_id]
+			local line = state.live_tool_lines[output.tool_call_id]
+			if line then
+				ctx.transcript.set_line(line, ctx.tools.summary_lines(output_id)[1])
+			end
+		end
+	end
 	if event.type == "response" then
 		ctx.rpc.handle_response(event)
 	elseif event.type == "agent_start" then
@@ -922,7 +918,6 @@ function M.handle_event(ctx, event)
 		state.is_agent_running = false
 		state.is_streaming = false
 		state.is_retrying = false
-		require("pi-integration.tool-groups").settle(state)
 		ctx.transcript.refresh_ui()
 		if state.is_loading then
 			start_activity(ctx, "loading")
@@ -934,7 +929,12 @@ function M.handle_event(ctx, event)
 		end
 		state.refresh_transcript_after_settled = false
 		ctx.actions.flush_queued_prompts()
-		ctx.ui.notify("Pi finished")
+		local running = state.spawn_running_count or 0
+		if running > 0 then
+			ctx.ui.notify(string.format("Pi turn finished; %d subagent%s still running", running, running == 1 and "" or "s"))
+		else
+			ctx.ui.notify("Pi finished")
+		end
 	elseif event.type == "auto_retry_start" then
 		state.is_retrying = true
 		state.pending_retry_error = event.errorMessage or state.pending_retry_error
@@ -1010,52 +1010,29 @@ function M.handle_event(ctx, event)
 		end
 	elseif event.type == "tool_execution_start" then
 		state.awaiting_agent_output = false
-		if event.toolName == "edit" or event.toolName == "write" or event.toolName == "bash" then
-			ctx.tools.record_execution_call(event.toolName, event.toolCallId, event.args)
-		end
+		ctx.tools.record_execution_call(event.toolName, event.toolCallId, event.args, "running")
 		start_activity(ctx, event.toolName or "tool", event.toolCallId)
-		if event.toolName == "spawn" then
-			render_or_update_live_tool(ctx, event, "Subagent starting…", { status = "running" })
-		elseif event.toolName == "bash" then
-			render_or_update_live_tool(ctx, event, "", { status = "running" })
+		if not pi_skills.tool_result_skill_name(state, event) then
+			render_tool_output(ctx, event, "")
 		end
-		-- Non-spawn/non-bash tool output is rendered from the final toolResult message. Rendering
-		-- every tool_execution_* stream creates empty/duplicate tool blocks for tools
-		-- that only publish their output at completion.
 		return
 	elseif event.type == "tool_execution_update" then
-		if event.toolName == "spawn" then
+		if not pi_skills.tool_result_skill_name(state, event) then
 			local partial = type(event.partialResult) == "table" and event.partialResult or {}
-			render_or_update_live_tool(ctx, event, partial_result_text(partial), partial.details or { status = "running" })
-		elseif event.toolName == "bash" then
-			local partial = type(event.partialResult) == "table" and event.partialResult or {}
-			render_or_update_live_tool(ctx, event, partial_result_text(partial), partial.details or { status = "running" })
-		elseif event.toolName == "spawn_control" then
-			local partial = type(event.partialResult) == "table" and event.partialResult or {}
-			update_spawn_details(ctx, event.toolName, partial.details, partial_result_text(partial))
+			render_tool_output(ctx, event, message_utils.extract_content_text(partial.content), partial.details)
 		end
 		return
 	elseif event.type == "tool_execution_end" then
+		ctx.tools.record_execution_call(event.toolName, event.toolCallId, nil, "completed")
 		local execution_result = type(event.result) == "table" and event.result or nil
 		local is_error = event.isError == true or (execution_result and execution_result.isError == true)
 		if is_error then
 			ctx.logs.add("error", "Tool execution failed: " .. tostring(event.toolName or "tool"), message_utils.extract_content_text(execution_result and execution_result.content))
 		end
-		if event.toolName == "spawn" then
-			local result = type(event.result) == "table" and event.result or {}
-			local details = type(result.details) == "table" and shallow_copy(result.details) or {}
-			if is_error and not details.status then
-				details.status = "error"
-			end
-			render_or_update_live_tool(ctx, event, message_utils.extract_content_text(result.content), details)
-		elseif event.toolName == "bash" then
-			local result = type(event.result) == "table" and event.result or {}
-			local details = type(result.details) == "table" and shallow_copy(result.details) or {}
-			details.status = details.status or "completed"
-			render_or_update_live_tool(ctx, event, message_utils.extract_content_text(result.content), details)
-		elseif event.toolName == "spawn_control" then
-			local result = type(event.result) == "table" and event.result or {}
-			update_spawn_details(ctx, event.toolName, result.details, message_utils.extract_content_text(result.content))
+		if not pi_skills.tool_result_skill_name(state, event) then
+			local result = execution_result or {}
+			local output_id, line = render_tool_output(ctx, event, message_utils.extract_content_text(result.content), result.details)
+			remember_todo_tool_line(ctx, output_id, line)
 		end
 		if state.activity_tool_call_id == event.toolCallId then
 			state.activity_tool_call_id = nil

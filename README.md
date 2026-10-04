@@ -12,11 +12,13 @@ This is a work in progress. The main reason for sharing this repository is to se
 
 - **Conversations in Neovim.** Editable Markdown prompts and rendered
   transcripts, with tool output and thinking available to open when you need
-  them. Consecutive reads, edits, and writes of the same tool type form inline
+  them. Consecutive visible tool calls with the same tool name form inline
   groups: `<CR>` toggles a group or opens an individual output. Single calls
-  open directly. Groups stay expanded during a run and collapse when it finishes,
-  unless manually toggled; failed calls remain labeled in collapsed summaries.
-  Switch models and thinking levels, or queue prompts while a run is active. Use `<leader>pq` to preview, edit, or delete queued messages; the
+  open directly. Groups expand while their calls execute and collapse as soon as
+  those calls finish, even while the assistant continues generating. Another
+  consecutive call reopens its group unless manually toggled; running and failed
+  calls remain labeled in collapsed summaries. Switch models and thinking levels, or queue prompts while a run is
+  active. Use `<leader>pq` to preview, edit, or delete queued messages; the
   statusline shows the queue count. Messages run in order after the active run
   finishes, waiting if the next message is being edited.
 - **Multiple sessions without losing your place.** A persistent tmux session
@@ -223,8 +225,40 @@ sessions:
 | `spawn` | Background and foreground subagents |
 | `todowrite` | Structured task lists |
 | `tree` | Session-tree navigation helpers |
-| `web-search` | DuckDuckGo search and page fetching |
+| `web-search` | Keyless multi-provider web search and structured page fetching |
 | `workspace` | Isolated Git workspaces and integration |
+
+### Web search and fetching
+
+`web_search(query, limit)` queries Exa, Parallel, Firecrawl, and Keenable concurrently,
+without API keys or model-provider credentials. It interleaves results, deduplicates
+URLs (ignoring fragments, preserving query parameters), and reports contributing
+providers and partial failures. Available snippets, excerpts, and page content are
+returned without local summarization or relevance filtering. The default result
+limit is 5, with up to 20 supported. These anonymous services may throttle requests;
+a failed provider does not discard results from the others.
+
+`web_fetch(url, maxChars)` first fetches the page directly and converts readable HTML
+to Markdown, preserving links, headings, lists, tables, and code. When direct
+retrieval or extraction fails, it tries the configured hosted providers in order.
+Responses include requested and returned URLs, extraction provider, content format,
+failed attempts, and whether the returned text was truncated. `contentKind` identifies
+page content versus provider excerpts; `totalChars` counts the extracted text before
+local truncation, not necessarily the complete original page. The default character
+limit is 12,000; `maxChars` accepts 1,000–50,000. Requests have a 30-second deadline
+per provider and respect tool cancellation.
+
+To select providers, add this to `~/.pi/agent/pi-console-config.yaml`:
+
+```yaml
+web-search:
+  providers: [exa, parallel, firecrawl, keenable]
+```
+
+The list must be non-empty, contain no duplicates, and use those provider names.
+Changes are read on each call. Search queries are sent to every selected provider;
+hosted fetching sends the requested URL to a provider only after direct fetching
+fails. No hosted-service signup or browser installation is required.
 
 The access modes are:
 

@@ -1,4 +1,4 @@
-import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ExtensionAPI, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn as spawnProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -870,7 +870,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
 
   const runs = new Map<string, SpawnRun>();
   activeRuns = runs;
-  let lastContext: { ui?: { notify(message: string, type?: "info" | "warning" | "error"): void; setStatus(key: string, text: string | undefined): void } } | undefined;
+  let ui: Pick<ExtensionUIContext, "notify" | "setStatus"> | undefined;
 
   const spawnStatusPayload = () => {
     const allRuns = Array.from(runs.values()).map(statusJson);
@@ -880,18 +880,13 @@ export default function spawnExtension(pi: ExtensionAPI) {
     };
   };
 
-  const publishSpawnStatus = (ctx?: typeof lastContext) => {
-    if (ctx) {
-      lastContext = ctx;
-    }
-    lastContext?.ui?.setStatus("pi-spawn-runs", JSON.stringify(spawnStatusPayload()));
+  const publishSpawnStatus = () => {
+    ui?.setStatus("pi-spawn-runs", JSON.stringify(spawnStatusPayload()));
   };
 
-  const enqueueCompletionNotification = (run: SpawnRun, ctx?: typeof lastContext) => {
-    if (ctx) {
-      lastContext = ctx;
-    }
-    ctx?.ui?.notify(`Subagent ${run.id} ${run.status}${run.profile?.name ? ` (${run.profile.name})` : ""}.`, run.status === "completed" ? "info" : run.status === "aborted" ? "warning" : "error");
+  const enqueueCompletionNotification = (run: SpawnRun) => {
+    if (!ui) return; // A retired runtime must not publish child completions.
+    ui.notify(`Subagent ${run.id} ${run.status}${run.profile?.name ? ` (${run.profile.name})` : ""}.`, run.status === "completed" ? "info" : run.status === "aborted" ? "warning" : "error");
     if (run.notified || run.joined || run.joinRequested) {
       return;
     }
@@ -905,19 +900,21 @@ export default function spawnExtension(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", (_event, ctx) => {
-    lastContext = ctx;
+    ui = ctx.ui;
     for (const run of restoreRuns(ctx.sessionManager.getSessionFile())) {
       if (!runs.has(run.id)) runs.set(run.id, run);
     }
-    publishSpawnStatus(ctx);
+    publishSpawnStatus();
   });
 
   pi.on("agent_end", (_event, ctx) => {
-    lastContext = ctx;
-    publishSpawnStatus(ctx);
+    ui = ctx.ui;
+    publishSpawnStatus();
   });
 
   pi.on("session_shutdown", () => {
+    // Child cleanup is asynchronous; drop the old UI before triggering it.
+    ui = undefined;
     for (const run of runs.values()) {
       if (run.status === "running") {
         run.stopReason = "session_shutdown";
@@ -978,6 +975,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
   };
 
   const emitCommandResult = (text: string, details?: Record<string, unknown>) => {
+    if (!ui) return;
     pi.sendMessage({
       customType: "spawn_control_result",
       content: text,
@@ -1063,7 +1061,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     return run;
   };
 
-  const startRun = (run: SpawnRun, params: { model?: string; timeoutSeconds?: number }, ctx: typeof lastContext) => {
+  const startRun = (run: SpawnRun, params: { model?: string; timeoutSeconds?: number }) => {
     const binary = process.env.PI_BINARY || "pi";
     const argv = [binary, "--mode", "rpc", "--session-dir", join(run.runDir, "sessions")];
     const model = params.model ?? (run.profile?.model && run.profile.model !== "inherit" ? run.profile.model : undefined);
@@ -1088,7 +1086,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
           progressPublishTimer = undefined;
         }
         lastProgressPublishAt = Date.now();
-        publishSpawnStatus(ctx);
+        publishSpawnStatus();
         return;
       }
       if (progressPublishTimer) {
@@ -1099,7 +1097,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       progressPublishTimer = setTimeout(() => {
         progressPublishTimer = undefined;
         lastProgressPublishAt = Date.now();
-        publishSpawnStatus(ctx);
+        publishSpawnStatus();
       }, delay);
     };
     const transcript = (event: RpcEvent) => {
@@ -1172,19 +1170,20 @@ export default function spawnExtension(pi: ExtensionAPI) {
     void (async () => {
       try {
         const agentEnd = child.waitForAgentEnd();
-        const promptResponse = await child.send({
-          type: "prompt",
-          message: spawnPrompt({
-            prompt: run.prompt,
-            role: run.role,
-            agent: run.profile,
-            accessMode: run.accessMode,
-            briefPath: run.briefPath,
-            agentPromptPath: run.agentPromptPath,
-          }),
-        });
-        assertSuccess(promptResponse, "subagent prompt");
-        const terminalEnd = await agentEnd;
+        const [, terminalEnd] = await Promise.all([
+          child.send({
+            type: "prompt",
+            message: spawnPrompt({
+              prompt: run.prompt,
+              role: run.role,
+              agent: run.profile,
+              accessMode: run.accessMode,
+              briefPath: run.briefPath,
+              agentPromptPath: run.agentPromptPath,
+            }),
+          }).then((response) => assertSuccess(response, "subagent prompt")),
+          agentEnd,
+        ]);
         const terminalError = terminalAssistantError(terminalEnd);
         if (terminalError) {
           throw terminalError;
@@ -1252,7 +1251,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         publishProgress(true);
         child.dispose();
         if (run.mode === "background") {
-          enqueueCompletionNotification(run, ctx);
+          enqueueCompletionNotification(run);
         }
         run.resolveFinished(run);
       }
@@ -1262,13 +1261,13 @@ export default function spawnExtension(pi: ExtensionAPI) {
   pi.registerCommand("spawn-control", {
     description: "Control spawned subagents: /spawn-control list|status|join|stop <id>",
     handler: async (args, ctx) => {
-      lastContext = ctx;
+      ui = ctx.ui;
       const parts = (args || "").trim().split(/\s+/).filter(Boolean);
       const action = parts[0] || "list";
       const id = parts[1];
       try {
         if (action === "list") {
-          publishSpawnStatus(ctx);
+          publishSpawnStatus();
           emitCommandResult(Array.from(runs.values()).map(formatRunStatus).join("\n\n") || "No spawned subagents in this session.", spawnStatusPayload());
           return;
         }
@@ -1280,11 +1279,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
         if (action === "join") {
           const run = getRunById(id);
           run.joinRequested = true;
-          publishSpawnStatus(ctx);
+          publishSpawnStatus();
           await waitForRun(run, ctx.signal, true);
           await applyWorktreeChanges(run);
           run.joined = true;
-          publishSpawnStatus(ctx);
+          publishSpawnStatus();
           emitCommandResult(resultSummary(run), artifactDetails(run));
           return;
         }
@@ -1292,14 +1291,14 @@ export default function spawnExtension(pi: ExtensionAPI) {
           const run = getRunById(id);
           stopRun(run, "stopped_by_parent");
           await waitForRun(run, ctx.signal, false);
-          publishSpawnStatus(ctx);
+          publishSpawnStatus();
           emitCommandResult(`Stopped ${run.id}: ${run.status}${run.error ? ` (${run.error})` : ""}`, artifactDetails(run));
           return;
         }
-        ctx.ui.notify("Usage: /spawn-control list|status|join|stop <id>", "warning");
+        ui?.notify("Usage: /spawn-control list|status|join|stop <id>", "warning");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(message, "error");
+        ui?.notify(message, "error");
         emitCommandResult(`spawn-control ${action} failed: ${message}`);
       }
     },
@@ -1340,7 +1339,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      lastContext = ctx;
+      ui = ctx.ui;
       const mode = parseSpawnMode(params.mode);
       if (mode === "background") {
         const running = Array.from(runs.values()).filter((run) => run.mode === "background" && run.status === "running").length;
@@ -1398,7 +1397,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         signal,
       });
 
-      startRun(run, { model: params.model, timeoutSeconds: params.timeoutSeconds }, ctx);
+      startRun(run, { model: params.model, timeoutSeconds: params.timeoutSeconds });
 
       if (mode === "background") {
         onUpdate?.({ content: [{ type: "text", text: `${runLabel(run)} ${run.id} started (${accessMode}).` }], details: artifactDetails(run) });
@@ -1412,7 +1411,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       await run.finished;
       await applyWorktreeChanges(run);
       run.joined = true;
-      publishSpawnStatus(ctx);
+      publishSpawnStatus();
       return {
         content: [{ type: "text", text: resultSummary(run) }],
         isError: run.status !== "completed",
@@ -1444,7 +1443,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      lastContext = ctx;
+      ui = ctx.ui;
       const allRuns = Array.from(runs.values());
       const getRun = (id: string | undefined): SpawnRun => {
         if (!id) {
@@ -1480,14 +1479,14 @@ export default function spawnExtension(pi: ExtensionAPI) {
       if (params.action === "join") {
         const run = getRun(params.id);
         run.joinRequested = true;
-        publishSpawnStatus(ctx);
+        publishSpawnStatus();
         if (run.status === "running") {
           onUpdate?.({ content: [{ type: "text", text: `Waiting for subagent ${run.id}…` }], details: artifactDetails(run) });
           await waitForRun(run, signal, true);
         }
         await applyWorktreeChanges(run);
         run.joined = true;
-        publishSpawnStatus(ctx);
+        publishSpawnStatus();
         return {
           content: [{ type: "text", text: resultSummary(run) }],
           isError: run.status !== "completed" || run.worktree?.integration === "failed",
@@ -1505,14 +1504,14 @@ export default function spawnExtension(pi: ExtensionAPI) {
         for (const run of selected) {
           run.joinRequested = true;
         }
-        publishSpawnStatus(ctx);
+        publishSpawnStatus();
         onUpdate?.({ content: [{ type: "text", text: `Waiting for ${selected.length} subagent(s)…` }], details: { runs: selected.map(statusJson) } });
         await waitForRuns(selected, signal, true);
         for (const run of selected) {
           await applyWorktreeChanges(run);
           run.joined = true;
         }
-        publishSpawnStatus(ctx);
+        publishSpawnStatus();
         const text = selected.map((run) => `## ${run.id}\n\n${resultSummary(run)}`).join("\n\n---\n\n");
         return {
           content: [{ type: "text", text }],

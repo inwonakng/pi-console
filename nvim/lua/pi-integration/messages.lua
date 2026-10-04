@@ -2,6 +2,7 @@ local M = {}
 
 local json = require("pi-integration.utils.json")
 local pi_skills = require("pi-integration.skills")
+local message_utils = require("pi-integration.utils.message")
 
 function M.decode_session_record(line)
 	return json.decode_object(line)
@@ -279,19 +280,30 @@ local function update_existing_spawn_line(ctx, lines, message, text)
 	return true
 end
 
-local function append_tool_summary(ctx, lines, items, message)
+local function render_tool_summary(ctx, lines, items, message)
 	local name = message.toolName or "tool"
-	local text = ctx.messages.extract_text(message)
-	if not text or text == "" then
-		return false
-	end
-	if is_spawn_tool_name(name) then
+	local text = ctx.messages.extract_text(message) or ""
+	local tool_call_id = message_utils.tool_call_id(message)
+	if is_spawn_tool_name(name) and not message.isError then
 		message.details = upsert_spawn_details(ctx, message.details)
 	end
-	local output_id = ctx.tools.store_output(name, text, nil, message.details, message)
+	local output_id = ctx.tools.store_or_update_live_output(
+		name, tool_call_id, text, nil, message.details, ctx.tools.store_display(message), message.isError
+	)
+	local line = tool_call_id and ctx.state.live_tool_lines[tool_call_id]
+	if line then
+		if is_spawn_tool_name(name) and not message.isError then
+			bind_spawn_line(ctx, message, output_id, line)
+		end
+		lines[line] = ctx.tools.summary_lines(output_id)[1]
+		return false
+	end
 	vim.list_extend(lines, ctx.tools.summary_lines(output_id))
-	local line = #lines
-	if is_spawn_tool_name(name) then
+	line = #lines
+	if tool_call_id then
+		ctx.state.live_tool_lines[tool_call_id] = line
+	end
+	if is_spawn_tool_name(name) and not message.isError then
 		bind_spawn_line(ctx, message, output_id, line)
 	end
 	table.insert(lines, "")
@@ -489,17 +501,61 @@ function M.collect_message_lines(ctx, messages)
 		local role = message.role or message.type
 		local appended = false
 		local rendered_kind = nil
-		if role == "toolResult" then
+		if role == "tool_execution_end" then
+			local result = type(message.result) == "table" and message.result or {}
+			message = {
+				role = "toolResult",
+				toolName = message.toolName,
+				toolCallId = message.toolCallId,
+				content = result.content,
+				details = result.details,
+				isError = message.isError == true or result.isError == true,
+			}
+			role = "toolResult"
+		end
+		if role == "tool_execution_start" or role == "tool_execution_update" then
+			if role == "tool_execution_start" then
+				ctx.tools.record_execution_call(message.toolName, message.toolCallId, message.args, "running")
+			end
+			if not pi_skills.tool_result_skill_name(ctx.state, message) then
+				local partial = type(message.partialResult) == "table" and message.partialResult or {}
+				if not ctx.state.live_tool_lines[message.toolCallId] then
+					ensure_assistant_block()
+				end
+				appended = render_tool_summary(ctx, lines, items, {
+					toolName = message.toolName,
+					toolCallId = message.toolCallId,
+					content = partial.content,
+					details = partial.details,
+				})
+				rendered_kind = appended and "tool" or nil
+			end
+		elseif role == "agent_settled" or role == "agent_end" or role == "child_exit" then
+			if not message.willRetry then
+				for _, output_id in ipairs(ctx.tools.interrupt_executions()) do
+					local output = ctx.state.tool_outputs[output_id]
+					local line = ctx.state.live_tool_lines[output.tool_call_id]
+					if line then
+						lines[line] = ctx.tools.summary_lines(output_id)[1]
+					end
+				end
+			end
+		elseif role == "toolResult" then
 			local name = message.toolName or "tool"
 			local text = ctx.messages.extract_text(message) or ""
+			local tool_call_id = message_utils.tool_call_id(message)
+			ctx.tools.record_execution_call(name, tool_call_id, nil, "completed")
 			if pi_skills.tool_result_skill_name(ctx.state, message) then
 				ctx.skills.apply_tool_result(message)
 				appended = false
-			elseif is_spawn_tool_name(name) and update_existing_spawn_line(ctx, lines, message, text) then
+			elseif not message.isError and not ctx.state.live_tool_lines[tool_call_id]
+				and is_spawn_tool_name(name) and update_existing_spawn_line(ctx, lines, message, text) then
 				appended = false
-			elseif text ~= "" then
-				ensure_assistant_block()
-				appended = append_tool_summary(ctx, lines, items, message)
+			else
+				if not ctx.state.live_tool_lines[tool_call_id] then
+					ensure_assistant_block()
+				end
+				appended = render_tool_summary(ctx, lines, items, message)
 				rendered_kind = appended and "tool" or nil
 			end
 		elseif role == "compactionSummary" then

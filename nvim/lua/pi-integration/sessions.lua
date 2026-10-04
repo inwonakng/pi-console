@@ -666,13 +666,17 @@ local function session_preview_context(ctx, candidate)
 			record_calls = function(message)
 				return pi_tool_output.record_calls(state, message)
 			end,
-			record_execution_call = function(tool_name, tool_call_id, args)
-				return pi_tool_output.record_execution_call(state, tool_name, tool_call_id, args)
+			record_execution_call = function(tool_name, tool_call_id, args, execution_status)
+				return pi_tool_output.record_execution_call(state, tool_name, tool_call_id, args, execution_status)
 			end,
-			store_output = function(tool_name, text, filetype, details, message)
-				local tool_call_id = message_utils.tool_call_id(message)
-				local display = pi_tool_output.display_for_result(state, message)
-				return pi_tool_output.store(state, tool_name, text, filetype, details, display, tool_call_id, message and message.isError)
+			interrupt_executions = function()
+				return pi_tool_output.interrupt_executions(state)
+			end,
+			store_or_update_live_output = function(tool_name, tool_call_id, text, filetype, details, display, is_error)
+				return pi_tool_output.store_or_update_live(state, tool_name, tool_call_id, text, filetype, details, display, is_error)
+			end,
+			store_display = function(message)
+				return pi_tool_output.display_for_result(state, message)
 			end,
 			store_or_update_spawn_run_output = function(run, text)
 				return pi_tool_output.store_or_update_spawn_run(state, run, text)

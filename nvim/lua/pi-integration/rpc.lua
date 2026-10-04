@@ -88,6 +88,13 @@ end
 
 local function reset_runtime_state(ctx)
 	local state = ctx.state
+	for _, output_id in ipairs(ctx.tools.interrupt_executions()) do
+		local output = state.tool_outputs[output_id]
+		local line = state.live_tool_lines[output.tool_call_id]
+		if line then
+			ctx.transcript.set_line(line, ctx.tools.summary_lines(output_id)[1])
+		end
+	end
 	state.job = nil
 	state.is_agent_running = false
 	state.refresh_transcript_after_settled = false

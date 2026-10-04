@@ -19,9 +19,8 @@ local function extract_text(message)
 	return message_utils.extract_text(message)
 end
 
-local function read_messages(state, path)
+local function read_messages(path)
 	local messages = {}
-	state.is_agent_running = false
 	if not path or vim.fn.filereadable(path) ~= 1 then
 		return messages
 	end
@@ -29,12 +28,12 @@ local function read_messages(state, path)
 		local record = decode_json(line)
 		local event = type(record) == "table" and record.event or nil
 		if type(event) == "table" then
-			if event.type == "agent_start" then
-				state.is_agent_running = true
-			elseif event.type == "agent_settled" then
-				state.is_agent_running = false
-			elseif event.type == "message_end" and type(event.message) == "table" then
+			if event.type == "message_end" and type(event.message) == "table" then
 				table.insert(messages, event.message)
+			elseif event.type == "tool_execution_start" or event.type == "tool_execution_update"
+				or event.type == "tool_execution_end" or event.type == "agent_end" or event.type == "agent_settled"
+				or event.type == "child_exit" then
+				table.insert(messages, event)
 			end
 		end
 	end
@@ -54,6 +53,7 @@ end
 local function make_render_ctx(state, path)
 	return {
 		state = state,
+		notices = { empty_session = "No messages yet." },
 		messages = {
 			extract_text = extract_text,
 		},
@@ -66,12 +66,17 @@ local function make_render_ctx(state, path)
 			record_calls = function(message)
 				return pi_tool_output.record_calls(state, message)
 			end,
-			record_execution_call = function(tool_name, tool_call_id, args)
-				return pi_tool_output.record_execution_call(state, tool_name, tool_call_id, args)
+			record_execution_call = function(tool_name, tool_call_id, args, execution_status)
+				return pi_tool_output.record_execution_call(state, tool_name, tool_call_id, args, execution_status)
 			end,
-			store_output = function(tool_name, text, filetype, details, message)
-				local tool_call_id = message_utils.tool_call_id(message)
-				return pi_tool_output.store(state, tool_name, text, filetype, details, pi_tool_output.display_for_result(state, message), tool_call_id, message and message.isError)
+			interrupt_executions = function()
+				return pi_tool_output.interrupt_executions(state)
+			end,
+			store_or_update_live_output = function(tool_name, tool_call_id, text, filetype, details, display, is_error)
+				return pi_tool_output.store_or_update_live(state, tool_name, tool_call_id, text, filetype, details, display, is_error)
+			end,
+			store_display = function(message)
+				return pi_tool_output.display_for_result(state, message)
 			end,
 			store_or_update_spawn_run_output = function(run, text)
 				return pi_tool_output.store_or_update_spawn_run(state, run, text)
@@ -110,7 +115,7 @@ local function render_lines(path, state)
 	pi_tool_output.reset(state)
 	pi_thinking_output.reset(state)
 	pi_skills.reset(state)
-	local lines, items = pi_messages.collect_message_lines(make_render_ctx(state, path), read_messages(state, path))
+	local lines, items = pi_messages.collect_message_lines(make_render_ctx(state, path), read_messages(path))
 	state.transcript_items = items or {}
 	return lines
 end
