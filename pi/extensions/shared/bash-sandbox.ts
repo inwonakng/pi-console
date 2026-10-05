@@ -14,6 +14,7 @@ export type BashAccessRequest = {
   broadReadAccess?: boolean;
   workspaceWriteAccess?: boolean;
   networkAccess?: boolean;
+  unixSocketPaths?: string[];
   unsandboxed?: boolean;
 };
 
@@ -33,6 +34,7 @@ let sandboxConfig: SandboxRuntimeConfig | undefined;
 let sandboxError: string | undefined;
 let commandQueue: Promise<void> = Promise.resolve();
 let commandNetworkAccess = false;
+let commandUnixSocketPaths: string[] = [];
 
 function networkConfig(): SandboxRuntimeConfig["network"] {
   return {
@@ -42,6 +44,7 @@ function networkConfig(): SandboxRuntimeConfig["network"] {
     // command's upfront grant instead; it never asks for permission at runtime.
     strictAllowlist: !commandNetworkAccess || getAccessMode() === "readonly",
     allowLocalBinding: false,
+    allowUnixSockets: getAccessMode() === "readonly" ? [] : commandUnixSocketPaths,
   };
 }
 
@@ -92,7 +95,8 @@ function reportBlockedCommand(lines: string[], onData: (data: Buffer) => void): 
     + "For filesystem denials, request only the specific readPaths/writePaths that the operation needs. "
     + "For a proxy network allowlist denial, request networkAccess=true on your continuation command; approval happens before it starts. "
     + "Network approval does not lift filesystem restrictions or fix DNS, TLS, or server errors. "
-    + "If the sandbox cannot support the operation, request unsandboxed=true for explicitly approved, unrestricted access for one command. "
+    + "For Unix-socket denials on macOS, request narrow unixSocketPaths (inspect $TMPDIR for temporary socket directories). "
+    + "If the sandbox cannot support the operation, request unsandboxed=true for explicit unrestricted approval, once or for this exact command/CWD during the session. "
     + "Choose a continuation that does not duplicate completed work. Denied access is not task completion.\n", "utf8"));
 }
 
@@ -103,8 +107,8 @@ async function runUnsandboxed(
   ctx: ExtensionContext,
   onSessionGrant: () => void,
 ): Promise<{ exitCode: number | null }> {
-  await requestPermission(ctx, { kind: "unsandboxed", scope: command }, "bash",
-    { text: command, filetype: "sh" }, onSessionGrant, false);
+  await requestPermission(ctx, { kind: "unsandboxed", scope: command, cwd }, "bash",
+    { text: command, filetype: "sh" }, onSessionGrant);
   if (options.signal?.aborted) throw new Error("aborted");
   return localBash.exec(command, cwd, options);
 }
@@ -116,6 +120,7 @@ async function runSandboxed(
   ctx: ExtensionContext,
   filesystem: SandboxRuntimeConfig["filesystem"],
   networkAccess: boolean,
+  unixSocketPaths: string[],
   onSessionGrant: () => void,
   onBlocked: () => void,
 ): Promise<{ exitCode: number | null }> {
@@ -123,6 +128,7 @@ async function runSandboxed(
   const scratch = getScratchDirectory();
   let wrappedCommand = false;
   commandNetworkAccess = networkAccess;
+  commandUnixSocketPaths = unixSocketPaths;
   try {
     updateNetworkConfig();
     const previousTempDir = process.env.CLAUDE_CODE_TMPDIR;
@@ -136,6 +142,7 @@ async function runSandboxed(
       // Preparation failed before any process was started. It is safe to offer
       // the explicit one-command fallback here, but never after partial execution.
       commandNetworkAccess = false;
+      commandUnixSocketPaths = [];
       updateNetworkConfig();
       options.onData(Buffer.from(`Sandbox could not prepare this command: ${error instanceof Error ? error.message : String(error)}. No command was started.\n`));
       return await runUnsandboxed(command, cwd, options, ctx, onSessionGrant);
@@ -172,6 +179,7 @@ async function runSandboxed(
     }
   } finally {
     commandNetworkAccess = false;
+    commandUnixSocketPaths = [];
     try {
       updateNetworkConfig();
     } finally {
@@ -195,9 +203,16 @@ async function executeRestricted(
   const paths = (values: string[] = []) => [...new Set(values.map((path) => canonicalPath(resolveToolPath(path, root))))];
   const reads = paths(request.readPaths);
   const writes = paths([...(request.writePaths ?? []), ...(request.workspaceWriteAccess ? [root] : [])]);
+  const sockets = paths(request.unixSocketPaths);
   // Validate the configured policy before considering an unrestricted fallback.
   const baselinePaths = baselineReadPaths(root);
   const globShaped = (path: string) => /[*?\[\]]/.test(path);
+  if (!request.unsandboxed && sockets.length) {
+    if (process.platform !== "darwin") {
+      throw new Error("Path-scoped unixSocketPaths require macOS; this sandbox runtime cannot enforce them on this platform. No command was started. Consider explicit unsandboxed approval instead.");
+    }
+    if (sockets.some(globShaped)) throw new Error("unixSocketPaths must be literal paths without sandbox wildcard characters. No command was started.");
+  }
   if (request.unsandboxed || !sandboxConfig || !SandboxManager.isSandboxingEnabled()
     || [...baselinePaths, ...reads, ...writes].some(globShaped)) {
     return runUnsandboxed(command, root, options, context, onSessionGrant);
@@ -225,11 +240,16 @@ async function executeRestricted(
   if (filesystem.allowWrite.some((write) => filesystem.denyWrite.some((denied) => pathInside(denied, write)))) {
     return runUnsandboxed(command, root, options, context, onSessionGrant);
   }
+  for (const scope of sockets) {
+    await requestPermission(context, { kind: "unix-socket", scope }, "bash", preview, onSessionGrant);
+  }
+  sockets.push(...getGrantedScopes("unix-socket"));
   if (request.networkAccess) {
     await requestPermission(context, { kind: "network", scope: "*" }, "bash", preview, onSessionGrant, false);
   }
   if (options.signal?.aborted) throw new Error("aborted");
-  return runSandboxed(command, root, options, context, filesystem, request.networkAccess === true, onSessionGrant, onBlocked);
+  return runSandboxed(command, root, options, context, filesystem, request.networkAccess === true,
+    [...new Set(sockets)], onSessionGrant, onBlocked);
 }
 
 export function createAccessControlledBashOperations(
@@ -267,7 +287,7 @@ export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void
     if (SandboxManager.isSandboxingEnabled()) {
       try { await SandboxManager.reset(); } catch { /* Keep the initialization error. */ }
     }
-    ctx.ui.notify(`Sandbox unavailable: ${sandboxError}. Shell commands require explicit one-command unrestricted approval; readonly mode cannot grant it.`, "warning");
+    ctx.ui.notify(`Sandbox unavailable: ${sandboxError}. Shell commands require explicit unrestricted approval (once or for the exact command/CWD during this session); readonly mode cannot grant it.`, "warning");
   }
 }
 
@@ -280,6 +300,7 @@ export async function shutdownBashSandbox(): Promise<void> {
     setScratchDirectory(undefined);
     sandboxConfig = undefined;
     commandNetworkAccess = false;
+    commandUnixSocketPaths = [];
     if (scratch) rmSync(scratch, { recursive: true, force: true });
   }
 }

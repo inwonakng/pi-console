@@ -294,6 +294,15 @@ or the runtime's network safeguards. Network access is routed through the sandbo
 proxy; it never opens a permission prompt while a command is running. Undeclared
 access is denied, with the destination reported when available.
 
+On macOS, `unixSocketPaths` requests Unix-socket binding and connections at
+literal socket paths or directories (directory approval includes descendants).
+Inspect Bash's `$TMPDIR` to find Neovim's temporary socket directory, then pass
+its literal path rather than `$TMPDIR` as a string. Socket approval does not grant
+filesystem reads/writes, outbound-network access, or TCP binding. Access to Unix
+sockets can expose powerful local services; approve only the needed paths. The
+runtime cannot enforce path-scoped socket grants on Linux, so such requests are
+rejected before execution rather than widened to all sockets.
+
 Scoped filesystem approvals offer Allow once, Allow for session, or Deny.
 Network access offers Allow once or Deny and is never saved. Existing saved
 read/write and host-specific network grants are retained on resume, but not
@@ -314,16 +323,30 @@ approvals finish before the shell and its execution timer start.
 If granular permissions cannot support an operation (for example, raw networking
 or a literal path containing sandbox wildcard characters), request
 `unsandboxed: true`. This explicitly asks to run that command with unrestricted
-host filesystem, environment, and network access **once**, without changing the
+host filesystem, environment, and network access, without changing the
 session's mode. The same fallback is offered when the sandbox is unavailable or
-cannot prepare a command before execution. It is never remembered, implicitly
-granted, or offered as an automatic rerun after partial execution.
+cannot prepare a command before execution. The picker offers Allow once,
+Allow this command outside the sandbox for this session, or Deny. Session approval
+matches the **exact command text and canonical Command CWD**, not a prefix. It
+includes future changes to scripts and execution of child processes with
+unrestricted host access; it does not confine their effects to the script's
+directory. Different arguments, appended shell commands, or a different CWD need
+new approval. Keep script modifications in separate calls from the stable run
+command to reuse approval. Remembered approval is only consulted when a command
+needs unsandboxed execution; it never moves a normally sandboxed run outside the
+sandbox.
+
+Unsandboxed and Unix-socket session grants are held only in memory. They expire
+on session/branch replacement or process exit, are not saved for resume, and are
+not inherited by forks or subagents. Both are blocked in `readonly`. Approval is
+never offered as an automatic rerun after partial execution.
 
 Detected sandbox denials are reported with available diagnostics and partial
 output, even when the command exits zero. Commands are never automatically
 rerun after a sandbox block: inspect what already happened, then request the
 needed access with an appropriate continuation command (`networkAccess: true`
-for a proxy allowlist denial, `readPaths`/`writePaths` for filesystem denials).
+for a proxy allowlist denial, `readPaths`/`writePaths` for filesystem denials,
+`unixSocketPaths` for Unix-socket denials on macOS).
 Network permission does not fix DNS, TLS, or server errors. Detection is best-effort;
 suppressed errors may not be observable. `readonly` and noninteractive sessions
 do not prompt for additional access.

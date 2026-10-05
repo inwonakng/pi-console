@@ -9,8 +9,12 @@ import { getInteractionMode } from "./interaction-mode";
 import { notifyPiToolApproval } from "./notifications";
 
 export type Permission = {
-  kind: "read" | "write" | "network" | "tool" | "unsandboxed";
+  kind: "read" | "write" | "network" | "tool" | "unix-socket";
   scope: string;
+} | {
+  kind: "unsandboxed";
+  scope: string;
+  cwd: string;
 };
 
 export type PermissionPreview = { text: string; filetype: string };
@@ -91,7 +95,7 @@ export function getSessionGrants(): Permission[] {
   return sessionGrants.map((grant) => ({ ...grant }));
 }
 
-export function getGrantedScopes(kind: "read" | "write" | "network"): string[] {
+export function getGrantedScopes(kind: "read" | "write" | "network" | "unix-socket"): string[] {
   if (getAccessMode() === "readonly") return [];
   return sessionGrants.filter((grant) => grant.kind === kind || (kind === "read" && grant.kind === "write"))
     .filter((grant) => grant.kind === "network" || canonicalPath(grant.scope) === grant.scope)
@@ -113,7 +117,8 @@ export function restorePermissionGrants(values: unknown): void {
     } else if (kind === "network" || kind === "tool") {
       sessionGrants.push({ kind, scope });
     }
-    // Unrestricted execution is always approved for one invocation, never restored.
+    // Unsandboxed and Unix-socket grants live only in this process/session.
+    // Never restore them from session history, including after a branch change.
   }
 }
 
@@ -121,13 +126,18 @@ export function hasPermission(permission: Permission, cwd: string): boolean {
   const mode = getAccessMode();
   if (mode === "full") return true;
   const { kind } = permission;
-  const scope = kind === "read" || kind === "write" ? canonicalPath(permission.scope) : permission.scope;
+  const scope = kind === "read" || kind === "write" || kind === "unix-socket"
+    ? canonicalPath(permission.scope) : permission.scope;
   if (kind === "read" && baselineReadPaths(cwd).some((path) => pathInside(canonicalPath(path), scope))) return true;
   if (kind === "write" && baselineWritePaths(cwd).some((path) => pathInside(canonicalPath(path), scope))) return true;
-  if (mode === "readonly" || kind === "unsandboxed") return false;
+  if (mode === "readonly") return false;
   return sessionGrants.some((grant) => {
     if (grant.kind !== kind && !(kind === "read" && grant.kind === "write")) return false;
     if (kind === "read" || kind === "write") return pathInside(grant.scope, scope);
+    if (kind === "unix-socket") return canonicalPath(grant.scope) === grant.scope && pathInside(grant.scope, scope);
+    if (permission.kind === "unsandboxed" && grant.kind === "unsandboxed") {
+      return grant.scope === scope && grant.cwd === permission.cwd && grant.cwd === canonicalPath(cwd);
+    }
     if (kind === "network") return grant.scope === scope || scope.startsWith(`${grant.scope}:`);
     return grant.scope === scope;
   });
@@ -141,7 +151,8 @@ function permissionSummary(permission: Permission): string {
       ? "Allow outbound network access to any host for this command only? The command can send data it can read, including inherited environment values. Filesystem restrictions and sandbox network safeguards remain in place."
       : `Allow network access to ${permission.scope}?`;
     case "tool": return `Allow running ${permission.scope}?`;
-    case "unsandboxed": return "Run this command outside the sandbox once? This grants unrestricted host filesystem, environment, and network access for this invocation only.";
+    case "unix-socket": return `Allow Unix-socket binding and connections at ${permission.scope}? Directory approval includes descendants and can expose local services. Filesystem and outbound-network restrictions remain in place.`;
+    case "unsandboxed": return `Run this exact command outside the sandbox in ${permission.cwd}? Approval grants unrestricted host filesystem, environment, and network access, including child processes. Session approval includes future script modifications, but not different command text or working directories.`;
   }
 }
 
@@ -168,27 +179,29 @@ export function requestPermission(
     if (getInteractionMode(ctx) !== "interactive") {
       throw new Error(`${permission.kind} access requires approval, but interaction mode is noninteractive: ${scopeLabel}`);
     }
-    const canRemember = remember && permission.kind !== "unsandboxed"
-      && !(permission.kind === "network" && permission.scope === "*");
+    const canRemember = remember && !(permission.kind === "network" && permission.scope === "*");
     const summary = permissionSummary(permission);
     const contents = typeof preview === "function" ? preview() : preview;
     const title = ctx.mode === "rpc" ? JSON.stringify({
       kind: "pi_approval_preview", tool, mode: getAccessMode(), summary: scopeLabel,
       request: summary, directory: ctx.cwd,
-      path: permission.kind === "read" || permission.kind === "write" ? permission.scope : undefined,
+      path: permission.kind === "read" || permission.kind === "write" || permission.kind === "unix-socket"
+        ? permission.scope : undefined,
       preview_filetype: contents.filetype, preview: contents.text,
     }) : `${summary}\n${contents.text}`;
     notifyPiToolApproval(ctx);
-    const choices = canRemember ? ["Allow once", "Allow for session", "Deny"] : ["Allow once", "Deny"];
+    const sessionChoice = permission.kind === "unsandboxed"
+      ? "Allow this command outside the sandbox for this session" : "Allow for session";
+    const choices = canRemember ? ["Allow once", sessionChoice, "Deny"] : ["Allow once", "Deny"];
     const choice = await ctx.ui.select(title, choices, { signal });
     assertCurrent();
     if (getAccessMode() === "readonly") throw new Error("Permission request cancelled because access mode changed to readonly.");
-    if (choice !== "Allow once" && !(canRemember && choice === "Allow for session")) {
+    if (choice !== "Allow once" && !(canRemember && choice === sessionChoice)) {
       throw new Error(`${permission.kind} access denied by user: ${scopeLabel}`);
     }
-    if (choice === "Allow for session") {
+    if (choice === sessionChoice) {
       sessionGrants.push({ ...permission });
-      onSessionGrant();
+      if (permission.kind !== "unsandboxed" && permission.kind !== "unix-socket") onSessionGrant();
     }
   };
   // All file-tool and network requests share the frontend's one active picker.

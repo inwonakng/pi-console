@@ -155,7 +155,7 @@ function setStatus(ctx: ExtensionContext): void {
 function saveAccessState(pi: ExtensionAPI): void {
   saveSessionSetting(pi, ACCESS_SETTING, {
     mode: getAccessMode(),
-    permissions: getSessionGrants(),
+    permissions: getSessionGrants().filter((grant) => grant.kind !== "unsandboxed" && grant.kind !== "unix-socket"),
   });
 }
 
@@ -183,7 +183,7 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     ...defaultBash,
     label: "bash (sandboxed)",
     executionMode: "sequential",
-    description: `${defaultBash.description} Reads are unrestricted by default. Temporary space and configured write paths are writable without approval; edit mode also allows workspace writes. Request additional writePaths before execution, and narrow readPaths only when read access is configured to be restricted. networkAccess requests outbound access to any host for this command only, without lifting filesystem restrictions. workspaceWriteAccess requests writing the current directory. If granular sandbox permissions cannot support the operation, request unsandboxed for unrestricted access for this invocation only. Omit timeout by default; use it for a user-requested execution deadline.`,
+    description: `${defaultBash.description} Reads are unrestricted by default. Temporary space and configured write paths are writable without approval; edit mode also allows workspace writes. Request additional writePaths before execution, and narrow readPaths only when read access is configured to be restricted. networkAccess requests outbound access to any host for this command only, without lifting filesystem restrictions. workspaceWriteAccess requests writing the current directory. unixSocketPaths requests path-scoped Unix-socket binding and connections on macOS while retaining other sandbox restrictions. If granular sandbox permissions cannot support the operation, request unsandboxed for unrestricted access, approved once or for the exact command and working directory during this session. Omit timeout by default; use it for a user-requested execution deadline.`,
     outputSchema: Type.Intersect([defaultBash.outputSchema!, Type.Object({
       sandbox_blocked: Type.Optional(Type.Boolean({ description: "The sandbox detected denied access; output may be partial even when exit_code is zero." })),
     })]),
@@ -207,8 +207,11 @@ export default function accessModeExtension(pi: ExtensionAPI) {
       workspaceWriteAccess: Type.Optional(Type.Boolean({
         description: "Request reading and writing the current working directory before execution; equivalent to including it in writePaths.",
       })),
+      unixSocketPaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
+        description: "Request Unix-socket binding and connections at literal paths on macOS. Directory approval includes descendants; may expose local services. Offers approval once or for this session, without granting filesystem or outbound-network access. Inspect $TMPDIR to find temporary socket directories. Unsupported on Linux; never silently widened to all sockets.",
+      })),
       unsandboxed: Type.Optional(Type.Boolean({
-        description: "Ask to execute this command outside the sandbox once, with unrestricted host filesystem, environment, and network access. Never remembered; does not change the session's access mode.",
+        description: "Ask to execute outside the sandbox with unrestricted host filesystem, environment, and network access, including child processes. Offers approval once or for the exact command text and canonical working directory during this session, including future script modifications. Grants are not persisted or inherited; does not change the session's access mode.",
       })),
     }),
     promptGuidelines: [
@@ -216,7 +219,8 @@ export default function accessModeExtension(pi: ExtensionAPI) {
       "Reads are unrestricted by default, including session logs and credential files; do not request read access for routine inspection. Scratch space and configured write paths are already writable; edit mode also permits workspace writes. Declare only additional writePaths before mutation. In ask mode, workspaceWriteAccess=true requests writing the current directory. If configured reads are restricted, request specific required readPaths rather than broadReadAccess for incidental configuration lookups.",
       "Request networkAccess=true upfront for commands that need outbound connections, such as dependency downloads or remote API calls. It grants access to any host for that command only, not filesystem access. Undeclared access is denied during execution; the proxy never opens a permission prompt. Existing saved host grants still apply.",
       "Omit bash.timeout by default. Do not add command-level timeouts such as curl --max-time, curl --connect-timeout, or the timeout utility unless the user requested them or you are specifically testing timeout behavior. For a user-requested execution deadline, use bash.timeout instead.",
-      "If an operation cannot be supported by granular sandbox permissions, request unsandboxed=true to ask for unrestricted host access for one command, without changing the session's mode.",
+      "For Unix-socket denials on macOS, prefer narrow unixSocketPaths over unsandboxed execution. Inspect $TMPDIR for temporary socket directories and pass literal paths, not shell variables. Socket permission does not grant filesystem writes, outbound connections, or TCP binding; Linux cannot enforce path-scoped socket grants.",
+      "If granular sandbox permissions cannot support an operation, request unsandboxed=true. The user can approve once or for the exact command text and canonical CWD during this session, including modified scripts and child processes with unrestricted host access. Keep script modifications in separate calls from the stable run command so repeated execution can reuse approval. Grants expire on session/branch replacement or process exit and are not inherited by forks or subagents.",
       "Denied access is not task completion. A sandbox-blocked command may have partially executed and written files, even when its exit code is zero. Inspect partial output and state, then request needed access with an appropriate continuation. Do not blindly rerun. Permissions are requested through tool arguments, not the question tool.",
     ],
     async execute(id, params, signal, onUpdate, ctx) {
