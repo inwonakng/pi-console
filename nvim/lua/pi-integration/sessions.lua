@@ -681,12 +681,6 @@ local function session_preview_context(ctx, candidate)
 			store_or_update_spawn_run_output = function(run, text)
 				return pi_tool_output.store_or_update_spawn_run(state, run, text)
 			end,
-			bind_spawn_run = function(run, output_id, line)
-				return pi_tool_output.bind_spawn_run(state, run, output_id, line)
-			end,
-			summary_lines = function(output_id)
-				return pi_tool_output.summary_lines(state, output_id)
-			end,
 		},
 		thinking = {
 			store_output = function(text)

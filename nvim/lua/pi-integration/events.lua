@@ -6,19 +6,12 @@ local pi_skills = require("pi-integration.skills")
 local pi_usage = require("pi-integration.usage")
 local pending_picker = require("pi-integration.pending-picker")
 
-local function bind_spawn_run_line(ctx, run, output_id, line)
-	if ctx.tools.bind_spawn_run then
-		ctx.tools.bind_spawn_run(run, output_id, line)
-	end
-end
-
 local function render_tool_output(ctx, event, text, details, display)
-	local state = ctx.state
 	local is_error = event.isError
 	if type(event.result) == "table" then
 		is_error = is_error == true or event.result.isError == true
 	end
-	local output_id, updated = ctx.tools.store_or_update_live_output(
+	local output_id = ctx.tools.store_or_update_live_output(
 		event.toolName or "tool",
 		event.toolCallId,
 		text or "",
@@ -27,39 +20,8 @@ local function render_tool_output(ctx, event, text, details, display)
 		display,
 		is_error
 	)
-	local output = state.tool_outputs and state.tool_outputs[output_id]
-	local run_details = output and output.details or details
-	local is_spawn = not output.is_error and (event.toolName == "spawn" or event.toolName == "spawn_control")
-	if updated then
-		local line = state.live_tool_lines and event.toolCallId and state.live_tool_lines[event.toolCallId]
-		if line then
-			if is_spawn then
-				bind_spawn_run_line(ctx, run_details, output_id, line)
-			end
-			ctx.transcript.set_line(line, ctx.tools.summary_lines(output_id)[1])
-		end
-		return output_id, line
-	end
-
-	ctx.transcript.ensure_assistant_turn_started("Assistant")
-	ctx.transcript.begin_trace_item()
-	ctx.transcript.append_lines(ctx.tools.summary_lines(output_id))
-	local line = ctx.transcript.line_count()
-	state.live_tool_lines = state.live_tool_lines or {}
-	if event.toolCallId then
-		state.live_tool_lines[event.toolCallId] = line
-	end
-	if is_spawn then
-		bind_spawn_run_line(ctx, run_details, output_id, line)
-	end
-	ctx.transcript.register_item({
-		kind = "tool",
-		start_line = line,
-		end_line = line,
-		output_id = output_id,
-	})
-	ctx.transcript.end_trace_item()
-	return output_id, line
+	ctx.transcript.write_tool_output(output_id)
+	return output_id
 end
 
 local function run_id(run)
@@ -181,7 +143,7 @@ function M.start_activity(ctx, label)
 	start_activity(ctx, label)
 end
 
-local function update_spawn_run_line(ctx, run, progress)
+local function update_spawn_run_output(ctx, run, progress)
 	local id = run_id(run)
 	if type(id) ~= "string" or id == "" then
 		return false
@@ -191,19 +153,12 @@ local function update_spawn_run_line(ctx, run, progress)
 		run.progress = progress
 	end
 	run = upsert_spawn_run(ctx, run)
-	local state = ctx.state
-	state.spawn_run_lines = state.spawn_run_lines or {}
-	local line = state.spawn_run_lines[id]
-	if not line then
-		return false
-	end
 	ctx.transcript.touch()
 	local output_id = ctx.tools.store_or_update_spawn_run_output(run, progress)
 	if not output_id then
 		return false
 	end
-	bind_spawn_run_line(ctx, run, output_id, line)
-	ctx.transcript.set_line(line, ctx.tools.summary_lines(output_id)[1])
+	ctx.transcript.write_tool_output(output_id)
 	return true
 end
 
@@ -213,7 +168,7 @@ local function render_spawn_runs(ctx, runs)
 	end
 	local rendered = false
 	for _, run in ipairs(runs) do
-		rendered = update_spawn_run_line(ctx, run) or rendered
+		rendered = update_spawn_run_output(ctx, run) or rendered
 	end
 	return rendered
 end
@@ -238,11 +193,11 @@ local function update_spawn_details(ctx, name, details, text)
 		return false
 	end
 	if type(details.runId) == "string" or type(details.id) == "string" then
-		return update_spawn_run_line(ctx, details, text)
+		return update_spawn_run_output(ctx, details, text)
 	elseif type(details.runs) == "table" then
 		local updated = false
 		for _, run in ipairs(details.runs) do
-			updated = update_spawn_run_line(ctx, run) or updated
+			updated = update_spawn_run_output(ctx, run) or updated
 		end
 		return updated
 	end
@@ -263,22 +218,20 @@ local function is_todo_tool_name(name)
 	return name == "todowrite" or name == "todo_write"
 end
 
-local function remember_todo_tool_line(ctx, output_id, line)
+local function remember_todo_output(ctx, output_id)
 	local state = ctx.state
 	local output = state.tool_outputs and state.tool_outputs[output_id]
 	if output and is_todo_tool_name(output.name) then
 		state.todo_tool_output_id = output_id
-		state.todo_tool_line = line
 	end
 end
 
-local function refresh_todo_tool_line(ctx)
+local function refresh_todo_output(ctx)
 	local state = ctx.state
 	local output_id = state.todo_tool_output_id
-	local line = state.todo_tool_line
-	if output_id and line and state.tool_outputs and state.tool_outputs[output_id] then
+	if output_id and state.tool_outputs and state.tool_outputs[output_id] then
 		ctx.transcript.touch()
-		ctx.transcript.set_line(line, ctx.tools.summary_lines(output_id)[1])
+		ctx.transcript.write_tool_output(output_id)
 	end
 end
 
@@ -326,12 +279,12 @@ function M.render_message(ctx, message)
 			and update_spawn_details(ctx, name, message.details, text) then
 			return
 		end
-		local output_id, line = render_tool_output(ctx, {
+		local output_id = render_tool_output(ctx, {
 			toolName = name,
 			toolCallId = tool_call_id,
 			isError = message.isError,
 		}, text, message.details, ctx.tools.store_display and ctx.tools.store_display(message) or nil)
-		remember_todo_tool_line(ctx, output_id, line)
+		remember_todo_output(ctx, output_id)
 		return
 	end
 	ctx.transcript.append_message_header(role:gsub("^%l", string.upper))
@@ -688,7 +641,7 @@ function M.handle_extension_ui_request(ctx, event)
 			state.tree_leaf_id = normalize_leaf_id(event.statusText)
 		elseif event.statusKey == "pi-todos" then
 			state.todo_status = event.statusText
-			refresh_todo_tool_line(ctx)
+			refresh_todo_output(ctx)
 		elseif event.statusKey == "pi-notifications" then
 			state.notification_status = event.statusText
 			ctx.transcript.refresh_ui()
@@ -845,11 +798,7 @@ function M.handle_event(ctx, event)
 	local state = ctx.state
 	if (event.type == "agent_end" and not event.willRetry) or event.type == "agent_settled" then
 		for _, output_id in ipairs(ctx.tools.interrupt_executions()) do
-			local output = state.tool_outputs[output_id]
-			local line = state.live_tool_lines[output.tool_call_id]
-			if line then
-				ctx.transcript.set_line(line, ctx.tools.summary_lines(output_id)[1])
-			end
+			ctx.transcript.write_tool_output(output_id)
 		end
 	end
 	if event.type == "response" then
@@ -1031,8 +980,8 @@ function M.handle_event(ctx, event)
 		end
 		if not pi_skills.tool_result_skill_name(state, event) then
 			local result = execution_result or {}
-			local output_id, line = render_tool_output(ctx, event, message_utils.extract_content_text(result.content), result.details)
-			remember_todo_tool_line(ctx, output_id, line)
+			local output_id = render_tool_output(ctx, event, message_utils.extract_content_text(result.content), result.details)
+			remember_todo_output(ctx, output_id)
 		end
 		if state.activity_tool_call_id == event.toolCallId then
 			state.activity_tool_call_id = nil

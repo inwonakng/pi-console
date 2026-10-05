@@ -177,20 +177,12 @@ local function store_or_update_spawn_run_output(run, text)
 	return pi_tool_output.store_or_update_spawn_run(state, run, text)
 end
 
-local function bind_spawn_run_output(run, output_id, line)
-	return pi_tool_output.bind_spawn_run(state, run, output_id, line)
-end
-
 local function store_tool_display(message)
 	return pi_tool_output.display_for_result(state, message)
 end
 
 local function live_tool_output_id(tool_call_id)
 	return pi_tool_output.live_output_id(state, tool_call_id)
-end
-
-local function tool_output_summary_lines(output_id)
-	return pi_tool_output.summary_lines(state, output_id)
 end
 
 local function store_thinking_output(text)
@@ -239,6 +231,10 @@ end
 
 local function set_transcript_line(line, text)
 	return pi_transcript.set_line(transcript_ctx(), line, text)
+end
+
+local function write_tool_output(output_id)
+	return pi_transcript.write_tool_output(transcript_ctx(), output_id)
 end
 
 local function open_transcript_item_under_cursor()
@@ -458,6 +454,7 @@ local integration_context = {
 		end_trace_item = end_trace_item,
 		register_item = register_transcript_item,
 		set_line = set_transcript_line,
+		write_tool_output = write_tool_output,
 		open_item_under_cursor = open_transcript_item_under_cursor,
 		start_assistant_placeholder = start_assistant_placeholder,
 		assistant_placeholder_active = assistant_placeholder_active,
@@ -474,10 +471,8 @@ local integration_context = {
 		end,
 		store_or_update_live_output = store_or_update_live_tool_output,
 		store_or_update_spawn_run_output = store_or_update_spawn_run_output,
-		bind_spawn_run = bind_spawn_run_output,
 		store_display = store_tool_display,
 		live_output_id = live_tool_output_id,
-		summary_lines = tool_output_summary_lines,
 	},
 	thinking = {
 		store_output = store_thinking_output,

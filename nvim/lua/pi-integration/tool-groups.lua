@@ -1,46 +1,12 @@
 local message_utils = require("pi-integration.utils.message")
+local tool_output = require("pi-integration.tool-output")
 
 local M = {}
 
-local function tool_name(state, item)
-	local output = item.kind == "tool" and state.tool_outputs[item.output_id]
-	return output and output.name or nil
-end
-
-local function adjacent(lines, left, right)
-	for line = left.end_line + 1, right.start_line - 1 do
-		if lines[line] ~= "" then
-			return false
-		end
-	end
-	return true
-end
-
-local function shift_lines(state, items, at)
-	for _, item in ipairs(items) do
-		if item.start_line >= at then
-			item.start_line = item.start_line + 1
-		end
-		if item.end_line >= at then
-			item.end_line = item.end_line + 1
-		end
-	end
-	-- These live-update targets must continue pointing to the original rows.
-	for _, key in ipairs({ "active_thinking_line", "todo_tool_line", "placeholder_start_line", "placeholder_line" }) do
-		if state[key] and state[key] >= at then
-			state[key] = state[key] + 1
-		end
-	end
-	for _, key in ipairs({ "live_tool_lines", "spawn_run_lines" }) do
-		for id, line in pairs(state[key] or {}) do
-			if line >= at then
-				state[key][id] = line + 1
-			end
-		end
-	end
-end
-
 local function summary(state, group)
+	if #group.children == 1 then
+		return "> 󰇥 " .. tool_output.summary_text(state, group.children[1].output_id)
+	end
 	local files, failures, running = {}, 0, 0
 	for _, child in ipairs(group.children) do
 		local output = state.tool_outputs[child.output_id]
@@ -72,90 +38,65 @@ local function summary(state, group)
 	return text
 end
 
--- Used both by the history collector and by the live transcript. Existing
--- headers are retained; only a newly promoted singleton inserts a buffer row.
-function M.collect(state, lines, items)
-	local runs, existing = {}, {}
-	local previous, run
-	for _, item in ipairs(items) do
-		if item.kind == "tool_group" then
-			existing[item.children[1].output_id] = item
-		else
-			local name = tool_name(state, item)
-			if name and run and name == run.name and adjacent(lines, previous, item) then
-				table.insert(run.children, item)
-			elseif name then
-				run = { name = name, children = { item } }
-				table.insert(runs, run)
-			else
-				run = nil
-			end
-			previous = item
-		end
-	end
-
-	local edits = {}
-	for _, candidate in ipairs(runs) do
-		if #candidate.children > 1 then
-			local first = candidate.children[1]
-			local group = existing[first.output_id]
-			if not group then
-				local at = first.start_line
-				local output = state.tool_outputs[first.output_id]
-				group = {
-					kind = "tool_group",
-					name = candidate.name,
-					key = output.tool_call_id,
-				}
-				shift_lines(state, items, at)
-				group.start_line, group.end_line = at, at
-				for index, item in ipairs(items) do
-					if item == first then
-						table.insert(items, index, group)
-						break
-					end
-				end
-				table.insert(lines, at, "")
-				table.insert(edits, { line = at, insert = true })
-			end
-			group.children = candidate.children
-			local text = summary(state, group)
-			if lines[group.start_line] ~= text then
-				lines[group.start_line] = text
-				table.insert(edits, { line = group.start_line, text = text })
-			end
-		end
-	end
-	return edits
+local function child_text(state, group, child)
+	local branch = child == group.children[#group.children] and "└─ " or "├─ "
+	return "> " .. branch .. tool_output.summary_text(state, child.output_id)
 end
 
-local function fold_end(group)
-	return group.children[#group.children].end_line
+-- Both history and live rendering use this placement operation. The writer
+-- replaces an existing row or appends a new one; it never inserts earlier rows.
+function M.write_output(state, items, output_id, at, write)
+	state.tool_items_by_output = state.tool_items_by_output or {}
+	local entry = state.tool_items_by_output[output_id]
+	if entry then
+		write(entry.child.start_line, child_text(state, entry.group, entry.child))
+		write(entry.group.start_line, summary(state, entry.group))
+		return false
+	end
+
+	local output = state.tool_outputs[output_id]
+	local group = items[#items]
+	-- Callers leave at most one blank separator between consecutive trace items.
+	if not group or group.kind ~= "tool_group" or group.name ~= output.name or at - group.end_line > 2 then
+		group = {
+			kind = "tool_group",
+			name = output.name,
+			key = output.tool_call_id or output_id,
+			start_line = at,
+			end_line = at,
+			children = {},
+		}
+		table.insert(items, group)
+		at = at + 1
+	else
+		local previous = group.children[#group.children]
+		-- The previous last branch becomes an interior branch when we append.
+		write(previous.start_line, "> ├─ " .. tool_output.summary_text(state, previous.output_id))
+	end
+	local child = { kind = "tool", output_id = output_id, start_line = at, end_line = at }
+	table.insert(group.children, child)
+	group.end_line = at
+	state.tool_items_by_output[output_id] = { group = group, child = child }
+	write(group.start_line, summary(state, group))
+	write(at, child_text(state, group, child))
+	return true
+end
+
+function M.item_at_line(items, line)
+	for _, item in ipairs(items or {}) do
+		if line >= item.start_line and line <= item.end_line then
+			if item.kind == "tool_group" and line ~= item.start_line then
+				return M.item_at_line(item.children, line)
+			end
+			return item
+		end
+	end
+	return nil
 end
 
 function M.apply_folds(state, win)
 	if not win or not vim.api.nvim_win_is_valid(win) then
 		return
-	end
-	local groups = {}
-	for _, item in ipairs(state.transcript_items or {}) do
-		if item.kind == "tool_group" then
-			local choice = item.manual_expanded
-			if item.key and state.tool_group_expanded then
-				choice = state.tool_group_expanded[item.key]
-			end
-			local running = false
-			for _, child in ipairs(item.children) do
-				local output = state.tool_outputs[child.output_id]
-				local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
-				if call and call.execution_status == "running" then
-					running = true
-					break
-				end
-			end
-			item.expanded = choice == true or (choice == nil and running)
-			table.insert(groups, item)
-		end
 	end
 	vim.api.nvim_win_call(win, function()
 		local view = vim.fn.winsaveview()
@@ -166,62 +107,34 @@ function M.apply_folds(state, win)
 		vim.wo.foldtext = ""
 		vim.opt_local.fillchars:append({ fold = " " })
 		vim.cmd("normal! zE")
-		for _, group in ipairs(groups) do
-			local last = fold_end(group)
-			vim.cmd(string.format("%d,%dfold", group.start_line, last))
-			if group.expanded then
-				vim.cmd(tostring(group.start_line) .. "foldopen")
-			elseif view.lnum > group.start_line and view.lnum <= last then
-				view.lnum, view.col = group.start_line, 0
+		for _, group in ipairs(state.transcript_items or {}) do
+			if group.kind == "tool_group" then
+				local choice = (state.tool_group_expanded or {})[group.key]
+				local running = false
+				for _, child in ipairs(group.children) do
+					local output = state.tool_outputs[child.output_id]
+					local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
+					if call and call.execution_status == "running" then
+						running = true
+						break
+					end
+				end
+				group.expanded = choice == true or (choice == nil and running)
+				vim.cmd(string.format("%d,%dfold", group.start_line, group.end_line))
+				if group.expanded then
+					vim.cmd(tostring(group.start_line) .. "foldopen")
+				elseif view.lnum > group.start_line and view.lnum <= group.end_line then
+					view.lnum, view.col = group.start_line, 0
+				end
 			end
 		end
 		vim.fn.winrestview(view)
 	end)
 end
 
-function M.update(ctx)
-	local state, buf = ctx.state, ctx.state.transcript_buf
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local edits = M.collect(state, lines, state.transcript_items)
-	local wins, views = {}, {}
-	for _, win in ipairs(vim.api.nvim_list_wins()) do
-		if vim.api.nvim_win_get_buf(win) == buf then
-			table.insert(wins, win)
-			views[win] = vim.api.nvim_win_call(win, vim.fn.winsaveview)
-		end
-	end
-	if #edits > 0 then
-		ctx.buffer.set_modifiable(buf, true)
-		for _, edit in ipairs(edits) do
-			local row = edit.line - 1
-			vim.api.nvim_buf_set_lines(buf, row, edit.insert and row or row + 1, false, { edit.text or "" })
-			if edit.insert then
-				for _, view in pairs(views) do
-					if view.lnum >= edit.line then
-						view.lnum = view.lnum + 1
-					end
-					if view.topline >= edit.line then
-						view.topline = view.topline + 1
-					end
-				end
-			end
-		end
-		ctx.buffer.set_modifiable(buf, false)
-	end
-	for _, win in ipairs(wins) do
-		vim.api.nvim_win_call(win, function()
-			vim.fn.winrestview(views[win])
-		end)
-		M.apply_folds(state, win)
-	end
-end
-
 function M.toggle(ctx, group)
-	group.manual_expanded = not group.expanded
-	if group.key then
-		ctx.state.tool_group_expanded = ctx.state.tool_group_expanded or {}
-		ctx.state.tool_group_expanded[group.key] = group.manual_expanded
-	end
+	ctx.state.tool_group_expanded = ctx.state.tool_group_expanded or {}
+	ctx.state.tool_group_expanded[group.key] = not group.expanded
 	M.apply_folds(ctx.state, vim.api.nvim_get_current_win())
 	return true
 end
@@ -231,7 +144,7 @@ function M.preview_lines(lines, items)
 	local hidden = {}
 	for _, item in ipairs(items) do
 		if item.kind == "tool_group" then
-			for line = item.start_line + 1, fold_end(item) do
+			for line = item.start_line + 1, item.end_line do
 				hidden[line] = true
 			end
 		end
@@ -245,13 +158,11 @@ function M.preview_lines(lines, items)
 	end
 	local preview_items = {}
 	for _, item in ipairs(items) do
-		if line_map[item.start_line] then
-			local copy = vim.tbl_extend("force", {}, item)
-			copy.start_line = line_map[item.start_line]
-			copy.end_line = line_map[item.end_line]
-			copy.expanded = false
-			table.insert(preview_items, copy)
-		end
+		local copy = vim.tbl_extend("force", {}, item)
+		copy.start_line = line_map[item.start_line]
+		copy.end_line = item.kind == "tool_group" and copy.start_line or line_map[item.end_line]
+		copy.expanded = false
+		table.insert(preview_items, copy)
 	end
 	return result, preview_items
 end

@@ -140,26 +140,14 @@ function M.has_body(ctx)
 	return false
 end
 
-local function tool_rows(state, preview)
+local function tool_summary_rows(state, preview)
 	local rows = {}
-	for _, item in ipairs(state.transcript_items or {}) do
-		if item.kind == "tool" then
-			rows[item.start_line] = { output_id = item.output_id, stats = true }
-		end
-	end
 	for _, group in ipairs(state.transcript_items or {}) do
 		if group.kind == "tool_group" then
-			local output_id = group.children[1].output_id
-			rows[group.start_line] = { output_id = output_id, marker = group.expanded and "▾  " or "▸  " }
+			rows[group.start_line] = { output_id = group.children[1].output_id, stats = #group.children == 1 }
 			if not preview then
-				for index, child in ipairs(group.children) do
-					rows[child.start_line].marker = index == #group.children and "└─ " or "├─ "
-					local next_child = group.children[index + 1]
-					if next_child then
-						for line = child.end_line + 1, next_child.start_line - 1 do
-							rows[line] = { output_id = output_id, marker = "│" }
-						end
-					end
+				for _, child in ipairs(group.children) do
+					rows[child.start_line] = { output_id = child.output_id, stats = true }
 				end
 			end
 		end
@@ -205,7 +193,7 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 
 	vim.api.nvim_buf_clear_namespace(buf, quote_ns, 0, -1)
 	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local rows = state and tool_rows(state, opts and opts.preview) or {}
+	local rows = state and tool_summary_rows(state, opts and opts.preview) or {}
 	for index, line in ipairs(lines) do
 		local row = rows[index]
 		local highlight = row and tool_output.summary_highlight(state, row.output_id)
@@ -224,12 +212,8 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 				hl_group = highlight,
 				priority = 250,
 			})
-			local gutter = { { "▋", "PiQuoteBar" } }
-			if row and row.marker then
-				table.insert(gutter, { row.marker, highlight })
-			end
 			vim.api.nvim_buf_set_extmark(buf, quote_ns, index - 1, 0, {
-				virt_text = gutter,
+				virt_text = { { "▋", "PiQuoteBar" } },
 				virt_text_pos = "overlay",
 				priority = 300,
 			})
@@ -271,7 +255,11 @@ function M.render(ctx)
 
 	vim.schedule(function()
 		if ctx.buffer.valid(state.transcript_buf) and M.win_valid(ctx) then
-			tool_groups.update(ctx)
+			for _, win in ipairs(vim.api.nvim_list_wins()) do
+				if vim.api.nvim_win_get_buf(win) == state.transcript_buf then
+					tool_groups.apply_folds(state, win)
+				end
+			end
 			markdown_render.render(state.transcript_buf, state.transcript_win, { latex = true, event = "PiNvim" })
 			M.apply_quote_highlights(ctx)
 		end
@@ -474,6 +462,7 @@ end
 
 function M.clear_transcript_items(ctx)
 	ctx.state.transcript_items = {}
+	ctx.state.tool_items_by_output = {}
 	ctx.state.tool_group_expanded = {}
 end
 
@@ -494,14 +483,33 @@ function M.register_transcript_item(ctx, item)
 end
 
 function M.transcript_item_at_line(ctx, line)
-	for _, item in ipairs(ctx.state.transcript_items) do
-		local start_line = item.start_line or item.line
-		local end_line = item.end_line or start_line
-		if line >= start_line and line <= end_line then
-			return item
+	return tool_groups.item_at_line(ctx.state.transcript_items, line)
+end
+
+function M.write_tool_output(ctx, output_id)
+	local state = ctx.state
+	if not ctx.buffer.valid(state.transcript_buf) then
+		return
+	end
+	local existing = state.tool_items_by_output and state.tool_items_by_output[output_id]
+	if not existing then
+		M.ensure_assistant_turn_started(ctx, "Assistant")
+		M.remove_pending_transcript_item_separator(ctx)
+		local previous = state.transcript_items[#state.transcript_items]
+		if not previous or previous.kind ~= "tool_group" or previous.end_line ~= M.line_count(ctx) then
+			M.begin_trace_item(ctx)
 		end
 	end
-	return nil
+	tool_groups.write_output(state, state.transcript_items, output_id, M.line_count(ctx) + 1, function(line, text)
+		if line <= M.line_count(ctx) then
+			M.set_line(ctx, line, text)
+		else
+			M.append_lines(ctx, { text })
+		end
+	end)
+	if not existing then
+		M.end_trace_item(ctx)
+	end
 end
 
 function M.remove_pending_transcript_item_separator(ctx)

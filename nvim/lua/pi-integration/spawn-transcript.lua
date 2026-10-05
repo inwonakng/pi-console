@@ -8,6 +8,7 @@ local pi_tool_output = require("pi-integration.tool-output")
 local pi_thinking_output = require("pi-integration.thinking-output")
 local pi_skills = require("pi-integration.skills")
 local pi_transcript = require("pi-integration.transcript")
+local tool_groups = require("pi-integration.tool-groups")
 
 local M = {}
 
@@ -81,12 +82,6 @@ local function make_render_ctx(state, path)
 			store_or_update_spawn_run_output = function(run, text)
 				return pi_tool_output.store_or_update_spawn_run(state, run, text)
 			end,
-			bind_spawn_run = function(run, output_id, line)
-				return pi_tool_output.bind_spawn_run(state, run, output_id, line)
-			end,
-			summary_lines = function(output_id)
-				return pi_tool_output.summary_lines(state, output_id)
-			end,
 		},
 		thinking = {
 			store_output = function(text)
@@ -138,20 +133,9 @@ local function render_transcript_ui(state)
 	pi_transcript.render(transcript_ctx(state))
 end
 
-local function item_at_line(state, line)
-	for _, item in ipairs(state.transcript_items or {}) do
-		local start_line = item.start_line or item.line
-		local end_line = item.end_line or start_line
-		if start_line and end_line and line >= start_line and line <= end_line then
-			return item
-		end
-	end
-	return nil
-end
-
 local function open_item(ctx, state, parent_win)
 	local cursor = vim.api.nvim_win_get_cursor(0)
-	local item = item_at_line(state, cursor[1])
+	local item = tool_groups.item_at_line(state.transcript_items, cursor[1])
 	if not item then
 		return false
 	end
@@ -165,7 +149,7 @@ local function open_item(ctx, state, parent_win)
 		},
 	}
 	if item.kind == "tool_group" then
-		require("pi-integration.tool-groups").toggle(transcript_ctx(state), item)
+		tool_groups.toggle(transcript_ctx(state), item)
 		render_transcript_ui(state)
 		return true
 	elseif item.kind == "tool" then
@@ -190,7 +174,6 @@ function M.open(ctx, path, title)
 		tool_calls = {},
 		live_tool_output_by_call = {},
 		spawn_run_output_by_id = {},
-		spawn_run_lines = {},
 		thinking_outputs = {},
 		next_thinking_output_id = 0,
 		skill_tool_calls = {},

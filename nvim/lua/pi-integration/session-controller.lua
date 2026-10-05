@@ -20,11 +20,9 @@ local function reset_conversation(ctx, keep_transcript, keep_pending_messages)
 	state.session_stats = nil
 	state.todo_status = nil
 	state.todo_tool_output_id = nil
-	state.todo_tool_line = nil
 	state.tree_leaf_id = nil
 	state.spawn_runs = {}
 	state.spawn_running_count = 0
-	state.spawn_run_lines = {}
 	state.spawn_run_output_by_id = {}
 	state.is_agent_running = false
 	state.refresh_transcript_after_settled = false

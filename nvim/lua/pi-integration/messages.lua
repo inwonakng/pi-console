@@ -3,6 +3,7 @@ local M = {}
 local json = require("pi-integration.utils.json")
 local pi_skills = require("pi-integration.skills")
 local message_utils = require("pi-integration.utils.message")
+local tool_groups = require("pi-integration.tool-groups")
 
 function M.decode_session_record(line)
 	return json.decode_object(line)
@@ -217,10 +218,15 @@ local function message_run_id(message)
 	return details.runId or details.id
 end
 
-local function bind_spawn_line(ctx, message, output_id, line)
-	if ctx.tools.bind_spawn_run then
-		ctx.tools.bind_spawn_run(message.details, output_id, line)
-	end
+local function has_tool_item(state, tool_call_id)
+	local output_id = tool_call_id and state.live_tool_output_by_call[tool_call_id]
+	return output_id and state.tool_items_by_output[output_id] ~= nil
+end
+
+local function write_tool_output(ctx, lines, items, output_id)
+	return tool_groups.write_output(ctx.state, items, output_id, #lines + 1, function(line, text)
+		lines[line] = text
+	end)
 end
 
 local function upsert_spawn_run(ctx, run)
@@ -257,7 +263,7 @@ local function upsert_spawn_details(ctx, details)
 	return upsert_spawn_run(ctx, details)
 end
 
-local function update_existing_spawn_line(ctx, lines, message, text)
+local function update_existing_spawn_output(ctx, lines, items, message, text)
 	if type(message.details) == "table" and type(message.details.runs) == "table" then
 		upsert_spawn_details(ctx, message.details)
 		return false
@@ -267,16 +273,15 @@ local function update_existing_spawn_line(ctx, lines, message, text)
 		return false
 	end
 	message.details = upsert_spawn_details(ctx, message.details)
-	local line = ctx.state.spawn_run_lines and ctx.state.spawn_run_lines[id]
-	if not line or not lines[line] or not ctx.tools.store_or_update_spawn_run_output then
+	local existing = ctx.state.spawn_run_output_by_id[id]
+	if not existing or not ctx.state.tool_items_by_output[existing] then
 		return false
 	end
 	local output_id = ctx.tools.store_or_update_spawn_run_output(message.details, text)
 	if not output_id then
 		return false
 	end
-	bind_spawn_line(ctx, message, output_id, line)
-	lines[line] = ctx.tools.summary_lines(output_id)[1]
+	write_tool_output(ctx, lines, items, output_id)
 	return true
 end
 
@@ -290,30 +295,11 @@ local function render_tool_summary(ctx, lines, items, message)
 	local output_id = ctx.tools.store_or_update_live_output(
 		name, tool_call_id, text, nil, message.details, ctx.tools.store_display(message), message.isError
 	)
-	local line = tool_call_id and ctx.state.live_tool_lines[tool_call_id]
-	if line then
-		if is_spawn_tool_name(name) and not message.isError then
-			bind_spawn_line(ctx, message, output_id, line)
-		end
-		lines[line] = ctx.tools.summary_lines(output_id)[1]
-		return false
+	local added = write_tool_output(ctx, lines, items, output_id)
+	if added then
+		table.insert(lines, "")
 	end
-	vim.list_extend(lines, ctx.tools.summary_lines(output_id))
-	line = #lines
-	if tool_call_id then
-		ctx.state.live_tool_lines[tool_call_id] = line
-	end
-	if is_spawn_tool_name(name) and not message.isError then
-		bind_spawn_line(ctx, message, output_id, line)
-	end
-	table.insert(lines, "")
-	table.insert(items, {
-		kind = "tool",
-		start_line = line,
-		end_line = line,
-		output_id = output_id,
-	})
-	return true
+	return added
 end
 
 local function spawn_custom_tool_name(message)
@@ -472,6 +458,7 @@ end
 function M.collect_message_lines(ctx, messages)
 	local lines = ctx.transcript.metadata_lines()
 	local items = {}
+	ctx.state.tool_items_by_output = {}
 	local has_body = false
 	local last_rendered_kind = nil
 	local assistant_block_open = false
@@ -519,7 +506,7 @@ function M.collect_message_lines(ctx, messages)
 			end
 			if not pi_skills.tool_result_skill_name(ctx.state, message) then
 				local partial = type(message.partialResult) == "table" and message.partialResult or {}
-				if not ctx.state.live_tool_lines[message.toolCallId] then
+				if not has_tool_item(ctx.state, message.toolCallId) then
 					ensure_assistant_block()
 				end
 				appended = render_tool_summary(ctx, lines, items, {
@@ -533,10 +520,8 @@ function M.collect_message_lines(ctx, messages)
 		elseif role == "agent_settled" or role == "agent_end" or role == "child_exit" then
 			if not message.willRetry then
 				for _, output_id in ipairs(ctx.tools.interrupt_executions()) do
-					local output = ctx.state.tool_outputs[output_id]
-					local line = ctx.state.live_tool_lines[output.tool_call_id]
-					if line then
-						lines[line] = ctx.tools.summary_lines(output_id)[1]
+					if ctx.state.tool_items_by_output[output_id] then
+						write_tool_output(ctx, lines, items, output_id)
 					end
 				end
 			end
@@ -548,11 +533,11 @@ function M.collect_message_lines(ctx, messages)
 			if pi_skills.tool_result_skill_name(ctx.state, message) then
 				ctx.skills.apply_tool_result(message)
 				appended = false
-			elseif not message.isError and not ctx.state.live_tool_lines[tool_call_id]
-				and is_spawn_tool_name(name) and update_existing_spawn_line(ctx, lines, message, text) then
+			elseif not message.isError and not has_tool_item(ctx.state, tool_call_id)
+				and is_spawn_tool_name(name) and update_existing_spawn_output(ctx, lines, items, message, text) then
 				appended = false
 			else
-				if not ctx.state.live_tool_lines[tool_call_id] then
+				if not has_tool_item(ctx.state, tool_call_id) then
 					ensure_assistant_block()
 				end
 				appended = render_tool_summary(ctx, lines, items, message)
@@ -591,10 +576,10 @@ function M.collect_message_lines(ctx, messages)
 				local details = type(message.details) == "table" and message.details or nil
 				if details and type(details.runs) == "table" then
 					for _, run in ipairs(details.runs) do
-						update_existing_spawn_line(ctx, lines, { details = run }, nil)
+						update_existing_spawn_output(ctx, lines, items, { details = run }, nil)
 					end
 				else
-					update_existing_spawn_line(ctx, lines, message, text)
+					update_existing_spawn_output(ctx, lines, items, message, text)
 				end
 				appended = false
 			elseif message.display == false then
@@ -627,7 +612,6 @@ function M.collect_message_lines(ctx, messages)
 		vim.list_extend(lines, { "", "> " .. ctx.notices.empty_session })
 	end
 
-	require("pi-integration.tool-groups").collect(ctx.state, lines, items)
 	return lines, items
 end
 

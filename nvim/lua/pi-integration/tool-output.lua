@@ -478,11 +478,8 @@ function M.reset(state)
 	state.next_tool_output_id = 0
 	state.tool_calls = {}
 	state.live_tool_output_by_call = {}
-	state.live_tool_lines = {}
 	state.spawn_run_output_by_id = {}
-	state.spawn_run_lines = {}
 	state.todo_tool_output_id = nil
-	state.todo_tool_line = nil
 end
 
 function M.record_calls(state, message)
@@ -812,7 +809,7 @@ function M.store_or_update_live(state, tool_name, tool_call_id, text, filetype, 
 	return M.store(state, tool_name, text, filetype, details, display, tool_call_id, is_error), false
 end
 
-function M.bind_spawn_run(state, run, output_id, line)
+function M.bind_spawn_run(state, run, output_id)
 	local id = run_id(run)
 	if type(id) ~= "string" or id == "" then
 		return false
@@ -826,10 +823,6 @@ function M.bind_spawn_run(state, run, output_id, line)
 	if output_id then
 		state.spawn_run_output_by_id = state.spawn_run_output_by_id or {}
 		state.spawn_run_output_by_id[id] = output_id
-	end
-	if line then
-		state.spawn_run_lines = state.spawn_run_lines or {}
-		state.spawn_run_lines[id] = line
 	end
 	return true
 end
@@ -886,7 +879,7 @@ local function failure_summary(output)
 	return "✗ failed", text
 end
 
--- Group headers and singleton rows share the same presentation policy.
+-- Group headers and children share the same presentation policy.
 function M.summary_highlight(state, output_id)
 	local output = state.tool_outputs[output_id]
 	if not output then
@@ -909,10 +902,10 @@ function M.summary_highlight(state, output_id)
 	return "PiToolQuote"
 end
 
-function M.summary_lines(state, output_id)
+function M.summary_text(state, output_id)
 	local output = state.tool_outputs[output_id]
 	if not output then
-		return { "> Tool output unavailable." }
+		return "Tool output unavailable."
 	end
 	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
 	local execution = call and call.execution_status
@@ -928,7 +921,7 @@ function M.summary_lines(state, output_id)
 			label = label .. ": " .. markdown_code_span(output.display.path)
 		end
 		local status = execution == "running" and "running" or "✗ interrupted"
-		return { "> 󰇥 " .. label .. " · " .. status .. (lines > 0 and (" · " .. line_label) or "") }
+		return label .. " · " .. status .. (lines > 0 and (" · " .. line_label) or "")
 	end
 	if not output.is_error and (output.name == "spawn" or output.name == "spawn_control") then
 		label = "Subagent"
@@ -952,7 +945,7 @@ function M.summary_lines(state, output_id)
 		elseif status and progress == status then
 			progress = ""
 		end
-		local parts = { "> 󰇥 " .. label }
+		local parts = { label }
 		if status and status ~= "" then
 			table.insert(parts, status)
 		end
@@ -964,16 +957,16 @@ function M.summary_lines(state, output_id)
 		if output.spawn then
 			table.insert(parts, "artifacts")
 		end
-		return { table.concat(parts, " · ") }
+		return table.concat(parts, " · ")
 	elseif not output.is_error and is_todo_tool_name(output.name) then
 		local status = type(state.todo_status) == "string" and state.todo_status ~= "" and state.todo_status or nil
-		return { "> 󰇥 Todo: " .. (status or line_label) }
+		return "Todo: " .. (status or line_label)
 	elseif output.display and output.display.kind == "bash" and output.display.command then
 		label = "Bash: " .. markdown_code_span(command_preview(output.display.command))
 		local details = type(output.details) == "table" and output.details or {}
 		if not output.is_error and details.status == "running" then
 			local running_label = lines > 0 and ("running · " .. line_label) or "running"
-			return { "> 󰇥 " .. label .. " · " .. running_label }
+			return label .. " · " .. running_label
 		end
 	elseif output.display and output.display.kind == "file" and output.display.path then
 		label = label .. ": " .. markdown_code_span(output.display.path)
@@ -983,13 +976,11 @@ function M.summary_lines(state, output_id)
 	if output.is_error then
 		local status, diagnostic = failure_summary(output)
 		local reason = truncate_spawn_text(diagnostic, 120)
-		return { "> 󰇥 " .. label .. " · " .. status .. (reason ~= "" and (" · " .. markdown_code_span(reason)) or "") }
+		return label .. " · " .. status .. (reason ~= "" and (" · " .. markdown_code_span(reason)) or "")
 	end
 	local artifact_label = output.spawn and " · artifacts" or ""
 	local edit_label = output.name == "edit" and edit_change_label(output.args) or nil
-	return {
-		"> 󰇥 " .. label .. " · " .. (edit_label or line_label) .. artifact_label,
-	}
+	return label .. " · " .. (edit_label or line_label) .. artifact_label
 end
 
 function M.open_float(ctx, output_id)
