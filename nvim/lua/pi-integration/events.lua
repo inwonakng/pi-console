@@ -6,24 +6,6 @@ local pi_skills = require("pi-integration.skills")
 local pi_usage = require("pi-integration.usage")
 local pending_picker = require("pi-integration.pending-picker")
 
-local function render_tool_output(ctx, event, text, details, display)
-	local is_error = event.isError
-	if type(event.result) == "table" then
-		is_error = is_error == true or event.result.isError == true
-	end
-	local output_id = ctx.tools.store_or_update_live_output(
-		event.toolName or "tool",
-		event.toolCallId,
-		text or "",
-		nil,
-		details,
-		display,
-		is_error
-	)
-	ctx.transcript.write_tool_output(output_id)
-	return output_id
-end
-
 local function run_id(run)
 	if type(run) ~= "table" then
 		return nil
@@ -143,18 +125,15 @@ function M.start_activity(ctx, label)
 	start_activity(ctx, label)
 end
 
-local function update_spawn_run_output(ctx, run, progress)
+local function update_spawn_run_output(ctx, run, text)
 	local id = run_id(run)
 	if type(id) ~= "string" or id == "" then
 		return false
 	end
-	if type(progress) == "string" and progress ~= "" then
-		run = shallow_copy(run)
-		run.progress = progress
-	end
+	-- Keep the child's progress metadata; control result text is separate output.
 	run = upsert_spawn_run(ctx, run)
 	ctx.transcript.touch()
-	local output_id = ctx.tools.store_or_update_spawn_run_output(run, progress)
+	local output_id = ctx.tools.store_or_update_spawn_run_output(run, text)
 	if not output_id then
 		return false
 	end
@@ -202,6 +181,31 @@ local function update_spawn_details(ctx, name, details, text)
 		return updated
 	end
 	return false
+end
+
+local function render_tool_output(ctx, event, text, details, display)
+	local is_error = event.isError
+	if type(event.result) == "table" then
+		is_error = is_error == true or event.result.isError == true
+	end
+	if event.toolName == "spawn_control" then
+		-- Control calls update the original spawn outputs, not their own trace rows.
+		update_spawn_details(ctx, event.toolName, details, not is_error and text or nil)
+		if not is_error then
+			return nil
+		end
+	end
+	local output_id = ctx.tools.store_or_update_live_output(
+		event.toolName or "tool",
+		event.toolCallId,
+		text or "",
+		nil,
+		details,
+		display,
+		is_error
+	)
+	ctx.transcript.write_tool_output(output_id)
+	return output_id
 end
 
 local function render_spawn_custom_tool(ctx, message)
@@ -275,7 +279,7 @@ function M.render_message(ctx, message)
 		local name = message.toolName or "tool"
 		local tool_call_id = message_utils.tool_call_id(message)
 		ctx.tools.record_execution_call(name, tool_call_id, nil, "completed")
-		if not message.isError and not ctx.tools.live_output_id(tool_call_id)
+		if name == "spawn" and not message.isError and not ctx.tools.live_output_id(tool_call_id)
 			and update_spawn_details(ctx, name, message.details, text) then
 			return
 		end

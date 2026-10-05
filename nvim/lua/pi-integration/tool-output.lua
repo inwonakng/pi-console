@@ -816,14 +816,17 @@ function M.bind_spawn_run(state, run, output_id)
 	end
 	local output = output_id and state.tool_outputs[output_id]
 	local call = output and output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
-	-- Progress belongs to the executing call, not to the background run's update target.
-	if output and (output.is_error or (call and call.execution_status == "running")) then
+	if not output or output.name ~= "spawn" or output.is_error
+		or (call and call.execution_status == "running") then
 		return false
 	end
-	if output_id then
-		state.spawn_run_output_by_id = state.spawn_run_output_by_id or {}
-		state.spawn_run_output_by_id[id] = output_id
+	state.spawn_run_output_by_id = state.spawn_run_output_by_id or {}
+	local existing = state.spawn_run_output_by_id[id]
+	-- The original spawn output owns the run for the lifetime of this transcript.
+	if existing and existing ~= output_id then
+		return false
 	end
+	state.spawn_run_output_by_id[id] = output_id
 	return true
 end
 

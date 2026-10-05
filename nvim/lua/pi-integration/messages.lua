@@ -265,8 +265,11 @@ end
 
 local function update_existing_spawn_output(ctx, lines, items, message, text)
 	if type(message.details) == "table" and type(message.details.runs) == "table" then
-		upsert_spawn_details(ctx, message.details)
-		return false
+		local updated = false
+		for _, run in ipairs(message.details.runs) do
+			updated = update_existing_spawn_output(ctx, lines, items, { details = run }, nil) or updated
+		end
+		return updated
 	end
 	local id = message_run_id(message)
 	if type(id) ~= "string" or id == "" then
@@ -289,6 +292,12 @@ local function render_tool_summary(ctx, lines, items, message)
 	local name = message.toolName or "tool"
 	local text = ctx.messages.extract_text(message) or ""
 	local tool_call_id = message_utils.tool_call_id(message)
+	if name == "spawn_control" then
+		update_existing_spawn_output(ctx, lines, items, message, not message.isError and text or nil)
+		if not message.isError then
+			return false
+		end
+	end
 	if is_spawn_tool_name(name) and not message.isError then
 		message.details = upsert_spawn_details(ctx, message.details)
 	end
@@ -506,7 +515,7 @@ function M.collect_message_lines(ctx, messages)
 			end
 			if not pi_skills.tool_result_skill_name(ctx.state, message) then
 				local partial = type(message.partialResult) == "table" and message.partialResult or {}
-				if not has_tool_item(ctx.state, message.toolCallId) then
+				if message.toolName ~= "spawn_control" and not has_tool_item(ctx.state, message.toolCallId) then
 					ensure_assistant_block()
 				end
 				appended = render_tool_summary(ctx, lines, items, {
@@ -533,11 +542,11 @@ function M.collect_message_lines(ctx, messages)
 			if pi_skills.tool_result_skill_name(ctx.state, message) then
 				ctx.skills.apply_tool_result(message)
 				appended = false
-			elseif not message.isError and not has_tool_item(ctx.state, tool_call_id)
-				and is_spawn_tool_name(name) and update_existing_spawn_output(ctx, lines, items, message, text) then
+			elseif name == "spawn" and not message.isError and not has_tool_item(ctx.state, tool_call_id)
+				and update_existing_spawn_output(ctx, lines, items, message, text) then
 				appended = false
 			else
-				if not has_tool_item(ctx.state, tool_call_id) then
+				if (name ~= "spawn_control" or message.isError) and not has_tool_item(ctx.state, tool_call_id) then
 					ensure_assistant_block()
 				end
 				appended = render_tool_summary(ctx, lines, items, message)
