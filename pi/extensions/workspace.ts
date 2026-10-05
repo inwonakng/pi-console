@@ -291,6 +291,7 @@ async function confirmDestructive(
   message: string,
   approved: boolean | undefined,
 ): Promise<boolean> {
+  if (getIntegrationMode() === "allowed") return true;
   if (getInteractionMode(ctx) === "interactive") {
     return ctx.ui.confirm(title, message, { signal: ctx.signal });
   }
@@ -344,8 +345,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
 
   pi.on("before_agent_start", (event) => {
     const guidance = getIntegrationMode() === "allowed"
-      ? "Top-level workspace integration mode is allowed. After completing and verifying requested work, call workspace with action=integrate; no user confirmation is required."
-      : "Top-level workspace integration mode is ask. After completing and verifying requested work, call workspace with action=integrate; Pi will request user confirmation before applying it.";
+      ? "Workspace integration mode is allowed. Top-level integration and workspace discard, including child-workspace discard, are pre-authorized. After completing and verifying requested work, call workspace with action=integrate; no user confirmation is required."
+      : "Workspace integration mode is ask. Top-level integration and workspace discard, including child-workspace discard, require confirmation. After completing and verifying requested work, call workspace with action=integrate; Pi will request user confirmation before applying it.";
     return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
   });
 
@@ -512,7 +513,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("pi-integration-mode", {
-    description: "Set top-level workspace integration mode: /pi-integration-mode ask|allowed",
+    description: "Set approval mode for top-level workspace integration and workspace discard: /pi-integration-mode ask|allowed",
     handler: async (args, ctx) => {
       const requestedMode = parseIntegrationMode(args);
       if (!requestedMode) {
@@ -556,14 +557,14 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       "Before making implementation changes with edit or write inside the git repository containing the current session cwd, call workspace with action=enter as the only tool call in that assistant response, unless the current session is already in an associated workspace. To edit existing ignored files, provide their paths relative to the original cwd in ignoredFiles on the first enter call; only those files are copied and later integrated. Wait for the cwd switch before using more tools.",
       "Temporary probes, scripts, and generated artifacts may be created under $TMPDIR without entering a workspace; keep them outside the repository and remove them when finished.",
       "Call workspace with action=status when the expected workspace is missing or its lifecycle is unclear.",
-      "Top-level workspace integration follows the active integration mode: ask requests confirmation and allowed is pre-authorized.",
+      "Top-level workspace integration and workspace discard, including child-workspace discard, follow the active integration mode: ask requests confirmation and allowed is pre-authorized.",
       "Call workspace with action=integrate or action=discard as the only tool call in that assistant response when the action will leave the active workspace. Wait for the cwd switch before using more tools.",
     ],
     parameters: Type.Object({
       action: StringEnum(WORKSPACE_ACTIONS, { description: "Workspace lifecycle action." }),
       id: Type.Optional(Type.String({ description: "Workspace id for enter, status, integration, or discard; enter creates a new task workspace unless an id is specified." })),
       ignoredFiles: Type.Optional(Type.Array(Type.String(), { description: "Existing ignored file paths relative to the original cwd, copied into a new task worktree on enter and copied back on integration." })),
-      approved: Type.Optional(Type.Boolean({ description: "Required for destructive operations when no interactive UI is available." })),
+      approved: Type.Optional(Type.Boolean({ description: "Required for integration or discard in ask mode when no interactive UI is available; does not bypass interactive confirmation." })),
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
