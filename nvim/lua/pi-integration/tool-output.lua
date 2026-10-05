@@ -866,6 +866,26 @@ function M.live_output_id(state, tool_call_id)
 	return tool_call_id and state.live_tool_output_by_call and state.live_tool_output_by_call[tool_call_id] or nil
 end
 
+local function failure_summary(output)
+	local text = output.text or ""
+	if output.name == "bash" then
+		local details = type(output.details) == "table" and output.details or {}
+		if details.sandboxBlocked == true then
+			-- Use the appended report, not an earlier one quoted by the command.
+			local diagnostic = text:match(".*%[Access blocked; command may have partially executed%]\r?\n([^\r\n]+)")
+			return "✗ sandbox blocked", diagnostic or ""
+		end
+		-- Pi appends this status after the command output, including when truncated.
+		local exit_code = text:match("Command exited with code (%-?%d+)%s*$")
+		if exit_code then
+			return "✗ exited " .. exit_code, ""
+		end
+		-- Aborts, timeouts, and shell errors belong at the end, after any partial output.
+		text = vim.trim(text):match("[^\r\n]+$") or ""
+	end
+	return "✗ failed", text
+end
+
 -- Group headers and singleton rows share the same presentation policy.
 function M.summary_highlight(state, output_id)
 	local output = state.tool_outputs[output_id]
@@ -961,8 +981,9 @@ function M.summary_lines(state, output_id)
 		label = label .. ": " .. markdown_code_span(path_for_display(state, output_path(output)))
 	end
 	if output.is_error then
-		local reason = truncate_spawn_text(output.text, 120)
-		return { "> 󰇥 " .. label .. " · ✗ failed" .. (reason ~= "" and (" · " .. markdown_code_span(reason)) or "") }
+		local status, diagnostic = failure_summary(output)
+		local reason = truncate_spawn_text(diagnostic, 120)
+		return { "> 󰇥 " .. label .. " · " .. status .. (reason ~= "" and (" · " .. markdown_code_span(reason)) or "") }
 	end
 	local artifact_label = output.spawn and " · artifacts" or ""
 	local edit_label = output.name == "edit" and edit_change_label(output.args) or nil

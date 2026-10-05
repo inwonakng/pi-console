@@ -216,6 +216,9 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     }),
     promptGuidelines: [
       ...(defaultBash.promptGuidelines ?? []),
+      "Run independent investigations in separate Bash calls so each result has its own exit status; use && for commands that depend on earlier success.",
+      "Use git --no-optional-locks status --short for read-only Git inspection to avoid optional index-refresh writes.",
+      "Nonzero exits are errors. rg returns 1 for no matches; when that outcome is acceptable, handle only exit code 1 explicitly and preserve other failures. Do not use blanket || true.",
       "Reads are unrestricted by default, including session logs and credential files; do not request read access for routine inspection. Scratch space and configured write paths are already writable; edit mode also permits workspace writes. Declare only additional writePaths before mutation. In ask mode, workspaceWriteAccess=true requests writing the current directory. If configured reads are restricted, request specific required readPaths rather than broadReadAccess for incidental configuration lookups.",
       "Request networkAccess=true upfront for commands that need outbound connections, such as dependency downloads or remote API calls. It grants access to any host for that command only, not filesystem access. Undeclared access is denied during execution; the proxy never opens a permission prompt. Existing saved host grants still apply.",
       "Omit bash.timeout by default. Do not add command-level timeouts such as curl --max-time, curl --connect-timeout, or the timeout utility unless the user requested them or you are specifically testing timeout behavior. For a user-requested execution deadline, use bash.timeout instead.",

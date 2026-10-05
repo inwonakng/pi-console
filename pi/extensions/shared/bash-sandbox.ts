@@ -77,7 +77,7 @@ async function collectViolations(commandId: string, filesystem: SandboxRuntimeCo
   if (process.platform === "darwin") await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
   return [...new Set(SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId)
     .map((violation) => violation.line).filter((line) => {
-      if (process.platform === "darwin") return /\b(?:file-(?:read|write)|network-)/.test(line);
+      if (process.platform === "darwin") return /\b(?:file-(?:read|write)|network-)|^deny http-request\b/.test(line);
       // Linux's observer uses the initial profile rather than the per-command
       // grants. Do not report granted writes as denied merely from that hint.
       const attempted = /^deny \S+ (\/.*)$/.exec(line)?.[1];
@@ -89,7 +89,7 @@ async function collectViolations(commandId: string, filesystem: SandboxRuntimeCo
 }
 
 function reportBlockedCommand(lines: string[], onData: (data: Buffer) => void): void {
-  const diagnostics = lines.length ? lines.slice(0, 20).join("\n") : "Permission-denied output detected; operation and path could not be determined.";
+  const diagnostics = lines.slice(0, 20).join("\n");
   onData(Buffer.from(`\n[Access blocked; command may have partially executed]\n${diagnostics}\n`
     + "Files may already have been written. No automatic retry was performed. Inspect partial output and state before continuing.\n"
     + "For filesystem denials, request only the specific readPaths/writePaths that the operation needs. "
@@ -153,23 +153,16 @@ async function runSandboxed(
     wrappedCommand = true;
     const env = { ...options.env,
       ...(scratch ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : {}) };
-    let permissionDenied = false;
-    let outputTail = "";
-    const onData = (data: Buffer) => {
-      const text = outputTail + data.toString("utf8");
-      if (/operation not permitted|permission denied|read-only file system/i.test(text)) permissionDenied = true;
-      outputTail = text.slice(-4096);
-      options.onData(data);
-    };
     const report = async () => {
+      // Command output can quote denial messages; only runtime diagnostics prove a block.
       const lines = await collectViolations(commandId, filesystem);
-      if (permissionDenied || lines.length) {
+      if (lines.length) {
         reportBlockedCommand(lines, options.onData);
         onBlocked();
       }
     };
     try {
-      const result = await localBash.exec(wrapped, cwd, { ...options, env, onData });
+      const result = await localBash.exec(wrapped, cwd, { ...options, env });
       await report();
       return result;
     } catch (error) {

@@ -237,7 +237,10 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 			if row and row.stats and output and output.name == "edit" then
 				apply_edit_stat_highlights(buf, index, line)
 			end
-			local failure_start = line:find("✗ failed", 1, true) or line:find("%d+ failed$")
+			local failure_start = line:find("✗ failed", 1, true)
+				or line:find("✗ exited ", 1, true)
+				or line:find("✗ sandbox blocked", 1, true)
+				or line:find("%d+ failed$")
 			if failure_start then
 				vim.api.nvim_buf_set_extmark(buf, quote_ns, index - 1, failure_start - 1, {
 					end_col = #line,
