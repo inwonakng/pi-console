@@ -92,7 +92,9 @@ function reportBlockedCommand(lines: string[], onData: (data: Buffer) => void): 
   const diagnostics = lines.slice(0, 20).join("\n");
   onData(Buffer.from(`\n[Access blocked; command may have partially executed]\n${diagnostics}\n`
     + "Files may already have been written. No automatic retry was performed. Inspect partial output and state before continuing.\n"
-    + "For filesystem denials, request only the specific readPaths/writePaths that the operation needs. "
+    + "For filesystem denials, request only the additional readPaths/writePaths that the operation needs. "
+    + "For multiple files in the same task directory, request the smallest covering directory once instead of listing individual files. "
+    + "Keep unrelated directories separate; use file-level requests for isolated files or when directory access would expose sensitive unrelated contents. "
     + "For a proxy network allowlist denial, request networkAccess=true on your continuation command; approval happens before it starts. "
     + "Network approval does not lift filesystem restrictions or fix DNS, TLS, or server errors. "
     + "For Unix-socket denials on macOS, request narrow unixSocketPaths (inspect $TMPDIR for temporary socket directories). "
