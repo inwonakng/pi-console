@@ -112,27 +112,29 @@ function pathInside(parent: string, child: string) {
 	return rel === "" || (!rel.startsWith("..") && !rel.startsWith(sep));
 }
 
-function assertSafeWorkspacePath(root: string, path: string) {
+function isSafeWorkspacePath(root: string, path: string): boolean {
 	const canonicalRoot = realpathSync(root);
 	let ancestor = dirname(path);
 	while (!existsSync(ancestor) && ancestor !== dirname(ancestor)) {
 		ancestor = dirname(ancestor);
 	}
 	const canonicalAncestor = realpathSync(ancestor);
-	assertOk(pathInside(canonicalRoot, canonicalAncestor), `Refusing to follow a path outside workspace: ${path}`);
+	return pathInside(canonicalRoot, canonicalAncestor);
 }
 
-function normalizePath(root: string, cwd: string, path: string) {
+function normalizePath(root: string, cwd: string, path: string): string | undefined {
 	const absolute = resolve(cwd, path);
-	assertOk(pathInside(root, absolute), `Refusing to snapshot outside workspace: ${path}`);
-	assertSafeWorkspacePath(root, absolute);
+	// History observes worktree changes; access-mode authorizes external writes.
+	if (!pathInside(root, absolute) || !isSafeWorkspacePath(root, absolute)) {
+		return undefined;
+	}
 	return relative(root, absolute) || ".";
 }
 
 function absolutePath(root: string, path: string) {
 	const resolvedPath = resolve(root, path);
 	assertOk(pathInside(root, resolvedPath), `Refusing to restore outside workspace: ${path}`);
-	assertSafeWorkspacePath(root, resolvedPath);
+	assertOk(isSafeWorkspacePath(root, resolvedPath), `Refusing to follow a path outside workspace: ${resolvedPath}`);
 	return resolvedPath;
 }
 
@@ -219,7 +221,7 @@ function formatBytes(bytes: number) {
 function snapshotBefore(path: string) {
 	assertOk(turn, "No active turn");
 	const normalizedPath = normalizePath(turn.root, turn.cwd, path);
-	if (isHistoryIgnoredPath(normalizedPath)) {
+	if (normalizedPath === undefined || isHistoryIgnoredPath(normalizedPath)) {
 		return;
 	}
 	if (!turn.files.has(normalizedPath)) {
@@ -232,7 +234,7 @@ function snapshotBefore(path: string) {
 function snapshotAfter(path: string) {
 	assertOk(turn, "No active turn");
 	const normalizedPath = normalizePath(turn.root, turn.cwd, path);
-	if (isHistoryIgnoredPath(normalizedPath)) {
+	if (normalizedPath === undefined || isHistoryIgnoredPath(normalizedPath)) {
 		return;
 	}
 	const current = turn.files.get(normalizedPath) || {
