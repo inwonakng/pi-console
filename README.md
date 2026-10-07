@@ -151,7 +151,8 @@ if-shell "command -v pi-console >/dev/null 2>&1" "run-shell 'pi-console --tmux s
 ```
 
 The command resolves its application directory and sources the matching tmux
-integration. Reload tmux, then use:
+keybindings and modified-key settings. It does not enable graphics passthrough
+or install graphics-depth hooks. Reload tmux, then use:
 
 | Binding | Action |
 |---|---|
@@ -172,6 +173,40 @@ prompt, and access/integration modes. Restart is refused while Pi work or
 requests are pending; save or discard modified file buffers first. This
 requires starting through `pi-console`. `:PiRestart` / `<leader>pr` continues
 to restart only Pi.
+
+### Optional LaTeX graphics in tmux
+
+Display equations use the Kitty graphics protocol through
+[nvim-extras](https://github.com/inwonakng/nvim-extras). They require a compatible
+terminal (such as Kitty or Ghostty), `pdflatex`, ImageMagick, and the TeX packages
+listed in the [renderer documentation](https://github.com/inwonakng/nvim-extras/blob/main/lua/latex_renderer/README.md).
+Inline equations use `utftex`.
+
+Graphics passthrough is a host-wide tmux policy, so the default integration and
+installer leave it to your main tmux configuration. For standalone installations
+that do not already configure it, explicitly source
+[`tmux/graphics.conf`](tmux/graphics.conf) from your main tmux config:
+
+```tmux
+# Default managed installation; adjust for a custom install directory or checkout.
+source-file "$HOME/.local/share/pi-console/tmux/graphics.conf"
+```
+
+This optional file enables `allow-passthrough` and focus events globally and
+installs graphics-depth hooks at index 90. The hooks set the session option
+`@graphics-nest-count` to 1 for ordinary terminal clients or 2 for nested tmux
+clients (identified by their terminal name matching `default-terminal`). The
+renderer reads that option on startup and focus changes so popup graphics pass
+through both tmux layers. These settings affect all applications on that tmux
+server, not just pi-console. Keep them in your own config **or** source the
+optional file; do not install both copies of the hooks.
+
+After upgrading from the previously automatic setup, choose one of those
+locations for the graphics settings. Reload your main tmux config and reopen
+the popup so the client hooks run. Existing hooks remain in a running server
+until removed or the server exits; reloading only `pi-console --tmux setup`
+does not remove them. Without an explicit graphics setup, a fresh server will
+no longer enable passthrough automatically.
 
 ## Configuration
 
