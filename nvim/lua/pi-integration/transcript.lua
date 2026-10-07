@@ -494,8 +494,10 @@ function M.write_tool_output(ctx, output_id)
 	local existing = state.tool_items_by_output and state.tool_items_by_output[output_id]
 	if not existing then
 		M.ensure_assistant_turn_started(ctx, "Assistant")
-		M.remove_pending_transcript_item_separator(ctx)
 		local previous = state.transcript_items[#state.transcript_items]
+		if previous and previous.kind == "tool_group" then
+			M.remove_pending_transcript_item_separator(ctx)
+		end
 		if not previous or previous.kind ~= "tool_group" or previous.end_line ~= M.line_count(ctx) then
 			M.begin_trace_item(ctx)
 		end
