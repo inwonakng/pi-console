@@ -1,19 +1,11 @@
 local M = {}
 
--- fzf-lua has one live picker. Keep ownership until the RPC request is answered,
--- not just until its window disappears.
+-- Track the live RPC picker for response/timeout/session cleanup. Only explicitly
+-- resumable requests keep exclusive ownership when their window is hidden.
 local active
 
 function M.owns_buffer(buf)
-	return active ~= nil and active.buf == buf
-end
-
-function M.can_open(request_id)
-	if not active or request_id == active.id then
-		return true
-	end
-	active.ctx.ui.notify("Resolve the pending action first (<leader>pa).", vim.log.levels.WARN)
-	return false
+	return active ~= nil and active.request.resumable and active.buf == buf
 end
 
 local function refresh(picker)
@@ -46,9 +38,23 @@ local function finish(picker, choice, respond)
 	refresh(picker)
 end
 
+function M.can_open(request_id)
+	if not active or request_id == active.id then
+		return true
+	end
+	if not active.request.resumable then
+		-- Replacing an ordinary picker cancels its RPC request before opening
+		-- the next UI. Its delayed callback must not close the new picker.
+		finish(active, nil, true)
+		return true
+	end
+	active.ctx.ui.notify("Resolve the pending action first (<leader>pa).", vim.log.levels.WARN)
+	return false
+end
+
 function M.hide()
 	local picker = active
-	if not picker or picker.request.hidden then
+	if not picker or not picker.request.resumable or picker.request.hidden then
 		return
 	end
 	picker.request.hidden = true
@@ -63,7 +69,7 @@ end
 
 function M.restore(ctx)
 	local picker = active
-	if not picker or picker.ctx.state ~= ctx.state then
+	if not picker or not picker.request.resumable or picker.ctx.state ~= ctx.state then
 		ctx.ui.notify("No pending picker to restore.")
 		return
 	end
@@ -104,8 +110,10 @@ function M.select(ctx, id, items, opts, on_choice)
 		request.hidden = nil
 		picker.buf = event.bufnr
 		picker.win = event.winid
-		for _, key in ipairs({ "<Esc>", "<C-c>" }) do
-			vim.keymap.set({ "t", "n" }, key, M.hide, { buffer = event.bufnr, nowait = true, desc = "Hide pending Pi action" })
+		if request.resumable then
+			for _, key in ipairs({ "<Esc>", "<C-c>" }) do
+				vim.keymap.set({ "t", "n" }, key, M.hide, { buffer = event.bufnr, nowait = true, desc = "Hide pending Pi action" })
+			end
 		end
 		if not picker.watching_buffer then
 			picker.watching_buffer = true

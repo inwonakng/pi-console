@@ -282,7 +282,10 @@ async function confirmDestructive(
 ): Promise<boolean> {
   if (getIntegrationMode() === "allowed") return true;
   if (getInteractionMode(ctx) === "interactive") {
-    return ctx.ui.confirm(title, message, { signal: ctx.signal });
+    const dialogTitle = ctx.mode === "rpc"
+      ? JSON.stringify({ kind: "pi_confirmation", prompt: title, resumable: true })
+      : title;
+    return ctx.ui.confirm(dialogTitle, message, { signal: ctx.signal });
   }
   return approved === true;
 }
@@ -661,7 +664,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
             notifyPiWorkspaceIntegration(ctx);
             const prompt = `Apply ${selected.label} to ${selected.destinationRoot}?${ignoredReviewNote(selected)}`;
             decision = await ctx.ui.select(
-              ctx.mode === "rpc" ? JSON.stringify({ kind: "pi_compact_select", prompt }) : prompt,
+              ctx.mode === "rpc" ? JSON.stringify({ kind: "pi_compact_select", prompt, resumable: true }) : prompt,
               [INTEGRATE_ACTION, REVIEW_ACTION, RETURN_ACTION],
               { signal: ctx.signal },
             ) ?? RETURN_ACTION;

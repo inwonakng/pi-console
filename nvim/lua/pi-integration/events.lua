@@ -331,7 +331,9 @@ local function summarize_ui_request(event)
 	end
 
 	local compact_select = decode_compact_select_payload(event.title)
-	local title = compact_request_text(compact_select and compact_select.prompt or event.title, 360)
+	local confirmation = type(event.title) == "string" and json.decode_object(event.title)
+	local prompt = type(confirmation) == "table" and confirmation.kind == "pi_confirmation" and confirmation.prompt
+	local title = compact_request_text(compact_select and compact_select.prompt or prompt or event.title, 360)
 	local message = compact_request_text(event.message, 360)
 	if request_has_option(event, "Integrate and return") then
 		return {
@@ -567,9 +569,17 @@ function M.handle_extension_ui_request(ctx, event)
 			return
 		end
 		local request = summarize_ui_request(event)
+		local payload = type(event.title) == "string" and json.decode_object(event.title)
+			or decode_approval_payload(event.message)
+		request.resumable = (event.method == "select" or event.method == "confirm")
+			and type(payload) == "table" and payload.resumable == true
 		request.expires = type(event.timeout) == "number" and (vim.uv.now() + event.timeout) or nil
 		state.pending_ui_requests[event.id] = request
-		state.active_ui_request_id = event.id
+		-- RPC bookkeeping is not itself a blocking conversation interaction.
+		-- Freehand question input keeps its existing waiting status/editor flow.
+		if request.resumable or decode_question_payload(event.title, "pi_question_response") then
+			state.active_ui_request_id = event.id
+		end
 	end
 	if event.method == "set_editor_text" and type(event.text) == "string" and ctx.buffer.valid(state.input_buf) then
 		vim.api.nvim_buf_set_lines(state.input_buf, 0, -1, false, vim.split(event.text, "\n", { plain = true }))
@@ -633,7 +643,9 @@ function M.handle_extension_ui_request(ctx, event)
 		if confirm_with_preview(ctx, event) then
 			return
 		end
-		local prompt = event.title or "Pi confirm"
+		local payload = type(event.title) == "string" and json.decode_object(event.title)
+		local prompt = type(payload) == "table" and payload.kind == "pi_confirmation"
+			and type(payload.prompt) == "string" and payload.prompt or event.title or "Pi confirm"
 		local preview_text = prompt
 		if type(event.message) == "string" and event.message ~= "" then
 			preview_text = preview_text .. "\n\n" .. event.message

@@ -166,7 +166,7 @@ export function requestPermission(
     const summary = permissionSummary(permission);
     const contents = typeof preview === "function" ? preview() : preview;
     const title = ctx.mode === "rpc" ? JSON.stringify({
-      kind: "pi_approval_preview", tool, mode: getAccessMode(), summary: scopeLabel,
+      kind: "pi_approval_preview", resumable: true, tool, mode: getAccessMode(), summary: scopeLabel,
       request: summary, directory: ctx.cwd,
       path: permission.kind === "read" || permission.kind === "write" || permission.kind === "unix-socket"
         ? permission.scope : undefined,

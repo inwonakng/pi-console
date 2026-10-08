@@ -126,7 +126,7 @@ export default function questionExtension(pi: ExtensionAPI) {
       while (true) {
         preparePrompt();
         const selectTitle = ctx.mode === "rpc"
-          ? JSON.stringify({ kind: "pi_question_select", question })
+          ? JSON.stringify({ kind: "pi_question_select", question, resumable: true })
           : question;
         const selected = await ctx.ui.select(selectTitle, displayedOptions, { signal });
         if (selected === undefined) {
