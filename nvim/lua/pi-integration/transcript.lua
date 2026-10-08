@@ -147,7 +147,7 @@ local function tool_summary_rows(state, preview)
 	local rows = {}
 	for _, group in ipairs(state.transcript_items or {}) do
 		if group.kind == "tool_group" then
-			rows[group.start_line] = { output_id = group.children[1].output_id, stats = #group.children == 1 }
+			rows[group.start_line] = { output_id = group.children[1].output_id, stats = false }
 			if not preview then
 				for _, child in ipairs(group.children) do
 					rows[child.start_line] = { output_id = child.output_id, stats = true }

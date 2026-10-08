@@ -4,9 +4,6 @@ local tool_output = require("pi-integration.tool-output")
 local M = {}
 
 local function summary(state, group)
-	if #group.children == 1 then
-		return "> 󰇥 " .. tool_output.summary_text(state, group.children[1].output_id)
-	end
 	local files, failures, running = {}, 0, 0
 	for _, child in ipairs(group.children) do
 		local output = state.tool_outputs[child.output_id]
@@ -24,11 +21,10 @@ local function summary(state, group)
 			running = running + 1
 		end
 	end
+	local call_count = #group.children
 	local file_count = vim.tbl_count(files)
-	local text = "> 󰇥 " .. group.name .. " · " .. #group.children .. " calls"
-	if file_count > 0 then
-		text = text .. " · " .. file_count .. (file_count == 1 and " file" or " files")
-	end
+	local text = "> 󰇥 " .. group.name .. " (" .. call_count .. (call_count == 1 and " call" or " calls")
+		.. ", " .. file_count .. (file_count == 1 and " file" or " files") .. ")"
 	if running > 0 then
 		text = text .. " · " .. running .. " running"
 	end
