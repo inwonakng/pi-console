@@ -1,7 +1,7 @@
 import type { ExtensionCommandContext, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, workspaceDisplayState, type WorkspaceRecord } from "./workspace";
-import { hasRunningSubagents } from "../spawn";
+import { hasRunningSubagents } from "./subagent-state";
 
 const LOCATION_ENTRY = "pi-workspace-location";
 const CURSOR_ENTRY = "pi-workspace-cursor";
@@ -52,7 +52,7 @@ export async function moveToLocation(
   ctx: ExtensionCommandContext,
   cwd: string,
   leafId: string | null,
-  options: { workspaceId?: string; workspaceLabel?: string; markLocation?: boolean; navigateTo?: string; reload?: boolean; saveCursor?: boolean; continueWith?: string; onArrival?: (ctx: ExtensionCommandContext) => void } = {},
+  options: { workspaceId?: string; workspaceLabel?: string; markLocation?: boolean; navigateTo?: string; reload?: boolean; saveCursor?: boolean; continueWith?: string; onArrival?: (ctx: ExtensionCommandContext) => void | Promise<void> } = {},
 ): Promise<boolean> {
   if (leafId !== null && !options.reload && !ctx.sessionManager.getEntry(leafId)) throw new Error(`Unknown session entry: ${leafId}`);
   const file = ctx.sessionManager.getSessionFile();
@@ -88,7 +88,7 @@ export async function moveToLocation(
         nextCtx.sessionManager.appendCustomEntry(CURSOR_ENTRY, {});
       }
       setExpectedWorkspaceMissing(undefined);
-      options.onArrival?.(nextCtx);
+      await options.onArrival?.(nextCtx);
     } finally {
       if (ownsPending) {
         setPendingWorkspace(undefined);

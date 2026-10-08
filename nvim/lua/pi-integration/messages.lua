@@ -2,15 +2,13 @@ local M = {}
 
 local json = require("pi-integration.utils.json")
 local pi_skills = require("pi-integration.skills")
+local pi_tool_output = require("pi-integration.tool-output")
+local pi_thinking_output = require("pi-integration.thinking-output")
 local message_utils = require("pi-integration.utils.message")
 local tool_groups = require("pi-integration.tool-groups")
 
 function M.decode_session_record(line)
 	return json.decode_object(line)
-end
-
-local function is_spawn_custom_type(custom_type)
-	return custom_type == "spawn_completion" or custom_type == "spawn_control_result"
 end
 
 local function custom_message_from_record(record)
@@ -51,8 +49,11 @@ local function message_from_session_record(record)
 	if record.type == "message" and record.message then
 		return record.message
 	end
-	if record.type == "custom_message" and (record.display ~= false or is_spawn_custom_type(record.customType)) then
-		return custom_message_from_record(record)
+	if record.type == "custom_message" then
+		local message = custom_message_from_record(record)
+		if record.display ~= false or message_utils.spawn_custom_tool_name(message) then
+			return message
+		end
 	end
 	if record.type == "compaction" then
 		return compaction_message_from_record(record)
@@ -206,18 +207,6 @@ local function append_compaction_summary(lines, items, message, has_body)
 	return true, "compaction"
 end
 
-local function is_spawn_tool_name(name)
-	return name == "spawn" or name == "spawn_control"
-end
-
-local function message_run_id(message)
-	local details = type(message) == "table" and type(message.details) == "table" and message.details or nil
-	if not details then
-		return nil
-	end
-	return details.runId or details.id
-end
-
 local function has_tool_item(state, tool_call_id)
 	local output_id = tool_call_id and state.live_tool_output_by_call[tool_call_id]
 	return output_id and state.tool_items_by_output[output_id] ~= nil
@@ -229,80 +218,28 @@ local function write_tool_output(ctx, lines, items, output_id)
 	end)
 end
 
-local function upsert_spawn_run(ctx, run)
-	local id = type(run) == "table" and (run.runId or run.id) or nil
-	if type(id) ~= "string" or id == "" then
-		return run
-	end
-	local state = ctx.state
-	state.spawn_runs = state.spawn_runs or {}
-	for index, existing in ipairs(state.spawn_runs) do
-		if type(existing) == "table" and (existing.runId or existing.id) == id then
-			local merged = {}
-			for key, value in pairs(existing) do
-				merged[key] = value
-			end
-			for key, value in pairs(run) do
-				merged[key] = value
-			end
-			state.spawn_runs[index] = merged
-			return merged
-		end
-	end
-	table.insert(state.spawn_runs, run)
-	return run
-end
-
-local function upsert_spawn_details(ctx, details)
-	if type(details) == "table" and type(details.runs) == "table" then
-		for _, run in ipairs(details.runs) do
-			upsert_spawn_run(ctx, run)
-		end
-		return details
-	end
-	return upsert_spawn_run(ctx, details)
-end
-
 local function update_existing_spawn_output(ctx, lines, items, message, text)
-	if type(message.details) == "table" and type(message.details.runs) == "table" then
-		local updated = false
-		for _, run in ipairs(message.details.runs) do
-			updated = update_existing_spawn_output(ctx, lines, items, { details = run }, nil) or updated
-		end
-		return updated
-	end
-	local id = message_run_id(message)
-	if type(id) ~= "string" or id == "" then
-		return false
-	end
-	message.details = upsert_spawn_details(ctx, message.details)
-	local existing = ctx.state.spawn_run_output_by_id[id]
-	if not existing or not ctx.state.tool_items_by_output[existing] then
-		return false
-	end
-	local output_id = ctx.tools.store_or_update_spawn_run_output(message.details, text)
-	if not output_id then
-		return false
-	end
-	write_tool_output(ctx, lines, items, output_id)
-	return true
+	local updated, remaining, represented = pi_tool_output.update_spawn_outputs(ctx.state, message.details, text)
+	for _, output_id in ipairs(updated) do write_tool_output(ctx, lines, items, output_id) end
+	return represented, remaining
 end
 
-local function render_tool_summary(ctx, lines, items, message)
+local function render_tool_summary(ctx, lines, items, message, ensure_assistant_block)
 	local name = message.toolName or "tool"
-	local text = ctx.messages.extract_text(message) or ""
+	local text = message_utils.extract_text(message) or ""
 	local tool_call_id = message_utils.tool_call_id(message)
+	local details = message.details
 	if name == "spawn_control" then
-		update_existing_spawn_output(ctx, lines, items, message, not message.isError and text or nil)
-		if not message.isError then
-			return false
-		end
+		local call = ctx.state.tool_calls[tool_call_id]
+		if not message.isError and details == nil and call and call.execution_status == "running" then return false end
+		local represented, remaining = update_existing_spawn_output(ctx, lines, items, message, not message.isError and text or nil)
+		if not message.isError and represented then return false end
+		if not message.isError then details = remaining end
 	end
-	if is_spawn_tool_name(name) and not message.isError then
-		message.details = upsert_spawn_details(ctx, message.details)
-	end
-	local output_id = ctx.tools.store_or_update_live_output(
-		name, tool_call_id, text, nil, message.details, ctx.tools.store_display(message), message.isError
+	if ensure_assistant_block and not has_tool_item(ctx.state, tool_call_id) then ensure_assistant_block() end
+	local output_id = pi_tool_output.store_or_update_live(
+		ctx.state, name, tool_call_id, text, nil, details,
+		pi_tool_output.display_for_result(ctx.state, message), message.isError
 	)
 	local added = write_tool_output(ctx, lines, items, output_id)
 	if added then
@@ -311,24 +248,12 @@ local function render_tool_summary(ctx, lines, items, message)
 	return added
 end
 
-local function spawn_custom_tool_name(message)
-	if type(message) ~= "table" or message.role ~= "custom" then
-		return nil
-	end
-	if message.customType == "spawn_completion" then
-		return "spawn"
-	elseif message.customType == "spawn_control_result" then
-		return "spawn_control"
-	end
-	return nil
-end
-
 local function append_thinking_summary(ctx, lines, items, text)
 	if type(text) ~= "string" or text == "" then
 		return false
 	end
-	local output_id = ctx.thinking.store_output(text)
-	vim.list_extend(lines, ctx.thinking.summary_lines(output_id, false))
+	local output_id = pi_thinking_output.store(ctx.state, text)
+	vim.list_extend(lines, pi_thinking_output.summary_lines(ctx.state, output_id, false))
 	local line = #lines
 	table.insert(lines, "")
 	table.insert(items, {
@@ -353,8 +278,8 @@ local function append_skill_load_summaries(ctx, lines, items, loads, has_body, p
 		add_message_separator(lines, has_body)
 	end
 	for _, load in ipairs(loads) do
-		local output_id = ctx.skills.store_prompt(load)
-		vim.list_extend(lines, ctx.skills.summary_lines(output_id))
+		local output_id = pi_skills.store_load(ctx.state, load)
+		vim.list_extend(lines, pi_skills.summary_lines(ctx.state, output_id))
 		local line = #lines
 		table.insert(items, {
 			kind = "skill",
@@ -381,7 +306,7 @@ local function append_assistant_blocks(ctx, lines, items, message, has_body, opt
 	options = options or {}
 	local content = message.content
 	if type(content) ~= "table" then
-		local text = ctx.messages.extract_text(message)
+		local text = message_utils.extract_text(message)
 		if text and text ~= "" then
 			if options.continue_trace then
 				if lines[#lines] ~= "" then
@@ -511,24 +436,21 @@ function M.collect_message_lines(ctx, messages)
 		end
 		if role == "tool_execution_start" or role == "tool_execution_update" then
 			if role == "tool_execution_start" then
-				ctx.tools.record_execution_call(message.toolName, message.toolCallId, message.args, "running")
+				pi_tool_output.record_execution_call(ctx.state, message.toolName, message.toolCallId, message.args, "running")
 			end
 			if not pi_skills.tool_result_skill_name(ctx.state, message) then
 				local partial = type(message.partialResult) == "table" and message.partialResult or {}
-				if message.toolName ~= "spawn_control" and not has_tool_item(ctx.state, message.toolCallId) then
-					ensure_assistant_block()
-				end
 				appended = render_tool_summary(ctx, lines, items, {
 					toolName = message.toolName,
 					toolCallId = message.toolCallId,
 					content = partial.content,
 					details = partial.details,
-				})
+				}, ensure_assistant_block)
 				rendered_kind = appended and "tool" or nil
 			end
 		elseif role == "agent_settled" or role == "agent_end" or role == "child_exit" then
 			if not message.willRetry then
-				for _, output_id in ipairs(ctx.tools.interrupt_executions()) do
+				for _, output_id in ipairs(pi_tool_output.interrupt_executions(ctx.state)) do
 					if ctx.state.tool_items_by_output[output_id] then
 						write_tool_output(ctx, lines, items, output_id)
 					end
@@ -536,27 +458,24 @@ function M.collect_message_lines(ctx, messages)
 			end
 		elseif role == "toolResult" then
 			local name = message.toolName or "tool"
-			local text = ctx.messages.extract_text(message) or ""
+			local text = message_utils.extract_text(message) or ""
 			local tool_call_id = message_utils.tool_call_id(message)
-			ctx.tools.record_execution_call(name, tool_call_id, nil, "completed")
+			pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed")
 			if pi_skills.tool_result_skill_name(ctx.state, message) then
-				ctx.skills.apply_tool_result(message)
+				pi_skills.apply_tool_result(ctx.state, message, text)
 				appended = false
 			elseif name == "spawn" and not message.isError and not has_tool_item(ctx.state, tool_call_id)
 				and update_existing_spawn_output(ctx, lines, items, message, text) then
 				appended = false
 			else
-				if (name ~= "spawn_control" or message.isError) and not has_tool_item(ctx.state, tool_call_id) then
-					ensure_assistant_block()
-				end
-				appended = render_tool_summary(ctx, lines, items, message)
+				appended = render_tool_summary(ctx, lines, items, message, ensure_assistant_block)
 				rendered_kind = appended and "tool" or nil
 			end
 		elseif role == "compactionSummary" then
 			close_assistant_block()
 			appended, rendered_kind = append_compaction_summary(lines, items, message, has_body)
 		elseif role == "assistant" then
-			ctx.tools.record_calls(message)
+			pi_tool_output.record_calls(ctx.state, message)
 			local skill_loads = pi_skills.collect_loads(ctx.state, message)
 			appended, rendered_kind = append_assistant_blocks(ctx, lines, items, message, has_body, {
 				continue_trace = assistant_block_open,
@@ -579,22 +498,22 @@ function M.collect_message_lines(ctx, messages)
 				rendered_kind = "skill"
 			end
 		elseif role == "custom" then
-			local name = spawn_custom_tool_name(message)
+			local name = message_utils.spawn_custom_tool_name(message)
 			if name then
-				local text = name == "spawn" and "" or (ctx.messages.extract_text(message) or "")
-				local details = type(message.details) == "table" and message.details or nil
-				if details and type(details.runs) == "table" then
-					for _, run in ipairs(details.runs) do
-						update_existing_spawn_output(ctx, lines, items, { details = run }, nil)
-					end
-				else
-					update_existing_spawn_output(ctx, lines, items, message, text)
+				local text = message_utils.extract_text(message) or ""
+				local represented, remaining = update_existing_spawn_output(ctx, lines, items, message, name ~= "spawn" and text or nil)
+				if not represented then
+					ensure_assistant_block()
+					-- A fallback control/completion row is not an owning spawn ack.
+					local output_id = pi_tool_output.store(ctx.state, "spawn_control", text, nil, remaining)
+					appended = write_tool_output(ctx, lines, items, output_id)
+					if appended then table.insert(lines, "") end
+					rendered_kind = appended and "tool" or nil
 				end
-				appended = false
 			elseif message.display == false then
 				appended = false
 			else
-				local text = ctx.messages.extract_text(message)
+				local text = message_utils.extract_text(message)
 				if text and text ~= "" then
 					close_assistant_block()
 					append_text_message(lines, message, text, has_body)
@@ -603,7 +522,7 @@ function M.collect_message_lines(ctx, messages)
 				end
 			end
 		else
-			local text = ctx.messages.extract_text(message)
+			local text = message_utils.extract_text(message)
 			if text and text ~= "" then
 				close_assistant_block()
 				append_text_message(lines, message, text, has_body)

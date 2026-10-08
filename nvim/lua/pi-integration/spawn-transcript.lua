@@ -1,7 +1,6 @@
 local floats = require("pi-integration.floats")
 local buffer_utils = require("pi-integration.utils.buffer")
 local json = require("pi-integration.utils.json")
-local message_utils = require("pi-integration.utils.message")
 local markdown_render = require("pi-integration.markdown-render")
 local pi_messages = require("pi-integration.messages")
 local pi_tool_output = require("pi-integration.tool-output")
@@ -14,10 +13,6 @@ local M = {}
 
 local function decode_json(line)
 	return json.decode_object(line)
-end
-
-local function extract_text(message)
-	return message_utils.extract_text(message)
 end
 
 local function read_messages(path)
@@ -55,51 +50,9 @@ local function make_render_ctx(state, path)
 	return {
 		state = state,
 		notices = { empty_session = "No messages yet." },
-		messages = {
-			extract_text = extract_text,
-		},
 		transcript = {
 			metadata_lines = function()
 				return metadata_lines(path)
-			end,
-		},
-		tools = {
-			record_calls = function(message)
-				return pi_tool_output.record_calls(state, message)
-			end,
-			record_execution_call = function(tool_name, tool_call_id, args, execution_status)
-				return pi_tool_output.record_execution_call(state, tool_name, tool_call_id, args, execution_status)
-			end,
-			interrupt_executions = function()
-				return pi_tool_output.interrupt_executions(state)
-			end,
-			store_or_update_live_output = function(tool_name, tool_call_id, text, filetype, details, display, is_error)
-				return pi_tool_output.store_or_update_live(state, tool_name, tool_call_id, text, filetype, details, display, is_error)
-			end,
-			store_display = function(message)
-				return pi_tool_output.display_for_result(state, message)
-			end,
-			store_or_update_spawn_run_output = function(run, text)
-				return pi_tool_output.store_or_update_spawn_run(state, run, text)
-			end,
-		},
-		thinking = {
-			store_output = function(text)
-				return pi_thinking_output.store(state, text)
-			end,
-			summary_lines = function(output_id, streaming)
-				return pi_thinking_output.summary_lines(state, output_id, streaming)
-			end,
-		},
-		skills = {
-			store_prompt = function(load)
-				return pi_skills.store_load(state, load)
-			end,
-			summary_lines = function(output_id)
-				return pi_skills.summary_lines(state, output_id)
-			end,
-			apply_tool_result = function(message)
-				return pi_skills.apply_tool_result(state, message, extract_text(message))
 			end,
 		},
 	}
@@ -168,6 +121,11 @@ function M.open(ctx, path, title)
 		return
 	end
 
+	local owner = ctx.state
+	floats.close_window(owner.spawn_win)
+	owner.spawn_win = nil
+	owner.spawn_buf = nil
+
 	local state = {
 		tool_outputs = {},
 		next_tool_output_id = 0,
@@ -184,10 +142,8 @@ function M.open(ctx, path, title)
 		transcript_win = nil,
 	}
 
-	local buf = buffer_utils.create_scratch({
-		name = "pi://spawn/transcript/" .. vim.fn.fnamemodify(path, ":h:t"),
-		filetype = "markdown",
-	})
+	local buf = buffer_utils.create_scratch({ filetype = "markdown" })
+	vim.api.nvim_buf_set_name(buf, "pi://spawn/transcript/" .. buf .. "/" .. vim.fn.fnamemodify(path, ":h:t"))
 	markdown_render.prepare_buffer(buf, { latex = true })
 
 	state.transcript_buf = buf
@@ -217,6 +173,8 @@ function M.open(ctx, path, title)
 		title_pos = "left",
 	})
 	state.transcript_win = win
+	owner.spawn_buf = buf
+	owner.spawn_win = win
 	vim.api.nvim_set_option_value("wrap", true, { win = win })
 	vim.api.nvim_set_option_value("number", false, { win = win })
 	vim.api.nvim_set_option_value("relativenumber", false, { win = win })
@@ -224,7 +182,9 @@ function M.open(ctx, path, title)
 	render_transcript_ui(state)
 
 	local close_win = function()
-		floats.close_window(win)
+		if buffer_utils.window_matches(win, buf) then floats.close_window(win) end
+		if owner.spawn_win == win then owner.spawn_win = nil end
+		if owner.spawn_buf == buf then owner.spawn_buf = nil end
 	end
 	floats.close_on_win_leave(buf, close_win, { win = win, parent = ctx.window.parent })
 	vim.keymap.set("n", "q", close_win, { buffer = buf, silent = true, desc = "Close spawn transcript" })

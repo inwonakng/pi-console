@@ -1,4 +1,5 @@
 local guard = require("pi-integration.utils.guard")
+local lifecycle = require("pi-integration.state")
 
 local M = {}
 
@@ -138,9 +139,8 @@ end
 
 function M.flush_queued_prompts(ctx)
 	local state = ctx.state
-	if state.loading_error or state.is_loading or state.session_replacement_pending
-		or state.is_agent_running or state.is_streaming or state.is_retrying
-		or state.is_compacting or state.awaiting_agent_output then
+	if state.loading_error or state.is_loading or state.session_replacement_pending or state.rpc_tearing_down
+		or lifecycle.is_agent_active(state) or state.is_compacting then
 		return
 	end
 	for _, pending in ipairs(state.pending_user_messages or {}) do
@@ -205,7 +205,7 @@ function M.abort(ctx)
 end
 
 function M.history(ctx)
-	if not guard.if_not_active(ctx, "changing history") then
+	if not guard.if_history_change_allowed(ctx, "changing history") then
 		return
 	end
 	ctx.rpc.send({ type = "prompt", message = "/pi-history" }, function(event)

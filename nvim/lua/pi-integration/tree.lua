@@ -323,8 +323,10 @@ local function apply_tree_highlights(ctx)
 end
 
 local function focus_input_window(ctx)
-	if win_valid(ctx.state.input_win) then
-		vim.api.nvim_set_current_win(ctx.state.input_win)
+	local state = ctx.state
+	state.input_win = require("pi-integration.utils.buffer").find_window(state.input_buf, state.input_win)
+	if state.input_win then
+		vim.api.nvim_set_current_win(state.input_win)
 	end
 end
 
@@ -570,7 +572,7 @@ local function jump_to_node(ctx, summarize)
 	if not node then
 		return
 	end
-	if not guard.if_not_active(ctx, "changing history") then
+	if not guard.if_history_change_allowed(ctx, "changing history") then
 		return
 	end
 	local entry_id = node.target_id
@@ -600,7 +602,7 @@ local function delete_node(ctx)
 	if not node then
 		return
 	end
-	if not guard.if_not_active(ctx, "deleting history") then
+	if not guard.if_history_change_allowed(ctx, "deleting history") then
 		return
 	end
 	if not selected_session_path(ctx) then

@@ -1,8 +1,8 @@
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, join, resolve } from "node:path";
+import { pathInside, resolveToolPath } from "./paths";
+export { pathInside, resolveToolPath } from "./paths";
 import { getAccessMode, getScratchDirectory } from "./access-state";
 import { loadExtensionSettings } from "./extension-settings";
 import { getInteractionMode } from "./interaction-mode";
@@ -23,16 +23,6 @@ const sessionGrants: Permission[] = [];
 let approvalQueue: Promise<void> = Promise.resolve();
 let generation = 0;
 let approvalLifetime = new AbortController();
-
-export function resolveToolPath(path: string, cwd: string): string {
-  // Match Pi's file-tool normalization, including local file URLs.
-  let normalized = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ");
-  if (normalized.startsWith("@")) normalized = normalized.slice(1);
-  if (normalized === "~") return homedir();
-  if (normalized.startsWith("~/")) return join(homedir(), normalized.slice(2));
-  if (normalized.startsWith("file://")) normalized = fileURLToPath(normalized);
-  return resolve(cwd, normalized);
-}
 
 export function canonicalPath(path: string): string {
   const resolveLinks = (candidate: string, remainingLinks: number): string => {
@@ -58,13 +48,6 @@ export function canonicalPath(path: string): string {
     return resolve(realpathSync.native(current), ...suffix);
   };
   return resolveLinks(path, 40);
-}
-
-export function pathInside(parent: string, child: string): boolean {
-  // Scopes are canonicalized when approved, not re-resolved afterward. A
-  // remembered scope must not follow a newly planted symlink to another target.
-  const rel = relative(parent, child);
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith(sep));
 }
 
 export function baselineReadPaths(cwd: string): string[] {

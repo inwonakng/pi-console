@@ -6,10 +6,10 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAccessMode } from "./shared/access-state";
+import { resolveToolPath } from "./shared/paths";
 import {
   getIntegrationMode,
   parseIntegrationMode,
@@ -36,7 +36,7 @@ import {
   removeWorkspace,
   retainedChildWorkspaces,
   sameSessionFile,
-  saveWorkspace,
+  updateWorkspace,
   setExpectedWorkspaceMissing,
   setPendingWorkspace,
   workspaceDisplayState,
@@ -208,17 +208,6 @@ function formatStatus(ctx: ExtensionContext): string {
   return lines.join("\n");
 }
 
-function resolveToolPath(path: string, cwd: string): string {
-  const normalized = path.startsWith("@") ? path.slice(1) : path;
-  if (normalized === "~") {
-    return homedir();
-  }
-  if (normalized.startsWith("~/")) {
-    return join(homedir(), normalized.slice(2));
-  }
-  return resolve(cwd, normalized);
-}
-
 function managedRepositoryPath(path: string): boolean {
   return listWorkspaces().some((record) =>
     record.retained
@@ -299,7 +288,10 @@ async function confirmDestructive(
 }
 
 export default function workspaceExtension(pi: ExtensionAPI) {
+  let runtimeCancellation = new AbortController();
+  pi.on("session_shutdown", () => runtimeCancellation.abort());
   pi.on("session_start", (event, ctx) => {
+    runtimeCancellation = new AbortController();
     restoreIntegrationMode(ctx);
     const envWorkspaceId = process.env.PI_WORKSPACE_ID;
     if (envWorkspaceId) {
@@ -400,9 +392,10 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         const transitionPending = getPendingWorkspaceId() !== undefined;
         setPendingWorkspace(undefined);
         if (transitionPending) publishWorkspaceState(ctx);
-        record.lifecycle = "retained";
-        record.integrationReason = error instanceof Error ? error.message : String(error);
-        saveWorkspace(record);
+        await updateWorkspace(record.id, (current) => {
+          current.lifecycle = "retained";
+          current.integrationReason = error instanceof Error ? error.message : String(error);
+        });
         throw error;
       }
     },
@@ -454,8 +447,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           continueWith: lifecycle === "integrated"
             ? "Report the integration result, then continue any remaining work in the origin checkout."
             : "Report that the workspace was discarded and continue only if work remains.",
-          onArrival: (nextCtx) => {
-            const cleaned = removeWorkspace(id, lifecycle);
+          onArrival: async (nextCtx) => {
+            const cleaned = await removeWorkspace(id, lifecycle);
             setPendingWorkspace(undefined);
             publishWorkspaceState(nextCtx);
             nextCtx.ui.notify(cleaned.lifecycle === "cleanup_failed"
@@ -470,9 +463,10 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         setPendingWorkspace(undefined);
         if (transitionPending) publishWorkspaceState(ctx);
         const retained = loadWorkspace(id);
-        if (retained) {
-          retained.integrationReason = error instanceof Error ? error.message : String(error);
-          saveWorkspace(retained);
+        if (retained?.retained && !isWorkspaceFinalized(retained)) {
+          await updateWorkspace(id, (current) => {
+            current.integrationReason = error instanceof Error ? error.message : String(error);
+          });
         }
         throw error;
       }
@@ -567,7 +561,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       approved: Type.Optional(Type.Boolean({ description: "Required for integration or discard in ask mode when no interactive UI is available; does not bypass interactive confirmation." })),
     }),
     executionMode: "sequential",
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const action = params.action as WorkspaceAction;
       if (action === "status") {
         const record = params.id ? loadWorkspace(params.id) : workspaceForContext(ctx.cwd, sessionFile(ctx));
@@ -689,7 +683,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
             terminate: true,
           };
         }
-        const integrated = await integrateWorkspace(selected.id);
+        const operationSignal = signal ? AbortSignal.any([signal, runtimeCancellation.signal]) : runtimeCancellation.signal;
+        const integrated = await integrateWorkspace(selected.id, operationSignal);
         if (integrated.integration !== "applied" && integrated.integration !== "none") {
           return {
             content: [{ type: "text", text: `Workspace was retained; integration=${integrated.integration}.\n${formatWorkspaceRecord(integrated)}` }],
@@ -712,7 +707,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       if (selected.kind === "task" && retainedChildWorkspaces(selected.id).length) {
         throw new Error(`Join or discard child workspaces before discarding ${selected.id}.`);
       }
-      const prepared = prepareWorkspaceDiscard(selected.id);
+      const prepared = await prepareWorkspaceDiscard(selected.id);
       const changed = prepared.changedFiles.length > 0 ? prepared.changedFiles.join("\n") : "(no changed files)";
       const included = prepared.includedIgnoredFiles?.length
         ? `\n\nIncluded ignored files (not in the recovery patch):\n${prepared.includedIgnoredFiles.map((file) => file.path).join("\n")}`
@@ -731,8 +726,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       }
       const active = workspaceForContext(ctx.cwd, sessionFile(ctx));
       if (prepared.kind === "task" && active?.id === prepared.id) {
-        prepared.lifecycle = "discard_pending";
-        saveWorkspace(prepared);
+        await updateWorkspace(prepared.id, (current) => {
+          current.lifecycle = "discard_pending";
+        });
         setPendingWorkspace(prepared.id);
         publishWorkspaceState(ctx);
         queueCommand(pi, `/pi-workspace-return ${prepared.id}`);
@@ -745,7 +741,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           terminate: true,
         };
       }
-      const discarded = removeWorkspace(prepared.id, "discarded");
+      const discarded = await removeWorkspace(prepared.id, "discarded");
       return {
         content: [{ type: "text", text: discarded.lifecycle === "cleanup_failed"
           ? `Discard cleanup failed; workspace retained: ${discarded.integrationReason ?? discarded.worktreePath}`

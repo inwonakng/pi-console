@@ -1,4 +1,4 @@
-import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ExtensionAPI, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawn as spawnProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -15,6 +15,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAccessMode } from "./shared/access-state";
+import { registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
 import {
   createWorkspace,
   integrateWorkspace,
@@ -23,9 +24,10 @@ import {
   prepareWorkspaceDiscard,
   removeWorkspace,
   sameSessionFile,
-  saveWorkspace,
+  updateWorkspace,
   workspaceForContext,
   workspaceStorageRoot,
+  type WorkspaceRecord,
 } from "./shared/workspace";
 
 const ACCESS_MODES = ["readonly", "ask", "edit", "full"] as const;
@@ -62,14 +64,24 @@ type SubagentProfile = {
   accessMode?: AccessMode;
 };
 
+type IntegrationBlock = {
+  integration: "needs_parent" | "failed";
+  reason: string;
+};
+
+type RunWorkspace = {
+  workspaceId: string;
+  // Recovery artifacts can outlive the record/worktree. This is not authority
+  // for workspace existence or permission to integrate.
+  recoveryPatchPath?: string;
+};
+
 type WorktreeInfo = {
   workspaceId: string;
-  gitRoot: string;
-  parentCwd: string;
-  childCwd: string;
-  path: string;
-  baseRef: string;
-  patchPath: string;
+  gitRoot: string | null;
+  path: string | null;
+  baseRef: string | null;
+  patchPath: string | null;
   changedFiles: string[];
   unpreservedFiles?: string[];
   integration: IntegrationStatus;
@@ -101,7 +113,8 @@ type SpawnRun = {
   child?: PiRpcChild;
   childCwd: string;
   parentSessionFile?: string;
-  worktree?: WorktreeInfo;
+  worktree?: RunWorkspace;
+  integrationBlock?: IntegrationBlock;
   timeout?: NodeJS.Timeout;
   abortListener?: () => void;
   abortSignal?: AbortSignal;
@@ -565,6 +578,58 @@ function runLabel(run: SpawnRun): string {
   return run.profile?.name ? `${run.profile.name} subagent` : "Subagent";
 }
 
+function unavailableWorkspaceReason(record: WorkspaceRecord | undefined, id: string): string | undefined {
+  if (!record) return `Workspace data is missing for ${id}; automatic integration is unavailable.`;
+  if (isWorkspaceFinalized(record)) return undefined;
+  if (record.lifecycle === "discarded") {
+    return `Workspace ${id} was intentionally discarded and is not eligible for automatic integration.`;
+  }
+  if (!record.retained || !existsSync(record.worktreePath)) {
+    return `Worktree is missing for workspace ${id}; automatic integration is unavailable.`;
+  }
+  return undefined;
+}
+
+function worktreeInfo(run: SpawnRun): WorktreeInfo | undefined {
+  const workspace = run.worktree;
+  if (!workspace) return undefined;
+  const record = loadWorkspace(workspace.workspaceId);
+  const unavailable = unavailableWorkspaceReason(record, workspace.workspaceId);
+  const finalizedIntegration = record?.integration === "applied" || record?.integration === "none" ? record.integration : undefined;
+  const block = record?.integration === "pending" && !unavailable ? run.integrationBlock : undefined;
+  const patchPath = record?.resultPatchPath ?? workspace.recoveryPatchPath;
+  const unavailableReason = unavailable && record?.lifecycle === "cleanup_failed" && record.integrationReason
+    ? `${unavailable}\nCleanup warning: ${record.integrationReason}` : unavailable;
+  return {
+    workspaceId: workspace.workspaceId,
+    gitRoot: record?.destinationRoot ?? null,
+    path: record?.worktreePath ?? null,
+    baseRef: record?.baselineCommit ?? null,
+    patchPath: patchPath && existsSync(patchPath) ? patchPath : null,
+    changedFiles: record?.changedFiles ?? [],
+    unpreservedFiles: record?.unpreservedFiles ?? [],
+    integration: finalizedIntegration ?? (unavailable ? "needs_parent"
+      : block?.integration ?? (record?.integration === "conflict" ? "needs_parent" : record?.integration ?? "needs_parent")),
+    integrationReason: finalizedIntegration ? record?.integrationReason : unavailableReason ?? block?.reason ?? record?.integrationReason,
+    retained: record?.retained ?? false,
+  };
+}
+
+function workspaceDetails(worktree: WorktreeInfo | undefined) {
+  // Lua merges run updates and accepts both forms. Publish them together so
+  // clearing a flat artifact cannot fall back to stale nested metadata (or vice versa).
+  return {
+    workspaceId: worktree?.workspaceId,
+    worktreePath: worktree?.path,
+    patchPath: worktree?.patchPath,
+    integration: worktree?.integration,
+    integrationReason: worktree?.integrationReason ?? null,
+    changedFiles: worktree?.changedFiles,
+    unpreservedFiles: worktree?.unpreservedFiles,
+    worktree: worktree ? { ...worktree, integrationReason: worktree.integrationReason ?? null } : null,
+  };
+}
+
 function artifactDetails(run: SpawnRun): Record<string, unknown> {
   return {
     runId: run.id,
@@ -574,9 +639,7 @@ function artifactDetails(run: SpawnRun): Record<string, unknown> {
     transcriptPath: run.transcriptPath,
     statusPath: run.statusPath,
     agentPromptPath: run.agentPromptPath,
-    patchPath: run.worktree?.patchPath,
-    worktreePath: run.worktree?.path,
-    workspaceId: run.worktree?.workspaceId,
+    ...workspaceDetails(worktreeInfo(run)),
     accessMode: run.accessMode,
     isolation: run.isolation,
     mode: run.mode,
@@ -588,10 +651,6 @@ function artifactDetails(run: SpawnRun): Record<string, unknown> {
     progress: run.progress ?? null,
     joined: run.joined,
     joinRequested: run.joinRequested ?? false,
-    integration: run.worktree?.integration,
-    integrationReason: run.worktree?.integrationReason,
-    changedFiles: run.worktree?.changedFiles,
-    unpreservedFiles: run.worktree?.unpreservedFiles,
   };
 }
 
@@ -616,24 +675,12 @@ function statusJson(run: SpawnRun): Record<string, unknown> {
     notified: run.notified,
     joined: run.joined,
     joinRequested: run.joinRequested ?? false,
+    integrationBlock: run.integrationBlock,
     briefPath: run.briefPath,
     resultPath: run.resultPath,
     transcriptPath: run.transcriptPath,
     agentPromptPath: run.agentPromptPath,
-    worktree: run.worktree
-      ? {
-          workspaceId: run.worktree.workspaceId,
-          gitRoot: run.worktree.gitRoot,
-          path: run.worktree.path,
-          baseRef: run.worktree.baseRef,
-          patchPath: run.worktree.patchPath,
-          changedFiles: run.worktree.changedFiles,
-          unpreservedFiles: run.worktree.unpreservedFiles,
-          integration: run.worktree.integration,
-          integrationReason: run.worktree.integrationReason ?? null,
-          retained: run.worktree.retained,
-        }
-      : null,
+    ...workspaceDetails(worktreeInfo(run)),
   };
 }
 
@@ -646,14 +693,14 @@ function writeStatus(run: SpawnRun): void {
 function resultSummary(run: SpawnRun): string {
   const resultText = run.resultText?.trim() || (run.status === "completed" ? "Subagent produced no final text." : `Subagent ${run.status}: ${run.error ?? run.stopReason ?? "unknown"}`);
   const agentPromptLine = run.agentPromptPath ? `\n- Subagent prompt: ${run.agentPromptPath}` : "";
-  const patchLine = run.worktree?.patchPath ? `\n- Patch: ${run.worktree.patchPath}` : "";
-  const worktreeLine = run.worktree?.retained ? `\n- Worktree: ${run.worktree.path}` : "";
-  const integrationLine = formatIntegrationLine(run);
+  const worktree = worktreeInfo(run);
+  const patchLine = worktree?.patchPath ? `\n- Patch: ${worktree.patchPath}` : "";
+  const worktreeLine = worktree?.retained && worktree.path ? `\n- Worktree: ${worktree.path}` : "";
+  const integrationLine = formatIntegrationLine(worktree);
   return `${resultText}${integrationLine}\n\nArtifacts:\n- Brief: ${run.briefPath}\n- Result: ${run.resultPath}\n- Transcript: ${run.transcriptPath}\n- Status: ${run.statusPath}${agentPromptLine}${patchLine}${worktreeLine}`;
 }
 
-function formatIntegrationLine(run: SpawnRun): string {
-  const worktree = run.worktree;
+function formatIntegrationLine(worktree: WorktreeInfo | undefined): string {
   if (!worktree) {
     return "";
   }
@@ -662,7 +709,11 @@ function formatIntegrationLine(run: SpawnRun): string {
     return `${files}${worktree.integrationReason ? `\n\nCleanup warning: ${worktree.integrationReason}` : ""}`;
   }
   if (worktree.integration === "needs_parent" || worktree.integration === "failed") {
-    return `\n\nIsolated worktree changes were not applied. Reason: ${worktree.integrationReason ?? worktree.integration}. The parent should inspect/apply the patch manually.`;
+    const recovery = worktree.patchPath ? ` Recovery patch: ${worktree.patchPath}` : "";
+    const outcome = worktree.integration === "failed"
+      ? "Isolated worktree integration failed."
+      : "Isolated worktree changes were not applied.";
+    return `\n\n${outcome} Reason: ${worktree.integrationReason ?? worktree.integration}${recovery}`;
   }
   if (worktree.integration === "none") {
     return `\n\nNo isolated worktree changes to apply.${worktree.integrationReason ? `\n\nCleanup warning: ${worktree.integrationReason}` : ""}`;
@@ -674,7 +725,7 @@ function createWorktree(
   ctxCwd: string,
   runId: string,
   parentSessionFile: string | undefined,
-): WorktreeInfo {
+): WorkspaceRecord {
   const parentWorkspace = workspaceForContext(ctxCwd, parentSessionFile);
   const record = createWorkspace({
     kind: "child",
@@ -684,86 +735,64 @@ function createWorktree(
     runId,
     label: `subagent-${runId.slice(-8)}`,
   });
-  return {
-    workspaceId: record.id,
-    gitRoot: record.destinationRoot,
-    parentCwd: ctxCwd,
-    childCwd: record.workspaceCwd,
-    path: record.worktreePath,
-    baseRef: record.baselineCommit,
-    patchPath: record.resultPatchPath,
-    changedFiles: record.changedFiles,
-    unpreservedFiles: record.unpreservedFiles,
-    integration: "pending",
-    retained: record.retained,
-  };
+  return record;
 }
 
-function prepareWorktreePatch(run: SpawnRun): void {
-  const worktree = run.worktree;
-  if (!worktree || !existsSync(worktree.path)) {
-    return;
-  }
-  const record = prepareWorkspaceDiscard(worktree.workspaceId);
-  worktree.patchPath = record.resultPatchPath;
-  worktree.changedFiles = record.changedFiles;
-  worktree.unpreservedFiles = record.unpreservedFiles;
-  worktree.retained = record.retained;
+async function prepareWorktreePatch(run: SpawnRun): Promise<void> {
+  if (!run.worktree) return;
+  const record = loadWorkspace(run.worktree.workspaceId);
+  if (unavailableWorkspaceReason(record, run.worktree.workspaceId) || !record || isWorkspaceFinalized(record)) return;
+  await prepareWorkspaceDiscard(record.id);
 }
 
-async function applyWorktreeChanges(run: SpawnRun): Promise<void> {
-  const worktree = run.worktree;
-  if (!worktree || worktree.integration === "applied" || worktree.integration === "none") {
+async function applyWorktreeChanges(run: SpawnRun, signal?: AbortSignal): Promise<void> {
+  if (!run.worktree) return;
+  const record = loadWorkspace(run.worktree.workspaceId);
+  if (record && isWorkspaceFinalized(record)) {
+    run.integrationBlock = undefined;
     return;
   }
+  const unavailable = unavailableWorkspaceReason(record, run.worktree.workspaceId);
+  if (unavailable) return; // Reports derive unavailability from the record, never stale run paths.
   if (run.status !== "completed") {
-    worktree.integration = "needs_parent";
-    worktree.integrationReason = `subagent status is ${run.status}`;
-    writeStatus(run);
+    run.integrationBlock = { integration: "needs_parent", reason: `subagent status is ${run.status}` };
     return;
   }
-  if (getAccessMode() !== "edit" && getAccessMode() !== "full") {
-    worktree.integration = "needs_parent";
-    worktree.integrationReason = `parent access mode is ${getAccessMode()}; not applying isolated worktree changes`;
-    writeStatus(run);
+  const accessMode = getAccessMode();
+  if (accessMode !== "edit" && accessMode !== "full") {
+    run.integrationBlock = { integration: "needs_parent", reason: `parent access mode is ${accessMode}; not applying isolated worktree changes` };
     return;
   }
 
-  const record = await integrateWorkspace(worktree.workspaceId);
-  worktree.patchPath = record.resultPatchPath;
-  worktree.changedFiles = record.changedFiles;
-  worktree.unpreservedFiles = record.unpreservedFiles;
-  worktree.integrationReason = record.integrationReason;
-  if (record.integration === "conflict") {
-    worktree.integration = "needs_parent";
-  } else if (record.integration === "failed") {
-    worktree.integration = "failed";
-  } else {
-    worktree.integration = record.integration;
-    const cleaned = removeWorkspace(record.id, "integrated");
-    worktree.retained = cleaned.retained;
-    if (cleaned.lifecycle === "cleanup_failed") {
-      worktree.integrationReason = cleaned.integrationReason;
-    }
+  run.integrationBlock = undefined;
+  try {
+    const integrated = await integrateWorkspace(run.worktree.workspaceId, signal);
+    if (isWorkspaceFinalized(integrated)) await removeWorkspace(integrated.id, "integrated");
+  } catch (error) {
+    // Removal can happen while integration waits for the destination queue.
+    if (unavailableWorkspaceReason(loadWorkspace(run.worktree.workspaceId), run.worktree.workspaceId)) return;
+    throw error;
   }
-  writeStatus(run);
 }
 
 function formatSpawnStarted(run: SpawnRun): string {
-  const worktreeLine = run.worktree ? `\n- Worktree: ${run.worktree.path}` : "";
+  const worktree = worktreeInfo(run);
+  const worktreeLine = worktree?.retained && worktree.path ? `\n- Worktree: ${worktree.path}` : "";
   return `Spawned subagent.\n- id: ${run.id}\n- status: ${run.status}\n- agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n- accessMode: ${run.accessMode}\n- isolation: ${run.isolation}\n- brief: ${run.briefPath}\n- result: ${run.resultPath}\n- transcript: ${run.transcriptPath}\n- status file: ${run.statusPath}${worktreeLine}\n\nUse spawn_control with action=join/status/stop. If your answer depends on this result, call spawn_control join or join_all before answering.`;
 }
 
 function formatRunStatus(run: SpawnRun): string {
-  const changed = run.worktree?.changedFiles.length ? `\n- changed files: ${run.worktree.changedFiles.join(", ")}` : "";
-  const integration = run.worktree ? `\n- integration: ${run.worktree.integration}${run.worktree.integrationReason ? ` (${run.worktree.integrationReason})` : ""}` : "";
+  const worktree = worktreeInfo(run);
+  const changed = worktree?.changedFiles.length ? `\n- changed files: ${worktree.changedFiles.join(", ")}` : "";
+  const integration = worktree ? `\n- integration: ${worktree.integration}${worktree.integrationReason ? ` (${worktree.integrationReason})` : ""}` : "";
   return `- id: ${run.id}\n  status: ${run.status}\n  agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n  accessMode: ${run.accessMode}\n  isolation: ${run.isolation}\n  startedAt: ${run.startedAt}${run.completedAt ? `\n  completedAt: ${run.completedAt}` : ""}${run.error ? `\n  error: ${run.error}` : ""}${changed}${integration}`;
 }
 
 function completionContext(run: SpawnRun): string {
   const result = truncateText(run.resultText?.trim() || run.error || "(no final text)", RESULT_CONTEXT_LIMIT);
-  const integration = run.worktree ? `\n- integration: ${run.worktree.integration}${run.worktree.integrationReason ? ` (${run.worktree.integrationReason})` : ""}` : "";
-  return `Subagent completed:\n- id: ${run.id}\n- agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n- status: ${run.status}\n- accessMode: ${run.accessMode}\n- isolation: ${run.isolation}${integration}\n- result: ${run.resultPath}\n- transcript: ${run.transcriptPath}\n- status: ${run.statusPath}${run.worktree?.patchPath ? `\n- patch: ${run.worktree.patchPath}` : ""}\n\nFinal output:\n${result}`;
+  const worktree = worktreeInfo(run);
+  const integration = worktree ? `\n- integration: ${worktree.integration}${worktree.integrationReason ? ` (${worktree.integrationReason})` : ""}` : "";
+  return `Subagent completed:\n- id: ${run.id}\n- agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n- status: ${run.status}\n- accessMode: ${run.accessMode}\n- isolation: ${run.isolation}${integration}\n- result: ${run.resultPath}\n- transcript: ${run.transcriptPath}\n- status: ${run.statusPath}${worktree?.patchPath ? `\n- patch: ${worktree.patchPath}` : ""}\n\nFinal output:\n${result}`;
 }
 
 function restoredRun(statusPath: string, parentSessionFile: string | undefined): SpawnRun | undefined {
@@ -773,40 +802,39 @@ function restoredRun(statusPath: string, parentSessionFile: string | undefined):
   } catch {
     return undefined;
   }
-  if (typeof data.runId !== "string" || data.parentSessionFile !== parentSessionFile) {
+  const storedParentSessionFile = typeof data.parentSessionFile === "string" ? data.parentSessionFile : undefined;
+  if (typeof data.runId !== "string" || storedParentSessionFile !== parentSessionFile) {
     return undefined;
   }
   const runDir = dirname(statusPath);
   const worktreeData = typeof data.worktree === "object" && data.worktree !== null
     ? data.worktree as Record<string, unknown>
     : undefined;
-  let worktree: WorktreeInfo | undefined;
-  if (worktreeData && typeof worktreeData.workspaceId === "string") {
-    const record = loadWorkspace(worktreeData.workspaceId);
-    if (record) {
-      worktree = {
-        workspaceId: record.id,
-        gitRoot: record.destinationRoot,
-        parentCwd: record.destinationCwd,
-        childCwd: record.workspaceCwd,
-        path: record.worktreePath,
-        baseRef: record.baselineCommit,
-        patchPath: record.resultPatchPath,
-        changedFiles: record.changedFiles,
-        unpreservedFiles: record.unpreservedFiles,
-        integration: typeof worktreeData.integration === "string"
-          ? worktreeData.integration as IntegrationStatus
-          : "pending",
-        integrationReason: typeof worktreeData.integrationReason === "string" ? worktreeData.integrationReason : undefined,
-        retained: record.retained,
-      };
-    }
+  const worktree: RunWorkspace | undefined = worktreeData && typeof worktreeData.workspaceId === "string"
+    ? {
+        workspaceId: worktreeData.workspaceId,
+        recoveryPatchPath: typeof worktreeData.patchPath === "string" ? worktreeData.patchPath : undefined,
+      }
+    : undefined;
+  const record = worktree ? loadWorkspace(worktree.workspaceId) : undefined;
+  const blockData = typeof data.integrationBlock === "object" && data.integrationBlock !== null
+    ? data.integrationBlock as Record<string, unknown> : undefined;
+  let integrationBlock: IntegrationBlock | undefined;
+  if ((blockData?.integration === "needs_parent" || blockData?.integration === "failed") && typeof blockData.reason === "string") {
+    integrationBlock = { integration: blockData.integration, reason: blockData.reason };
+  } else if (record?.integration === "pending"
+    && (worktreeData?.integration === "needs_parent" || worktreeData?.integration === "failed")
+    && typeof worktreeData.integrationReason === "string") {
+    // Old files stored run-specific refusals in the workspace mirror.
+    integrationBlock = { integration: worktreeData.integration, reason: worktreeData.integrationReason };
   }
   const storedStatus = data.status === "completed" || data.status === "error" || data.status === "aborted"
     ? data.status
     : "aborted";
   const briefPath = join(runDir, "brief.md");
-  const run = {
+  let resolveFinished: (run: SpawnRun) => void = () => undefined;
+  const finished = new Promise<SpawnRun>((resolvePromise) => { resolveFinished = resolvePromise; });
+  const run: SpawnRun = {
     id: data.runId,
     mode: data.mode === "foreground" ? "foreground" : "background",
     prompt: typeof data.prompt === "string" ? data.prompt : existsSync(briefPath) ? readFileSync(briefPath, "utf8") : "",
@@ -828,16 +856,19 @@ function restoredRun(statusPath: string, parentSessionFile: string | undefined):
     resultPath: join(runDir, "result.md"),
     statusPath,
     agentPromptPath: existsSync(join(runDir, "subagent-prompt.md")) ? join(runDir, "subagent-prompt.md") : undefined,
-    childCwd: worktree?.childCwd ?? "",
+    childCwd: record?.workspaceCwd ?? "",
     parentSessionFile,
     worktree,
+    integrationBlock,
     notified: data.notified === true,
     joined: data.joined === true,
-    joinRequested: data.joinRequested === true,
-    resolveFinished: () => undefined,
-  } as SpawnRun;
-  run.finished = Promise.resolve(run);
-  if (data.status === "running") {
+    // No join operation survives a runtime restart.
+    joinRequested: false,
+    finished,
+    resolveFinished,
+  };
+  resolveFinished(run);
+  if (data.status === "running" || data.joinRequested === true) {
     writeStatus(run);
   }
   return run;
@@ -857,24 +888,23 @@ function restoreRuns(parentSessionFile: string | undefined): SpawnRun[] {
   return runs;
 }
 
-let activeRuns: Map<string, SpawnRun> | undefined;
-
-export function hasRunningSubagents(): boolean {
-  return Array.from(activeRuns?.values() ?? []).some((run) => run.status === "running");
-}
-
 export default function spawnExtension(pi: ExtensionAPI) {
   if (process.env.PI_SPAWN_AGENT === "1") {
     return;
   }
 
   const runs = new Map<string, SpawnRun>();
-  activeRuns = runs;
+  const owner = Symbol("spawn runtime");
+  let retired = false;
+  let runtimeCancellation = new AbortController();
+  const announcedCompletions = new Set<string>();
+  let sessionManager: ExtensionContext["sessionManager"] | undefined;
   let ui: Pick<ExtensionUIContext, "notify" | "setStatus"> | undefined;
 
   const spawnStatusPayload = () => {
     const allRuns = Array.from(runs.values()).map(statusJson);
     return {
+      sessionFile: sessionManager?.getSessionFile() ?? null,
       running: allRuns.filter((run) => run.status === "running").length,
       runs: allRuns,
     };
@@ -884,43 +914,116 @@ export default function spawnExtension(pi: ExtensionAPI) {
     ui?.setStatus("pi-spawn-runs", JSON.stringify(spawnStatusPayload()));
   };
 
-  const enqueueCompletionNotification = (run: SpawnRun) => {
-    if (!ui) return; // A retired runtime must not publish child completions.
-    ui.notify(`Subagent ${run.id} ${run.status}${run.profile?.name ? ` (${run.profile.name})` : ""}.`, run.status === "completed" ? "info" : run.status === "aborted" ? "warning" : "error");
-    if (run.notified || run.joined || run.joinRequested) {
-      return;
+  const branchHasSpawn = (runId: string): boolean => sessionManager?.getBranch().some((entry) => {
+    if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "spawn" || entry.message.isError) return false;
+    const details = entry.message.details as { runId?: unknown } | undefined;
+    return details?.runId === runId;
+  }) ?? false;
+
+  const reconcileCompletionDelivery = () => {
+    const delivered = new Set<string>();
+    for (const entry of sessionManager?.getBranch() ?? []) {
+      if (entry.type !== "custom_message" || entry.customType !== "spawn_completion") continue;
+      const details = entry.details as { runId?: unknown; runs?: { runId?: unknown }[] } | undefined;
+      if (typeof details?.runId === "string") delivered.add(details.runId);
+      if (Array.isArray(details?.runs)) {
+        for (const run of details.runs) {
+          if (typeof run?.runId === "string") delivered.add(run.runId);
+        }
+      }
     }
-    run.notified = true;
-    pi.sendMessage({
-      customType: "spawn_completion",
-      content: completionContext(run),
-      display: false,
-      details: artifactDetails(run),
-    }, { deliverAs: "nextTurn", triggerTurn: false });
+    for (const run of runs.values()) {
+      const notified = delivered.has(run.id);
+      if (run.notified !== notified) {
+        run.notified = notified;
+        writeStatus(run);
+      }
+    }
   };
+
+  const completionEligible = (run: SpawnRun): boolean => !retired && run.mode === "background"
+    && run.status !== "running" && !run.notified && !run.joined && !run.joinRequested && branchHasSpawn(run.id);
+
+  const announceCompletion = (run: SpawnRun) => {
+    if (!ui || !completionEligible(run) || announcedCompletions.has(run.id)) return;
+    ui.notify(`Subagent ${run.id} ${run.status}${run.profile?.name ? ` (${run.profile.name})` : ""}.`, run.status === "completed" ? "info" : run.status === "aborted" ? "warning" : "error");
+    announcedCompletions.add(run.id);
+  };
+
+  pi.on("before_agent_start", () => {
+    if (retired) return;
+    reconcileCompletionDelivery();
+    const completed = Array.from(runs.values()).filter(completionEligible);
+    if (!completed.length) return;
+    // Pi appends these messages alongside the next user prompt, like nextTurn,
+    // but nothing remains queued after an idle manual join or branch change.
+    // History, not this hook returning, is the durable delivery evidence.
+    return {
+      message: {
+        customType: "spawn_completion",
+        content: completed.length === 1 ? completionContext(completed[0]!)
+          : completed.map((run) => `## ${run.id}\n\n${completionContext(run)}`).join("\n\n---\n\n"),
+        display: false,
+        details: completed.length === 1 ? artifactDetails(completed[0]!)
+          : { runs: completed.map(artifactDetails) },
+      },
+    };
+  });
 
   pi.on("session_start", (_event, ctx) => {
     ui = ctx.ui;
+    retired = false;
+    runtimeCancellation = new AbortController();
+    sessionManager = ctx.sessionManager;
+    runs.clear();
+    announcedCompletions.clear();
+    registerSubagentRuntime(owner, () => Array.from(runs.values()).some((run) => run.status === "running"), historyBlockReason);
     for (const run of restoreRuns(ctx.sessionManager.getSessionFile())) {
       if (!runs.has(run.id)) runs.set(run.id, run);
     }
+    reconcileCompletionDelivery();
+    for (const run of runs.values()) announceCompletion(run);
     publishSpawnStatus();
   });
 
   pi.on("agent_end", (_event, ctx) => {
+    if (retired) return;
     ui = ctx.ui;
+    // Pi persists message_end after extension handlers. agent_end is after
+    // those writes, and also catches completion before a spawn ack persisted.
+    reconcileCompletionDelivery();
+    for (const run of runs.values()) announceCompletion(run);
     publishSpawnStatus();
+  });
+
+  pi.on("session_tree", () => {
+    if (retired) return;
+    reconcileCompletionDelivery();
+    // Explicit joins continue to suppress completion delivery on other branches.
   });
 
   pi.on("session_shutdown", () => {
     // Child cleanup is asynchronous; drop the old UI before triggering it.
     ui = undefined;
+    retired = true;
+    runtimeCancellation.abort();
+    const ownedRuntime = retireSubagentRuntime(owner);
+    const failures: string[] = [];
     for (const run of runs.values()) {
+      run.joinRequested = false;
       if (run.status === "running") {
         run.stopReason = "session_shutdown";
         run.child?.abort();
       }
+      if (ownedRuntime) {
+        // Preserve a terminal execution status even if artifact finalization is
+        // still awaiting the child. A stale owner must not overwrite a replacement.
+        try { writeStatus(run); } catch (error) {
+          failures.push(error instanceof Error ? error.message : String(error));
+        }
+      }
     }
+    if (failures.length) throw new Error(`Could not save subagent shutdown state: ${failures.join("; ")}`);
   });
 
   const stopRun = (run: SpawnRun, reason: string) => {
@@ -933,9 +1036,8 @@ export default function spawnExtension(pi: ExtensionAPI) {
   };
 
   const waitForRun = async (run: SpawnRun, signal: AbortSignal | undefined, stopOnAbort: boolean): Promise<SpawnRun> => {
-    if (run.status !== "running") {
-      return run;
-    }
+    // Execution status can settle before asynchronous artifact finalization.
+    // Always await the owning completion promise, including for restored runs.
     if (!signal) {
       return run.finished;
     }
@@ -963,6 +1065,101 @@ export default function spawnExtension(pi: ExtensionAPI) {
     await Promise.all(selected.map((run) => waitForRun(run, signal, stopOnAbort)));
   };
 
+  const finalizeJoin = async <T>(
+    selected: SpawnRun[],
+    signal: AbortSignal | undefined,
+    report: () => T,
+    onWaiting?: () => void,
+  ): Promise<T> => {
+    signal = signal ? AbortSignal.any([signal, runtimeCancellation.signal]) : runtimeCancellation.signal;
+    const previouslyJoined = new Map(selected.map((run) => [run.id, run.joined]));
+    try {
+      if (retired) throw new Error("Spawn runtime was retired.");
+      for (const run of selected) {
+        run.joinRequested = true;
+        writeStatus(run);
+      }
+      publishSpawnStatus();
+      onWaiting?.();
+      await waitForRuns(selected, signal, true);
+      if (retired) throw new Error("Spawn runtime was retired.");
+      for (const run of selected) {
+        if (signal.aborted) throw new Error("spawn_control aborted before integration.");
+        await applyWorktreeChanges(run, signal);
+        if (retired) throw new Error("Spawn runtime was retired.");
+        // Integration owns the cancellation boundary. Once applied, report the
+        // actual result rather than implying cancellation left files untouched.
+      }
+      // A join-all result is not available until every integration attempt
+      // finishes. Do not leave early members joined if a later attempt throws.
+      for (const run of selected) {
+        run.joinRequested = false;
+        run.joined = true;
+        writeStatus(run);
+      }
+      publishSpawnStatus();
+      return report();
+    } catch (error) {
+      const failures: unknown[] = [error];
+      for (const run of selected) {
+        run.joinRequested = false;
+        run.joined = previouslyJoined.get(run.id) ?? false;
+        // A replacement may already have restored and finalized this run.
+        if (retired) continue;
+        try { writeStatus(run); } catch (failure) { failures.push(failure); }
+        // Completion may have occurred while this join suppressed notification.
+        try { announceCompletion(run); } catch (failure) { failures.push(failure); }
+      }
+      publishSpawnStatus();
+      const outcomes = selected.flatMap((run) => {
+        const worktree = worktreeInfo(run);
+        if (worktree?.integration !== "applied" && worktree?.integration !== "failed") return [];
+        return [`Subagent ${run.id}:${formatIntegrationLine(worktree)}`];
+      });
+      if (failures.length === 1 && outcomes.length === 0) throw error;
+      const reason = failures.map((failure) => failure instanceof Error ? failure.message : String(failure)).join("; ");
+      throw new Error(`${reason}${outcomes.length ? `\n\n${outcomes.join("\n\n")}` : ""}`, { cause: error });
+    }
+  };
+
+  function historyBlockReason(): string | undefined {
+    const all = Array.from(runs.values());
+    if (all.some((run) => run.status === "running" || run.joinRequested)) {
+      return "There are active subagents that haven't completed. Join them before changing history, or stop them and collect their results. Open <leader>ps to manage them.";
+    }
+    if (all.some((run) => !run.joined)) {
+      return "There are subagent results that haven't been collected. Join them before changing history. Open <leader>ps to manage them.";
+    }
+    return undefined;
+  }
+
+  const blockHistoryChange = (_event: unknown, ctx: ExtensionContext) => {
+    const reason = historyBlockReason();
+    if (!reason) return;
+    ctx.ui.notify(reason, "warning");
+    return { cancel: true };
+  };
+  pi.on("session_before_tree", blockHistoryChange);
+  pi.on("session_before_fork", blockHistoryChange);
+
+  pi.on("session_before_switch", async (event, ctx) => {
+    const running = Array.from(runs.values()).filter((run) => run.status === "running");
+    if (!running.length) return;
+    const action = event.reason === "new" ? "starting a new session" : "switching sessions";
+    try {
+      const choice = await ctx.ui.select(
+        `There are running subagents. Continuing will stop them. Continue ${action}?`,
+        ["Cancel", "Continue and stop subagents"],
+      );
+      if (choice !== "Continue and stop subagents") return { cancel: true };
+      for (const run of running) stopRun(run, "session_switch");
+      await waitForRuns(running, undefined, false);
+    } catch (error) {
+      ctx.ui.notify(`Could not stop subagents: ${error instanceof Error ? error.message : String(error)}`, "error");
+      return { cancel: true };
+    }
+  });
+
   const getRunById = (id: string | undefined): SpawnRun => {
     if (!id) {
       throw new Error("spawn id is required");
@@ -975,7 +1172,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
   };
 
   const emitCommandResult = (text: string, details?: Record<string, unknown>) => {
-    if (!ui) return;
+    if (!ui) throw new Error("Spawn runtime has no active UI for command results.");
     pi.sendMessage({
       customType: "spawn_control_result",
       content: text,
@@ -1044,8 +1241,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
     }
 
     if (input.isolation === "worktree") {
-      run.worktree = createWorktree(input.cwd, id, input.parentSessionFile);
-      run.childCwd = run.worktree.childCwd;
+      const record = createWorktree(input.cwd, id, input.parentSessionFile);
+      run.worktree = { workspaceId: record.id, recoveryPatchPath: record.resultPatchPath };
+      run.childCwd = record.workspaceCwd;
     }
 
     const abortListener = () => stopRun(run, "parent_abort");
@@ -1157,7 +1355,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         const progress = summarizeChildEvent(event);
         if (run.status === "running" && progress && progress !== run.progress) {
           run.progress = progress;
-          writeStatus(run);
+          if (!retired) writeStatus(run);
           publishProgress();
         }
       },
@@ -1222,40 +1420,48 @@ export default function spawnExtension(pi: ExtensionAPI) {
           try {
             const state = await child.send({ type: "get_state" });
             const data = state.data as { sessionFile?: unknown } | undefined;
-            const record = loadWorkspace(run.worktree.workspaceId);
-            if (record && typeof data?.sessionFile === "string") {
-              record.targetSessionFile = data.sessionFile;
-              saveWorkspace(record);
+            if (typeof data?.sessionFile === "string") {
+              const childSessionFile = data.sessionFile;
+              await updateWorkspace(run.worktree.workspaceId, (record) => {
+                record.targetSessionFile = childSessionFile;
+              });
             }
           } catch {
             // A terminated child may not be able to report its session path; run artifacts still retain its session directory.
           }
         }
         try {
-          prepareWorktreePatch(run);
+          await prepareWorktreePatch(run);
         } catch (error) {
           if (run.worktree) {
-            run.worktree.integration = "failed";
-            run.worktree.integrationReason = `failed to create patch: ${error instanceof Error ? error.message : String(error)}`;
+            run.integrationBlock = { integration: "failed", reason: `failed to create patch: ${error instanceof Error ? error.message : String(error)}` };
           }
         }
-        if (run.worktree && run.worktree.integration === "pending" && run.status !== "completed") {
-          run.worktree.integration = "needs_parent";
-          run.worktree.integrationReason = `subagent status is ${run.status}`;
+        if (run.worktree && !run.integrationBlock && run.status !== "completed") {
+          run.integrationBlock = { integration: "needs_parent", reason: `subagent status is ${run.status}` };
         }
         if (progressPublishTimer) {
           clearTimeout(progressPublishTimer);
           progressPublishTimer = undefined;
         }
-        writeStatus(run);
-        publishProgress(true);
         child.dispose();
-        if (run.mode === "background") {
-          enqueueCompletionNotification(run);
+        // Retired callbacks may finish artifacts but must not overwrite status
+        // already restored by a replacement runtime or publish to its UI.
+        if (!retired) {
+          writeStatus(run);
+          publishProgress(true);
+          announceCompletion(run);
         }
         run.resolveFinished(run);
       }
-    })();
+    })().catch((error: unknown) => {
+      child.dispose();
+      const failure = error instanceof Error ? error : new Error(String(error));
+      // A failed status write/send is reported, but must not strand all later
+      // joins. Their own writes can retry durable finalization.
+      run.resolveFinished(run);
+      ui?.notify(`Could not finalize subagent ${run.id}: ${failure.message}`, "error");
+    });
   };
 
   pi.registerCommand("spawn-control", {
@@ -1278,13 +1484,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         }
         if (action === "join") {
           const run = getRunById(id);
-          run.joinRequested = true;
-          publishSpawnStatus();
-          await waitForRun(run, ctx.signal, true);
-          await applyWorktreeChanges(run);
-          run.joined = true;
-          publishSpawnStatus();
-          emitCommandResult(resultSummary(run), artifactDetails(run));
+          await finalizeJoin([run], ctx.signal, () => emitCommandResult(resultSummary(run), artifactDetails(run)));
           return;
         }
         if (action === "stop") {
@@ -1408,15 +1608,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
       }
 
       onUpdate?.({ content: [{ type: "text", text: `${runLabel(run)} ${run.id} running in foreground (${accessMode}).` }], details: artifactDetails(run) });
-      await run.finished;
-      await applyWorktreeChanges(run);
-      run.joined = true;
-      publishSpawnStatus();
-      return {
-        content: [{ type: "text", text: resultSummary(run) }],
+      return finalizeJoin([run], signal, () => ({
+        content: [{ type: "text" as const, text: resultSummary(run) }],
         isError: run.status !== "completed",
         details: artifactDetails(run),
-      };
+      }));
     },
   });
 
@@ -1478,20 +1674,15 @@ export default function spawnExtension(pi: ExtensionAPI) {
 
       if (params.action === "join") {
         const run = getRun(params.id);
-        run.joinRequested = true;
-        publishSpawnStatus();
-        if (run.status === "running") {
-          onUpdate?.({ content: [{ type: "text", text: `Waiting for subagent ${run.id}…` }], details: artifactDetails(run) });
-          await waitForRun(run, signal, true);
-        }
-        await applyWorktreeChanges(run);
-        run.joined = true;
-        publishSpawnStatus();
-        return {
-          content: [{ type: "text", text: resultSummary(run) }],
-          isError: run.status !== "completed" || run.worktree?.integration === "failed",
+        return finalizeJoin([run], signal, () => ({
+          content: [{ type: "text" as const, text: resultSummary(run) }],
+          isError: run.status !== "completed" || worktreeInfo(run)?.integration === "failed",
           details: artifactDetails(run),
-        };
+        }), () => {
+          if (run.status === "running") {
+            onUpdate?.({ content: [{ type: "text", text: `Waiting for subagent ${run.id}…` }], details: artifactDetails(run) });
+          }
+        });
       }
 
       if (params.action === "join_all") {
@@ -1501,23 +1692,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
         if (selected.length === 0) {
           return { content: [{ type: "text", text: "No spawned subagents to join." }], details: { runs: [] } };
         }
-        for (const run of selected) {
-          run.joinRequested = true;
-        }
-        publishSpawnStatus();
-        onUpdate?.({ content: [{ type: "text", text: `Waiting for ${selected.length} subagent(s)…` }], details: { runs: selected.map(statusJson) } });
-        await waitForRuns(selected, signal, true);
-        for (const run of selected) {
-          await applyWorktreeChanges(run);
-          run.joined = true;
-        }
-        publishSpawnStatus();
-        const text = selected.map((run) => `## ${run.id}\n\n${resultSummary(run)}`).join("\n\n---\n\n");
-        return {
-          content: [{ type: "text", text }],
-          isError: selected.some((run) => run.status !== "completed" || run.worktree?.integration === "failed"),
+        return finalizeJoin(selected, signal, () => ({
+          content: [{ type: "text" as const, text: selected.map((run) => `## ${run.id}\n\n${resultSummary(run)}`).join("\n\n---\n\n") }],
+          isError: selected.some((run) => run.status !== "completed" || worktreeInfo(run)?.integration === "failed"),
           details: { runs: selected.map(statusJson) },
-        };
+        }), () => onUpdate?.({ content: [{ type: "text", text: `Waiting for ${selected.length} subagent(s)…` }], details: { runs: selected.map(statusJson) } }));
       }
 
       return { content: [{ type: "text", text: `Unknown action: ${String(params.action)}` }], isError: true };

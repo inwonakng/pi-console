@@ -105,7 +105,7 @@ local function touch_transcript()
 end
 
 local function is_agent_active()
-	return state.is_agent_running or state.is_streaming or state.is_retrying or state.awaiting_agent_output
+	return require("pi-integration.state").is_agent_active(state)
 end
 
 local function transcript_line_count()
@@ -159,58 +159,6 @@ local function reset_transcript_outputs()
 	pi_tool_output.reset(state)
 	pi_thinking_output.reset(state)
 	pi_skills.reset(state)
-end
-
-local function record_tool_calls(message)
-	return pi_tool_output.record_calls(state, message)
-end
-
-local function record_tool_execution_call(tool_name, tool_call_id, args, execution_status)
-	return pi_tool_output.record_execution_call(state, tool_name, tool_call_id, args, execution_status)
-end
-
-local function store_or_update_live_tool_output(tool_name, tool_call_id, text, filetype, details, display, is_error)
-	return pi_tool_output.store_or_update_live(state, tool_name, tool_call_id, text, filetype, details, display, is_error)
-end
-
-local function store_or_update_spawn_run_output(run, text)
-	return pi_tool_output.store_or_update_spawn_run(state, run, text)
-end
-
-local function store_tool_display(message)
-	return pi_tool_output.display_for_result(state, message)
-end
-
-local function live_tool_output_id(tool_call_id)
-	return pi_tool_output.live_output_id(state, tool_call_id)
-end
-
-local function store_thinking_output(text)
-	return pi_thinking_output.store(state, text)
-end
-
-local function append_thinking_output(output_id, delta)
-	return pi_thinking_output.append(state, output_id, delta)
-end
-
-local function thinking_output_text(output_id)
-	return pi_thinking_output.text(state, output_id)
-end
-
-local function thinking_output_summary_lines(output_id, streaming)
-	return pi_thinking_output.summary_lines(state, output_id, streaming)
-end
-
-local function store_skill_prompt(load)
-	return pi_skills.store_load(state, load)
-end
-
-local function skill_summary_lines(output_id)
-	return pi_skills.summary_lines(state, output_id)
-end
-
-local function apply_skill_tool_result(message)
-	return pi_skills.apply_tool_result(state, message, extract_text(message))
 end
 
 local function begin_trace_item()
@@ -358,7 +306,8 @@ local function set_input_text(text)
 		return
 	end
 	vim.api.nvim_buf_set_lines(state.input_buf, 0, -1, false, vim.split(text or "", "\n", { plain = true }))
-	if state.input_win and vim.api.nvim_win_is_valid(state.input_win) then
+	state.input_win = require("pi-integration.utils.buffer").find_window(state.input_buf, state.input_win)
+	if state.input_win then
 		vim.api.nvim_set_current_win(state.input_win)
 		vim.api.nvim_win_set_cursor(state.input_win, { vim.api.nvim_buf_line_count(state.input_buf), 0 })
 	end
@@ -462,28 +411,6 @@ local integration_context = {
 		clear_assistant_placeholder = clear_assistant_placeholder,
 		clear_assistant_placeholder_spinner = clear_assistant_placeholder_spinner,
 		render_error_message = render_error_message,
-	},
-	tools = {
-		record_calls = record_tool_calls,
-		record_execution_call = record_tool_execution_call,
-		interrupt_executions = function()
-			return pi_tool_output.interrupt_executions(state)
-		end,
-		store_or_update_live_output = store_or_update_live_tool_output,
-		store_or_update_spawn_run_output = store_or_update_spawn_run_output,
-		store_display = store_tool_display,
-		live_output_id = live_tool_output_id,
-	},
-	thinking = {
-		store_output = store_thinking_output,
-		append_output = append_thinking_output,
-		text = thinking_output_text,
-		summary_lines = thinking_output_summary_lines,
-	},
-	skills = {
-		store_prompt = store_skill_prompt,
-		summary_lines = skill_summary_lines,
-		apply_tool_result = apply_skill_tool_result,
 	},
 	session = {
 		set_model_metadata = set_model_metadata,
@@ -798,6 +725,9 @@ local function restart_in_cwd(path)
 		return
 	end
 
+	if not pi_rpc.can_restart(integration_ctx()) then
+		return
+	end
 	local ok, error_message = pcall(vim.api.nvim_set_current_dir, cwd)
 	if not ok then
 		notify("Could not change CWD: " .. tostring(error_message), vim.log.levels.ERROR)

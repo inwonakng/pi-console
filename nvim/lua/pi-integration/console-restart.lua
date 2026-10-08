@@ -1,3 +1,5 @@
+local lifecycle = require("pi-integration.state")
+
 local M = {}
 
 function M.request(ctx)
@@ -7,22 +9,9 @@ function M.request(ctx)
 		ctx.ui.notify("Full-console restart requires launching through pi-console.", vim.log.levels.WARN)
 		return
 	end
-	if
-		state.is_streaming or state.is_retrying or state.awaiting_agent_output or state.is_compacting
-		or state.is_loading or state.restart_requested or (state.spawn_running_count or 0) > 0
-		or (state.workspace and state.workspace.transitionPending)
-	then
-		ctx.ui.notify("Wait for the current Pi work to finish before restarting pi-console.", vim.log.levels.WARN)
-		return
-	end
-	for _, pending in ipairs(state.pending_user_messages or {}) do
-		if pending.status == "queued" or pending.status == "sending" then
-			ctx.ui.notify("Wait for pending prompts to finish before restarting pi-console.", vim.log.levels.WARN)
-			return
-		end
-	end
-	if state.active_ui_request_id then
-		ctx.ui.notify("Resolve the pending Pi request before restarting pi-console.", vim.log.levels.WARN)
+	local reason = lifecycle.restart_block_reason(state)
+	if reason then
+		ctx.ui.notify(reason, vim.log.levels.WARN)
 		return
 	end
 	for _, buf in ipairs(vim.api.nvim_list_bufs()) do

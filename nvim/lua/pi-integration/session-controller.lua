@@ -4,7 +4,7 @@ local pending_picker = require("pi-integration.pending-picker")
 
 local M = {}
 
-local function reset_conversation(ctx, keep_transcript, keep_pending_messages)
+local function reset_conversation(ctx, keep_transcript, keep_pending_messages, session_file)
 	local state = ctx.state
 	local pending_user_messages = keep_pending_messages and state.pending_user_messages or {}
 	if not keep_pending_messages then
@@ -21,8 +21,13 @@ local function reset_conversation(ctx, keep_transcript, keep_pending_messages)
 	state.todo_status = nil
 	state.todo_tool_output_id = nil
 	state.tree_leaf_id = nil
-	state.spawn_runs = {}
-	state.spawn_running_count = 0
+	-- Startup status can arrive before get_state. Keep only the snapshot
+	-- explicitly owned by the incoming session; never carry the old session.
+	if not session_file or state.spawn_runs_session_file ~= session_file then
+		state.spawn_runs = {}
+		state.spawn_runs_session_file = nil
+		state.spawn_running_count = 0
+	end
 	state.spawn_run_output_by_id = {}
 	state.is_agent_running = false
 	state.refresh_transcript_after_settled = false
@@ -50,7 +55,7 @@ function M.apply_state(ctx, data, new_session)
 	local previous_leaf_id = state.tree_leaf_id
 	local sent_before_sync = state.has_sent_message
 	if new_session or session_changed then
-		reset_conversation(ctx, restore_transcript, state.is_loading and not new_session and not state.session_replacement_pending)
+		reset_conversation(ctx, restore_transcript, state.is_loading and not new_session and not state.session_replacement_pending, data.sessionFile)
 	end
 	state.session_file = data.sessionFile
 	state.pending_session_file = nil
@@ -74,6 +79,12 @@ end
 function M.sync(ctx, options)
 	options = options or {}
 	local state = ctx.state
+	-- Startup performs the initial sync after assigning the job. Hand off the
+	-- caller's options instead of creating two competing sync generations.
+	if not state.job and not state.rpc_tearing_down then
+		require("pi-integration.rpc").start(ctx, options)
+		return
+	end
 	state.session_sync_generation = (state.session_sync_generation or 0) + 1
 	local generation = state.session_sync_generation
 	local function fail_sync(message)

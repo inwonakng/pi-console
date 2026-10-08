@@ -11,7 +11,7 @@ import {
 	workspaceDiscardWarning,
 	type WorkspaceRecord,
 } from "./shared/workspace";
-import { hasRunningSubagents } from "./spawn";
+import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -221,6 +221,11 @@ export default function treeExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			const blocked = subagentHistoryBlockReason();
+			if (blocked) {
+				ctx.ui.notify(blocked, "warning");
+				return;
+			}
 			const entry = ctx.sessionManager.getEntry(entryId);
 			if (!entry) {
 				ctx.ui.notify(`Unknown tree entry: ${entryId}`, "error");
@@ -260,6 +265,11 @@ export default function treeExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /pi-tree-delete <entry-id> [--yes]", "error");
 				return;
 			}
+			const blocked = subagentHistoryBlockReason();
+			if (blocked) {
+				ctx.ui.notify(blocked, "warning");
+				return;
+			}
 			if (!ctx.isIdle() || hasRunningSubagents()) {
 				ctx.ui.notify("Wait for Pi and its subagents to finish before deleting session history.", "warning");
 				return;
@@ -290,7 +300,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 					ctx.ui.notify(`Join or discard child workspaces before deleting ${blocked.label}.`, "warning");
 					return;
 				}
-				removedWorkspaces = affected.map((record) => prepareWorkspaceDiscard(record.id));
+				removedWorkspaces = await Promise.all(affected.map((record) => prepareWorkspaceDiscard(record.id)));
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Could not prepare tree deletion: ${message}`, "error");
@@ -316,12 +326,12 @@ export default function treeExtension(pi: ExtensionAPI) {
 
 			const switched = await moveToLocation(ctx, location.cwd, result.desiredLeafId, {
 				reload: true,
-				onArrival: (nextCtx) => {
+				onArrival: async (nextCtx) => {
 					for (const record of removedWorkspaces) {
 						const lifecycle = record.integration === "applied" || record.integration === "none"
 							? "integrated"
 							: "discarded";
-						const cleaned = removeWorkspace(record.id, lifecycle);
+						const cleaned = await removeWorkspace(record.id, lifecycle);
 						if (cleaned.lifecycle === "cleanup_failed") {
 							nextCtx.ui.notify(`Could not remove ${record.label}: ${cleaned.integrationReason ?? cleaned.worktreePath}`, "warning");
 						}

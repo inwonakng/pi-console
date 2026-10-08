@@ -1,3 +1,5 @@
+local lifecycle = require("pi-integration.state")
+
 local M = {}
 
 function M.active_run_message(ctx, action)
@@ -6,10 +8,22 @@ function M.active_run_message(ctx, action)
 end
 
 function M.is_agent_active(ctx)
-	return ctx.session.is_agent_active and ctx.session.is_agent_active()
+	return lifecycle.is_agent_active(ctx.state)
 end
 
-function M.if_not_active(ctx, action)
+function M.if_history_change_allowed(ctx, action)
+	for _, run in ipairs(ctx.state.spawn_runs or {}) do
+		if run.status == "running" or run.joinRequested == true then
+			ctx.ui.notify("There are active subagents that haven't completed. Join them before changing history, or stop them and collect their results. Open <leader>ps to manage them.", vim.log.levels.WARN)
+			return false
+		end
+	end
+	for _, run in ipairs(ctx.state.spawn_runs or {}) do
+		if run.joined ~= true then
+			ctx.ui.notify("There are subagent results that haven't been collected. Join them before changing history. Open <leader>ps to manage them.", vim.log.levels.WARN)
+			return false
+		end
+	end
 	if M.is_agent_active(ctx) then
 		ctx.ui.notify(M.active_run_message(ctx, action), vim.log.levels.WARN)
 		return false

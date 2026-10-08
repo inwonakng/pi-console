@@ -37,14 +37,14 @@ export default function sessionWorkspaces(pi: ExtensionAPI) {
         }
         // Snapshot once, after user approval and before removing any worktree.
         // Ref-cleanup retries reuse the patch saved before the worktree was removed.
-        const prepared = linked.map((record) => record.retained ? prepareWorkspaceDiscard(record.id) : record);
+        const prepared = await Promise.all(linked.map((record) => record.retained ? prepareWorkspaceDiscard(record.id) : record));
         // Ask the picker to recheck live ownership after startup/snapshotting,
         // immediately before removal. This is not another user-facing dialog.
         const authorized = await ctx.ui.confirm("Remove prepared session workspaces?", JSON.stringify(prepared.map((record) => record.id).sort()));
         if (!authorized) throw new Error("Workspace removal cancelled; session files were kept.");
         for (const record of prepared) {
           const lifecycle = record.integration === "applied" || record.integration === "none" ? "integrated" : "discarded";
-          const removed = removeWorkspace(record.id, lifecycle);
+          const removed = await removeWorkspace(record.id, lifecycle);
           if (removed.lifecycle === "cleanup_failed") {
             throw new Error(`Could not remove ${record.label}: ${removed.integrationReason ?? removed.worktreePath}. Session files were kept; earlier workspace removals may have succeeded.`);
           }

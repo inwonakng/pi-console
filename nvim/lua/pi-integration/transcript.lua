@@ -1,6 +1,7 @@
 local markdown_render = require("pi-integration.markdown-render")
 local tool_groups = require("pi-integration.tool-groups")
 local tool_output = require("pi-integration.tool-output")
+local buffer = require("pi-integration.utils.buffer")
 
 local M = {}
 
@@ -58,14 +59,12 @@ end
 
 function M.win_valid(ctx)
 	local state = ctx.state
-	return state.transcript_win
-		and vim.api.nvim_win_is_valid(state.transcript_win)
-		and ctx.buffer.valid(state.transcript_buf)
-		and vim.api.nvim_win_get_buf(state.transcript_win) == state.transcript_buf
+	state.transcript_win = buffer.find_window(state.transcript_buf, state.transcript_win)
+	return state.transcript_win ~= nil
 end
 
 function M.is_focused(ctx)
-	return M.win_valid(ctx) and vim.api.nvim_get_current_win() == ctx.state.transcript_win
+	return buffer.window_matches(vim.api.nvim_get_current_win(), ctx.state.transcript_buf)
 end
 
 function M.preserve_focused_view(ctx, callback)
@@ -75,18 +74,22 @@ function M.preserve_focused_view(ctx, callback)
 		return
 	end
 
-	local cursor = vim.api.nvim_win_get_cursor(state.transcript_win)
+	local win = vim.api.nvim_get_current_win()
+	local buf = state.transcript_buf
+	local cursor = vim.api.nvim_win_get_cursor(win)
 	local view = vim.fn.winsaveview()
 	callback()
 
-	if not M.win_valid(ctx) or not ctx.buffer.valid(state.transcript_buf) then
+	if not buffer.window_matches(win, buf) then
 		return
 	end
-	local line_count = vim.api.nvim_buf_line_count(state.transcript_buf)
+	local line_count = vim.api.nvim_buf_line_count(buf)
 	cursor[1] = math.min(cursor[1], line_count)
-	vim.api.nvim_win_set_cursor(state.transcript_win, cursor)
 	view.lnum = cursor[1]
-	vim.fn.winrestview(view)
+	vim.api.nvim_win_call(win, function()
+		vim.api.nvim_win_set_cursor(win, cursor)
+		vim.fn.winrestview(view)
+	end)
 end
 
 local function lines_equal(left, right)
@@ -253,15 +256,18 @@ function M.render(ctx)
 		return
 	end
 
+	local buf = state.transcript_buf
 	vim.schedule(function()
-		if ctx.buffer.valid(state.transcript_buf) and M.win_valid(ctx) then
-			for _, win in ipairs(vim.api.nvim_list_wins()) do
-				if vim.api.nvim_win_get_buf(win) == state.transcript_buf then
-					tool_groups.apply_folds(state, win)
+		if state.transcript_buf == buf and ctx.buffer.valid(buf) and M.win_valid(ctx) then
+			M.preserve_focused_view(ctx, function()
+				for _, win in ipairs(vim.api.nvim_list_wins()) do
+					if buffer.window_matches(win, buf) then
+						tool_groups.apply_folds(state, win)
+					end
 				end
-			end
-			markdown_render.render(state.transcript_buf, state.transcript_win, { latex = true, event = "PiNvim" })
-			M.apply_quote_highlights(ctx)
+				markdown_render.render(buf, state.transcript_win, { latex = true, event = "PiNvim" })
+				M.apply_quote_highlights(ctx)
+			end)
 		end
 	end)
 end

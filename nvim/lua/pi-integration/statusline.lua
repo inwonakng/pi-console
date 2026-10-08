@@ -1,3 +1,5 @@
+local buffer = require("pi-integration.utils.buffer")
+
 local M = {}
 
 local footer_ns = vim.api.nvim_create_namespace("pi-console-status-footer")
@@ -447,9 +449,15 @@ function M.render_secondary(ctx)
 	return left_label .. "%#PiUsageStats#%=" .. right_label .. "%*"
 end
 
+local function resolve_footer(state)
+	state.status_win = buffer.find_window(state.status_buf, state.status_win)
+	return state.status_win
+end
+
 local function close_footer(state)
-	if state.status_win and vim.api.nvim_win_is_valid(state.status_win) then
-		pcall(vim.api.nvim_win_close, state.status_win, true)
+	local win = resolve_footer(state)
+	if win then
+		pcall(vim.api.nvim_win_close, win, true)
 	end
 	state.status_win = nil
 end
@@ -481,6 +489,10 @@ local function footer_is_bottom(state)
 end
 
 local function normalize_footer_window(state)
+	if not buffer.window_matches(state.transcript_win, state.transcript_buf)
+		or not buffer.window_matches(state.status_win, state.status_buf) then
+		return
+	end
 	local transcript_tab = vim.api.nvim_win_get_tabpage(state.transcript_win)
 	if vim.api.nvim_get_current_tabpage() == transcript_tab then
 		local footer_tab = vim.api.nvim_win_get_tabpage(state.status_win)
@@ -504,7 +516,7 @@ local function apply_footer_window_options(win)
 end
 
 local function ensure_footer_window(state, buf)
-	if state.status_win and vim.api.nvim_win_is_valid(state.status_win) then
+	if resolve_footer(state) then
 		normalize_footer_window(state)
 		return state.status_win
 	end
@@ -584,7 +596,8 @@ function M.setup(ctx)
 		desc = "Keep focus out of the pi-console status footer",
 		callback = function()
 			local state = ctx.state
-			if not state.status_win or vim.api.nvim_get_current_win() ~= state.status_win then
+			if not buffer.window_matches(state.status_win, state.status_buf)
+				or vim.api.nvim_get_current_win() ~= state.status_win then
 				return
 			end
 			local previous_win = vim.fn.win_getid(vim.fn.winnr("#"))
@@ -600,7 +613,7 @@ function M.setup(ctx)
 		desc = "Restore the pi-console status footer after window commands",
 		callback = function()
 			local state = ctx.state
-			if ctx.transcript.win_valid() and state.status_win and vim.api.nvim_win_is_valid(state.status_win) then
+			if ctx.transcript.win_valid() and resolve_footer(state) then
 				normalize_footer_window(state)
 			end
 		end,

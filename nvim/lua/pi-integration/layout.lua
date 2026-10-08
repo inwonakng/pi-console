@@ -1,4 +1,5 @@
 local markdown_render = require("pi-integration.markdown-render")
+local buffer = require("pi-integration.utils.buffer")
 
 local M = {}
 
@@ -44,14 +45,19 @@ local function input_sidebar_highlight(mode)
 end
 
 function M.update_input_sidebar(ctx)
-	local win = ctx.state.input_win
-	if not win or not vim.api.nvim_win_is_valid(win) then
+	local state = ctx.state
+	state.input_win = buffer.find_window(state.input_buf, state.input_win)
+	if not state.input_win then
 		return
 	end
-	local highlight = input_sidebar_highlight(ctx.state.access_mode)
-	vim.api.nvim_set_option_value("fillchars", "stl:─,stlnc:─,eob:▌", { win = win })
-	vim.api.nvim_set_option_value("statuscolumn", "%#" .. highlight .. "#▌%#SignColumn# ", { win = win })
-	vim.api.nvim_set_option_value("winhl", "EndOfBuffer:" .. highlight, { win = win })
+	local highlight = input_sidebar_highlight(state.access_mode)
+	for _, win in ipairs(vim.api.nvim_list_wins()) do
+		if buffer.window_matches(win, state.input_buf) then
+			vim.api.nvim_set_option_value("fillchars", "stl:─,stlnc:─,eob:▌", { win = win })
+			vim.api.nvim_set_option_value("statuscolumn", "%#" .. highlight .. "#▌%#SignColumn# ", { win = win })
+			vim.api.nvim_set_option_value("winhl", "EndOfBuffer:" .. highlight, { win = win })
+		end
+	end
 end
 
 function M.apply_input_window_options(ctx, win)

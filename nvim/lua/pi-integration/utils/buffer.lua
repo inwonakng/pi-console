@@ -4,6 +4,37 @@ function M.valid(buf)
 	return buf and vim.api.nvim_buf_is_valid(buf)
 end
 
+function M.window_matches(win, buf)
+	return M.valid(buf) and win ~= nil and vim.api.nvim_win_is_valid(win)
+		and vim.api.nvim_win_get_buf(win) == buf
+end
+
+-- Window IDs are hints: prefer an existing current-tab view when recovering a
+-- stale handle. Never change focus or open a window just to find a buffer.
+function M.find_window(buf, hint)
+	if not M.valid(buf) then
+		return nil
+	end
+	if M.window_matches(hint, buf) then
+		return hint
+	end
+	local current = vim.api.nvim_get_current_win()
+	if M.window_matches(current, buf) then
+		return current
+	end
+	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+		if M.window_matches(win, buf) then
+			return win
+		end
+	end
+	for _, win in ipairs(vim.api.nvim_list_wins()) do
+		if M.window_matches(win, buf) then
+			return win
+		end
+	end
+	return nil
+end
+
 function M.set_modifiable(buf, value)
 	if M.valid(buf) then
 		vim.api.nvim_set_option_value("modifiable", value, { buf = buf })

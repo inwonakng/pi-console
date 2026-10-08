@@ -17,12 +17,13 @@ local fzf_keymap = {
 		["<C-b>"] = "preview-page-up",
 	},
 	fzf = {
-    ["ctrl-a"] = "toggle-all",
+		["ctrl-a"] = "toggle-all",
 		["ctrl-d"] = "half-page-down",
 		["ctrl-u"] = "half-page-up",
 		["ctrl-f"] = "preview-page-down",
 		["ctrl-b"] = "preview-page-up",
 		["ctrl-z"] = "abort",
+		["ctrl-l"] = "clear-multi",
 	},
 }
 
@@ -117,11 +118,17 @@ local function highlight_approval_preview(buf, header, padding, filetype)
 	vim.api.nvim_buf_call(buf, function()
 		vim.cmd("syntax clear")
 		vim.b[buf].current_syntax = nil
-		if type(filetype) == "string" and filetype ~= "text" and filetype:match("^[%w_]+$")
-			and #vim.fn.globpath(vim.o.runtimepath, "syntax/" .. filetype .. ".vim", false, true) > 0 then
+		if
+			type(filetype) == "string"
+			and filetype ~= "text"
+			and filetype:match("^[%w_]+$")
+			and #vim.fn.globpath(vim.o.runtimepath, "syntax/" .. filetype .. ".vim", false, true) > 0
+		then
 			vim.cmd("syntax include @PiApprovalBody syntax/" .. filetype .. ".vim")
 			local start = padding + #header + 2
-			vim.cmd("syntax region PiApprovalBody start=/\\%" .. start .. "l/ end=/\\%$/ contains=@PiApprovalBody keepend")
+			vim.cmd(
+				"syntax region PiApprovalBody start=/\\%" .. start .. "l/ end=/\\%$/ contains=@PiApprovalBody keepend"
+			)
 			vim.cmd("syntax sync fromstart")
 		end
 		vim.b[buf].current_syntax = "pi_approval"

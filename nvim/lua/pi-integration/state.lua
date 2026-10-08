@@ -1,8 +1,42 @@
 local M = {}
 
+function M.is_agent_active(state)
+	return state.is_agent_running or state.is_streaming or state.is_retrying or state.awaiting_agent_output
+end
+
+function M.restart_block_reason(state)
+	if (state.spawn_running_count or 0) > 0 then
+		return "There are running subagents. Join or stop them before restarting."
+	end
+	for _, run in ipairs(state.spawn_runs or {}) do
+		if run.status == "running" or run.joinRequested == true then
+			return "Wait for the current subagent work to finish before restarting."
+		end
+	end
+	if M.is_agent_active(state) or state.is_compacting or state.is_loading
+		or state.session_replacement_pending or state.rpc_tearing_down or state.restart_requested
+		or (state.workspace and state.workspace.transitionPending) then
+		return "Wait for the current Pi work to finish before restarting."
+	end
+	for _, pending in ipairs(state.pending_user_messages or {}) do
+		if pending.status == "queued" or pending.status == "sending" then
+			return "Wait for pending prompts to finish before restarting."
+		end
+	end
+	if state.active_ui_request_id or next(state.pending_ui_requests or {}) then
+		return "Resolve the pending Pi request before restarting."
+	end
+	if next(state.callbacks or {}) then
+		return "Wait for pending Pi requests to finish before restarting."
+	end
+	return nil
+end
+
 function M.new()
 	return {
 		job = nil,
+		rpc_process = nil,
+		rpc_tearing_down = false,
 		stdout_pending = "",
 		stderr_pending = "",
 		restart_requested = false,
@@ -73,6 +107,7 @@ function M.new()
 		model_id = nil,
 		thinking_level = nil,
 		spawn_runs = {},
+		spawn_runs_session_file = nil,
 		spawn_running_count = 0,
 		last_updated = nil,
 		transcript_refresh_scheduled = false,

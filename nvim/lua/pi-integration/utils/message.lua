@@ -39,6 +39,18 @@ function M.extract_text(message)
 	return nil
 end
 
+function M.spawn_custom_tool_name(message)
+	if type(message) ~= "table" or message.role ~= "custom" then
+		return nil
+	end
+	if message.customType == "spawn_completion" then
+		return "spawn"
+	elseif message.customType == "spawn_control_result" then
+		return "spawn_control"
+	end
+	return nil
+end
+
 function M.tool_call_id(item)
 	return item and (item.id or item.toolCallId or item.tool_call_id or item.callId) or nil
 end

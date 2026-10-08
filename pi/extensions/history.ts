@@ -15,11 +15,12 @@ import {
   writeFileSync,
 } from "fs";
 import { appendFile } from "fs/promises";
-import { dirname, join, relative, resolve, sep } from "path";
+import { dirname, join, relative, resolve } from "path";
 import { createHash } from "crypto";
 import { listWorkspaces, loadWorkspace, prepareWorkspaceDiscard, removeWorkspace, retainedChildWorkspaces, workspaceForContext } from "./shared/workspace";
 import { locationForEntry, locationEntry, moveToLocation, workspaceIdAt } from "./shared/workspace-navigation";
-import { hasRunningSubagents } from "./spawn";
+import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
+import { pathInside, resolveToolPath } from "./shared/paths";
 
 type SnapshotState =
   | { kind: "missing" }
@@ -107,23 +108,34 @@ function isHistoryIgnoredPath(path: string) {
 	return normalized === spawnRoot || normalized.startsWith(`${spawnRoot}/`);
 }
 
-function pathInside(parent: string, child: string) {
-	const rel = relative(resolve(parent), resolve(child));
-	return rel === "" || (!rel.startsWith("..") && !rel.startsWith(sep));
-}
-
 function isSafeWorkspacePath(root: string, path: string): boolean {
 	const canonicalRoot = realpathSync(root);
 	let ancestor = dirname(path);
-	while (!existsSync(ancestor) && ancestor !== dirname(ancestor)) {
-		ancestor = dirname(ancestor);
+	while (true) {
+		try {
+			// A dangling symlink is an existing ancestor, not a missing directory
+			// we can skip. Only the leaf may be treated as a symlink object.
+			lstatSync(ancestor);
+			break;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+			const parent = dirname(ancestor);
+			if (parent === ancestor) return false;
+			ancestor = parent;
+		}
 	}
-	const canonicalAncestor = realpathSync(ancestor);
-	return pathInside(canonicalRoot, canonicalAncestor);
+	try {
+		return pathInside(canonicalRoot, realpathSync(ancestor));
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "ELOOP") throw error;
+		return false;
+	}
 }
 
 function normalizePath(root: string, cwd: string, path: string): string | undefined {
-	const absolute = resolve(cwd, path);
+	const absolute = resolveToolPath(path, cwd);
 	// History observes worktree changes; access-mode authorizes external writes.
 	if (!pathInside(root, absolute) || !isSafeWorkspacePath(root, absolute)) {
 		return undefined;
@@ -380,6 +392,11 @@ function validateCurrentState(root: string, files: FileRecord[]) {
 }
 
 async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null, navigateTo?: string): Promise<"same" | "switched" | false> {
+	const blocked = subagentHistoryBlockReason();
+	if (blocked) {
+		ctx.ui.notify(blocked, "warning");
+		return false;
+	}
 	const sessionFile = ctx.sessionManager.getSessionFile();
 	const branch = ctx.sessionManager.getBranch();
 	const afterIds = branchIdsAfter(branch, targetId);
@@ -430,7 +447,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 			ctx.ui.notify("Cross-workspace rollback requires selecting a message through /pi-history.", "warning");
 			return false;
 		}
-		const patches = discarded.map((record) => prepareWorkspaceDiscard(record.id));
+		const patches = await Promise.all(discarded.map((record) => prepareWorkspaceDiscard(record.id)));
 		const approved = await ctx.ui.confirm("Change workspace during rollback?",
 			`Switch to ${target.cwd}?${patches.length ? `\nThe following worktrees will be discarded (recovery patches remain):\n${patches.map((record) => `- ${record.label}: ${record.worktreePath}\n  ${record.resultPatchPath}`).join("\n")}` : "\nNo worktree will be discarded."}\n${files.length ? `${files.length} recorded file change(s) in the destination workspace will be rolled back.` : "Destination files will remain at their current state."} Proceed?`);
 		if (!approved) return false;
@@ -442,9 +459,9 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	}
 	const moved = await moveToLocation(ctx, target.cwd, ctx.sessionManager.getLeafId(), {
 		navigateTo,
-		onArrival: (nextCtx) => {
+		onArrival: async (nextCtx) => {
 			for (const record of discarded) {
-				const cleaned = removeWorkspace(record.id, "discarded");
+				const cleaned = await removeWorkspace(record.id, "discarded");
 				if (cleaned.lifecycle === "cleanup_failed") nextCtx.ui.notify(`Could not remove ${record.label}: ${cleaned.integrationReason}`, "warning");
 			}
 			if (navigateTo) {

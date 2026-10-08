@@ -1,6 +1,7 @@
 local M = {}
 
-local current_mode = "normal"
+local active_mode
+local mode_keys = { "h", "j", "k", "l", "<Esc>", "q" }
 local augroup = vim.api.nvim_create_augroup("WindowModes", { clear = true })
 
 local function echo_mode(mode)
@@ -12,43 +13,68 @@ local function echo_mode(mode)
 end
 
 local function clear_mode_keys()
-	vim.api.nvim_clear_autocmds({ group = augroup })
-	for _, key in ipairs({ "h", "j", "k", "l", "<Esc>", "q" }) do
-		pcall(vim.keymap.del, "n", key, { buffer = 0 })
+	local owner = active_mode
+	if not owner then
+		return
 	end
-	current_mode = "normal"
+	active_mode = nil
+	vim.api.nvim_clear_autocmds({ group = augroup })
+	if vim.api.nvim_buf_is_valid(owner.buf) then
+		vim.api.nvim_buf_call(owner.buf, function()
+			for _, key in ipairs(mode_keys) do
+				local mapping = vim.fn.maparg(key, "n", false, true)
+				if mapping.buffer == 1 and mapping.callback == owner.callbacks[key] then
+					vim.keymap.del("n", key, { buffer = owner.buf })
+					if owner.originals[key] then
+						vim.fn.mapset("n", false, owner.originals[key])
+					end
+				end
+			end
+		end)
+	end
 	echo_mode("normal")
 	vim.cmd("redrawstatus")
 end
 
 local function enter_mode(mode, keymaps)
-	if current_mode == mode then
+	if active_mode and active_mode.name == mode then
 		clear_mode_keys()
 		return
 	end
 
 	clear_mode_keys()
-	current_mode = mode
+	local owner = {
+		name = mode,
+		buf = vim.api.nvim_get_current_buf(),
+		originals = {},
+		callbacks = keymaps,
+	}
+	for _, key in ipairs(mode_keys) do
+		local mapping = vim.fn.maparg(key, "n", false, true)
+		if mapping.buffer == 1 then
+			owner.originals[key] = mapping
+		end
+	end
+	active_mode = owner
 	echo_mode(mode)
 	vim.cmd("redrawstatus")
 
-	local opts = { buffer = 0, noremap = true, silent = true }
 	local exit = function()
-		clear_mode_keys()
+		if active_mode == owner then
+			clear_mode_keys()
+		end
 	end
-
+	keymaps["<Esc>"] = exit
+	keymaps.q = exit
+	local opts = { buffer = owner.buf, noremap = true, silent = true }
 	for key, action in pairs(keymaps) do
 		vim.keymap.set("n", key, action, opts)
 	end
-	vim.keymap.set("n", "<Esc>", exit, opts)
-	vim.keymap.set("n", "q", exit, opts)
 
-	vim.api.nvim_create_autocmd({ "WinLeave", "BufLeave" }, {
+	vim.api.nvim_create_autocmd({ "WinLeave", "BufLeave", "BufWipeout" }, {
 		group = augroup,
-		once = true,
-		callback = function()
-			clear_mode_keys()
-		end,
+		buffer = owner.buf,
+		callback = exit,
 	})
 end
 
@@ -94,7 +120,7 @@ function M.enter_move()
 end
 
 function M.get_mode()
-	return current_mode
+	return active_mode and active_mode.name or "normal"
 end
 
 return M

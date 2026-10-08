@@ -1,6 +1,7 @@
 local floats = require("pi-integration.floats")
 local json = require("pi-integration.utils.json")
 local message_utils = require("pi-integration.utils.message")
+local pi_spawn_artifacts = require("pi-integration.spawn-artifacts")
 
 local M = {}
 
@@ -273,6 +274,20 @@ local function merge_details(old_details, new_details)
 	return merged
 end
 
+local function spawn_details(state, details)
+	local id = run_id(details)
+	if type(id) ~= "string" or type(state.session_file) ~= "string"
+		or state.spawn_runs_session_file ~= state.session_file then
+		return details
+	end
+	for _, run in ipairs(state.spawn_runs or {}) do
+		if run_id(run) == id then
+			return merge_details(details, run)
+		end
+	end
+	return details
+end
+
 local function markdown_code_span(text)
 	text = tostring(text or "")
 	local longest = 0
@@ -340,137 +355,17 @@ local function display_for_call(state, name, args)
 	return nil
 end
 
-local function path_from_artifact_line(text, label)
-	if type(text) ~= "string" then
-		return nil
-	end
-	return text:match("%- " .. label .. ": ([^\n]+)")
-end
-
-local function artifact_path_value(value)
-	return type(value) == "string" and value ~= "" and value or nil
-end
-
 local function spawn_artifacts(tool_name, text, details)
-	if tool_name ~= "spawn" and tool_name ~= "spawn_control" then
-		return nil
-	end
-	details = type(details) == "table" and details or {}
-	local worktree = type(details.worktree) == "table" and details.worktree or nil
-	local artifacts = {
-		brief = artifact_path_value(details.briefPath) or path_from_artifact_line(text, "Brief"),
-		result = artifact_path_value(details.resultPath) or path_from_artifact_line(text, "Result"),
-		transcript = artifact_path_value(details.transcriptPath) or path_from_artifact_line(text, "Transcript"),
-		status = artifact_path_value(details.statusPath) or path_from_artifact_line(text, "Status"),
-		agent_prompt = artifact_path_value(details.agentPromptPath) or path_from_artifact_line(text, "Subagent prompt"),
-		patch = artifact_path_value(details.patchPath) or artifact_path_value(worktree and worktree.patchPath) or path_from_artifact_line(text, "Patch"),
-	}
-	if artifacts.brief or artifacts.result or artifacts.transcript or artifacts.status or artifacts.agent_prompt or artifacts.patch then
-		return artifacts
-	end
-	return nil
+	if not is_spawn_output_name(tool_name) then return nil end
+	return pi_spawn_artifacts.paths(details, text)
 end
 
 local function sanitize_buf_name_part(value)
 	return tostring(value or "tool"):gsub("[^%w%._%-]+", "-")
 end
 
-local function read_file_text(path)
-	if not path or vim.fn.filereadable(path) ~= 1 then
-		return nil
-	end
-	return table.concat(vim.fn.readfile(path), "\n")
-end
-
-local function open_spawn_text(ctx, title, path, filetype)
-	local state = ctx.state
-	local text = read_file_text(path)
-	if not text then
-		ctx.ui.notify("Could not read " .. tostring(path), vim.log.levels.WARN)
-		return
-	end
-	floats.close_window(state.spawn_win)
-	state.spawn_win = nil
-	state.spawn_buf = vim.api.nvim_create_buf(false, true)
-	vim.api.nvim_buf_set_name(state.spawn_buf, "pi://spawn/" .. vim.fn.fnamemodify(path, ":t"))
-	vim.api.nvim_set_option_value("buftype", "nofile", { buf = state.spawn_buf })
-	vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = state.spawn_buf })
-	vim.api.nvim_set_option_value("swapfile", false, { buf = state.spawn_buf })
-	vim.api.nvim_set_option_value("filetype", filetype or "markdown", { buf = state.spawn_buf })
-	vim.api.nvim_buf_set_lines(state.spawn_buf, 0, -1, false, vim.split(text, "\n", { plain = true }))
-	vim.api.nvim_set_option_value("modifiable", false, { buf = state.spawn_buf })
-
-	local width = math.min(math.max(72, math.floor(vim.o.columns * 0.82)), vim.o.columns - 4)
-	local height = math.min(math.max(16, math.floor(vim.o.lines * 0.75)), vim.o.lines - 4)
-	local row = math.max(1, math.floor((vim.o.lines - height) / 2))
-	local col = math.max(0, math.floor((vim.o.columns - width) / 2))
-	state.spawn_win = vim.api.nvim_open_win(state.spawn_buf, true, {
-		relative = "editor",
-		width = width,
-		height = height,
-		row = row,
-		col = col,
-		style = "minimal",
-		border = "rounded",
-		title = " " .. title .. " ",
-		title_pos = "left",
-	})
-	vim.api.nvim_set_option_value("wrap", true, { win = state.spawn_win })
-	vim.api.nvim_set_option_value("number", false, { win = state.spawn_win })
-	vim.api.nvim_set_option_value("relativenumber", false, { win = state.spawn_win })
-	local close_spawn_win = function()
-		floats.close_window(state.spawn_win)
-		state.spawn_win = nil
-	end
-	floats.close_on_win_leave(state.spawn_buf, close_spawn_win, { win = state.spawn_win, parent = ctx.window.parent })
-	vim.keymap.set("n", "q", close_spawn_win, { buffer = state.spawn_buf, silent = true, desc = "Close spawn output" })
-	vim.keymap.set("n", "<Esc>", close_spawn_win, { buffer = state.spawn_buf, silent = true, desc = "Close spawn output" })
-	vim.keymap.set("n", "y", function()
-		vim.fn.setreg("+", text)
-		ctx.ui.notify("Yanked spawn output")
-	end, { buffer = state.spawn_buf, silent = true, desc = "Yank spawn output" })
-end
-
 local function is_todo_tool_name(name)
 	return name == "todowrite" or name == "todo_write"
-end
-
-local function open_spawn_artifacts(ctx, output)
-	if not output.spawn then
-		return false
-	end
-	local choices = {}
-	local function add(label, path, filetype)
-		if type(path) == "string" and path ~= "" then
-			table.insert(choices, { label = label, path = path, filetype = filetype })
-		end
-	end
-	add("result", output.spawn.result, "markdown")
-	add("transcript", output.spawn.transcript, "json")
-	add("brief", output.spawn.brief, "markdown")
-	add("status", output.spawn.status, "json")
-	add("subagent prompt", output.spawn.agent_prompt, "markdown")
-	add("patch", output.spawn.patch, "diff")
-	if #choices == 0 then
-		ctx.ui.notify("No spawn artifacts found for this tool call", vim.log.levels.WARN)
-		return true
-	end
-	vim.ui.select(choices, {
-		prompt = "Open spawn artifact",
-		pi_select_layout = "compact",
-		format_item = function(item)
-			return item.label .. "  " .. item.path
-		end,
-	}, function(choice)
-		if choice then
-			if choice.label == "transcript" then
-				require("pi-integration.spawn-transcript").open(ctx, choice.path, "Spawn transcript")
-			else
-				open_spawn_text(ctx, "Spawn " .. choice.label, choice.path, choice.filetype)
-			end
-		end
-	end)
-	return true
 end
 
 function M.reset(state)
@@ -759,6 +654,7 @@ function M.store(state, tool_name, text, filetype, details, display, tool_call_i
 	state.next_tool_output_id = state.next_tool_output_id + 1
 	local id = state.next_tool_output_id
 	local call = tool_call_id and state.tool_calls and state.tool_calls[tool_call_id]
+	if tool_name == "spawn" and not is_error then details = spawn_details(state, details) end
 	state.tool_outputs[id] = {
 		name = tool_name or "tool",
 		text = text or "",
@@ -774,9 +670,10 @@ function M.store(state, tool_name, text, filetype, details, display, tool_call_i
 		state.live_tool_output_by_call = state.live_tool_output_by_call or {}
 		state.live_tool_output_by_call[tool_call_id] = id
 	end
-	if is_spawn_output_name(tool_name) and not is_error then
+	if tool_name == "spawn" and not is_error then
 		M.bind_spawn_run(state, details, id)
 	end
+	if is_todo_tool_name(tool_name) then state.todo_tool_output_id = id end
 	return id
 end
 
@@ -800,10 +697,12 @@ function M.store_or_update_live(state, tool_name, tool_call_id, text, filetype, 
 		end
 		output.display = display or output.display
 		output.args = call_args_for_id(state, tool_call_id) or output.args
-		output.spawn = spawn_artifacts(output.name, output.text, output.details)
-		if is_spawn_output_name(output.name) and not output.is_error then
+		if output.name == "spawn" and not output.is_error then
+			output.details = spawn_details(state, output.details)
 			M.bind_spawn_run(state, output.details, output_id)
 		end
+		output.spawn = spawn_artifacts(output.name, output.text, output.details)
+		if is_todo_tool_name(output.name) then state.todo_tool_output_id = output_id end
 		return output_id, true
 	end
 	return M.store(state, tool_name, text, filetype, details, display, tool_call_id, is_error), false
@@ -840,22 +739,46 @@ function M.store_or_update_spawn_run(state, run, text)
 	end
 	state.spawn_run_output_by_id = state.spawn_run_output_by_id or {}
 	local output_id = state.spawn_run_output_by_id[id]
-	local output_text = text or run.progress or ""
 	if output_id and state.tool_outputs[output_id] then
 		local output = state.tool_outputs[output_id]
 		if output.is_error then
 			return nil, false
 		end
-		output.name = output.name == "spawn" and "spawn" or "spawn_control"
-		output.text = output_text
-		output.filetype = infer_filetype(output.name, output_text)
-		output.details = merge_details(output.details, run)
+		output.text = text or output.text or ""
+		output.filetype = infer_filetype(output.name, output.text)
+		output.details = spawn_details(state, merge_details(output.details, run))
 		output.display = nil
 		output.spawn = spawn_artifacts(output.name, output.text, output.details)
 		M.bind_spawn_run(state, output.details, output_id)
 		return output_id, true
 	end
 	return nil, false
+end
+
+-- Update only represented owning spawn rows. Rendering paths retain their
+-- own placement/buffer behavior and render the unmatched remainder.
+function M.update_spawn_outputs(state, details, text)
+	if type(details) ~= "table" then return {}, details, false end
+	local is_list = type(details.runs) == "table"
+	local runs = is_list and details.runs or { details }
+	local updated, unmatched = {}, {}
+	for _, run in ipairs(runs) do
+		local id = run_id(run)
+		local owner = id and state.spawn_run_output_by_id[id]
+		local output_id = owner and state.tool_items_by_output[owner]
+			and M.store_or_update_spawn_run(state, run, not is_list and text or nil)
+		if output_id then
+			table.insert(updated, output_id)
+		else
+			table.insert(unmatched, run)
+		end
+	end
+	if #updated > 0 and #unmatched == 0 then return updated, nil, true end
+	if is_list then
+		local remaining = merge_details(details, { runs = unmatched })
+		return updated, remaining, false
+	end
+	return updated, details, false
 end
 
 function M.live_output_id(state, tool_call_id)
@@ -929,6 +852,15 @@ function M.summary_text(state, output_id)
 	if not output.is_error and (output.name == "spawn" or output.name == "spawn_control") then
 		label = "Subagent"
 		local details = type(output.details) == "table" and output.details or {}
+		if type(details.runs) == "table" then
+			local labels = {}
+			for _, run in ipairs(details.runs) do
+				local status = type(run) == "table" and run.status or "unknown"
+				table.insert(labels, (short_run_id(run_id(run)) or "unknown") .. " " .. tostring(status or "unknown"))
+			end
+			return #labels > 0 and ("Subagents: " .. table.concat(labels, " · "))
+				or ("Subagents: " .. truncate_spawn_text(output.text ~= "" and output.text or "No subagents", 120))
+		end
 		if type(details.agent) == "string" and details.agent ~= "" then
 			label = label .. ": " .. details.agent
 		elseif type(details.role) == "string" and details.role ~= "" then
@@ -942,8 +874,7 @@ function M.summary_text(state, output_id)
 			and output.text:find("Spawned subagent", 1, true) ~= nil
 		local progress_source = type(details.progress) == "string" and details.progress or output.text or ""
 		local progress = truncate_spawn_text(progress_source, is_spawn_ack and 80 or 120)
-		if is_spawn_ack then
-			status = "spawned"
+		if is_spawn_ack and (type(details.progress) ~= "string" or details.progress == "") then
 			progress = short_run_id(run_id) and ("id: " .. short_run_id(run_id)) or ""
 		elseif status and progress == status then
 			progress = ""
@@ -995,7 +926,7 @@ function M.open_float(ctx, output_id)
 	end
 	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
 	local pending = call and (call.execution_status == "running" or call.execution_status == "interrupted")
-	if not pending and output.spawn and open_spawn_artifacts(ctx, output) then
+	if not pending and output.spawn and pi_spawn_artifacts.open_output(ctx, output) then
 		return true
 	end
 	if not pending and output.name == "edit" and not output.is_error and open_edit_diff_float(ctx, output) then

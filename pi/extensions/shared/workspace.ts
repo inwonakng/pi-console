@@ -18,7 +18,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import { pathInside as lexicalPathInside } from "./paths";
 
 export type WorkspaceKind = "task" | "child";
 export type WorkspaceLifecycle =
@@ -141,8 +142,7 @@ export function sameSessionFile(left: string | undefined, right: string | undefi
 }
 
 export function pathInside(parent: string, child: string): boolean {
-  const rel = relative(canonicalPath(parent), canonicalPath(child));
-  return rel === "" || (!rel.startsWith("..") && !rel.startsWith(sep));
+  return lexicalPathInside(canonicalPath(parent), canonicalPath(child));
 }
 
 function gitResult(cwd: string, args: string[], options: { env?: NodeJS.ProcessEnv; input?: Buffer } = {}): GitResult {
@@ -309,7 +309,7 @@ function recordPath(id: string): string {
   return join(RECORDS_DIR, `${safeRefSegment(id)}.json`);
 }
 
-export function saveWorkspace(record: WorkspaceRecord): void {
+function saveWorkspace(record: WorkspaceRecord): void {
   ensureDirectories();
   record.updatedAt = new Date().toISOString();
   const destination = recordPath(record.id);
@@ -523,12 +523,45 @@ export function workspaceDiscardWarning(records: WorkspaceRecord[]): string {
   return lines.join("\n");
 }
 
-export function prepareWorkspaceDiscard(id: string): WorkspaceRecord {
-  const record = loadWorkspace(id);
-  if (!record) {
-    throw new Error(`Unknown workspace: ${id}`);
-  }
-  return snapshotWorkspaceResult(record);
+export async function prepareWorkspaceDiscard(id: string): Promise<WorkspaceRecord> {
+  return withWorkspaceLock(id, async (record) => {
+    if (isWorkspaceFinalized(record)) return record;
+    assertWorkspaceAvailable(record);
+    return snapshotWorkspaceResult(record);
+  });
+}
+
+/** Update live metadata from the record reloaded under the mutation lock. */
+export async function updateWorkspace(id: string, update: (record: WorkspaceRecord) => void): Promise<WorkspaceRecord> {
+  return withWorkspaceLock(id, async (record) => {
+    if (isWorkspaceFinalized(record)) return record;
+    assertWorkspaceAvailable(record);
+    update(record);
+    saveWorkspace(record);
+    return record;
+  });
+}
+
+function checkCancellation(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error("Workspace operation aborted before application.");
+}
+
+async function withWorkspaceLock<T>(id: string, fn: (record: WorkspaceRecord) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  checkCancellation(signal);
+  const initial = loadWorkspace(id);
+  if (!initial) throw new Error(`Unknown workspace: ${id}`);
+  return withDestinationQueue(initial.destinationRoot, async () => {
+    checkCancellation(signal);
+    const releaseLock = await acquireFilesystemLock(initial.destinationRoot, signal);
+    try {
+      checkCancellation(signal);
+      const record = loadWorkspace(id);
+      if (!record) throw new Error(`Workspace record disappeared: ${id}`);
+      return await fn(record);
+    } finally {
+      releaseLock();
+    }
+  });
 }
 
 async function withDestinationQueue<T>(destinationRoot: string, fn: () => Promise<T>): Promise<T> {
@@ -538,12 +571,14 @@ async function withDestinationQueue<T>(destinationRoot: string, fn: () => Promis
   const current = new Promise<void>((resolvePromise) => {
     release = resolvePromise;
   });
-  globalState.destinationQueues.set(key, previous.then(() => current));
+  const chained = previous.then(() => current);
+  globalState.destinationQueues.set(key, chained);
   await previous;
   try {
     return await fn();
   } finally {
     release();
+    if (globalState.destinationQueues.get(key) === chained) globalState.destinationQueues.delete(key);
   }
 }
 
@@ -551,23 +586,24 @@ function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // Lack of permission to inspect a process is not proof that it died.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
-async function acquireFilesystemLock(destinationRoot: string): Promise<() => void> {
+async function acquireFilesystemLock(destinationRoot: string, signal?: AbortSignal): Promise<() => void> {
   ensureDirectories();
   const key = createHash("sha256").update(resolve(destinationRoot)).digest("hex").slice(0, 24);
   const lockPath = join(LOCKS_DIR, `${key}.lock`);
   const ownerPath = join(lockPath, "owner.json");
   const deadline = Date.now() + 30_000;
   while (true) {
+    checkCancellation(signal);
     try {
       mkdirSync(lockPath);
-      writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, destinationRoot, createdAt: new Date().toISOString() }), "utf8");
-      return () => rmSync(lockPath, { recursive: true, force: true });
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       try {
         const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as { pid?: unknown };
         if (typeof owner.pid === "number" && !processAlive(owner.pid)) {
@@ -585,10 +621,18 @@ async function acquireFilesystemLock(destinationRoot: string): Promise<() => voi
         }
       }
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting to integrate into ${destinationRoot}`);
+        throw new Error(`Timed out waiting for workspace mutation in ${destinationRoot}`);
       }
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      continue;
     }
+    try {
+      writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, destinationRoot, createdAt: new Date().toISOString() }), "utf8");
+    } catch (error) {
+      rmSync(lockPath, { recursive: true, force: true });
+      throw error;
+    }
+    return () => rmSync(lockPath, { recursive: true, force: true });
   }
 }
 
@@ -655,24 +699,27 @@ function changedIgnoredFiles(record: WorkspaceRecord): { path: string; hash: str
   return changed;
 }
 
-export async function integrateWorkspace(id: string): Promise<WorkspaceRecord> {
-  const initial = loadWorkspace(id);
-  if (!initial) {
-    throw new Error(`Unknown workspace: ${id}`);
+function assertWorkspaceAvailable(record: WorkspaceRecord): void {
+  if (record.lifecycle === "discarded") {
+    throw new Error(`Workspace ${record.id} was discarded and is not eligible for integration.`);
   }
-  if (isWorkspaceFinalized(initial)) {
-    return initial;
+  if (!record.retained || !existsSync(record.worktreePath)) {
+    throw new Error(`Worktree is unavailable for workspace ${record.id}.`);
   }
-  return withDestinationQueue(initial.destinationRoot, async () => {
-    const releaseLock = await acquireFilesystemLock(initial.destinationRoot);
+}
+
+export async function integrateWorkspace(id: string, signal?: AbortSignal): Promise<WorkspaceRecord> {
+  return withWorkspaceLock(id, async (record) => {
+    let applicationStarted = false;
+    let destinationRef: string | undefined;
     try {
-      let record = loadWorkspace(id);
-      if (!record) {
-        throw new Error(`Workspace record disappeared: ${id}`);
-      }
+      // Finalized contributions are idempotent, including after cleanup.
+      if (isWorkspaceFinalized(record)) return record;
+      assertWorkspaceAvailable(record);
       record = snapshotWorkspaceResult(record);
       changedIgnoredFiles(record);
       const destination = captureSnapshot(record.destinationRoot, record.id, `destination-${randomUUID()}`);
+      destinationRef = destination.ref;
       const merge = mergeTree(record, destination);
       if (!merge.mergedTree) {
         const diagnostics = merge.diagnostics ?? "Git reported a merge conflict.";
@@ -681,7 +728,6 @@ export async function integrateWorkspace(id: string): Promise<WorkspaceRecord> {
         record.integrationReason = diagnostics;
         record.lifecycle = "conflicted";
         saveWorkspace(record);
-        deleteRef(record.destinationRoot, destination.ref);
         return record;
       }
 
@@ -706,16 +752,24 @@ export async function integrateWorkspace(id: string): Promise<WorkspaceRecord> {
       let changedIncludedFile = false;
 
       await withMutationQueues([...absoluteAffected, ...ignoredAffected], async () => {
+        checkCancellation(signal);
+        // The destination lock excludes removal and record writers throughout
+        // preparation and file-queue waits.
+        const current = loadWorkspace(id);
+        if (!current) throw new Error(`Workspace record disappeared: ${id}`);
+        assertWorkspaceAvailable(current);
         const recheck = captureSnapshot(record.destinationRoot, record.id, `recheck-${randomUUID()}`);
         try {
           if (recheck.tree !== destination.tree || recheck.indexFingerprint !== destination.indexFingerprint) {
             throw new Error("Destination changed while integration was being prepared; retry integration.");
           }
           const ignoredChanges = changedIgnoredFiles(record);
+          checkCancellation(signal);
           changedIncludedFile = ignoredChanges.length > 0;
           if (applicationPatch.length > 0) {
             gitBuffer(record.destinationRoot, ["apply", "--check", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
             const indexBefore = realIndexFingerprint(record.destinationRoot);
+            applicationStarted = true;
             gitBuffer(record.destinationRoot, ["apply", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
             const indexAfter = realIndexFingerprint(record.destinationRoot);
             if (indexAfter !== indexBefore) {
@@ -731,6 +785,7 @@ export async function integrateWorkspace(id: string): Promise<WorkspaceRecord> {
               if (regularFileHash(record.destinationRoot, relative(record.destinationRoot, temporary)) !== file.hash) {
                 throw new Error(`Ignored file changed while copying: ${file.path}`);
               }
+              applicationStarted = true;
               renameSync(temporary, destinationPath);
             } finally {
               rmSync(temporary, { force: true });
@@ -745,21 +800,27 @@ export async function integrateWorkspace(id: string): Promise<WorkspaceRecord> {
       record.integrationReason = undefined;
       record.lifecycle = "integration_pending";
       saveWorkspace(record);
-      deleteRef(record.destinationRoot, destination.ref);
       return record;
     } catch (error) {
-      const record = loadWorkspace(id) ?? initial;
+      if (signal?.aborted && !applicationStarted) throw error;
+      const record = loadWorkspace(id);
+      if (!record || isWorkspaceFinalized(record)) throw error;
+      // Do not resurrect a deleted record or turn removal into a merge failure.
+      assertWorkspaceAvailable(record);
       if (record.integration !== "conflict") {
         record.integration = "failed";
-        record.integrationReason = error instanceof Error ? error.message : String(error);
+        const reason = error instanceof Error ? error.message : String(error);
+        record.integrationReason = applicationStarted
+          ? `Destination mutation began; files may already have been applied. ${reason}`
+          : reason;
         record.lifecycle = "retained";
         saveWorkspace(record);
       }
       return record;
     } finally {
-      releaseLock();
+      deleteRef(record.destinationRoot, destinationRef);
     }
-  });
+  }, signal);
 }
 
 function cleanupGitDirectory(record: WorkspaceRecord): string {
@@ -778,11 +839,20 @@ function cleanupGitDirectory(record: WorkspaceRecord): string {
   throw new Error(`Could not locate the Git repository for ${record.label}.`);
 }
 
-export function removeWorkspace(id: string, finalLifecycle: "integrated" | "discarded"): WorkspaceRecord {
-  const record = loadWorkspace(id);
-  if (!record) {
-    throw new Error(`Unknown workspace: ${id}`);
-  }
+export async function removeWorkspace(id: string, finalLifecycle: "integrated" | "discarded"): Promise<WorkspaceRecord> {
+  return withWorkspaceLock(id, async (record) => {
+    if (!record.retained && record.lifecycle !== "cleanup_failed") return record;
+    // Integration may have won while a discard was waiting for the lock.
+    // Cleanup must not relabel an already applied contribution as discarded.
+    const lifecycle = isWorkspaceFinalized(record) ? "integrated" : finalLifecycle;
+    if (lifecycle === "integrated" && !isWorkspaceFinalized(record)) {
+      throw new Error(`Workspace ${id} has not been integrated.`);
+    }
+    return removeWorkspaceLocked(record, lifecycle);
+  });
+}
+
+function removeWorkspaceLocked(record: WorkspaceRecord, finalLifecycle: "integrated" | "discarded"): WorkspaceRecord {
   try {
     if (retainedChildWorkspaces(record.id).length > 0) {
       throw new Error(`Join or discard child workspaces before removing ${record.label}.`);
