@@ -6,6 +6,7 @@ end
 
 cmp.build():pwait()
 cmp.setup({
+	term = { enabled = false },
 	cmdline = {
 		enabled = true,
 		sources = {
