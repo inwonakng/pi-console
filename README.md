@@ -349,11 +349,20 @@ Explicitly user-entered `!`/`!!` commands run through Pi's normal shell path wit
 host-user permissions, without this extension's sandbox or approval checks.
 Agent-generated Bash commands remain access-controlled.
 
-Bash has no default execution timeout. The agent is instructed to omit `timeout`
-unless the user requests an execution deadline, and to use that harness-enforced
-deadline instead of embedding timeouts in shell commands. Command-level timeouts
-are reserved for explicit user requests or testing timeout behavior. All upfront
+Bash has no default execution timeout. The agent is instructed to use `timeout`
+for diagnostic probes expected to finish quickly or when the user requests an
+execution deadline, and to omit it otherwise. Probe deadlines should match the
+expected execution time, not impose arbitrary limits on builds, installs, or
+other legitimately long-running work. Command-level timeouts such as
+`curl --max-time`, `curl --connect-timeout`, or the `timeout` utility remain
+reserved for explicit user requests or testing timeout behavior. All upfront
 approvals finish before the shell and its execution timer start.
+
+Agent-written diagnostic scripts must terminate after collecting results and
+exit nonzero on initialization or execution failure. Headless Neovim probes
+should catch initialization errors and exit with `cquit`; a Lua error alone does
+not terminate the editor. Any watchdog must be installed before loading plugins
+or other fallible initialization, so an earlier error cannot bypass it.
 
 If granular permissions cannot support an operation (for example, raw networking
 or a literal path containing sandbox wildcard characters), request
