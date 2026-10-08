@@ -71,7 +71,7 @@ require("catppuccin").setup({
 			PiEditDelete = { fg = colors.red, bg = M.ui_bg, bold = false },
 			PiEditBlockCount = { fg = colors.overlay1, bg = M.ui_bg, bold = false },
 			PiSubagentQuote = { fg = colors.lavender, bg = "#18182d", bold = true },
-			PiThinkingQuote = { fg = colors.sky, bg = M.ui_bg, bold = true },
+			PiThinkingQuote = { fg = colors.yellow, bg = M.ui_bg, bold = true },
 			PiSkillQuote = { fg = colors.green, bg = "#102418", bold = true },
 			PiModeFull = { fg = colors.green, bg = M.status_bg, bold = true },
 			PiModeEdit = { fg = colors.blue, bg = M.status_bg, bold = true },
