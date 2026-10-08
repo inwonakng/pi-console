@@ -719,7 +719,7 @@ function M.render_error_message(ctx, title, message)
 	M.clear_assistant_placeholder(ctx)
 	ctx.state.error_rendered_for_active_run = true
 	M.append_message_header(ctx, title)
-	M.append_lines(ctx, tostring(message or ""))
+	M.append_text(ctx, tostring(message or ""))
 end
 
 return M
