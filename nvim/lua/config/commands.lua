@@ -7,6 +7,10 @@ vim.api.nvim_create_user_command("YankFilePath", function()
 	set_clipboard(vim.fn.expand("%:p"))
 end, {})
 
+vim.api.nvim_create_user_command("PackUpdate", function()
+	vim.pack.update()
+end, {})
+
 vim.api.nvim_create_user_command("YankRelativeFilePath", function()
 	local full_path = vim.fn.expand("%:p")
 	local relative_path = vim.fn.fnamemodify(full_path, ":." .. vim.fn.getcwd() .. ":~:.")
