@@ -19,9 +19,5 @@ bash "$script_dir/open-agents-overview.sh" --ensure "$pane_id" "$client_name" >/
 tmux new-window -t '=agents:' -n pi -c "$current_path" bash "$launcher"
 
 if [ "$current_session" != "agents" ]; then
-    if [ -n "$client_name" ]; then
-        tmux display-popup -c "$client_name" -w 80% -h 85% -E tmux attach-session -t '=agents'
-    else
-        tmux display-popup -t "$pane_id" -w 80% -h 85% -E tmux attach-session -t '=agents'
-    fi
+    exec bash "$script_dir/attach-agents.sh" "$pane_id" "$client_name"
 fi

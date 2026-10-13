@@ -21,7 +21,7 @@ repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
 launcher="$repo_root/bin/pi-console"
 current_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}')
 
-# Serialize discovery and creation, but never hold the lock while a popup is open.
+# Serialize discovery and creation, but never hold the lock while attached.
 lock_name=pi-agents-overview
 tmux wait-for -L "$lock_name"
 release_lock() {
@@ -58,9 +58,5 @@ overview_pane=$(tmux show-options -wv -t "$overview_id" @pi_overview_pane)
 tmux select-pane -t "$overview_pane"
 
 if [ "$current_session" != "agents" ]; then
-    if [ -n "$client_name" ]; then
-        tmux display-popup -c "$client_name" -w 80% -h 85% -E tmux attach-session -t '=agents'
-    else
-        tmux display-popup -t "$pane_id" -w 80% -h 85% -E tmux attach-session -t '=agents'
-    fi
+    exec bash "$script_dir/attach-agents.sh" "$pane_id" "$client_name"
 fi
