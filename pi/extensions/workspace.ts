@@ -325,11 +325,13 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         setExpectedWorkspaceMissing("unavailable");
       }
     }
+    refreshWorkspaceTool(ctx);
     publishWorkspaceState(ctx);
   });
 
   pi.on("session_tree", (_event, ctx) => {
     restoreIntegrationMode(ctx);
+    refreshWorkspaceTool(ctx);
   });
 
   pi.on("session_before_fork", (_event, ctx) => {
@@ -338,11 +340,11 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     return { cancel: true };
   });
 
-  pi.on("before_agent_start", (event) => {
-    const guidance = getIntegrationMode() === "allowed"
-      ? "Workspace integration mode is allowed. Top-level integration and workspace discard, including child-workspace discard, are pre-authorized. After completing and verifying requested work, call workspace with action=integrate; no user confirmation is required."
-      : "Workspace integration mode is ask. Top-level integration and workspace discard, including child-workspace discard, require confirmation. After completing and verifying requested work, call workspace with action=integrate; Pi will request user confirmation before applying it.";
-    return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
+  pi.on("before_agent_start", (event, ctx) => {
+    refreshWorkspaceTool(ctx);
+    // This event holds a prompt snapshot from before tool registration refreshed it.
+    event.systemPromptOptions.toolGuidelines.workspace = pi.getAllTools()
+      .find((tool) => tool.name === "workspace")?.promptGuidelines ?? [];
   });
 
   pi.on("tool_call", (event, ctx) => {
@@ -522,6 +524,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       const changed = requestedMode !== getIntegrationMode();
       setIntegrationMode(requestedMode);
       if (changed) saveSessionSetting(pi, INTEGRATION_SETTING, requestedMode);
+      refreshWorkspaceTool(ctx);
       publishIntegrationMode(ctx);
       ctx.ui.notify(`Integration mode: ${getIntegrationMode()}`, "info");
     },
@@ -545,16 +548,17 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  const registerWorkspaceTool = (available: boolean, guidance: string[]) => pi.registerTool({
     name: "workspace",
     label: "Workspace",
+    exposure: available ? "direct" : "hidden",
     description: "Create/reuse a task worktree, optionally copying named ignored files on entry, inspect workspace state, integrate or discard. Status includes full workspace paths.",
     promptSnippet: "Manage the current task's isolated Git worktree and integration lifecycle.",
     promptGuidelines: [
       "Before making implementation changes with edit or write inside the git repository containing the current session cwd, call workspace with action=enter as the only tool call in that assistant response, unless the current session is already in an associated workspace. To edit existing ignored files, provide their paths relative to the original cwd in ignoredFiles on the first enter call; only those files are copied and later integrated. Wait for the cwd switch before using more tools.",
       "Temporary probes, scripts, and generated artifacts may be created under $TMPDIR without entering a workspace; keep them outside the repository and remove them when finished.",
       "Call workspace with action=status when the expected workspace is missing or its lifecycle is unclear.",
-      "Top-level workspace integration and workspace discard, including child-workspace discard, follow the active integration mode: ask requests confirmation and allowed is pre-authorized.",
+      ...guidance,
       "Call workspace with action=integrate or action=discard as the only tool call in that assistant response when the action will leave the active workspace. Wait for the cwd switch before using more tools.",
     ],
     parameters: Type.Object({
@@ -753,4 +757,25 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       };
     },
   });
+
+  let toolContext: string | undefined;
+  function refreshWorkspaceTool(ctx: ExtensionContext): void {
+    const active = workspaceForContext(ctx.cwd, sessionFile(ctx));
+    // Keep recovery available when a previously assigned workspace is missing.
+    const available = !!findGitRoot(ctx.cwd) || !!getExpectedWorkspaceMissing();
+    const guidance = [
+      active?.kind === "child"
+        ? "Reuse the assigned child workspace. Do not enter or integrate a task workspace; the parent integrates your changes through spawn_control."
+        : "After completing and verifying changes in an active task workspace, call workspace with action=integrate. Direct edits outside a task workspace need no integration.",
+      getIntegrationMode() === "allowed"
+        ? "Integration mode: allowed. Task integration and workspace discard are pre-authorized."
+        : "Integration mode: ask. Task integration and workspace discard require confirmation.",
+    ];
+    const nextContext = JSON.stringify([available, guidance]);
+    if (nextContext === toolContext) return;
+    registerWorkspaceTool(available, guidance);
+    toolContext = nextContext;
+  }
+
+  registerWorkspaceTool(false, []);
 }

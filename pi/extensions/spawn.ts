@@ -18,6 +18,7 @@ import { getAccessMode } from "./shared/access-state";
 import { registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
 import {
   createWorkspace,
+  findGitRoot,
   integrateWorkspace,
   isWorkspaceFinalized,
   loadWorkspace,
@@ -950,8 +951,12 @@ export default function spawnExtension(pi: ExtensionAPI) {
     announcedCompletions.add(run.id);
   };
 
-  pi.on("before_agent_start", () => {
+  pi.on("before_agent_start", (event, ctx) => {
     if (retired) return;
+    refreshSpawnTool(ctx);
+    // Keep this run's prompt snapshot in sync with the registered tool guidance.
+    event.systemPromptOptions.toolGuidelines.spawn = pi.getAllTools()
+      .find((tool) => tool.name === "spawn")?.promptGuidelines ?? [];
     reconcileCompletionDelivery();
     const completed = Array.from(runs.values()).filter(completionEligible);
     if (!completed.length) return;
@@ -975,6 +980,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     retired = false;
     runtimeCancellation = new AbortController();
     sessionManager = ctx.sessionManager;
+    refreshSpawnTool(ctx);
     runs.clear();
     announcedCompletions.clear();
     registerSubagentRuntime(owner, () => Array.from(runs.values()).some((run) => run.status === "running"), historyBlockReason);
@@ -1504,17 +1510,18 @@ export default function spawnExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
+  const registerSpawnTool = (writingGuidance: string) => pi.registerTool({
     name: "spawn",
     label: "Spawn Subagent",
-    description: "Spawn a bounded isolated pi subagent. Defaults to background mode and returns a handle immediately. If the parent answer depends on the result, call spawn_control join or join_all. Named profiles load from ~/.pi/agent/agents/*.md and trusted .pi/agents/*.md; run artifacts are stored with Pi workspace state.",
+    description: "Spawn a bounded pi subagent. Defaults to background mode and returns a handle immediately. If the parent answer depends on the result, call spawn_control join or join_all. Named profiles load from ~/.pi/agent/agents/*.md and trusted .pi/agents/*.md; run artifacts are stored with Pi workspace state.",
     promptSnippet: "Spawn background or foreground pi subagents, primarily for read-heavy research, investigation, summarization, review, and verification; worker handles self-contained tasks requiring file changes.",
     promptGuidelines: [
       "Use spawn when the user asks for subagents or when bounded read-heavy work would help: research, investigation, summarization, review, or verification.",
       "The main agent normally implements changes. Delegate writing only when the user approved implementation, requirements are settled, ownership is non-overlapping, the result can be verified independently, and the benefit outweighs briefing and integration overhead. Keep tightly coupled changes and evolving design decisions in the main session.",
       "spawn defaults to background. If your response depends on the subagent result, call spawn_control with action=join or join_all before answering.",
       "Prefer researcher for investigation and summarization, reviewer for review, verifier for verification, and worker for self-contained tasks requiring file changes.",
-      "Use accessMode=readonly for research/planning/investigation/summarization/review/verification. Use accessMode=edit for approved writing tasks that meet the delegation criteria; edit agents use isolated git worktrees and their changes are reconciled at join. Use accessMode=full only when the parent is in full mode and unrestricted host access is required.",
+      "Use accessMode=readonly for research, planning, review, and verification. Delegate file changes with accessMode=edit and worktree isolation; join reconciles their changes. Use full only when the parent is in full mode and unrestricted access is required, not to bypass write isolation.",
+      writingGuidance,
     ],
     parameters: Type.Object({
       prompt: Type.String({ description: "The complete bounded prompt/task for the subagent." }),
@@ -1570,6 +1577,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
         throw new Error("edit-mode spawned subagents must use worktree isolation");
       }
       if (isolation === "worktree") {
+        if (!findGitRoot(ctx.cwd)) {
+          throw new Error("Isolated writing subagents require a Git repository. Use read-only subagents; the parent applies edits directly.");
+        }
         const parentWorkspace = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile());
         if (!parentWorkspace) {
           throw new Error("Isolated writing subagents require an active parent task workspace. Call workspace with action=enter first.");
@@ -1615,6 +1625,23 @@ export default function spawnExtension(pi: ExtensionAPI) {
       }));
     },
   });
+
+  let currentWritingGuidance: string | undefined;
+  function refreshSpawnTool(ctx: ExtensionContext): void {
+    const active = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile());
+    const writingGuidance = !findGitRoot(ctx.cwd)
+      ? "This directory is not a Git repository. Use read-only subagents for parallel work; the parent applies edits directly."
+      : !active
+        ? "Before spawning writing subagents, enter a task workspace with workspace action=enter."
+        : isWorkspaceFinalized(active)
+          ? "This workspace is finalized. Do not spawn writing subagents here."
+          : "Writing subagents use isolated child worktrees of the active workspace. Use spawn_control join to integrate their changes.";
+    if (writingGuidance === currentWritingGuidance) return;
+    registerSpawnTool(writingGuidance);
+    currentWritingGuidance = writingGuidance;
+  }
+
+  registerSpawnTool("Writing subagents require an active Git task workspace.");
 
   pi.registerTool({
     name: "spawn_control",
