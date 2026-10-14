@@ -26,6 +26,7 @@ if [ "$modal_supported" -eq 1 ]; then
     # -W preserves display-popup's wait-until-detached behavior. Force only the
     # container to close on exit, even if its host has remain-on-exit enabled.
     exec tmux new-pane -O -K -W -B none -t "$pane_id" -x 80% -y 85% -X 10% -Y 7% \
+        -s "$(tmux show-options -gv popup-style)" \
         bash -eu -c '
             tmux -S "$1" set-option -p -t "$TMUX_PANE" remain-on-exit off
             unset TMUX
