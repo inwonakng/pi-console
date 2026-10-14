@@ -6,7 +6,14 @@ Your existing Pi credentials, instructions, skills, settings, and packages carry
 
 This is a work in progress. The main reason for sharing this repository is to serve as an inspiration for others who want to build something similar. I use this project daily so I will continue to improve/add features, but I do not guarantee that it will be maintained or supported in the future. If you want to use it, please read the requirements and installation instructions carefully (or have your agent do it).
 
-![Regular conversation view with the transcript, prompt buffer, and session status](assets/regular.png)
+![A conversation in a tmux popup, with the transcript above the prompt buffer](assets/regular.png)
+
+The transcript and prompt are both Neovim buffers, so you can search, select,
+resize splits, or open a buffer in another tab just as you would while editing
+code. The transcript uses [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim)
+with some extra highlighting; the prompt is a regular editable buffer. The
+statusline keeps the model, thinking level, token and context usage, and cost
+in view.
 
 ## Features
 
@@ -42,16 +49,20 @@ This is a work in progress. The main reason for sharing this repository is to se
 
 ### Session overview
 
-See which conversations need attention, check their workspaces, and jump into
-one from a single overview.
+This is where I go when I've lost track of which conversation is doing what.
+It lists open sessions, whether they're working, idle, or waiting for me, and
+their directories and workspaces. Select one to resume or close it. I keep this
+bound to `<prefix>o` so I don't have to remember where each conversation lives.
 
 ![Session overview showing working, idle, and waiting conversations](assets/overview.png)
 
 <details>
 <summary>Session picker and transcript preview</summary>
 
-Search saved conversations and read a preview before resuming. Archive and
-trash actions are available in the same picker.
+When I want to pick up an older conversation, I search for it here and check
+the transcript preview before opening it. Like the other pickers, this uses
+[fzf-lua](https://github.com/ibhagwan/fzf-lua). You can also select several
+sessions at once to archive or delete them.
 
 ![Session history picker with a preview of the selected conversation](assets/session-picker.png)
 
@@ -60,17 +71,32 @@ trash actions are available in the same picker.
 <details>
 <summary>Conversation tree</summary>
 
-Navigate conversation branches and jump back to an earlier message, with an
-optional summary when switching context.
+The tree lets you revisit earlier messages, take a different branch, or remove
+messages you no longer need. I find this useful for asking clarifying questions:
+once I understand the answer, I can go back to the original message and ask the
+agent to start working, without keeping that whole detour in context.
 
 ![Conversation tree showing multiple branches and the current message](assets/tree-view.png)
 
 </details>
 
 <details>
+<summary>Tool output and reasoning trace</summary>
+
+Tool output, reasoning traces, and skill invocations open in floating buffers
+when you want a closer look. This screenshot shows the agent's reasoning trace.
+Press `q` to close it, or use `<C-h/j/k/l>` to return to the conversation.
+
+![The agent's reasoning trace in a floating buffer over the conversation](assets/reasoning-view.png)
+
+</details>
+
+<details>
 <summary>Subagent transcript</summary>
 
-Open a delegated agent's transcript alongside the parent conversation.
+You can check what a subagent is doing without leaving the parent conversation.
+The subagent menu lets you open its transcript or send actions to it; this
+screenshot shows a reviewer's transcript.
 
 ![Subagent transcript opened over the parent conversation](assets/subagent-transcript.png)
 
@@ -79,7 +105,10 @@ Open a delegated agent's transcript alongside the parent conversation.
 <details>
 <summary>Question picker</summary>
 
-Choose an answer or write your own response when the agent needs a decision.
+When the agent asks a multiple-choice question, you can pick an answer or type
+your own. If you need to reread the conversation first, you can hide the picker
+and come back to it later. The agent still waits for your answer, and other
+pickers stay unavailable until you resolve the question.
 
 ![Question picker with multiple choices and a custom response option](assets/question-picker.png)
 
@@ -88,7 +117,9 @@ Choose an answer or write your own response when the agent needs a decision.
 <details>
 <summary>OpenAI Codex usage</summary>
 
-Check the remaining five-hour and weekly quotas, with reset times.
+A quick way to check how much Codex quota is left before starting another task.
+It shows the remaining five-hour and weekly quotas, when they reset, and how
+long until then.
 
 ![OpenAI Codex usage view showing remaining quotas and reset times](assets/codex-usage.png)
 
