@@ -194,7 +194,7 @@ or install graphics-depth hooks. Reload tmux, then use:
 |---|---|
 | `<prefix>g` | Toggle the `agents` popup |
 | `<prefix>G` | Start a conversation in the current pane's directory |
-| `<prefix>o` | Open or focus the persistent overview |
+| `<prefix>o` | Open or focus the persistent overview; close the popup if already focused |
 
 You can also run `pi-console` directly from a project directory. Inside
 pi-console, `<leader>?` shows the complete context-sensitive key list.

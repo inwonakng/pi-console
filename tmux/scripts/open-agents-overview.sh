@@ -53,8 +53,12 @@ if [ "$ensure_only" -eq 1 ]; then
 fi
 
 current_session=$(tmux display-message -p -t "$pane_id" '#{session_name}')
-tmux select-window -t "$overview_id"
 overview_pane=$(tmux show-options -wv -t "$overview_id" @pi_overview_pane)
+if [ "$current_session" = "agents" ] && [ "$pane_id" = "$overview_pane" ]; then
+    exec bash "$script_dir/toggle-popup-agents.sh" "$pane_id" "$client_name"
+fi
+
+tmux select-window -t "$overview_id"
 tmux select-pane -t "$overview_pane"
 
 if [ "$current_session" != "agents" ]; then
