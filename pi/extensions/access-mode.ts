@@ -268,7 +268,8 @@ export default function accessModeExtension(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     setStatus(ctx);
     const mode = getAccessMode();
-    if (mode === "full" || event.toolName === "bash") return undefined;
+    // Codemode's nested tool calls pass through this hook and enforce their own permissions.
+    if (mode === "full" || event.toolName === "bash" || event.toolName === "codemode") return undefined;
 
     const input = event.input as Record<string, unknown>;
     if (event.toolName === "workspace" && workspaceManagesApproval(input)) {
