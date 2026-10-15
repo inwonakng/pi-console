@@ -220,6 +220,29 @@ requests are pending; save or discard modified file buffers first. This
 requires starting through `pi-console`. `:PiRestart` / `<leader>pr` continues
 to restart only Pi.
 
+### Zotero references
+
+In the prompt buffer, type `@z:paper:`, `@z:collection:`, or `@z:tag:` to search
+your local personal library. `@z:` also completes those namespaces. Queries can
+contain spaces; papers match titles, short titles, citation keys, authors, and
+tags. Choose a suggestion with the regular completion keys. Other sources,
+including file completion, stay out of Zotero queries.
+
+Keep Zotero running and enable **Settings → Advanced → Allow other applications
+on this computer to communicate with Zotero**. Completion reads metadata from
+`127.0.0.1:23119`, caches it in memory, and refreshes on use after a minute. If
+Zotero is unavailable, a warning appears and any cached suggestions remain;
+failed requests retry after ten seconds. It does not read PDFs/notes or write
+to your library, and does not include group libraries.
+
+Paper and collection suggestions insert readable native Zotero links. Tag
+suggestions insert local API tag links with the exact tag name (metadata, not a
+PDF); Zotero has no native tag-selection URI. Agent operations are separate: install `zotero-cli`
+and supply agent instructions for resolving these references (the console does
+not bundle a Zotero skill). The ordinary Pi terminal UI needs its own autocomplete
+extension; RPC does not forward Pi autocomplete providers to Neovim. Restart the
+console after updating the frontend.
+
 ### Optional LaTeX graphics in tmux
 
 Display equations use the Kitty graphics protocol through

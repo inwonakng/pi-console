@@ -38,7 +38,7 @@ end
 local function file_reference_range(ctx)
 	local line_before_cursor = ctx.line:sub(1, ctx.cursor[2])
 	local at_start, typed = line_before_cursor:match("()@([^%s@]*)$")
-	if not at_start then
+	if not at_start or typed:sub(1, 2) == "z:" then
 		return nil
 	end
 

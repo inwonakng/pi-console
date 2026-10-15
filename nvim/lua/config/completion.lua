@@ -25,7 +25,8 @@ cmp.setup({
 	},
 	keymap = {
 		["<C-space>"] = { "show", "show_documentation", "hide_documentation" },
-		["<C-e>"] = { "hide", "fallback" },
+		["<Esc>"] = { "cancel", "fallback" },
+		["<C-e>"] = { "cancel", "fallback" },
 		["<CR>"] = { "accept", "fallback" },
 		["<Tab>"] = { "snippet_forward", "fallback" },
 		["<S-Tab>"] = { "snippet_backward", "fallback" },
@@ -48,15 +49,22 @@ cmp.setup({
 		},
 	},
 	sources = {
-		default = {
-			"pi_commands",
-			"pi_files",
-			"lsp",
-			"path",
-			"snippets",
-			"buffer",
-		},
+		default = function()
+			if vim.api.nvim_buf_get_name(0) == "pi://input" then
+				local col = vim.api.nvim_win_get_cursor(0)[2]
+				if require("pi-integration.zotero-completion").owns(vim.api.nvim_get_current_line(), col) then
+					return { "pi_zotero" }
+				end
+			end
+			return { "pi_zotero", "pi_commands", "pi_files", "lsp", "path", "snippets", "buffer" }
+		end,
 		providers = {
+			pi_zotero = {
+				name = "Zotero",
+				module = "pi-integration.zotero-completion",
+				score_offset = 100,
+				timeout_ms = 3500,
+			},
 			pi_commands = {
 				name = "Pi",
 				module = "pi-integration.completion",
