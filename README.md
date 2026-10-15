@@ -92,6 +92,11 @@ Tool output, reasoning traces, and skill invocations open in floating buffers
 when you want a closer look. This screenshot shows the agent's reasoning trace.
 Press `q` to close it, or use `<C-h/j/k/l>` to return to the conversation.
 
+Codemode's internal tools stay within its parent call rather than appearing as
+separate transcript entries. Its detail view shows JavaScript-highlighted source
+and wrapped output, reading Pi's full saved output when available. If that
+temporary file is unavailable, the view labels the truncated recorded fallback.
+
 ![The agent's reasoning trace in a floating buffer over the conversation](assets/reasoning-view.png)
 
 </details>

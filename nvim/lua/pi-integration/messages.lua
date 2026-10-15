@@ -225,6 +225,7 @@ local function update_existing_spawn_output(ctx, lines, items, message, text)
 end
 
 local function render_tool_summary(ctx, lines, items, message, ensure_assistant_block)
+	if pi_tool_output.is_codemode_child(ctx.state, message) then return false end
 	local name = message.toolName or "tool"
 	local text = message_utils.extract_text(message) or ""
 	local tool_call_id = message_utils.tool_call_id(message)
@@ -428,6 +429,7 @@ function M.collect_message_lines(ctx, messages)
 				role = "toolResult",
 				toolName = message.toolName,
 				toolCallId = message.toolCallId,
+				parentToolCallId = message.parentToolCallId,
 				content = result.content,
 				details = result.details,
 				isError = message.isError == true or result.isError == true,
@@ -436,13 +438,14 @@ function M.collect_message_lines(ctx, messages)
 		end
 		if role == "tool_execution_start" or role == "tool_execution_update" then
 			if role == "tool_execution_start" then
-				pi_tool_output.record_execution_call(ctx.state, message.toolName, message.toolCallId, message.args, "running")
+				pi_tool_output.record_execution_call(ctx.state, message.toolName, message.toolCallId, message.args, "running", message.parentToolCallId)
 			end
 			if not pi_skills.tool_result_skill_name(ctx.state, message) then
 				local partial = type(message.partialResult) == "table" and message.partialResult or {}
 				appended = render_tool_summary(ctx, lines, items, {
 					toolName = message.toolName,
 					toolCallId = message.toolCallId,
+					parentToolCallId = message.parentToolCallId,
 					content = partial.content,
 					details = partial.details,
 				}, ensure_assistant_block)
@@ -460,7 +463,7 @@ function M.collect_message_lines(ctx, messages)
 			local name = message.toolName or "tool"
 			local text = message_utils.extract_text(message) or ""
 			local tool_call_id = message_utils.tool_call_id(message)
-			pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed")
+			pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed", message.parentToolCallId)
 			if pi_skills.tool_result_skill_name(ctx.state, message) then
 				pi_skills.apply_tool_result(ctx.state, message, text)
 				appended = false

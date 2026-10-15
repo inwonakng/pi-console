@@ -277,24 +277,28 @@ local function size_select_picker(select_opts, items, winopts)
 	end
 end
 
+local function update_select_layout(win)
+	if not win or not win._o._ui_select then
+		return
+	end
+	size_select_picker(win._o._ui_select, win._o._items, win._o.winopts)
+	local hidden = win._o.winopts.preview.hidden
+	if hidden ~= win.preview_hidden then
+		win.preview_hidden = hidden
+		if hidden then
+			win:close_preview(true)
+		elseif not win:hidden() then
+			win:redraw_preview()
+		end
+	end
+end
+
 -- Run before fzf-lua's resize handler so its absolute preview size still fits.
 -- The pinned fzf-lua provider retains these items/options on the live picker.
 vim.api.nvim_create_autocmd("VimResized", {
 	group = vim.api.nvim_create_augroup("PiSelectPicker", { clear = true }),
 	callback = function()
-		local win = fzf.win.__SELF()
-		if win and win._o._ui_select then
-			size_select_picker(win._o._ui_select, win._o._items, win._o.winopts)
-			local hidden = win._o.winopts.preview.hidden
-			if hidden ~= win.preview_hidden then
-				win.preview_hidden = hidden
-				if hidden then
-					win:close_preview(true)
-				elseif not win:hidden() then
-					win:redraw_preview()
-				end
-			end
-		end
+		update_select_layout(fzf.win.__SELF())
 	end,
 })
 
@@ -325,9 +329,14 @@ fzf.register_ui_select(function(select_opts, items)
 		}
 	end
 	size_select_picker(select_opts, items, winopts)
-	if type(select_opts.on_create) == "function" then
-		winopts.on_create = function(event)
-			disable_mouse_for_fzf()
+	winopts.on_create = function(event)
+		disable_mouse_for_fzf()
+		-- Reused fzf windows inherit the previous picker's preview visibility.
+		-- Restore this select's layout before fzf-lua renders its preview.
+		local win = fzf.win.__SELF()
+		update_select_layout(win)
+		if win then win:redraw() end
+		if type(select_opts.on_create) == "function" then
 			select_opts.on_create(event)
 		end
 	end

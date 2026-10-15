@@ -118,6 +118,9 @@ function previewForTool(event: ToolCallEvent, ctx: ExtensionContext): { text: st
   try {
     if (event.toolName === "edit") return { text: exactEditPreview(ctx.cwd, input), filetype: "diff" };
     if (event.toolName === "write") return writePreview(ctx.cwd, input);
+    if (event.toolName === "codemode" && typeof input.code === "string") {
+      return { text: input.code, filetype: "javascript" };
+    }
   } catch (error) {
     // Preview errors can reveal existing file contents (for example, edit match
     // counts). Show them only to the user, never as a pre-approval tool error.

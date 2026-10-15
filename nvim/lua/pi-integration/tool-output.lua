@@ -407,7 +407,20 @@ function M.display_for_result(state, message)
 	return call and call.display or nil
 end
 
-function M.record_execution_call(state, tool_name, tool_call_id, args, execution_status)
+function M.is_codemode_child(state, message)
+	local id = tool_call_id(message)
+	local call = id and state.tool_calls and state.tool_calls[id]
+	local parent = message.parentToolCallId or (call and call.parent_tool_call_id)
+	while parent do
+		call = state.tool_calls and state.tool_calls[parent]
+		if not call then return false end
+		if call.name == "codemode" then return true end
+		parent = call.parent_tool_call_id
+	end
+	return false
+end
+
+function M.record_execution_call(state, tool_name, tool_call_id, args, execution_status, parent_tool_call_id)
 	if not tool_call_id then
 		return
 	end
@@ -415,6 +428,7 @@ function M.record_execution_call(state, tool_name, tool_call_id, args, execution
 	local call = state.tool_calls[tool_call_id] or {}
 	call.name = tool_name or call.name
 	call.args = type(args) == "table" and args or call.args
+	call.parent_tool_call_id = parent_tool_call_id or call.parent_tool_call_id
 	call.display = display_for_call(state, call.name, call.args) or call.display
 	-- Execution can finish while details.status still describes a running background job.
 	call.execution_status = execution_status or call.execution_status
@@ -917,6 +931,39 @@ function M.summary_text(state, output_id)
 	return label .. " · " .. (edit_label or line_label) .. artifact_label
 end
 
+local function codemode_output(output)
+	local text = output.text or ""
+	local details = type(output.details) == "table" and output.details or {}
+	local path = details.fullOutputPath
+	if type(path) ~= "string" or path == "" then return text end
+	local ok, lines = pcall(vim.fn.readfile, path, "b")
+	if not ok then
+		return text, "Full output unavailable; showing the truncated recorded result.\nSaved path: " .. path
+	end
+	-- The saved file contains only the output, without Pi's completion/time header.
+	local header = text:match("^(Script [^\n]*\nWall time [^\n]*\nOutput:\n)") or ""
+	return header .. table.concat(lines, "\n"), "Full output: " .. path
+end
+
+local function highlight_codemode(buf, source_end, output_start, text)
+	vim.api.nvim_buf_call(buf, function()
+		vim.cmd("syntax clear")
+		local function region(name, filetype, first, last)
+			vim.b[buf].current_syntax = nil
+			vim.cmd("syntax include @" .. name .. " syntax/" .. filetype .. ".vim")
+			vim.cmd("syntax region " .. name .. " start=/\\%" .. first .. "l/ end=/\\%" .. (last + 1)
+				.. "l/ contains=@" .. name .. " keepend")
+		end
+		region("PiCodemodeSource", "javascript", 3, source_end)
+		local header, body = text:match("^(Script [^\n]*\nWall time [^\n]*\nOutput:\n)(.*)$")
+		if looks_like_json(body or text) then
+			region("PiCodemodeOutput", "json", output_start + line_count_text(header), vim.api.nvim_buf_line_count(buf))
+		end
+		vim.cmd("syntax sync fromstart")
+		vim.b[buf].current_syntax = "pi_codemode"
+	end)
+end
+
 function M.open_float(ctx, output_id)
 	local state = ctx.state
 	local output = state.tool_outputs[output_id]
@@ -949,10 +996,30 @@ function M.open_float(ctx, output_id)
 	if pending then
 		rendered_text, rendered_filetype = output.text, "text"
 	end
+	local full_output_note
+	if output.name == "codemode" then
+		rendered_text, full_output_note = codemode_output(output)
+		rendered_filetype = "text"
+	end
 	vim.api.nvim_set_option_value("filetype", rendered_filetype or output.filetype or "text", { buf = buf })
 	local content_lines = vim.split(rendered_text or "", "\n", { plain = true })
 	local path = output_path(output)
-	if path and (output.name == "edit" or output.name == "write") then
+	local source_end, output_start
+	if output.name == "codemode" then
+		local args = type(output.args) == "table" and output.args or {}
+		local code = type(args.code) == "string" and args.code or "Source unavailable."
+		local rendered = { "JavaScript", "" }
+		vim.list_extend(rendered, vim.split(code, "\n", { plain = true }))
+		source_end = #rendered
+		vim.list_extend(rendered, { "", "Output" })
+		if full_output_note then
+			vim.list_extend(rendered, vim.split(full_output_note, "\n", { plain = true }))
+		end
+		table.insert(rendered, "")
+		output_start = #rendered + 1
+		vim.list_extend(rendered, content_lines)
+		content_lines = rendered
+	elseif path and (output.name == "edit" or output.name == "write") then
 		local rendered = { "Path: " .. path_for_display(state, path), "" }
 		vim.list_extend(rendered, content_lines)
 		content_lines = rendered
@@ -971,6 +1038,7 @@ function M.open_float(ctx, output_id)
 		content_lines = rendered
 	end
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, content_lines)
+	if source_end then highlight_codemode(buf, source_end, output_start, rendered_text) end
 	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
 	local win = vim.api.nvim_open_win(buf, true, {
@@ -985,7 +1053,11 @@ function M.open_float(ctx, output_id)
 		title_pos = "left",
 	})
 
-	vim.api.nvim_set_option_value("wrap", false, { win = win })
+	vim.api.nvim_set_option_value("wrap", output.name == "codemode", { win = win })
+	if output.name == "codemode" then
+		vim.api.nvim_set_option_value("linebreak", true, { win = win })
+		vim.api.nvim_set_option_value("breakindent", true, { win = win })
+	end
 	vim.api.nvim_set_option_value("number", false, { win = win })
 	vim.api.nvim_set_option_value("relativenumber", false, { win = win })
 	vim.api.nvim_set_option_value("signcolumn", "no", { win = win })

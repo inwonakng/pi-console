@@ -134,6 +134,7 @@ local function update_spawn_details(ctx, name, details, text)
 end
 
 local function render_tool_output(ctx, event, text, details, display)
+	if pi_tool_output.is_codemode_child(ctx.state, event) then return nil end
 	local is_error = event.isError
 	if type(event.result) == "table" then
 		is_error = is_error == true or event.result.isError == true
@@ -221,7 +222,8 @@ function M.render_message(ctx, message)
 	if role == "toolResult" then
 		local name = message.toolName or "tool"
 		local tool_call_id = message_utils.tool_call_id(message)
-		pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed")
+		pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed", message.parentToolCallId)
+		if pi_tool_output.is_codemode_child(ctx.state, message) then return end
 		if name == "spawn" and not message.isError and not pi_tool_output.live_output_id(ctx.state, tool_call_id)
 			and update_spawn_details(ctx, name, message.details, text) then
 			return
@@ -866,8 +868,10 @@ function M.handle_event(ctx, event)
 		end
 	elseif event.type == "tool_execution_start" then
 		state.awaiting_agent_output = false
-		pi_tool_output.record_execution_call(state, event.toolName, event.toolCallId, event.args, "running")
-		start_activity(ctx, event.toolName or "tool", event.toolCallId)
+		pi_tool_output.record_execution_call(state, event.toolName, event.toolCallId, event.args, "running", event.parentToolCallId)
+		if not pi_tool_output.is_codemode_child(state, event) then
+			start_activity(ctx, event.toolName or "tool", event.toolCallId)
+		end
 		if not pi_skills.tool_result_skill_name(state, event) then
 			render_tool_output(ctx, event, "")
 		end
@@ -879,7 +883,7 @@ function M.handle_event(ctx, event)
 		end
 		return
 	elseif event.type == "tool_execution_end" then
-		pi_tool_output.record_execution_call(state, event.toolName, event.toolCallId, nil, "completed")
+		pi_tool_output.record_execution_call(state, event.toolName, event.toolCallId, nil, "completed", event.parentToolCallId)
 		local execution_result = type(event.result) == "table" and event.result or nil
 		local is_error = event.isError == true or (execution_result and execution_result.isError == true)
 		if is_error then
