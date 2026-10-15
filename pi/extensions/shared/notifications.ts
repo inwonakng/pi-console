@@ -219,10 +219,6 @@ export function notifyPiWorkspaceIntegration(ctx: ExtensionContext): boolean {
 	return notifySpecificInputRequest(ctx, "Pi: Workspace Integration");
 }
 
-export function notifyPiQuestion(ctx: ExtensionContext): boolean {
-	return notifySpecificInputRequest(ctx, "Pi: Question");
-}
-
 export function notifyPiFinished(ctx: ExtensionContext, force = false): boolean {
 	if (!notificationsEnabled() && !force) {
 		return false;

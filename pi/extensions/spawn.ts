@@ -955,8 +955,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
     if (retired) return;
     refreshSpawnTool(ctx);
     // Keep this run's prompt snapshot in sync with the registered tool guidance.
-    event.systemPromptOptions.toolGuidelines.spawn = pi.getAllTools()
-      .find((tool) => tool.name === "spawn")?.promptGuidelines ?? [];
+    event.systemPromptOptions.toolGuidelines.spawn = pi.getActiveTools().includes("spawn")
+      ? pi.getAllTools().find((tool) => tool.name === "spawn")?.promptGuidelines ?? []
+      : [];
     reconcileCompletionDelivery();
     const completed = Array.from(runs.values()).filter(completionEligible);
     if (!completed.length) return;
@@ -1512,6 +1513,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
 
   const registerSpawnTool = (writingGuidance: string) => pi.registerTool({
     name: "spawn",
+    defaultActive: false,
     label: "Spawn Subagent",
     description: "Spawn a bounded pi subagent. Defaults to background mode and returns a handle immediately. If the parent answer depends on the result, call spawn_control join or join_all. Named profiles load from ~/.pi/agent/agents/*.md and trusted .pi/agents/*.md; run artifacts are stored with Pi workspace state.",
     promptSnippet: "Spawn background or foreground pi subagents, primarily for read-heavy research, investigation, summarization, review, and verification; worker handles self-contained tasks requiring file changes.",
@@ -1645,6 +1647,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "spawn_control",
+    defaultActive: false,
     label: "Control Subagents",
     description: "Inspect, join, join_all, or stop background subagents created with spawn. join is a normal blocking tool call. For edit agents, join applies isolated worktree changes automatically only when safe; conflicts or overlapping parent changes are returned for parent handling.",
     promptSnippet: "Control spawned subagents: list, status, join, join_all, or stop.",

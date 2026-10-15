@@ -108,7 +108,7 @@ function M.toggle(ctx)
 		"",
 		"## Pending Actions",
 		"",
-		"- `<Esc>` hides tool approvals, agent question choices, and workspace tool decisions without answering them.",
+		"- `<Esc>` hides pending Pi choice/confirmation dialogs without answering them; `<C-q>` cancels the request.",
 		"- Navigation/settings pickers, including history, cancel on `<Esc>` and cannot be restored.",
 		"- `<leader>pa` restores the pending picker with its query and selection.",
 		"- Select Deny/No to reject a request; hiding never grants permission.",

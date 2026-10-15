@@ -113,7 +113,12 @@ screenshot shows a reviewer's transcript.
 When the agent asks a multiple-choice question, you can pick an answer or type
 your own. If you need to reread the conversation first, you can hide the picker
 and come back to it later. The agent still waits for your answer, and other
-pickers stay unavailable until you resolve the question.
+pickers stay unavailable until you resolve the question. `<Esc>` hides a pending
+choice/confirmation, `<leader>pa` reopens it, and `<C-q>` cancels its request.
+Freehand input uses a Markdown float: `:wq` submits; closing without writing
+(for example `:q!`) returns to the choices. This presentation also works for
+standard dialogs from other extensions. The question tool itself is supplied by a
+separately installed extension.
 
 ![Question picker with multiple choices and a custom response option](assets/question-picker.png)
 
@@ -290,46 +295,45 @@ sessions:
 | `auto-title` | Automatic and explicit session titles |
 | `codex-usage` | OpenAI Codex usage status |
 | `history` | Session history, archive, restore, and transcript operations |
-| `litellm` | LiteLLM model provider support |
-| `notifications` | Completion notifications |
-| `question` | Structured multiple-choice questions |
+| `notifications` | Completion and input-request notifications |
 | `spawn` | Background and foreground subagents |
-| `todowrite` | Structured task lists |
 | `tree` | Session-tree navigation helpers |
-| `web-search` | Keyless multi-provider web search and structured page fetching |
 | `workspace` | Isolated Git workspaces and integration |
 
-### Web search and fetching
+General-purpose `question`, `todowrite`, `web_search`/`web_fetch`, and LiteLLM
+extensions are not bundled. Install them separately through ordinary Pi extension
+discovery. The console supports standard choice, confirmation, and input dialogs
+from any extension, and optionally renders todo results from saved history. Console
+installation does not install or require personal dotfiles extensions. When
+upgrading an existing web extension setup, move `web-search.providers` from
+`pi-console-config.yaml` to `webSearch.providers` in Pi `settings.json`, then remove
+the old YAML section; the console no longer accepts that section.
 
-`web_search(query, limit)` queries Exa, Parallel, Firecrawl, and Keenable concurrently,
-without API keys or model-provider credentials. It interleaves results, deduplicates
-URLs (ignoring fragments, preserving query parameters), and reports contributing
-providers and partial failures. Available snippets, excerpts, and page content are
-returned without local summarization or relevance filtering. The default result
-limit is 5, with up to 20 supported. These anonymous services may throttle requests;
-a failed provider does not discard results from the others.
+### Optional tool selection
 
-`web_fetch(url, maxChars)` first fetches the page directly and converts readable HTML
-to Markdown, preserving links, headings, lists, tables, and code. When direct
-retrieval or extraction fails, it tries the configured hosted providers in order.
-Responses include requested and returned URLs, extraction provider, content format,
-failed attempts, and whether the returned text was truncated. `contentKind` identifies
-page content versus provider excerpts; `totalChars` counts the extracted text before
-local truncation, not necessarily the complete original page. The default character
-limit is 12,000; `maxChars` accepts 1,000–50,000. Requests have a 30-second deadline
-per provider and respect tool cancellation.
+`spawn`, `spawn_control`, and `workspace` register inactive. To enable them by
+default, add this to `~/.pi/agent/settings.json` (merge it with existing tool choices):
 
-To select providers, add this to `~/.pi/agent/pi-console-config.yaml`:
-
-```yaml
-web-search:
-  providers: [exa, parallel, firecrawl, keenable]
+```json
+{
+  "defaultTools": ["+spawn", "+spawn_control", "+workspace"]
+}
 ```
 
-The list must be non-empty, contain no duplicates, and use those provider names.
-Changes are read on each call. Search queries are sent to every selected provider;
-hosted fetching sends the requested URL to a provider only after direct fetching
-fails. No hosted-service signup or browser installation is required.
+A trusted project's `.pi/settings.json` can subtract from that selection:
+
+```json
+{
+  "defaultTools": ["-spawn", "-spawn_control", "-workspace"]
+}
+```
+
+Their commands and lifecycle hooks remain loaded, including workspace state updates
+needed by the frontend. Selection applies at startup; restart after removing tools
+from settings because Pi's `/reload` does not deactivate previously selected tools.
+Explicit CLI tool choices override settings. This is not a permission policy.
+
+### Access modes
 
 The access modes are:
 
@@ -431,9 +435,9 @@ Network permission does not fix DNS, TLS, or server errors. Detection is best-ef
 suppressed errors may not be observable. `readonly` and noninteractive sessions
 do not prompt for additional access.
 
-The package registers the tool names `bash`, `question`, `spawn`, `spawn_control`,
-`todowrite`, `web_search`, `web_fetch`, and `workspace`. Pi resolves duplicate
-tool names by extension precedence and then registration order: project and
+The package registers the tool names `bash`, `spawn`, `spawn_control`, and
+`workspace`. Pi resolves duplicate tool names by extension precedence and then
+registration order: project and
 user extension resources take precedence over package resources, and the first
 package registration wins between packages. Users can therefore override a
 bundled tool with a project or user extension, or reorder package declarations

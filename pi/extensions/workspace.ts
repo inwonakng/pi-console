@@ -343,8 +343,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", (event, ctx) => {
     refreshWorkspaceTool(ctx);
     // This event holds a prompt snapshot from before tool registration refreshed it.
-    event.systemPromptOptions.toolGuidelines.workspace = pi.getAllTools()
-      .find((tool) => tool.name === "workspace")?.promptGuidelines ?? [];
+    event.systemPromptOptions.toolGuidelines.workspace = pi.getActiveTools().includes("workspace")
+      ? pi.getAllTools().find((tool) => tool.name === "workspace")?.promptGuidelines ?? []
+      : [];
   });
 
   pi.on("tool_call", (event, ctx) => {
@@ -550,6 +551,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
 
   const registerWorkspaceTool = (available: boolean, guidance: string[]) => pi.registerTool({
     name: "workspace",
+    defaultActive: false,
     label: "Workspace",
     exposure: available ? "direct" : "hidden",
     description: "Create/reuse a task worktree, optionally copying named ignored files on entry, inspect workspace state, integrate or discard. Status includes full workspace paths.",
@@ -777,5 +779,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     toolContext = nextContext;
   }
 
-  registerWorkspaceTool(false, []);
+  // Let native defaultTools select it at startup. session_start resolves whether
+  // the directory supports workspaces before any model request is made.
+  registerWorkspaceTool(true, []);
 }

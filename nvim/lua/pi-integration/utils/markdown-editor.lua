@@ -26,6 +26,7 @@ function M.open(opts, on_close)
 		border = "rounded",
 		title = opts.title,
 		title_pos = opts.title_pos or "center",
+		footer = opts.footer,
 	})
 	vim.wo[win].wrap = true
 

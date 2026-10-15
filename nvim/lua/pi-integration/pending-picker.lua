@@ -1,7 +1,7 @@
 local M = {}
 
--- Track the live RPC picker for response/timeout/session cleanup. Only explicitly
--- resumable requests keep exclusive ownership when their window is hidden.
+-- Track the live RPC dialog for response/timeout/session cleanup. Select and
+-- confirm requests keep ownership when hidden; input uses a Markdown float.
 local active
 
 function M.owns_buffer(buf)
@@ -14,7 +14,11 @@ end
 
 local function close(picker)
 	if picker.buf and vim.api.nvim_buf_is_valid(picker.buf) then
-		require("fzf-lua").win.close()
+		if picker.input then
+			vim.api.nvim_buf_delete(picker.buf, { force = true })
+		else
+			require("fzf-lua").win.close()
+		end
 	end
 end
 
@@ -23,6 +27,9 @@ local function finish(picker, choice, respond)
 		return
 	end
 	active = nil
+	if picker.request.expires and picker.request.expires <= vim.uv.now() then
+		respond = false
+	end
 	picker.request.hidden = nil
 	-- Release ownership before closing: on_close and delayed choice callbacks
 	-- must not answer a disposed request or close the next dialog.
@@ -39,6 +46,9 @@ local function finish(picker, choice, respond)
 end
 
 function M.can_open(request_id)
+	if active and active.request.expires and active.request.expires <= vim.uv.now() then
+		finish(active, nil, false)
+	end
 	if not active or request_id == active.id then
 		return true
 	end
@@ -114,6 +124,9 @@ function M.select(ctx, id, items, opts, on_choice)
 			for _, key in ipairs({ "<Esc>", "<C-c>" }) do
 				vim.keymap.set({ "t", "n" }, key, M.hide, { buffer = event.bufnr, nowait = true, desc = "Hide pending Pi action" })
 			end
+			vim.keymap.set({ "t", "n" }, "<C-q>", function()
+				finish(picker, nil, true)
+			end, { buffer = event.bufnr, nowait = true, desc = "Cancel pending Pi action" })
 		end
 		if not picker.watching_buffer then
 			picker.watching_buffer = true
@@ -144,6 +157,41 @@ function M.select(ctx, id, items, opts, on_choice)
 	end)
 	if not ok or (active == picker and not picker.buf) then
 		ctx.logs.add("error", "Pi picker failed", ok and "fzf-lua did not open a picker" or tostring(err))
+		finish(picker, nil, true)
+	end
+	refresh(picker)
+end
+
+-- Use the same ownership and response guards for ordinary RPC input requests.
+-- Nothing here depends on which extension asked or on the wording of its title.
+function M.input(ctx, event, on_input)
+	if not M.can_open(event.id) then
+		on_input(nil)
+		return
+	end
+	local request = ctx.state.pending_ui_requests[event.id]
+	local picker = { ctx = ctx, id = event.id, request = request, on_choice = on_input, input = true }
+	active = picker
+	if request.expires then
+		vim.defer_fn(function()
+			if active == picker then
+				finish(picker, nil, false)
+			end
+		end, math.max(0, request.expires - vim.uv.now()))
+	end
+	local title = event.title or "Pi input"
+	local ok, err = pcall(function()
+		picker.buf, picker.win = require("pi-integration.utils.markdown-editor").open({
+			name = "pi://input/" .. tostring(event.id),
+			title = " " .. title:gsub("[\r\n]+", " ") .. " (:wq to submit) ",
+			footer = event.placeholder,
+		}, function(text)
+			finish(picker, text, true)
+		end)
+		vim.cmd("startinsert")
+	end)
+	if not ok then
+		ctx.logs.add("error", "Pi input failed", tostring(err))
 		finish(picker, nil, true)
 	end
 	refresh(picker)

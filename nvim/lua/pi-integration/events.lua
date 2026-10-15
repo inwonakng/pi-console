@@ -261,17 +261,6 @@ local function decode_approval_payload(message)
 	return decoded
 end
 
-local function decode_question_payload(title, expected_kind)
-	if type(title) ~= "string" or title == "" then
-		return nil
-	end
-	local payload = json.decode_object(title)
-	if not payload or payload.kind ~= expected_kind or type(payload.question) ~= "string" then
-		return nil
-	end
-	return payload
-end
-
 local function decode_compact_select_payload(title)
 	local payload = type(title) == "string" and json.decode_object(title)
 	if not payload or payload.kind ~= "pi_compact_select" or type(payload.prompt) ~= "string" then
@@ -311,22 +300,6 @@ local function summarize_ui_request(event)
 			label = "Tool permission",
 			question = "Allow " .. tool .. "?",
 			context = compact_request_text(approval.summary, 240),
-		}
-	end
-
-	local question_select = decode_question_payload(event.title, "pi_question_select")
-	if question_select then
-		return {
-			label = "Choice requested",
-			question = compact_request_text(question_select.question, 360) or "Pi needs input.",
-		}
-	end
-
-	local question_response = decode_question_payload(event.title, "pi_question_response")
-	if question_response then
-		return {
-			label = "Question response",
-			question = compact_request_text(question_response.question, 360) or "Write a response to Pi's question.",
 		}
 	end
 
@@ -416,26 +389,6 @@ local function select_capability_approval(ctx, event)
 	pending_picker.select(ctx, event.id, event.options or {}, approval_select_opts(payload, prompt), function(choice)
 		send_extension_ui_response(ctx, event.id, choice and { value = choice } or { cancelled = true })
 	end)
-	return true
-end
-
-local function markdown_input_float(ctx, event)
-	local payload = type(event.title) == "string" and json.decode_object(event.title)
-	if not payload or payload.kind ~= "pi_question_response" then
-		return false
-	end
-
-	require("pi-integration.utils.markdown-editor").open({
-		name = "pi://question-response/" .. tostring(event.id),
-		title = " Answer question (:wq to submit, :q! to return) ",
-	}, function(text)
-		if text then
-			send_extension_ui_response(ctx, event.id, { value = text })
-		else
-			send_extension_ui_response(ctx, event.id, { cancelled = true })
-		end
-	end)
-	vim.cmd.startinsert()
 	return true
 end
 
@@ -564,22 +517,15 @@ end
 function M.handle_extension_ui_request(ctx, event)
 	local state = ctx.state
 	if event.id and (event.method == "select" or event.method == "confirm" or event.method == "input" or event.method == "editor") then
-		if not pending_picker.can_open(event.id) then
+		if state.abort_requested or not pending_picker.can_open(event.id) then
 			ctx.rpc.send({ type = "extension_ui_response", id = event.id, cancelled = true })
 			return
 		end
 		local request = summarize_ui_request(event)
-		local payload = type(event.title) == "string" and json.decode_object(event.title)
-			or decode_approval_payload(event.message)
-		request.resumable = (event.method == "select" or event.method == "confirm")
-			and type(payload) == "table" and payload.resumable == true
+		request.resumable = event.method == "select" or event.method == "confirm"
 		request.expires = type(event.timeout) == "number" and (vim.uv.now() + event.timeout) or nil
 		state.pending_ui_requests[event.id] = request
-		-- RPC bookkeeping is not itself a blocking conversation interaction.
-		-- Freehand question input keeps its existing waiting status/editor flow.
-		if request.resumable or decode_question_payload(event.title, "pi_question_response") then
-			state.active_ui_request_id = event.id
-		end
+		state.active_ui_request_id = event.id
 	end
 	if event.method == "set_editor_text" and type(event.text) == "string" and ctx.buffer.valid(state.input_buf) then
 		vim.api.nvim_buf_set_lines(state.input_buf, 0, -1, false, vim.split(event.text, "\n", { plain = true }))
@@ -623,19 +569,14 @@ function M.handle_extension_ui_request(ctx, event)
 		if select_capability_approval(ctx, event) then
 			return
 		end
-		local question = decode_question_payload(event.title, "pi_question_select")
 		local compact_select = decode_compact_select_payload(event.title)
-		local select_opts = { prompt = event.title or "Pi select" }
-		if compact_select then
-			select_opts.prompt = compact_select.prompt
-			select_opts.pi_select_layout = "compact"
-		end
-		if question then
-			select_opts.prompt = question.question
-			select_opts.prompt_label = "Question"
-			select_opts.pi_select_layout = "compact"
-			select_opts.preview_text = question.question
-		end
+		local prompt = compact_select and compact_select.prompt or event.title or "Pi select"
+		local select_opts = {
+			prompt = prompt,
+			prompt_label = "Choice",
+			pi_select_layout = "compact",
+			preview_text = prompt,
+		}
 		pending_picker.select(ctx, event.id, event.options or {}, select_opts, function(choice)
 			send_extension_ui_response(ctx, event.id, choice and { value = choice } or { cancelled = true })
 		end)
@@ -659,10 +600,7 @@ function M.handle_extension_ui_request(ctx, event)
 			send_extension_ui_response(ctx, event.id, { confirmed = choice == "Yes" })
 		end)
 	elseif event.method == "input" then
-		if markdown_input_float(ctx, event) then
-			return
-		end
-		vim.ui.input({ prompt = event.title or "Pi input", default = event.placeholder or "" }, function(value)
+		pending_picker.input(ctx, event, function(value)
 			if value then
 				send_extension_ui_response(ctx, event.id, { value = value })
 			else
@@ -762,6 +700,9 @@ end
 
 function M.handle_event(ctx, event)
 	local state = ctx.state
+	if event.type == "agent_settled" and event.aborted then
+		pending_picker.clear(ctx, false)
+	end
 	if (event.type == "agent_end" and not event.willRetry) or event.type == "agent_settled" then
 		for _, output_id in ipairs(pi_tool_output.interrupt_executions(state)) do
 			ctx.transcript.write_tool_output(output_id)

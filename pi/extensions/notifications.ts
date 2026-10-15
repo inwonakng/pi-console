@@ -48,9 +48,7 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("ui_prompt_start", (_event, ctx) => {
-		if (!ctx.isIdle()) {
-			notifyPiNeedsInput(ctx);
-		}
+		notifyPiNeedsInput(ctx);
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
