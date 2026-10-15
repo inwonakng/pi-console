@@ -75,6 +75,7 @@ export type WorkspaceDisplayState = {
   path: string;
   cwd: string;
   directory: string;
+  project: string;
   sessionFile?: string;
   lifecycle: WorkspaceLifecycle | "local" | "external";
   localCheckout: boolean;
@@ -886,6 +887,11 @@ function branchAt(cwd: string): string | undefined {
 }
 
 export function workspaceDisplayState(cwd: string, sessionFile?: string): WorkspaceDisplayState {
+  const gitRoot = findGitRoot(cwd);
+  // Git lists the main checkout first, even from nested Pi or external worktrees.
+  const project = gitRoot
+    ? gitTextOrUndefined(gitRoot, ["worktree", "list", "--porcelain", "-z"])?.match(/^worktree ([^\0]+)\0/)?.[1] ?? gitRoot
+    : canonicalPath(cwd);
   const record = workspaceForContext(cwd, sessionFile);
   if (record) {
     return {
@@ -896,18 +902,19 @@ export function workspaceDisplayState(cwd: string, sessionFile?: string): Worksp
       path: record.worktreePath,
       cwd: canonicalPath(cwd),
       directory: record.destinationCwd,
+      project,
       sessionFile,
       lifecycle: record.lifecycle,
       localCheckout: false,
     };
   }
-  const gitRoot = findGitRoot(cwd);
   if (!gitRoot) {
     return {
       name: "Local checkout",
       path: canonicalPath(cwd),
       cwd: canonicalPath(cwd),
       directory: canonicalPath(cwd),
+      project,
       sessionFile,
       lifecycle: "local",
       localCheckout: true,
@@ -922,6 +929,7 @@ export function workspaceDisplayState(cwd: string, sessionFile?: string): Worksp
     path: gitRoot,
     cwd: canonicalPath(cwd),
     directory: canonicalPath(cwd),
+    project,
     sessionFile,
     lifecycle: externalWorktree ? "external" : "local",
     localCheckout: !externalWorktree,

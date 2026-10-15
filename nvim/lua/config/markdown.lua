@@ -1,3 +1,16 @@
+vim.api.nvim_create_autocmd("FileType", {
+	group = vim.api.nvim_create_augroup("PiMarkdownLinks", { clear = true }),
+	pattern = "markdown",
+	callback = function(args)
+		vim.keymap.set("n", "<CR>", function()
+			if not require("pi-integration").follow_markdown_link() then
+				vim.cmd("normal! " .. vim.v.count1 .. vim.keycode("<CR>"))
+			end
+		end, { buffer = args.buf, silent = true, desc = "Follow Markdown link" })
+		vim.b[args.buf].undo_ftplugin = (vim.b[args.buf].undo_ftplugin or "") .. "|silent! nunmap <buffer> <CR>"
+	end,
+})
+
 require("latex_renderer").setup({
 	scale = 0.8,
 })

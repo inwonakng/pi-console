@@ -221,6 +221,7 @@ local function snapshot(state)
 		rpc_mode = publisher_rpc_mode,
 		cwd = (state.workspace and state.workspace.cwd) or vim.fn.getcwd(),
 		directory = (state.workspace and state.workspace.directory) or (state.workspace and state.workspace.cwd) or vim.fn.getcwd(),
+		project = state.workspace and state.workspace.project,
 		workspace_id = state.workspace and state.workspace.id,
 		status = status,
 		activity = waiting and waiting.label or state.activity_label or "",

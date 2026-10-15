@@ -194,8 +194,10 @@ function M.open(ctx, path, title)
 		ctx.ui.notify("Refreshed spawn transcript")
 	end, { buffer = buf, silent = true, desc = "Refresh spawn transcript" })
 	vim.keymap.set("n", "<CR>", function()
-		open_item(ctx, state, win)
-	end, { buffer = buf, silent = true, desc = "Open nested spawn item" })
+		if not require("pi-integration.utils.markdown-links").follow((owner.workspace or {}).cwd) then
+			open_item(ctx, state, win)
+		end
+	end, { buffer = buf, silent = true, desc = "Follow link or open nested spawn item" })
 end
 
 return M

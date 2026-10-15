@@ -30,7 +30,7 @@ in view.
   finishes, waiting if the next message is being edited.
 - **Multiple sessions without losing your place.** A persistent tmux session
   holds your conversations. The overview shows who's working, idle, or waiting
-  for you, along with each session's directory and workspace.
+  for you, along with each session's project and workspace.
 - **History you can navigate.** Fuzzy-find sessions with transcript previews,
   resume old work, and archive, restore, or trash conversations. The session
   tree lets you revisit earlier messages and explore a different branch.

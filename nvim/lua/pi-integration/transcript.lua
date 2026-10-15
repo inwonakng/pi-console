@@ -33,7 +33,8 @@ function M.metadata_lines(ctx)
 		"access: " .. yaml_value(state.access_mode),
 		"integration: " .. yaml_value(state.integration_mode),
 		"session: " .. yaml_value(session_label(state)),
-		"cwd: " .. yaml_value(vim.fn.getcwd()),
+		"project: " .. yaml_value(state.workspace and state.workspace.project),
+		"workspace: " .. yaml_value((state.workspace and state.workspace.cwd) or vim.fn.getcwd()),
 		"last_updated: " .. yaml_value(state.last_updated),
 		"---",
 	}

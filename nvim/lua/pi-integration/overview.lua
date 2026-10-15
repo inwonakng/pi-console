@@ -21,7 +21,10 @@ local function column(value, width)
 	return value .. string.rep(" ", math.max(0, width - vim.fn.strdisplaywidth(value)))
 end
 
-local function directory(entry)
+local function project(entry)
+	if type(entry.project) == "string" and entry.project ~= "" then
+		return entry.project
+	end
 	return type(entry.directory) == "string" and entry.directory ~= "" and entry.directory or entry.cwd
 end
 
@@ -134,7 +137,7 @@ function M.open(config)
 					table.insert(lines, " Context:   " .. text(waiting.context))
 				end
 			end
-			table.insert(lines, " Directory: " .. text(directory(entry)))
+			table.insert(lines, " Project:   " .. text(project(entry)))
 			table.insert(lines, " Workspace: " .. workspace_hash(entry))
 			if workspace_hash(entry) ~= "—" then
 				table.insert(lines, " Working:   " .. text(entry.cwd))
@@ -172,7 +175,7 @@ function M.open(config)
 		end
 		rows = {}
 		for _, entry in ipairs(entries) do
-			local searchable = (text(entry.title) .. " " .. text(directory(entry)) .. " " .. text(entry.cwd) .. " " .. workspace_hash(entry) .. " " .. text(entry.status)):lower()
+			local searchable = (text(entry.title) .. " " .. text(project(entry)) .. " " .. text(entry.cwd) .. " " .. workspace_hash(entry) .. " " .. text(entry.status)):lower()
 			if query == "" or searchable:find(query:lower(), 1, true) then
 				table.insert(rows, entry)
 			end
@@ -181,14 +184,14 @@ function M.open(config)
 			" Pi sessions · " .. #entries .. " open",
 			query == "" and "" or (" Filter: " .. query),
 			"",
-			" " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Directory", 20) .. "  " .. column("Workspace", 10) .. "  Title",
+			" " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. "  Title",
 		}
 		local cursor = math.max(first_row, math.min(view.lnum, first_row + #rows - 1))
 		local indicator_prefix = " " .. column("", 13) .. "  "
 		local indicator_spans = {}
 		local title_start_cols = {}
 		for index, entry in ipairs(rows) do
-			local name = vim.fn.fnamemodify(directory(entry), ":t")
+			local name = vim.fn.fnamemodify(project(entry), ":t")
 			local indicators, spans = indicator_columns(entry)
 			local row_prefix = " " .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. "  "
 			indicator_spans[index] = spans
@@ -355,20 +358,20 @@ function M.open(config)
 	end, "Pick session")
 	map("<leader>pn", function()
 		require("pi-integration.directory-history").input(
-			{ prompt = "New conversation directory: ", default = vim.fn.getcwd(), completion = "dir" },
+			{ prompt = "New conversation project: ", default = vim.fn.getcwd(), completion = "dir" },
 			function(cwd)
 				if cwd and vim.trim(cwd) ~= "" then
 					report(runtime.launch(config.launcher, vim.fn.fnamemodify(vim.fn.expand(cwd), ":p")))
 				end
 			end
 		)
-	end, "New conversation with chosen directory")
+	end, "New conversation with chosen project")
 	map("<leader>pN", function()
 		local entry = require_selected()
 		if entry then
-			report(runtime.launch(config.launcher, directory(entry)))
+			report(runtime.launch(config.launcher, project(entry)))
 		end
-	end, "New conversation in selected project directory")
+	end, "New conversation in selected project")
 	map("<leader>?", function()
 		local lines = { "# Pi Overview Help", "", "## Keys", "" }
 		for _, spec in ipairs(mapping_specs) do

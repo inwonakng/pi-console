@@ -485,6 +485,10 @@ function M.open(session_file, restart_state)
 	pi_rpc.start(integration_ctx())
 end
 
+function M.follow_markdown_link()
+	return require("pi-integration.utils.markdown-links").follow((state.workspace or {}).cwd)
+end
+
 function M.show_input()
 	pi_layout.show_input(integration_ctx())
 	update_transcript_statusline()

@@ -40,7 +40,7 @@ M.specs = {
 		{
 			lhs = "<CR>",
 			action = "open_transcript_item",
-			desc = "Toggle tool group or open output",
+			desc = "Follow link, toggle tool group or open output",
 		},
 	},
 }
@@ -48,7 +48,9 @@ M.specs = {
 local function action_fn(ctx, action)
 	if action == "open_transcript_item" then
 		return function()
-			ctx.transcript.open_item_under_cursor()
+			if not require("pi-integration.utils.markdown-links").follow((ctx.state.workspace or {}).cwd) then
+				ctx.transcript.open_item_under_cursor()
+			end
 		end
 	end
 
@@ -121,7 +123,8 @@ function M.help_key_lines()
 		table.insert(lines, "- `" .. spec.lhs .. "` " .. spec.desc .. ".")
 	end
 	vim.list_extend(lines, {
-		"- `<CR>` expand/collapse a tool group, or open an individual tool/thinking/skill/compaction output.",
+		"- `<CR>` follow a Markdown link; otherwise expand/collapse a tool group or open a tool/thinking/skill/compaction output.",
+		"- Relative transcript links resolve against the active workspace cwd.",
 		"- `<Esc><Esc>` abort Pi.",
 		"- `q` or `<Esc>` close this help.",
 	})
