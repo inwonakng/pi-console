@@ -78,6 +78,20 @@ local function enter_mode(mode, keymaps)
 	})
 end
 
+local function resize_height(amount)
+	local current = vim.fn.winnr()
+	-- The non-focusable footer is skipped by directional window navigation.
+	if vim.fn.winnr("j") == current and vim.fn.bufwinid("pi://status") ~= -1 then
+		-- Move the boundary above this pane so footer restoration cannot undo the resize.
+		local above = vim.fn.winnr("k")
+		if above ~= current then
+			vim.fn.win_move_statusline(above, -amount)
+		end
+		return
+	end
+	vim.cmd("resize " .. string.format("%+d", amount))
+end
+
 function M.enter_resize()
 	enter_mode("resize", {
 		h = function()
@@ -87,10 +101,10 @@ function M.enter_resize()
 			vim.cmd("vertical resize +2")
 		end,
 		k = function()
-			vim.cmd("resize -2")
+			resize_height(-2)
 		end,
 		j = function()
-			vim.cmd("resize +2")
+			resize_height(2)
 		end,
 	})
 end
