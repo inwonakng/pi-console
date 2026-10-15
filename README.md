@@ -51,8 +51,13 @@ in view.
 
 This is where I go when I've lost track of which conversation is doing what.
 It lists open sessions, whether they're working, idle, or waiting for me, and
-their directories and workspaces. Select one to resume or close it. I keep this
-bound to `<prefix>o` so I don't have to remember where each conversation lives.
+their directories and workspaces. Press `p` on a saved session to toggle its pin
+(``). Pinned sessions move into the ` Pinned` group above the regular sessions.
+They stay in the overview after their windows close and across restarts, with
+status `Not Open`. Enter focuses an open session or reopens a
+closed pinned session; `dd` closes its window without removing the pin. Unpinning
+a closed session removes it from the overview, not from session history. I keep
+this bound to `<prefix>o` so I don't have to remember where each conversation lives.
 
 ![Session overview showing working, idle, and waiting conversations](assets/overview.png)
 

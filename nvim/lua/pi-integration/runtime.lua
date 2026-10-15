@@ -217,6 +217,7 @@ local function snapshot(state)
 		path = path,
 		title = title,
 		is_new_session = is_new_session,
+		is_starting = not state.workspace_status_received or not state.session_sync_complete,
 		rpc_address = publisher_rpc_address,
 		rpc_mode = publisher_rpc_mode,
 		cwd = (state.workspace and state.workspace.cwd) or vim.fn.getcwd(),

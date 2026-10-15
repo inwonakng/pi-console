@@ -1,10 +1,10 @@
 local help = require("pi-integration.help")
 local runtime = require("pi-integration.runtime")
 local sessions = require("pi-integration.sessions")
+local pins = require("pi-integration.session-pins")
 local statusline = require("pi-integration.statusline")
 local M = {}
 local ns = vim.api.nvim_create_namespace("pi-overview")
-local first_row = 5
 
 local function text(value)
 	return type(value) == "string" and value:gsub("[%c]", " ") or ""
@@ -94,7 +94,7 @@ function M.open(config)
 	local list_buf = scratch("pi://overview")
 	local list_win = vim.api.nvim_get_current_win()
 	vim.api.nvim_win_set_buf(list_win, list_buf)
-	window_options(list_win, "%#PiOverviewTitle# Pi Overview%#PiOverviewStatusLine# · Enter: focus · dd: kill · /: filter · c: clear · r: refresh · <leader>?: keys ")
+	window_options(list_win, "%#PiOverviewTitle# Pi Overview%#PiOverviewStatusLine# · Enter: open/focus · p: pin · dd: kill · /: filter · c: clear · r: refresh · <leader>?: keys ")
 	vim.wo[list_win].cursorline = true
 	vim.cmd("botright 9split")
 	local detail_win = vim.api.nvim_get_current_win()
@@ -113,7 +113,7 @@ function M.open(config)
 	local timer = vim.uv.new_timer()
 	local function selected()
 		if vim.api.nvim_win_is_valid(list_win) then
-			return rows[vim.api.nvim_win_get_cursor(list_win)[1] - first_row + 1]
+			return rows[vim.api.nvim_win_get_cursor(list_win)[1]]
 		end
 	end
 	local function details()
@@ -126,7 +126,7 @@ function M.open(config)
 			local waiting = type(entry.waiting) == "table" and entry.waiting or nil
 			local activity = not waiting and entry.activity and entry.activity ~= "" and (" · " .. text(entry.activity)) or ""
 			lines = {
-				" " .. text(entry.title),
+				" " .. (entry.pinned and " " or "") .. text(entry.title),
 				"",
 				" Status:    " .. text(entry.status) .. activity,
 			}
@@ -166,63 +166,98 @@ function M.open(config)
 		end
 		local previous = selected()
 		local view = vim.api.nvim_win_call(list_win, vim.fn.winsaveview)
-		local entries, err = runtime.list()
-		-- Keep the last successful list on a backend failure, rather than showing
-		-- an empty list that would falsely imply every conversation has closed.
+		local instances, err = runtime.list()
+		local entries
+		if instances then
+			entries, err = pins.merge(instances)
+		end
+		-- Keep the last successful list on a backend or pin-storage failure.
 		if not entries then
 			set_lines(detail_buf, { " Could not refresh sessions:", " " .. text(err) })
 			return
 		end
+		local previous_rows = rows
 		rows = {}
+		local pinned_entries, regular_entries = {}, {}
+		local pinned_count = 0
 		for _, entry in ipairs(entries) do
+			if entry.pinned then
+				pinned_count = pinned_count + 1
+			end
 			local searchable = (text(entry.title) .. " " .. text(project(entry)) .. " " .. text(entry.cwd) .. " " .. workspace_hash(entry) .. " " .. text(entry.status)):lower()
 			if query == "" or searchable:find(query:lower(), 1, true) then
-				table.insert(rows, entry)
+				table.insert(entry.pinned and pinned_entries or regular_entries, entry)
 			end
 		end
 		local lines = {
-			" Pi sessions · " .. #entries .. " open",
+			" Pi sessions · " .. #instances .. " open · " .. pinned_count .. " pinned",
 			query == "" and "" or (" Filter: " .. query),
 			"",
 			" " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. "  Title",
 		}
-		local cursor = math.max(first_row, math.min(view.lnum, first_row + #rows - 1))
+		local cursor, nearest_row
 		local indicator_prefix = " " .. column("", 13) .. "  "
 		local indicator_spans = {}
 		local title_start_cols = {}
-		for index, entry in ipairs(rows) do
-			local name = vim.fn.fnamemodify(project(entry), ":t")
-			local indicators, spans = indicator_columns(entry)
-			local row_prefix = " " .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. "  "
-			indicator_spans[index] = spans
-			title_start_cols[index] = #row_prefix
-			table.insert(lines, row_prefix .. text(entry.title))
-			if previous and previous.id == entry.id then
-				cursor = first_row + index - 1
+		local heading_rows = {}
+		for _, section in ipairs({ { title = " Pinned", entries = pinned_entries }, { title = "Sessions", entries = regular_entries } }) do
+			if #section.entries > 0 then
+				if #heading_rows > 0 then
+					table.insert(lines, "")
+				end
+				table.insert(lines, " " .. section.title)
+				table.insert(heading_rows, #lines)
+				for _, entry in ipairs(section.entries) do
+					local row = #lines + 1
+					rows[row] = entry
+					local name = vim.fn.fnamemodify(project(entry), ":t")
+					local indicators, spans = indicator_columns(entry)
+					local row_prefix = " " .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. "  "
+					indicator_spans[row] = spans
+					title_start_cols[row] = #row_prefix
+					table.insert(lines, row_prefix .. (entry.pinned and " " or "") .. text(entry.title))
+					if not nearest_row or math.abs(row - view.lnum) < math.abs(nearest_row - view.lnum) then
+						nearest_row = row
+					end
+					if previous and (previous.id == entry.id
+						or (previous.status == "Not Open" or entry.status == "Not Open")
+							and runtime.canonical_path(previous.path) == runtime.canonical_path(entry.path)) then
+						cursor = row
+					end
+				end
 			end
 		end
-		if #rows == 0 then
-			table.insert(lines, runtime.available() and " No matching open conversations. Press <leader>pn to start one." or " No supported session backend available.")
+		if not next(rows) then
+			table.insert(lines, runtime.available() and " No matching open or pinned conversations. Press <leader>pn to start one." or " No supported session backend available.")
+		end
+		if not cursor then
+			cursor = view.lnum
+			if previous or not next(previous_rows) then
+				cursor = nearest_row or cursor
+			end
+			cursor = math.max(1, math.min(cursor, #lines))
 		end
 		updating = true
 		set_lines(list_buf, lines)
 		vim.api.nvim_buf_clear_namespace(list_buf, ns, 0, -1)
 		vim.api.nvim_buf_set_extmark(list_buf, ns, 0, 0, { end_col = #lines[1], hl_group = "Title" })
-		for index, entry in ipairs(rows) do
+		for _, row in ipairs(heading_rows) do
+			vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, 1, { end_col = #lines[row], hl_group = "Title" })
+		end
+		for row, entry in pairs(rows) do
 			local group = entry.status == "Waiting" and "DiagnosticWarn"
 				or (entry.status == "Error" or entry.status == "Stopped" or entry.status == "Unresponsive") and "DiagnosticError"
-				or entry.status == "Idle" and "Comment"
+				or (entry.status == "Idle" or entry.status == "Not Open") and "Comment"
 				or "DiagnosticInfo"
-			local row = first_row + index - 2
-			vim.api.nvim_buf_set_extmark(list_buf, ns, row, 1, { end_col = 14, hl_group = group })
-			for _, span in ipairs(indicator_spans[index]) do
-				vim.api.nvim_buf_set_extmark(list_buf, ns, row, #indicator_prefix + span.start_col, {
+			vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, 1, { end_col = 14, hl_group = group })
+			for _, span in ipairs(indicator_spans[row]) do
+				vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, #indicator_prefix + span.start_col, {
 					end_col = #indicator_prefix + span.end_col,
 					hl_group = span.highlight,
 				})
 			end
-			vim.api.nvim_buf_set_extmark(list_buf, ns, row, title_start_cols[index], {
-				end_col = #lines[first_row + index - 1],
+			vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, title_start_cols[row], {
+				end_col = #lines[row],
 				hl_group = entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle",
 			})
 		end
@@ -291,9 +326,19 @@ function M.open(config)
 	map("<CR>", function()
 		local entry = selected()
 		if entry then
-			report(runtime.focus(entry.id))
+			if entry.status == "Not Open" then
+				report(runtime.launch(config.launcher, entry.cwd, entry.path))
+			else
+				report(runtime.focus(entry.id))
+			end
 		end
-	end, "Focus conversation")
+	end, "Focus or reopen conversation")
+	map("p", function()
+		local entry = require_selected()
+		if entry then
+			report(pins.toggle(entry))
+		end
+	end, "Toggle session pin")
 	map("dd", function()
 		local entry = selected()
 		if not entry then

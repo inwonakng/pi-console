@@ -164,6 +164,7 @@ function M.launch(launcher, cwd, path)
 			is_new_session = path == nil,
 			cwd = cwd,
 			status = "Starting",
+			is_starting = true,
 			activity = "Starting pi-console",
 		}),
 	})
