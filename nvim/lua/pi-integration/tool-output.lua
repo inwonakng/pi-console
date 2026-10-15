@@ -948,6 +948,9 @@ end
 local function highlight_codemode(buf, source_end, output_start, text)
 	vim.api.nvim_buf_call(buf, function()
 		vim.cmd("syntax clear")
+		vim.api.nvim_set_hl(0, "PiCodemodeHeading", { bold = true, default = true })
+		vim.cmd("syntax match PiCodemodeHeading /\\%1l.*/")
+		vim.cmd("syntax match PiCodemodeHeading /\\%" .. (source_end + 2) .. "l.*/")
 		local function region(name, filetype, first, last)
 			vim.b[buf].current_syntax = nil
 			vim.cmd("syntax include @" .. name .. " syntax/" .. filetype .. ".vim")
