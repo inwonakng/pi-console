@@ -19,6 +19,8 @@ client_name=${2-}
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
 launcher="$repo_root/bin/pi-console"
+# Match the two-cell icon area used by conversation tab names.
+overview_name='󰕮 '
 current_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}')
 
 # Serialize discovery and creation, but never hold the lock while attached.
@@ -36,9 +38,9 @@ fi
 
 if [ -z "$overview_id" ]; then
     if tmux has-session -t '=agents' 2>/dev/null; then
-        overview_id=$(tmux new-window -d -P -F '#{window_id}' -t '=agents:' -n '󰕮' -c "$current_path" bash "$launcher" --overview)
+        overview_id=$(tmux new-window -d -P -F '#{window_id}' -t '=agents:' -n "$overview_name" -c "$current_path" bash "$launcher" --overview)
     else
-        overview_id=$(tmux new-session -d -P -F '#{window_id}' -s agents -n '󰕮' -c "$current_path" bash "$launcher" --overview)
+        overview_id=$(tmux new-session -d -P -F '#{window_id}' -s agents -n "$overview_name" -c "$current_path" bash "$launcher" --overview)
     fi
     overview_pane=$(tmux display-message -p -t "$overview_id" '#{pane_id}')
     tmux set-option -w -t "$overview_id" @pi_overview 1
@@ -46,7 +48,7 @@ if [ -z "$overview_id" ]; then
 else
     # Refresh old managed titles without replacing a user's custom name.
     case "$(tmux display-message -p -t "$overview_id" '#{window_name}')" in
-        Pi-Overview|'󰕮 Overview') tmux rename-window -t "$overview_id" '󰕮' ;;
+        Pi-Overview|'󰕮 Overview'|'󰕮') tmux rename-window -t "$overview_id" "$overview_name" ;;
     esac
 fi
 release_lock
