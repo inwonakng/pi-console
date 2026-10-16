@@ -16,7 +16,9 @@ current_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}')
 current_session=$(tmux display-message -p -t "$pane_id" '#{session_name}')
 
 bash "$script_dir/open-agents-overview.sh" --ensure "$pane_id" "$client_name" >/dev/null
-tmux new-window -t '=agents:' -n pi -c "$current_path" bash "$launcher"
+conversation_pane=$(tmux new-window -P -F '#{pane_id}' -t '=agents:' -n ' ' -c "$current_path" bash "$launcher")
+# Only launcher-created conversation windows opt into state-icon names.
+tmux set-option -wo -t "$conversation_pane" @pi_console_tab "{\"pane\":\"$conversation_pane\",\"name\":\" \"}"
 
 if [ "$current_session" != "agents" ]; then
     exec bash "$script_dir/attach-agents.sh" "$pane_id" "$client_name"

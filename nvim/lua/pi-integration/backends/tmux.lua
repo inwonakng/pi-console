@@ -1,7 +1,28 @@
 local json = require("pi-integration.utils.json")
 local M = {}
 local option = "@pi_console"
+local tab_option = "@pi_console_tab"
 local owner_pane
+local owner_window
+
+local tab_icons = {
+	Done = "",
+	Working = "",
+	Retrying = "",
+	Waiting = "",
+	Compacting = "",
+	Starting = "",
+	Loading = "",
+	Idle = "",
+	Error = "",
+	Stopped = "",
+	Unresponsive = "",
+}
+
+local function tab_name(status)
+	local icon = tab_icons[status] or tab_icons.Error
+	return icon .. string.rep(" ", math.max(0, 2 - vim.fn.strdisplaywidth(icon)))
+end
 
 function M.available()
 	return vim.env.TMUX ~= nil and vim.env.TMUX_PANE ~= nil and vim.fn.executable("tmux") == 1
@@ -152,13 +173,18 @@ function M.launch(launcher, cwd, path)
 	if path then
 		shell_command = shell_command .. " --session " .. vim.fn.shellescape(path)
 	end
-	local target, err = command({ "new-window", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}", "-t", "=agents:", "-n", "pi", "-c", cwd, shell_command })
+	local name = tab_name("Starting")
+	local target, err = command({ "new-window", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}", "-t", "=agents:", "-n", name, "-c", cwd, shell_command })
 	if not target then
 		return nil, err
 	end
 	local pane, pid = target:match("^(%%%d+)\t(%d+)$")
 	if not pane then
 		return nil, "Could not identify the new conversation pane"
+	end
+	local marked, mark_err = command({ "set-option", "-wo", "-t", pane, tab_option, json.encode({ pane = pane, name = name }) })
+	if not marked then
+		return nil, mark_err
 	end
 	-- Reserve the session while Neovim starts, so a second selection focuses
 	-- this window instead of opening the same history again. -o never replaces
@@ -233,9 +259,70 @@ function M.start_overview()
 	return true
 end
 
+local function release_tab(keep_managed)
+	if not owner_window then
+		return
+	end
+	local target = command({ "display-message", "-p", "-t", owner_window, "#{window_name}\t#{" .. tab_option .. "}" })
+	local name, payload = (target or ""):match("^(.-)\t(.+)$")
+	local tab = payload and json.decode_object(payload)
+	if tab and tab.pane == owner_pane and tab.pid == vim.uv.os_getpid() then
+		-- Leave manual renames and replacement instances alone.
+		if name == tab.name then
+			local args = { "rename-window", "-t", owner_window, "pi" }
+			if keep_managed then
+				-- Keep the launcher marker so a frontend restart can reclaim this tab.
+				vim.list_extend(args, { ";", "set-option", "-w", "-t", owner_window, tab_option,
+					json.encode({ pane = owner_pane, name = "pi" }) })
+			else
+				vim.list_extend(args, { ";", "set-option", "-wu", "-t", owner_window, tab_option })
+			end
+			command(args)
+		else
+			command({ "set-option", "-wu", "-t", owner_window, tab_option })
+		end
+	end
+	owner_window = nil
+end
+
+local function publish_tab(status)
+	local target, err = command({ "display-message", "-p", "-t", owner_pane, "#{window_id}\t#{window_name}\t#{" .. tab_option .. "}" })
+	if not target then
+		return nil, err
+	end
+	local window, name, payload = target:match("^(@%d+)\t(.-)\t(.*)$")
+	if owner_window and owner_window ~= window then
+		-- Moving a pane must not leave its old tab decorated or claim its destination.
+		release_tab()
+	end
+	local tab = payload and json.decode_object(payload)
+	if not tab or tab.pane ~= owner_pane then
+		return true
+	end
+	if name ~= tab.name then
+		-- A user-supplied name permanently opts this window out of icon naming.
+		owner_window = nil
+		return command({ "set-option", "-wu", "-t", window, tab_option })
+	end
+	owner_window = window
+	local next_name = tab_name(status)
+	if tab.pid == vim.uv.os_getpid() and name == next_name then
+		return true
+	end
+	return command({
+		"rename-window", "-t", window, next_name,
+		";", "set-option", "-w", "-t", window, tab_option,
+		json.encode({ pane = owner_pane, pid = vim.uv.os_getpid(), name = next_name }),
+	})
+end
+
 function M.publish(snapshot)
 	owner_pane = owner_pane or vim.env.TMUX_PANE
-	return command({ "set-option", "-p", "-t", owner_pane, option, json.encode(snapshot) })
+	local published, err = command({ "set-option", "-p", "-t", owner_pane, option, json.encode(snapshot) })
+	if not published then
+		return nil, err
+	end
+	return publish_tab(snapshot.status)
 end
 
 function M.clear()
@@ -245,6 +332,11 @@ function M.clear()
 		local entry = payload and json.decode_object(payload)
 		if entry and entry.pid == vim.uv.os_getpid() then
 			command({ "set-option", "-pu", "-t", owner_pane, option })
+		end
+		if not entry or entry.pid == vim.uv.os_getpid() then
+			release_tab(true)
+		else
+			owner_window = nil
 		end
 		owner_pane = nil
 	end

@@ -255,6 +255,24 @@ Then use:
 | `<prefix>G` | Start a conversation in the current pane's directory |
 | `<prefix>o` | Open or focus the persistent overview; close the popup if already focused |
 
+Conversation windows created by the launcher use a fixed two-cell state icon
+instead of the `pi` window name (requires a Nerd Font):
+
+| State | Tab icon |
+|---|---|
+| Done / unread | `` |
+| Working / retrying | `` |
+| Waiting for you | `` |
+| Compacting | `` |
+| Loading / starting | `` |
+| Idle | `` |
+| Error / stopped | `` |
+
+The bell follows the overview's unread state and clears when the conversation
+is focused. Window indices and theme styling are unchanged. Manually renaming a
+window opts it out of icon naming; review splits do not take over its icon.
+On normal frontend exit, an icon-named window returns to `pi`.
+
 You can also run `pi-console` directly from a project directory. Inside
 pi-console, `<leader>?` shows the complete context-sensitive key list.
 In directory prompts, `<C-f>` opens up to 10 unique recently used Pi working
