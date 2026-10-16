@@ -1,6 +1,7 @@
 local runtime = require("pi-integration.runtime")
 local pins = require("pi-integration.session-pins")
 local icons = require("pi-integration.status-icons")
+local session_navigation = require("pi-integration.session-navigation")
 local M = {}
 
 local function text(value)
@@ -37,6 +38,8 @@ function M.open(config)
 	vim.o.ruler = false
 	local ns = vim.api.nvim_create_namespace("pi-sidebar")
 	local rows, starts = {}, {}
+	local navigation = session_navigation.new(win)
+	local updating = false
 	local last_focused_at = 0
 	local timer = vim.uv.new_timer()
 	local closed = false
@@ -130,6 +133,7 @@ function M.open(config)
 				end
 			end
 		end
+		updating = true
 		vim.bo[buf].modifiable = true
 		if not vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), lines) then
 			vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -150,22 +154,11 @@ function M.open(config)
 		vim.api.nvim_win_call(win, function()
 			vim.fn.winrestview(view)
 		end)
+		navigation.set_rows(starts)
+		updating = false
 	end
 	local function map(key, action, description)
 		vim.keymap.set("n", key, action, { buffer = buf, silent = true, desc = description })
-	end
-	local function move(delta)
-		local row = vim.api.nvim_win_get_cursor(win)[1]
-		local index = 1
-		for i, start in ipairs(starts) do
-			if start <= row then
-				index = i
-			end
-		end
-		local next_row = starts[math.max(1, math.min(#starts, index + delta))]
-		if next_row then
-			vim.api.nvim_win_set_cursor(win, { next_row, 0 })
-		end
 	end
 	local function tmux_action(action)
 		vim.system({ "bash", config.launcher, "--tmux", action, vim.env.TMUX_PANE }, { text = true }, vim.schedule_wrap(function(result)
@@ -174,10 +167,10 @@ function M.open(config)
 			end
 		end))
 	end
-	map("j", function() move(vim.v.count1) end, "Next session")
-	map("k", function() move(-vim.v.count1) end, "Previous session")
-	map("<Down>", function() move(1) end, "Next session")
-	map("<Up>", function() move(-1) end, "Previous session")
+	map("j", function() navigation.move(vim.v.count1) end, "Next session")
+	map("k", function() navigation.move(-vim.v.count1) end, "Previous session")
+	map("<Down>", function() navigation.move(vim.v.count1) end, "Next session")
+	map("<Up>", function() navigation.move(-vim.v.count1) end, "Previous session")
 	map("<CR>", function()
 		local entry = selected()
 		if not entry then return end
@@ -199,6 +192,14 @@ function M.open(config)
 			timer:close()
 		end
 	end
+	vim.api.nvim_create_autocmd("CursorMoved", {
+		buffer = buf,
+		callback = function()
+			if not updating then
+				navigation.snap()
+			end
+		end,
+	})
 	vim.api.nvim_create_autocmd("BufWipeout", { buffer = buf, once = true, callback = stop })
 	vim.api.nvim_create_autocmd("VimLeavePre", { once = true, callback = stop })
 	vim.api.nvim_create_autocmd({ "VimResized", "ColorScheme" }, { callback = refresh })

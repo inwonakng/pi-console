@@ -3,6 +3,7 @@ local runtime = require("pi-integration.runtime")
 local sessions = require("pi-integration.sessions")
 local pins = require("pi-integration.session-pins")
 local statusline = require("pi-integration.statusline")
+local session_navigation = require("pi-integration.session-navigation")
 local M = {}
 local ns = vim.api.nvim_create_namespace("pi-overview")
 
@@ -107,6 +108,7 @@ function M.open(config)
 	vim.api.nvim_set_current_win(list_win)
 
 	local rows = {}
+	local navigation = session_navigation.new(list_win)
 	local query = ""
 	local updating = false
 	local closed = false
@@ -180,8 +182,8 @@ function M.open(config)
 		end
 		local focus_target = select_last_focused and runtime.last_focused(instances) or nil
 		select_last_focused = false
-		local previous_rows = rows
 		rows = {}
+		local starts = {}
 		local pinned_entries, regular_entries = {}, {}
 		local pinned_count = 0
 		for _, entry in ipairs(entries) do
@@ -214,6 +216,7 @@ function M.open(config)
 				for _, entry in ipairs(section.entries) do
 					local row = #lines + 1
 					rows[row] = entry
+					table.insert(starts, row)
 					if focus_target and entry.id == focus_target.id then
 						focused_row = row
 					end
@@ -238,13 +241,7 @@ function M.open(config)
 		if not next(rows) then
 			table.insert(lines, runtime.available() and " No matching open or pinned conversations. Press <leader>pn to start one." or " No supported session backend available.")
 		end
-		if not cursor then
-			cursor = view.lnum
-			if previous or not next(previous_rows) then
-				cursor = nearest_row or cursor
-			end
-			cursor = math.max(1, math.min(cursor, #lines))
-		end
+		cursor = cursor or nearest_row or math.max(1, math.min(view.lnum, #lines))
 		updating = true
 		set_lines(list_buf, lines)
 		vim.api.nvim_buf_clear_namespace(list_buf, ns, 0, -1)
@@ -281,6 +278,7 @@ function M.open(config)
 		vim.api.nvim_win_call(list_win, function()
 			vim.fn.winrestview(view)
 		end)
+		navigation.set_rows(starts)
 		updating = false
 		details()
 	end
@@ -336,6 +334,10 @@ function M.open(config)
 		end)
 	end
 
+	map("j", function() navigation.move(vim.v.count1) end, "Next session")
+	map("k", function() navigation.move(-vim.v.count1) end, "Previous session")
+	map("<Down>", function() navigation.move(vim.v.count1) end, "Next session")
+	map("<Up>", function() navigation.move(-vim.v.count1) end, "Previous session")
 	map("<CR>", function()
 		local entry = selected()
 		if entry then
@@ -452,6 +454,7 @@ function M.open(config)
 		buffer = list_buf,
 		callback = function()
 			if not updating then
+				navigation.snap()
 				details()
 			end
 		end,
