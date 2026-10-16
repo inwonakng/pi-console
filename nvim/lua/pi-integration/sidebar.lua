@@ -69,7 +69,7 @@ function M.open(config)
 			waiting = waiting + (entry.status == "Waiting" and 1 or 0)
 		end
 		local width = math.max(1, vim.api.nvim_win_get_width(win) - 2)
-		local lines = { " Pi · " .. #instances .. " open", "" }
+		local lines = { " 󰕮 · " .. #instances .. " open", "" }
 		local highlights = { { row = 0, start = 0, finish = #lines[1], group = "Title" } }
 		if waiting > 0 then
 			local prefix = lines[1] .. " · "
@@ -195,7 +195,7 @@ function M.open(config)
 	vim.api.nvim_create_autocmd("VimLeavePre", { once = true, callback = stop })
 	vim.api.nvim_create_autocmd({ "VimResized", "ColorScheme" }, { callback = refresh })
 	refresh()
-	timer:start(1000, 1000, vim.schedule_wrap(refresh))
+	timer:start(icons.animation_interval_ms, icons.animation_interval_ms, vim.schedule_wrap(refresh))
 end
 
 return M

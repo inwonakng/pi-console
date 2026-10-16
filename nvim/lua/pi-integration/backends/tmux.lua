@@ -262,8 +262,8 @@ local function global_format(option_name)
 	return output and output:gsub("\n$", "") or nil, err
 end
 
-local function color_format(format)
-	local parts, pos, foreground = {}, 1, "default"
+local function color_format(format, bold)
+	local parts, pos, foreground, restore = {}, 1, "default", "#[default]"
 	while pos <= #format do
 		local pair = format:sub(pos, pos + 1)
 		local token, finish
@@ -271,6 +271,12 @@ local function color_format(format)
 			finish = format:find("]", pos + 2, true)
 			if not finish then return nil end
 			token = format:sub(pos, finish)
+			if bold then
+				-- Tmux's outer status-format already uses its single saved-default
+				-- slot. Restore by replaying the original styles, not by nesting pushes.
+				if token:find("push-default", 1, true) or token:find("pop-default", 1, true) then return nil end
+				restore = restore .. token
+			end
 			if token:match("^#%[%s*default") or token:match("^#%[%s*none") then
 				foreground = "default"
 			end
@@ -292,7 +298,11 @@ local function color_format(format)
 		end
 		-- Do not rewrite names inside conditionals, comparisons, or escaped ##W.
 		if token == "#W" or token == "#{window_name}" then
-			token = "#[fg=#{@pi_console_tab_color}]" .. token .. "#[fg=" .. foreground .. "]"
+			if bold then
+				token = "#[fg=#{@pi_console_tab_color},bold]" .. token .. restore
+			else
+				token = "#[fg=#{@pi_console_tab_color}]" .. token .. "#[fg=" .. foreground .. "]"
+			end
 		end
 		table.insert(parts, token)
 		pos = finish + 1
@@ -314,7 +324,7 @@ local function style_tab(window, tab, status)
 			base = saved.base
 		end
 		if not base then return nil, err end
-		local decorated = color_format(base)
+		local decorated = color_format(base, icons.get(status).bold)
 		if decorated and decorated ~= base then
 			if current ~= decorated then
 				local ok

@@ -94,7 +94,7 @@ function M.open(config)
 	local list_buf = scratch("pi://overview")
 	local list_win = vim.api.nvim_get_current_win()
 	vim.api.nvim_win_set_buf(list_win, list_buf)
-	window_options(list_win, "%#PiOverviewTitle# Pi Overview%#PiOverviewStatusLine# · Enter: open/focus · p: pin · dd: kill · /: filter · c: clear · r: refresh · <leader>?: keys ")
+	window_options(list_win, "%#PiOverviewTitle# 󰕮%#PiOverviewStatusLine# · Enter: open/focus · p: pin · dd: kill · /: filter · c: clear · r: refresh · <leader>?: keys ")
 	vim.wo[list_win].cursorline = true
 	vim.cmd("botright 9split")
 	local detail_win = vim.api.nvim_get_current_win()
@@ -423,14 +423,14 @@ function M.open(config)
 		end
 	end, "New conversation in selected project")
 	map("<leader>?", function()
-		local lines = { "# Pi Overview Help", "", "## Keys", "" }
+		local lines = { "# 󰕮 Help", "", "## Keys", "" }
 		for _, spec in ipairs(mapping_specs) do
 			table.insert(lines, "- `" .. spec.lhs .. "` " .. spec.desc .. ".")
 		end
 		vim.list_extend(lines, { "- `q` or `<Esc>` close this help." })
 		help.toggle_window(help_state, {
 			name = "pi://overview-help",
-			title = "Pi Overview Help",
+			title = "󰕮 Help",
 			lines = lines,
 		})
 	end, "Pi overview help")

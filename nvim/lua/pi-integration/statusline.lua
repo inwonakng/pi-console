@@ -6,16 +6,7 @@ local M = {}
 local footer_ns = vim.api.nvim_create_namespace("pi-console-status-footer")
 local footer_height = 1
 
-local activity_spinner_frames = {
-	"⠖",
-	"⠲",
-	"⢒",
-	"⢰",
-	"⣰",
-	"⣠",
-	"⣄",
-	"⣆",
-}
+local activity_spinner_frames = require("pi-integration.status-icons").working_frames
 
 local function non_null(value)
 	return value ~= nil and value ~= vim.NIL

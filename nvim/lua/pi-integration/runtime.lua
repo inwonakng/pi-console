@@ -4,6 +4,7 @@
 -- list() returns snapshots plus an opaque instance id and a readable location.
 -- Session controls use each Neovim instance's RPC server, independent of its backend.
 -- Operations return a non-nil value on success, or nil and an error message.
+local icons = require("pi-integration.status-icons")
 local M = {}
 local timer
 local publisher_state
@@ -296,8 +297,8 @@ function M.start(state)
 	M.publish()
 	timer = vim.uv.new_timer()
 	timer:start(
-		1000,
-		1000,
+		icons.animation_interval_ms,
+		icons.animation_interval_ms,
 		vim.schedule_wrap(function()
 			if timer then
 				M.publish()
