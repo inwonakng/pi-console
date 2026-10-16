@@ -1,3 +1,5 @@
+-- Snapshot before loading the application UI, including direct-init launches.
+require("pi-integration.build-info")
 local M = {}
 
 M.ui_bg = "#080808"
@@ -36,6 +38,8 @@ require("catppuccin").setup({
 			PiInputSidebarAsk = { fg = colors.peach, bg = M.ui_bg },
 			PiInputSidebarReadonly = { fg = colors.red, bg = M.ui_bg },
 			PiInputSidebarUnknown = { fg = colors.overlay0, bg = M.ui_bg },
+			PiBuildDev = { fg = colors.yellow, bg = M.status_bg, bold = true },
+			PiBuildStable = { fg = colors.subtext1, bg = M.status_bg },
 			PiUsageStats = { fg = colors.subtext1, bg = M.status_bg },
 			PiStatusSeparator = { fg = colors.text, bg = M.status_bg },
 			PiUsageInput = { fg = colors.blue, bg = M.status_bg },

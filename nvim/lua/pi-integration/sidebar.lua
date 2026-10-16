@@ -1,4 +1,5 @@
 local runtime = require("pi-integration.runtime")
+local build_info = require("pi-integration.build-info")
 local pins = require("pi-integration.session-pins")
 local icons = require("pi-integration.status-icons")
 local session_navigation = require("pi-integration.session-navigation")
@@ -19,6 +20,11 @@ local function truncate(value, width)
 	return width > 0 and (value .. "…") or ""
 end
 
+function M.render_statusline()
+	local win = vim.g.statusline_winid or vim.api.nvim_get_current_win()
+	return build_info.statusline(vim.api.nvim_win_get_width(win))
+end
+
 function M.open(config)
 	-- This is only a viewer: do not publish a conversation or register it as
 	-- the persistent overview used by the session launcher.
@@ -31,7 +37,9 @@ function M.open(config)
 	for option, value in pairs({ number = false, relativenumber = false, signcolumn = "no", wrap = false, spell = false, cursorline = true }) do
 		vim.api.nvim_set_option_value(option, value, { win = win })
 	end
-	vim.o.laststatus = 0
+	vim.o.laststatus = 2
+	vim.wo[win].fillchars = "stl: ,stlnc: "
+	vim.wo[win].statusline = "%!v:lua.require('pi-integration.sidebar').render_statusline()"
 	vim.o.showtabline = 0
 	vim.o.cmdheight = 0
 	vim.o.showmode = false
@@ -97,6 +105,10 @@ function M.open(config)
 					local row = #lines + 1
 					local icon = icons.get(entry.status).icon
 					local prefix = " " .. icon .. " "
+					if build_info.is_dev(entry) then
+						table.insert(highlights, { row = row - 1, start = #prefix, finish = #prefix + 3, group = "PiBuildDev" })
+						prefix = prefix .. "DEV "
+					end
 					local title = truncate(entry.title, width - vim.fn.strdisplaywidth(prefix))
 					table.insert(lines, prefix .. title)
 					table.insert(highlights, { row = row - 1, start = 1, finish = 1 + #icon, group = icons.highlight(entry.status) })
@@ -161,7 +173,7 @@ function M.open(config)
 		vim.keymap.set("n", key, action, { buffer = buf, silent = true, desc = description })
 	end
 	local function tmux_action(action)
-		vim.system({ "bash", config.launcher, "--tmux", action, vim.env.TMUX_PANE }, { text = true }, vim.schedule_wrap(function(result)
+		vim.system({ "bash", config.launcher, "tmux", action, vim.env.TMUX_PANE }, { text = true }, vim.schedule_wrap(function(result)
 			if result.code ~= 0 then
 				notify(vim.trim(result.stderr or "tmux operation failed"))
 			end

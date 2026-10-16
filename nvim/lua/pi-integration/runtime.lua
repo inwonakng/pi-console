@@ -5,6 +5,7 @@
 -- Session controls use each Neovim instance's RPC server, independent of its backend.
 -- Operations return a non-nil value on success, or nil and an error message.
 local icons = require("pi-integration.status-icons")
+local build_info = require("pi-integration.build-info")
 local M = {}
 local timer
 local publisher_state
@@ -68,6 +69,12 @@ function M.find_session(path)
 	path = M.canonical_path(path)
 	for _, entry in ipairs(instances) do
 		if path and M.canonical_path(entry.path) == path then
+			local running = build_info.snapshot()
+			local build = entry.build
+			if type(build) ~= "table" or build.channel ~= running.channel
+				or build.app_root ~= running.app_root then
+				return nil, "This conversation is open in another installation. Close that frontend before reopening it here; select its open row to focus it explicitly."
+			end
 			return entry
 		end
 	end
@@ -230,6 +237,7 @@ local function snapshot(state)
 		or "New Session"
 	return {
 		version = 1,
+		build = build_info.snapshot(),
 		pid = vim.uv.os_getpid(),
 		updated = os.time(),
 		last_focused_at = publisher_last_focused_at,

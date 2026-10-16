@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+set -eu
+
+script_path=$(realpath -- "${BASH_SOURCE[0]}")
+script_dir=$(dirname -- "$script_path")
+# shellcheck source=bin/channel-env.sh
+source "$script_dir/channel-env.sh"
+if [ "$#" -eq 1 ] && [ "$1" = --version ]; then
+    pi_console_version
+    exit 0
+fi
+# Console startup flags are not applicable to the terminal interface.
+unset PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR PI_CONSOLE_SESSION PI_CONSOLE_RESTART_FILE PI_CONSOLE_SESSION_FILE
+exec "${PI_BINARY:-pi}" -e "$PI_CONSOLE_APP_ROOT/pi" "$@"

@@ -4,6 +4,7 @@ local app_root = vim.fs.dirname(config_root)
 
 vim.g.pi_console_root = app_root
 vim.opt.runtimepath:prepend(config_root)
+require("pi-integration.build-info") -- Capture the launch identity before loading plugins.
 
 -- vim.pack reads only from stdpath("config"). Keep the isolated application
 -- config synchronized with the lockfile distributed alongside this init.lua.

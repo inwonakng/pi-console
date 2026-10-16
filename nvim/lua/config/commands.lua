@@ -1,3 +1,11 @@
+local build_info = require("pi-integration.build-info")
+
+vim.api.nvim_create_user_command("PiConsoleVersion", function()
+	local build = build_info.snapshot()
+	vim.api.nvim_echo({ { "Startup build: " .. build_info.detail_text(build)
+		.. "\nInstallation: " .. (build.app_root ~= "" and build.app_root or "unknown") } }, true, {})
+end, { desc = "Show the running pi-console startup build and installation path" })
+
 local function set_clipboard(text)
 	vim.fn.setreg("+", text)
 	print(text)

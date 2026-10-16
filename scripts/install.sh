@@ -1,288 +1,240 @@
 #!/usr/bin/env bash
-
 set -eu
 
 repository=https://github.com/inwonakng/pi-console.git
 releases_api=https://api.github.com/repos/inwonakng/pi-console/releases/latest
 install_root=${PI_CONSOLE_INSTALL_DIR:-"${XDG_DATA_HOME:-$HOME/.local/share}/pi-console"}
 bin_dir=${PI_CONSOLE_BIN_DIR:-"$HOME/.local/bin"}
+install_root=${install_root%/}
+bin_dir=${bin_dir%/}
 requested_version=
 requested_ref=
-tmux_mode=ask
-
+fail() { printf '%s\n' "$*" >&2; exit 1; }
 usage() {
-    cat >&2 <<'EOF'
-Usage: install.sh [--version VERSION | --ref REF] [--configure-tmux | --no-configure-tmux]
-
-Options:
-  --version VERSION   Install a release tag (for example, 0.1.0 or v0.1.0).
-  --ref REF           Install a specific Git branch or tag.
-  --configure-tmux    Add the pi-console integration to the tmux configuration.
-  --no-configure-tmux Do not offer to edit the tmux configuration.
-EOF
+    printf '%s\n' 'Usage: install.sh [--version VERSION | --ref REF]' >&2
+    printf '%s\n' 'Defaults to the latest published GitHub Release; --ref explicitly selects a branch or tag.' >&2
     exit "${1:-2}"
 }
-
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --version)
-            [ "$#" -ge 2 ] || usage
-            [ -z "$requested_ref" ] || {
-                printf '%s\n' 'Use only one of --version and --ref.' >&2
-                exit 2
-            }
-            requested_version=$2
-            shift 2
-            ;;
-        --ref)
-            [ "$#" -ge 2 ] || usage
-            [ -z "$requested_version" ] || {
-                printf '%s\n' 'Use only one of --version and --ref.' >&2
-                exit 2
-            }
-            requested_ref=$2
-            shift 2
-            ;;
-        --configure-tmux)
-            tmux_mode=yes
-            shift
-            ;;
-        --no-configure-tmux)
-            tmux_mode=no
-            shift
-            ;;
-        -h|--help)
-            usage 0
-            ;;
-        *)
-            printf 'Unknown option: %s\n' "$1" >&2
-            usage
-            ;;
+        --version|--ref)
+            [ "$#" -ge 2 ] && [ -n "$2" ] || usage
+            [ -z "$requested_version$requested_ref" ] || fail 'Use only one version or ref selector.'
+            if [ "$1" = --version ]; then requested_version=$2; else requested_ref=$2; fi
+            shift 2 ;;
+        -h|--help) usage 0 ;;
+        *) usage ;;
     esac
 done
 
-case "$install_root" in
-    ''|/|"$HOME")
-        printf 'Refusing unsafe installation directory: %s\n' "$install_root" >&2
-        exit 1
-        ;;
-    /*) ;;
-    *)
-        printf 'Installation directory must be absolute: %s\n' "$install_root" >&2
-        exit 1
-        ;;
-esac
-case "$bin_dir" in
-    /*) ;;
-    *)
-        printf 'Command directory must be absolute: %s\n' "$bin_dir" >&2
-        exit 1
-        ;;
-esac
+# This installer is intentionally self-contained so it can be piped to bash.
+validate_directory() {
+    case "$1" in
+        ''|/|"$HOME"|*/../*|*/..|*/./*|*/.|*//*|*$'\n'*|*$'\r'*) fail "Unsafe directory: $1" ;;
+        /*) ;;
+        *) fail "Directory must be absolute: $1" ;;
+    esac
+    [ ! -L "$1" ] || fail "Refusing symlink directory: $1"
+    [ ! -e "$1" ] || [ -d "$1" ] || fail "Not a directory: $1"
+}
+value() { awk -v key="$2" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' "$1"; }
+valid_commit() {
+    [ "${#1}" -eq 40 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+remove_registration() {
+    local output
+    if ! output=$(pi remove "$1" 2>&1); then
+        case "$output" in
+            *"No matching package found"*) ;;
+            *) fail "Could not remove legacy Pi registration for $1: $output" ;;
+        esac
+    fi
+}
+validate_directory "$install_root"
+validate_directory "$bin_dir"
+[ "$install_root" != "$bin_dir" ] || fail 'Application and command directories must differ.'
+case "$bin_dir/" in "$install_root/"*) fail 'Command directory must be outside the application directory.' ;; esac
 
 missing=
 required_commands='curl git node npm nvim pi tmux fzf cargo cc realpath rg'
-if [ "$(uname -s)" = Linux ]; then
-    required_commands="$required_commands bwrap socat"
-fi
+if [ "$(uname -s)" = Linux ]; then required_commands="$required_commands bwrap socat"; fi
 for command in $required_commands; do
-    if ! command -v "$command" >/dev/null 2>&1; then
-        missing="$missing $command"
-    fi
+    if ! command -v "$command" >/dev/null 2>&1; then missing="$missing $command"; fi
 done
-if [ -n "$missing" ]; then
-    printf 'Missing required commands:%s\n' "$missing" >&2
-    exit 1
-fi
+[ -z "$missing" ] || fail "Missing required commands:$missing"
 
-marker_path="$install_root/.pi-console-install"
-launcher_path="$bin_dir/pi-console"
-launcher_marker='# Managed by the pi-console installer.'
-
-if [ -e "$install_root" ] && [ ! -d "$install_root" ]; then
-    printf 'Refusing to replace non-directory installation path: %s\n' "$install_root" >&2
-    exit 1
-fi
-if [ -d "$install_root" ] && [ ! -f "$marker_path" ]; then
-    printf 'Refusing to replace an installation directory not owned by pi-console: %s\n' "$install_root" >&2
-    exit 1
-fi
-if [ -e "$launcher_path" ] || [ -L "$launcher_path" ]; then
-    if [ ! -f "$launcher_path" ] || ! grep -Fqx "$launcher_marker" "$launcher_path"; then
-        printf 'Refusing to replace an unmanaged command: %s\n' "$launcher_path" >&2
-        exit 1
+legacy=no
+if [ -d "$install_root" ]; then
+    marker="$install_root/.pi-console-install"
+    [ ! -L "$marker" ] && [ -f "$marker" ] && [ "$(value "$marker" source)" = "$repository" ] \
+        || fail "Refusing an unowned installation directory: $install_root"
+    layout=$(value "$marker" layout)
+    if [ "$layout" != versioned ]; then
+        [ -z "$layout" ] || fail "Unknown installation layout: $layout"
+        legacy=yes
+        legacy_commit=$(value "$marker" commit)
+        valid_commit "$legacy_commit" || fail 'Legacy installation has an invalid commit marker.'
+        [ -f "$install_root/bin/pi-console" ] && [ -d "$install_root/pi/node_modules" ] \
+            || fail 'Legacy installation is incomplete; leaving it unchanged.'
+    else
+        [ ! -L "$install_root/versions" ] && [ -d "$install_root/versions" ] || fail 'Invalid versions directory.'
+        for name in current; do
+            if [ -L "$install_root/$name" ]; then
+                link=$(readlink "$install_root/$name")
+                case "$link" in versions/*) valid_commit "${link#versions/}" || fail "Invalid $name link." ;; *) fail "Unmanaged $name link." ;; esac
+            elif [ -e "$install_root/$name" ]; then
+                fail "Refusing unmanaged path: $install_root/$name"
+            fi
+        done
     fi
 fi
 
-install_parent=$(dirname -- "$install_root")
-mkdir -p "$install_parent" "$bin_dir"
-staging_root=$(mktemp -d "$install_parent/.pi-console-install.XXXXXX")
-staged_source="$staging_root/source"
-backup_root=$(mktemp -d "$install_parent/.pi-console-backup.XXXXXX")
-backup_path="$backup_root/application"
-had_previous_install=no
-previous_moved=no
-swapped=no
-package_registered=no
-installation_finalized=no
-
+mkdir -p "$(dirname -- "$install_root")" "$bin_dir"
+staging=$(mktemp -d "$(dirname -- "$install_root")/.pi-console-install.XXXXXX")
+migration_started=no
+activation_done=no
 cleanup() {
-    status=$?
-    if [ "$status" -ne 0 ] && [ "$installation_finalized" = no ]; then
-        if [ "$swapped" = yes ]; then
-            rm -rf "$install_root"
+    local status=$?
+    if [ "$status" -ne 0 ] && [ "$migration_started" = yes ] && [ "$activation_done" = no ]; then
+        # Restore the original tree AND command paths on any activation failure.
+        # Its Pi registration has not been removed yet.
+        if [ ! -d "$staging/legacy" ] && [ -d "$install_root/versions/$legacy_commit" ]; then
+            mv -- "$install_root/versions/$legacy_commit" "$staging/legacy" || return
         fi
-        if [ "$previous_moved" = yes ] && [ -d "$backup_path" ]; then
-            mv "$backup_path" "$install_root"
-        fi
-        if [ "$package_registered" = yes ] && [ "$had_previous_install" = no ]; then
-            pi remove "$install_root/pi" >/dev/null 2>&1 || true
+        if [ -d "$staging/legacy" ]; then
+            rm -rf -- "$install_root"
+            mv -- "$staging/legacy" "$install_root" || return
+            for name in pi-console pi-stable; do
+                rm -f -- "$bin_dir/$name"
+                if [ -e "$staging/commands/$name" ] || [ -L "$staging/commands/$name" ]; then
+                    cp -P -- "$staging/commands/$name" "$bin_dir/$name" || return
+                fi
+            done
+        else
+            printf 'Could not locate the original installation; recovery files retained at %s.\n' "$staging" >&2
+            return
         fi
     fi
-    rm -rf "$backup_root" "$staging_root"
-    trap - EXIT
-    exit "$status"
+    rm -rf -- "$staging"
 }
 trap cleanup EXIT
+source_dir="$staging/source"
+
+# Generate stable wrappers now and preflight every destination before downloads.
+legacy_checkout=
+for name in pi-console pi-stable; do
+    case "$name" in
+        pi-console) target='current/bin/pi-console' ;;
+        pi-stable) target='current/bin/pi-shell' ;;
+    esac
+    {
+        printf '#!/usr/bin/env bash\n# Managed by the pi-console installer.\n'
+        printf 'exec %q "$@"\n' "$install_root/$target"
+    } >"$staging/$name"
+    chmod 755 "$staging/$name"
+    path="$bin_dir/$name"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        owned=no
+        if [ ! -L "$path" ] && [ -f "$path" ]; then
+            if cmp -s "$path" "$staging/$name"; then owned=yes; fi
+            if [ "$name" = pi-console ] && [ "$legacy" = yes ]; then
+                printf '#!/usr/bin/env bash\n# Managed by the pi-console installer.\nexec %q "$@"\n' \
+                    "$install_root/bin/pi-console" >"$staging/old-wrapper"
+                if cmp -s "$path" "$staging/old-wrapper"; then owned=yes; fi
+            fi
+        elif [ "$name" = pi-console ] && [ -L "$path" ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
+            # Only the exact symlink created by this checkout's old dev installer.
+            script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+            checkout=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+            if [ "$(readlink "$path")" = "$checkout/bin/pi-console" ]; then
+                owned=yes
+                legacy_checkout=$checkout
+            fi
+        fi
+        [ "$owned" = yes ] || fail "Refusing to replace an unrelated command: $path"
+    fi
+    if [ "$legacy" = yes ] && { [ -e "$path" ] || [ -L "$path" ]; }; then
+        mkdir -p "$staging/commands"
+        cp -P -- "$path" "$staging/commands/$name"
+    fi
+done
 
 if [ -n "$requested_version" ]; then
-    case "$requested_version" in
-        v*) install_ref=$requested_version ;;
-        *) install_ref="v$requested_version" ;;
-    esac
+    case "$requested_version" in v*) install_ref=$requested_version ;; *) install_ref="v$requested_version" ;; esac
 elif [ -n "$requested_ref" ]; then
     install_ref=$requested_ref
 else
-    release_response="$staging_root/latest-release.json"
-    http_status=$(curl -sS -L -o "$release_response" -w '%{http_code}' "$releases_api" || true)
-    case "$http_status" in
-        200)
-            install_ref=$(node - "$release_response" <<'NODE'
-const fs = require("node:fs");
-const release = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-if (typeof release.tag_name !== "string" || release.tag_name.length === 0) {
-  process.exit(1);
-}
+    http_status=$(curl -sS -L -o "$staging/release.json" -w '%{http_code}' "$releases_api") \
+        || fail 'Could not fetch the latest GitHub Release.'
+    [ "$http_status" = 200 ] || fail "No latest GitHub Release is available (HTTP $http_status); select --version or an explicit --ref."
+    install_ref=$(node - "$staging/release.json" <<'NODE'
+const release = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
+if (release.draft || release.prerelease || typeof release.tag_name !== "string" || !release.tag_name) process.exit(1);
 process.stdout.write(release.tag_name);
 NODE
-            )
-            ;;
-        404)
-            install_ref=main
-            printf '%s\n' 'No published release was found; installing the main branch.'
-            ;;
-        *)
-            printf 'Could not determine the latest release (GitHub returned HTTP %s).\n' "$http_status" >&2
-            printf '%s\n' 'Retry later or select a branch or tag with --ref.' >&2
-            exit 1
-            ;;
-    esac
+    ) || fail 'Invalid latest-release response.'
 fi
-
+case "$install_ref" in ''|-*|*$'\n'*|*$'\r'*) fail 'Invalid installation ref.' ;; esac
+git check-ref-format --branch "$install_ref" >/dev/null || fail 'Invalid branch or tag name.'
 printf 'Downloading pi-console ref %s...\n' "$install_ref"
-git clone --quiet --depth 1 --branch "$install_ref" "$repository" "$staged_source"
-installed_commit=$(git -C "$staged_source" rev-parse HEAD)
-installed_package_version=$(node - "$staged_source/pi/package.json" <<'NODE'
-const fs = require("node:fs");
-const packageJson = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-process.stdout.write(packageJson.version);
-NODE
-)
+git clone --quiet --depth 1 --branch "$install_ref" "$repository" "$source_dir"
+commit=$(git -C "$source_dir" rev-parse HEAD)
+valid_commit "$commit" || fail 'Git returned an invalid commit.'
+[ -f "$source_dir/bin/pi-console" ] && [ -f "$source_dir/bin/pi-shell" ] \
+    && [ -f "$source_dir/bin/channel-env.sh" ] || fail 'Selected ref does not contain the channel-aware launchers.'
+printf '%s\n' 'Installing release dependencies...'
+(cd "$source_dir/pi" && npm ci --omit=dev)
+[ -d "$source_dir/pi/node_modules" ] || fail 'npm did not create the dependency directory.'
+rm -rf -- "$source_dir/.git"
+printf 'ref=%s\ncommit=%s\nsource=%s\n' "$install_ref" "$commit" "$repository" >"$source_dir/.pi-console-install"
 
-printf '%s\n' 'Installing Pi package dependencies...'
-(cd "$staged_source/pi" && npm ci --omit=dev)
-rm -rf "$staged_source/.git"
-cat >"$staged_source/.pi-console-install" <<EOF
-ref=$install_ref
-version=$installed_package_version
-commit=$installed_commit
-source=$repository
-EOF
-
-staged_launcher="$staging_root/pi-console"
-printf '#!/usr/bin/env bash\n%s\nexec %q "$@"\n' \
-    "$launcher_marker" "$install_root/bin/pi-console" >"$staged_launcher"
-chmod 755 "$staged_launcher"
-
-previous_ref=
-previous_commit=
-if [ -f "$marker_path" ]; then
-    had_previous_install=yes
-    previous_ref=$(awk -F= '$1 == "ref" { print substr($0, index($0, "=") + 1); exit }' "$marker_path")
-    previous_commit=$(awk -F= '$1 == "commit" { print substr($0, index($0, "=") + 1); exit }' "$marker_path")
-    mv "$install_root" "$backup_path"
-    previous_moved=yes
+# Keep legacy registrations intact until filesystem activation succeeds. During
+# migration the compatibility package link keeps ordinary Pi usable as well.
+if [ "$legacy" = yes ]; then
+    mv -- "$install_root" "$staging/legacy"
+    migration_started=yes
 fi
-mv "$staged_source" "$install_root"
-swapped=yes
-
-printf '%s\n' 'Registering the global Pi package...'
-pi install "$install_root/pi"
-package_registered=yes
-mv "$staged_launcher" "$launcher_path"
-installation_finalized=yes
-swapped=no
-if [ "$previous_moved" = yes ]; then
-    rm -rf "$backup_path"
-    previous_moved=no
+mkdir -p "$install_root/versions"
+if [ "$legacy" = yes ]; then
+    mv -- "$staging/legacy" "$install_root/versions/$legacy_commit"
+    ln -s "versions/$legacy_commit" "$install_root/current"
+    ln -s current/pi "$install_root/pi"
 fi
-
-configure_tmux=no
-case "$tmux_mode" in
-    yes) configure_tmux=yes ;;
-    no) ;;
-    ask)
-        answer=
-        if printf 'Add the pi-console integration to your tmux configuration? [y/N] ' >/dev/tty 2>/dev/null \
-            && IFS= read -r answer </dev/tty 2>/dev/null; then
-            case "$answer" in
-                y|Y|yes|YES|Yes) configure_tmux=yes ;;
-            esac
-        fi
-        ;;
-esac
-
-if [ "$configure_tmux" = yes ]; then
-    home_tmux_config="$HOME/.tmux.conf"
-    xdg_tmux_config="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
-    if [ -f "$home_tmux_config" ]; then
-        tmux_config=$home_tmux_config
-    elif [ -f "$xdg_tmux_config" ]; then
-        tmux_config=$xdg_tmux_config
-    else
-        tmux_config=$home_tmux_config
-    fi
-    tmux_marker='# >>> pi-console >>>'
-    tmux_line='if-shell "command -v pi-console >/dev/null 2>&1" "run-shell '\''pi-console --tmux setup'\''"'
-    if [ -f "$tmux_config" ] && grep -Fqx "$tmux_line" "$tmux_config"; then
-        printf 'tmux integration is already present in %s.\n' "$tmux_config"
-    elif [ -f "$tmux_config" ] && grep -Fqx "$tmux_marker" "$tmux_config"; then
-        printf 'The pi-console block in %s is incomplete; leaving it unchanged.\n' "$tmux_config" >&2
-    else
-        mkdir -p "$(dirname -- "$tmux_config")"
-        if [ -f "$tmux_config" ]; then
-            tmux_backup=$(mktemp "$tmux_config.pi-console.bak.XXXXXX")
-            cp "$tmux_config" "$tmux_backup"
-            printf 'Backed up the tmux configuration to %s.\n' "$tmux_backup"
-        fi
-        cat >>"$tmux_config" <<'EOF'
-
-# >>> pi-console >>>
-if-shell "command -v pi-console >/dev/null 2>&1" "run-shell 'pi-console --tmux setup'"
-# <<< pi-console <<<
-EOF
-        printf 'Added the tmux integration to %s.\n' "$tmux_config"
-    fi
-fi
-
-if [ -n "$previous_commit" ] && [ "$previous_commit" = "$installed_commit" ]; then
-    printf '\npi-console is already current at %s (%s).\n' "$install_ref" "$installed_commit"
-elif [ -n "$previous_commit" ]; then
-    printf '\nUpdated pi-console from %s (%s) to %s (%s).\n' \
-        "${previous_ref:-unknown}" "$previous_commit" "$install_ref" "$installed_commit"
+printf 'layout=versioned\nsource=%s\n' "$repository" >"$staging/root-marker"
+mv -f -- "$staging/root-marker" "$install_root/.pi-console-install"
+if [ -e "$install_root/versions/$commit" ] || [ -L "$install_root/versions/$commit" ]; then
+    existing="$install_root/versions/$commit"
+    [ ! -L "$existing" ] && [ -d "$existing" ] && [ ! -L "$existing/.pi-console-install" ] \
+        && [ -f "$existing/.pi-console-install" ] && [ "$(value "$existing/.pi-console-install" commit)" = "$commit" ] \
+        && [ "$(value "$existing/.pi-console-install" source)" = "$repository" ] \
+        || fail "Refusing an unowned version directory: $existing"
+    # Reinstalling a tag for this commit updates its displayed identity.
+    cp "$source_dir/.pi-console-install" "$staging/version-marker"
+    mv -f -- "$staging/version-marker" "$existing/.pi-console-install"
 else
-    printf '\nInstalled pi-console %s (%s).\n' "$install_ref" "$installed_commit"
+    mv -- "$source_dir" "$install_root/versions/$commit"
 fi
-printf 'Command: %s\n' "$launcher_path"
-printf 'Application: %s\n' "$install_root"
-printf '%s\n' 'Restart running Pi/Neovim processes before using the updated extensions.'
+# Activate only after downloads and dependency installation have succeeded.
+ln -s "versions/$commit" "$staging/current"
+case "$(uname -s)" in
+    Darwin) mv -fh -- "$staging/current" "$install_root/current" ;;
+    *) mv -fT -- "$staging/current" "$install_root/current" ;;
+esac
+for name in pi-console pi-stable; do
+    mv -f -- "$staging/$name" "$bin_dir/$name"
+done
+activation_done=yes
+# Remove only known old registrations, not other user packages. If this fails,
+# the selected release and compatibility package remain usable; retry migration.
+if [ -n "$legacy_checkout" ]; then remove_registration "$legacy_checkout/pi"; fi
+if [ "$legacy" = yes ] || [ -L "$install_root/pi" ]; then
+    [ "$(readlink "$install_root/pi")" = current/pi ] || fail 'Unmanaged compatibility package link.'
+    remove_registration "$install_root/pi"
+    rm -- "$install_root/pi"
+fi
+
+printf '\nInstalled stable commands in %s.\nApplication: %s\n' "$bin_dir" "$install_root"
+printf '%s\n' 'To install another release, rerun install.sh --version <TAG>.'
+printf '%s\n' 'Restart running Pi/Neovim processes to use the selected version.'
+printf '\nTmux selection was not changed. To make stable your tmux default,\nsave that choice, and apply the bindings now, run:\n\n  pi-console tmux setup\n'

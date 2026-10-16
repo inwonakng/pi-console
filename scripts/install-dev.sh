@@ -1,40 +1,39 @@
 #!/usr/bin/env bash
-
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 project_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+. "$script_dir/install-common.sh"
 bin_dir=${PI_CONSOLE_BIN_DIR:-"$HOME/.local/bin"}
-command_path="$bin_dir/pi-console"
+bin_dir=${bin_dir%/}
+validate_directory "$bin_dir"
+[ "$#" -eq 0 ] || fail 'Usage: install-dev.sh'
 
 missing=
 for command in nvim pi tmux node npm git fzf cargo cc realpath; do
-    if ! command -v "$command" >/dev/null 2>&1; then
-        missing="$missing $command"
-    fi
+    if ! command -v "$command" >/dev/null 2>&1; then missing="$missing $command"; fi
 done
-if [ -n "$missing" ]; then
-    printf 'Missing required commands:%s\n' "$missing" >&2
-    exit 1
-fi
+[ -z "$missing" ] || fail "Missing required commands:$missing"
+[ -f "$project_root/bin/pi-shell" ] || fail 'Missing terminal launcher: bin/pi-shell'
+
+staging=$(mktemp -d "${TMPDIR:-/tmp}/pi-console-dev.XXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
+for name in pi-console-dev pi-dev; do
+    case "$name" in pi-console-dev) target=pi-console ;; pi-dev) target=pi-shell ;; esac
+    dev_wrapper "$project_root/bin/$target" >"$staging/$name"
+    chmod 755 "$staging/$name"
+    check_wrapper "$bin_dir/$name" "$staging/$name"
+done
 
 (cd "$project_root/pi" && npm ci)
-pi install "$project_root/pi"
-
+remove_old_registration "$project_root/pi"
 mkdir -p "$bin_dir"
-if [ -L "$command_path" ]; then
-    if [ "$(readlink "$command_path")" != "$project_root/bin/pi-console" ]; then
-        printf 'Refusing to replace unrelated symlink: %s\n' "$command_path" >&2
-        exit 1
-    fi
-elif [ -e "$command_path" ]; then
-    printf 'Refusing to replace existing path: %s\n' "$command_path" >&2
-    exit 1
-else
-    ln -s "$project_root/bin/pi-console" "$command_path"
-fi
+for name in pi-console-dev pi-dev; do
+    mv -f -- "$staging/$name" "$bin_dir/$name"
+done
+remove_checkout_link "$bin_dir/pi-console" "$project_root/bin/pi-console"
 
-printf '\nDevelopment install complete. Load the tmux integration with:\n\n'
-printf '  if-shell "command -v pi-console >/dev/null 2>&1" "run-shell '\''pi-console --tmux setup'\''"\n\n'
-printf 'The Pi package and pi-console command use this checkout directly.\n'
-printf 'Restart running Pi/Neovim processes after edits.\n'
+printf '\nDevelopment commands: %s/pi-console-dev and %s/pi-dev\n' "$bin_dir" "$bin_dir"
+printf 'Stable commands and their selected release were left unchanged.\n'
+printf 'Tmux selection was not changed. To make dev your tmux default,\nsave that choice, and apply the bindings now, run:\n\n  pi-console-dev tmux setup\n\n'
+printf 'The launchers use this checkout and scoped Pi extensions. Restart running sessions after edits.\n'

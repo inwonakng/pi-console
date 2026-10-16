@@ -4,22 +4,34 @@ set -eu
 
 usage() {
     printf 'Usage: %s [--overview | --sidebar | --session PATH]\n' "${0##*/}" >&2
-    printf '       %s --tmux {setup|toggle|new|overview|sidebar} [ARGS...]\n' "${0##*/}" >&2
+    printf '       %s tmux {setup|toggle|new|overview|sidebar} [ARGS...]\n' "${0##*/}" >&2
+    printf '       %s --version\n' "${0##*/}" >&2
     exit 2
 }
 
 script_path=$(realpath -- "${BASH_SOURCE[0]}")
 script_dir=$(dirname -- "$script_path")
 app_root=$(dirname -- "$script_dir")
+source "$script_dir/channel-env.sh"
+if [ "$#" -eq 1 ] && [ "$1" = --version ]; then
+    pi_console_version
+    exit 0
+fi
 
-if [ "${1-}" = "--tmux" ]; then
+# Old persisted config entries must only apply bindings, never rewrite config
+# while tmux is sourcing it. New user-facing commands use `tmux setup`.
+if [ "$#" -eq 2 ] && [ "$1" = --tmux ] && [ "$2" = setup ]; then
+    exec bash "$app_root/tmux/scripts/setup.sh" --apply
+fi
+
+if [ "${1-}" = "tmux" ]; then
     [ "$#" -ge 2 ] || usage
     action=$2
     shift 2
     case "$action" in
         setup)
             [ "$#" -eq 0 ] || usage
-            exec tmux source-file "$app_root/tmux/pi-console.conf"
+            exec bash "$app_root/tmux/scripts/setup.sh"
             ;;
         toggle)
             exec bash "$app_root/tmux/scripts/toggle-popup-agents.sh" "$@"
@@ -40,7 +52,6 @@ if [ "${1-}" = "--tmux" ]; then
 fi
 
 unset PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR PI_CONSOLE_SESSION
-export NVIM_APPNAME=pi-console-nvim
 
 case "$#" in
     0)
@@ -68,6 +79,9 @@ trap 'rm -rf -- "$restart_dir"' EXIT
 export PI_CONSOLE_RESTART_FILE="$restart_dir/request.json"
 
 while :; do
+    # A full restart takes a fresh build snapshot, including checkout edits.
+    source "$script_dir/channel-env.sh"
+    export NVIM_APPNAME="$PI_CONSOLE_NVIM_APPNAME"
     if nvim -u "$app_root/nvim/init.lua"; then
         status=0
     else

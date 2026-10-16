@@ -14,6 +14,7 @@ fi
 
 target=$1
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+source "$script_dir/../../bin/channel-env.sh"
 window=$(tmux display-message -p -t "$target" '#{window_id}')
 # Serialize toggles and resize hooks for this window, not the entire server.
 lock="pi-sidebar-${window#@}"

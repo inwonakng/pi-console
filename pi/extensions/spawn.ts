@@ -1268,7 +1268,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
 
   const startRun = (run: SpawnRun, params: { model?: string; timeoutSeconds?: number }) => {
     const binary = process.env.PI_BINARY || "pi";
-    const argv = [binary, "--mode", "rpc", "--session-dir", join(run.runDir, "sessions")];
+    const argv = [binary, "--mode", "rpc", "-e", resolve(dirname(fileURLToPath(import.meta.url)), ".."), "--session-dir", join(run.runDir, "sessions")];
     const model = params.model ?? (run.profile?.model && run.profile.model !== "inherit" ? run.profile.model : undefined);
     if (model) {
       argv.push("--model", model);

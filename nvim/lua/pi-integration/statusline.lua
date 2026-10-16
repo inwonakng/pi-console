@@ -1,5 +1,6 @@
 local buffer = require("pi-integration.utils.buffer")
 local diff_stats = require("pi-integration.diff-stats")
+local build_info = require("pi-integration.build-info")
 
 local M = {}
 
@@ -93,7 +94,7 @@ local function format_session_stats(state)
 		primary_text, primary_statusline = "tokens: --", statusline_escape("tokens: --")
 	end
 	local secondary_text, secondary_statusline = format_stat_parts(secondary_parts)
-	return primary_text, primary_statusline, secondary_text, secondary_statusline
+	return primary_text, primary_statusline, secondary_text, secondary_statusline, secondary_parts
 end
 
 local function truncate_plain_to_width(text, width)
@@ -440,18 +441,22 @@ function M.render_secondary(ctx)
 	local activity_label = activity_statusline_label(state)
 	local spawn_label = spawn_statusline_label(state)
 	local left_text = activity_label .. spawn_label
-	local _, _, stats_text, stats_statusline = format_session_stats(state)
-	local right_plain = stats_text ~= "" and (" " .. stats_text .. " ") or ""
-	local right_width = vim.fn.strdisplaywidth(right_plain)
 	local width = vim.api.nvim_win_get_width(state.status_win)
-	local right_label = stats_text ~= "" and ("%#PiUsageStats# " .. stats_statusline .. "%#PiUsageStats# ") or ""
-
-	if right_width >= width then
-		-- Let Neovim truncate styled segments without discarding their colors.
-		return right_label .. "%*"
+	local build_label = build_info.statusline_label(width)
+	local build_width = vim.fn.strdisplaywidth(build_label)
+	local _, _, _, _, parts = format_session_stats(state)
+	parts = parts or {}
+	local stats_text, stats_statusline = format_stat_parts(parts)
+	-- Drop less-important stats from the left, keeping cost nearest the build.
+	while #parts > 0 and vim.fn.strdisplaywidth(stats_text) + 1 + build_width > width do
+		table.remove(parts, 1)
+		stats_text, stats_statusline = format_stat_parts(parts)
 	end
+	local right_width = build_width + (stats_text ~= "" and (vim.fn.strdisplaywidth(stats_text) + 1) or 0)
+	local right_label = (stats_text ~= "" and (stats_statusline .. "%#PiStatusSeparator#·") or "")
+		.. statusline_text(build_label, build_info.highlight())
 
-	local gap_width = left_text ~= "" and right_plain ~= "" and 3 or 0
+	local gap_width = left_text ~= "" and 3 or 0
 	local available_left_width = math.max(0, width - right_width - gap_width)
 	local visible_left = truncate_plain_to_width(left_text, available_left_width)
 	local left_label = statusline_text(visible_left, "PiUsageStats")

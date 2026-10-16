@@ -56,7 +56,7 @@ in view.
 
 ## Project trust
 
-The bundled global Pi extension owns trust checks and metadata. Neovim only
+The selected installation's bundled Pi extension owns trust checks and metadata. Neovim only
 runs its startup handshake, displays standard RPC dialogs, and restarts Pi when
 requested. An undecided project starts untrusted; agent work and automatic
 workspace restoration wait for setup. Approval restarts Pi before loading project
@@ -83,8 +83,8 @@ check the destination before switching; the session picker and new-session actio
 restart RPC to avoid reusing another conversation's cached trust. Finish or abort
 active work before changing conversations.
 
-The global pi-console package must be enabled (verified with Pi 1.3.0). Personal
-trust handlers that run before ours retain Pi's precedence. There are no
+The launchers explicitly load their matching pi-console package (verified against
+Pi 1.3.0). Personal trust handlers that run before ours retain Pi's precedence. There are no
 `--approve` overrides or separate Neovim-side JavaScript helpers. Trust setup
 errors keep agent work blocked rather than implicitly approving resources.
 Project trust controls resource loading, not tool permissions or filesystem access.
@@ -216,42 +216,116 @@ Install the latest published release:
 curl -fsSL https://raw.githubusercontent.com/inwonakng/pi-console/main/scripts/install.sh | bash
 ```
 
-Until the first release is published, the installer reports that it is using
-the `main` branch. It installs the application under
-`~/.local/share/pi-console`, registers `pi/` as a global Pi package, and writes
-the `pi-console` command to `~/.local/bin`. Set `XDG_DATA_HOME`,
-`PI_CONSOLE_INSTALL_DIR`, or `PI_CONSOLE_BIN_DIR` to override those locations.
+The installer requires a published release by default; it never silently falls
+back to `main`. Applications and npm dependencies live under
+`~/.local/share/pi-console/versions/<commit>`, with `current` pointing to the
+installed version. The commands installed under `~/.local/bin` are:
 
-Running the installer again updates the existing managed installation. To
-select a release or another Git ref explicitly:
+| Interface | Installed release | Development checkout |
+|---|---|---|
+| Neovim | `pi-console` | `pi-console-dev` |
+| Pi terminal UI | `pi-stable` | `pi-dev` |
+
+Both stable interfaces use the same selected version. Set `XDG_DATA_HOME`,
+`PI_CONSOLE_INSTALL_DIR`, or `PI_CONSOLE_BIN_DIR` to override installation paths.
+Running the installer again explicitly updates stable. From a checkout:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/inwonakng/pi-console/main/scripts/install.sh | bash -s -- --version v0.1.0
-curl -fsSL https://raw.githubusercontent.com/inwonakng/pi-console/main/scripts/install.sh | bash -s -- --ref main
+bash scripts/install.sh --version v2026.10.05.1
+# Deliberately install a candidate branch/tag instead of a release:
+bash scripts/install.sh --ref main
 ```
 
-The installer offers to add the tmux integration when it has access to an
-interactive terminal. Pass `--configure-tmux` or `--no-configure-tmux` to make
-that choice non-interactively.
+An explicit `--ref` selects a candidate, not evidence that it works. Pushing,
+publishing, and editing development code never automatically update stable.
+Neither installer registers the bundled Pi package globally.
+
+### Recovery and version identity
+
+Use dev daily. If it breaks, install the latest release with `bash scripts/install.sh`
+and run `pi-console` or `pi-stable`. If already installed, simply launch stable.
+Each starts a fresh process instead of focusing a broken dev view. To return to a
+specific working release, use the same installer:
+
+```sh
+bash scripts/install.sh --version v2026.10.05.1
+pi-console                 # or pi-stable
+```
+
+Installation selects the version for both stable commands, not existing processes
+or your checkout. Installing requires network access; first frontend launch may
+also download plugins/parsers. Existing windows keep their original revision
+until closed or restarted. Old application/plugin directories are left untouched
+so running sessions are not disrupted; there is no separate version manager or
+previous-version selection.
+
+The conversation footer shows the build after cost: `$1.24·DEV abc1234*` or
+`$1.24·2026.10.05.1`. Overview/sidebar statuslines identify the viewer; dev
+conversation rows have a `DEV` badge. Narrow views shorten the dev label to `DEV`.
+The star records a dirty checkout at startup. `:PiConsoleVersion` and every
+launcher's `--version` show channel, commit, and installation path. The UI reports
+its startup identity, not a newer commit edited beneath an already-running process.
+
+Credentials, personal Pi settings, and conversation history remain shared. Do not
+edit the same conversation in two processes. When it is open in another
+installation, close that frontend before resuming it here; explicitly selecting
+an open overview/sidebar row can still focus it. Pi, Node, Neovim, personal
+packages, and persisted user data are not rolled back. Back up shared data before
+incompatible format changes.
+
+### Migrating an existing setup
+
+Run `scripts/install-dev.sh` from your checkout, then install the first release.
+The dev installer removes only the old exact checkout-owned `pi-console` symlink
+and local Pi package registration. Until a release is installed, there may be no
+`pi-console` fallback. Other Pi packages and the underlying `pi` executable are
+left alone. Plain `pi` no longer automatically loads pi-console's bundled tools;
+use `pi-stable` or `pi-dev` for them.
+
+An old managed, unversioned installation is preserved under `versions/<commit>`.
+Install a release containing the channel-aware launchers; older revisions relied
+on a global registration and lack `pi-stable`. Running sessions are not killed;
+restart them after migration.
+
+Neither installer edits tmux configuration or changes the selected channel. Each
+prints the matching setup command.
 
 ## tmux integration
 
-The installer can add this path-independent line to the main tmux
-configuration:
+Choose your tmux default with **one command**:
 
-```tmux
-if-shell "command -v pi-console >/dev/null 2>&1" "run-shell 'pi-console --tmux setup'"
+```sh
+pi-console-dev tmux setup   # development
+# Or, after installing a release:
+pi-console tmux setup       # stable
 ```
 
-The command resolves its application directory and sources the matching tmux
-keybindings, modified-key settings, and focus reporting for completion badges.
-It does not enable graphics passthrough or install graphics-depth hooks. Reload
-tmux; when first enabling focus reporting, detach and reattach existing clients.
-Then use:
+Setup saves your choice in the main tmux configuration and immediately applies
+the bindings to the current/default running server. If none is running, it saves
+the choice for next startup without starting a server. No manual config edit or
+reload is needed. Run the other channel's setup command to switch back; installing
+or updating either application alone never changes this choice.
+
+Setup backs up changed configuration and maintains one `pi-console` block at the
+end of `~/.tmux.conf` (or the existing `$XDG_CONFIG_HOME/tmux/tmux.conf`). Dotfile
+symlinks are preserved. Old installer blocks are replaced; unrelated settings and
+included files are left alone. The final block overrides older bindings loaded
+by includes. Custom configurations started with `tmux -f` must source this main
+configuration to load the saved choice. Startup only applies bindings; it does
+not rerun configuration editing.
+
+The keys stay the same. Dev uses `agents-dev`; each installed commit uses
+`agents-<commit-prefix>`, preventing recovery from attaching to a different
+build's broken overview. Viewers can still list both channels. Stable setup
+follows the installed `current` selection after installing another release.
+
+Setup also enables modified-key settings and focus reporting, but not graphics
+passthrough or graphics-depth hooks. When first enabling focus reporting, detach
+and reattach existing clients. Then use:
 
 | Binding | Action |
 |---|---|
-| `<prefix>g` | Toggle the `agents` popup |
+| `<prefix>g` | Toggle the selected channel's agents popup |
 | `<prefix>G` | Start a conversation in the current pane's directory |
 | `<prefix>o` | Open or focus the persistent overview; close the popup if already focused |
 | `<prefix>O` | Toggle the compact overview sidebar in the current window |
@@ -271,9 +345,11 @@ remains a full-height left pane. If you rearrange it into another layout, tmux
 controls its size until you toggle it off and on. It does not follow you to
 other windows or sessions. Native tmux zoom hides other panes as usual.
 
-For a command-line toggle, use `pi-console --tmux sidebar "$TMUX_PANE"`.
-After updating, run `pi-console --tmux setup` to load the new binding, and
-restart existing frontends to pick up status-title colors.
+The `tmux` subcommands are `setup`, `toggle`, `new`, `overview`, and `sidebar`.
+Only `setup` is normally needed manually; the keybindings use the other actions.
+For example, `pi-console-dev tmux sidebar "$TMUX_PANE"` toggles the dev sidebar.
+After updates, rerun your chosen channel's `tmux setup` to apply changed bindings;
+restart existing frontends to pick up UI changes.
 
 Conversation windows created by the launcher use a fixed two-cell state icon
 instead of the `pi` window name (requires a Nerd Font):
@@ -351,7 +427,7 @@ that do not already configure it, explicitly source
 
 ```tmux
 # Default managed installation; adjust for a custom install directory or checkout.
-source-file "$HOME/.local/share/pi-console/tmux/graphics.conf"
+source-file "$HOME/.local/share/pi-console/current/tmux/graphics.conf"
 ```
 
 This optional file enables `allow-passthrough` and focus events globally and
@@ -366,7 +442,7 @@ optional file; do not install both copies of the hooks.
 After upgrading from the previously automatic setup, choose one of those
 locations for the graphics settings. Reload your main tmux config and reopen
 the popup so the client hooks run. Existing hooks remain in a running server
-until removed or the server exits; reloading only `pi-console --tmux setup`
+until removed or the server exits; running only `pi-console tmux setup`
 does not remove them. Without an explicit graphics setup, a fresh server will
 no longer enable passthrough automatically.
 
@@ -414,14 +490,17 @@ Only the generated directory is removed, not its configured parent.
 
 pi-console uses the existing Pi agent directory, including credentials,
 instructions, skills, prompts, models, and other packages. Its dedicated
-Neovim application is named `pi-console-nvim`, so its Neovim configuration,
-data, state, and cache remain separate from both the installed application and
-the user's normal Neovim setup.
+Neovim application uses `pi-console-dev-nvim` for development and
+`pi-console-release-<commit>` for each installed revision. Configuration, plugin
+data, state, and cache are separate from each other and normal Neovim. Release
+launches use the locked `nvim-extras` plugin, never the local development override.
 
 ## Bundled Pi extensions
 
-The global Pi package loads these extensions in pi-console and ordinary Pi
-sessions:
+Each frontend/terminal launcher explicitly loads its matching package for that
+process, including its subagents. These extensions are available through
+`pi-console`, `pi-console-dev`, `pi-stable`, and `pi-dev`, not automatically through
+plain `pi`:
 
 | Extension | Capability |
 |---|---|
@@ -569,15 +648,12 @@ Network permission does not fix DNS, TLS, or server errors. Detection is best-ef
 suppressed errors may not be observable. `readonly` and noninteractive sessions
 do not prompt for additional access.
 
-The package registers the tool names `bash`, `spawn`, `spawn_control`, and
-`workspace`. Pi resolves duplicate tool names by extension precedence and then
-registration order: project and
-user extension resources take precedence over package resources, and the first
-package registration wins between packages. Users can therefore override a
-bundled tool with a project or user extension, or reorder package declarations
-when two packages register the same name. `pi config` can disable individual
-package extensions, although disabling an extension also disables the related
-pi-console feature.
+The bundle registers `bash`, `spawn`, `spawn_control`, and `workspace`. Other
+personal/trusted-project resources still load; avoid competing tool registrations.
+Do not globally register another pi-console checkout or release: explicit loading
+is additive, not a replacement for another copy. Remove additional manually
+registered copies with `pi remove <exact-source>`. Installers migrate only the
+registrations whose ownership they can establish.
 
 The profiles under `pi/agents/` are defaults used by the bundled `spawn`
 extension, not a standard Pi resource directory. Additional profiles can be
@@ -596,9 +672,46 @@ and evolving design decisions in the main session.
 
 ## Development
 
-For a checkout-based setup, run [`scripts/install-dev.sh`](scripts/install-dev.sh)
-from the repository root. It registers the local Pi package and links
-`pi-console` to the checkout. Restart running Pi/Neovim processes after edits.
+Run [`scripts/install-dev.sh`](scripts/install-dev.sh) from the repository root.
+It installs `pi-console-dev` and `pi-dev` wrappers and checkout npm dependencies,
+without updating stable. Restart processes after edits; reinstall when dependencies
+or installer-managed launchers change. `scripts/uninstall-dev.sh` removes only
+this checkout's development commands and old registration.
+
+### Publishing a release
+
+Tags use `vYYYY.MM.DD.N`, starting at 1 each day. The npm package version remains
+separate; four-part application tags are not npm versions. From a clean `main`
+checkout already pushed to origin, with authenticated GitHub CLI (`gh`):
+
+```sh
+scripts/release.sh
+# Or choose the tag explicitly:
+scripts/release.sh v2026.10.05.2
+```
+
+The script fetches tags, suggests the next counter, shows the commit, and asks you
+to type the tag before creating an annotated tag, pushing it, and publishing the
+latest GitHub Release. Tags are immutable. It does not publish npm packages or
+update stable. If publishing fails after pushing the tag, finish creating the
+Release for that existing tag through GitHub/`gh`; never move or replace it.
+
+Before releasing, use dev for normal work and manually exercise:
+
+- startup and the changed behavior;
+- prompting, streaming, tool execution, and approvals;
+- session resume, frontend/Pi restart, and subagents;
+- overview/sidebar navigation, dev badges, and version identity;
+- stable startup while dev is broken, and installing a specified working release.
+
+Then publish. Install a release when needed with `scripts/install.sh` (latest) or
+`scripts/install.sh --version <TAG>`. Installing at failure time needs network
+access; installing beforehand provides an offline fallback. Run `pi-console`
+directly for recovery, or `pi-console tmux setup` to also switch your shortcuts.
+Return to dev with `pi-console-dev tmux setup`. No extra known-good registry or
+promotion step is needed.
+Diagnose regressions through stable while using a separate Git worktree and
+`git bisect` between the working and failing revisions.
 
 ## License
 

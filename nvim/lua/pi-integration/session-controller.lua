@@ -122,7 +122,7 @@ function M.sync(ctx, options)
 				end
 			end
 			if not state.command_sources["pi-trust-setup"] then
-				fail_sync("The pi-console project trust extension is missing; enable or update the global pi-console package.")
+				fail_sync("The pi-console project trust extension is missing; check this installation's bundled Pi package and restart through its launcher.")
 				return
 			end
 			state.trust_status = nil

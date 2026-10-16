@@ -3,6 +3,7 @@ local runtime = require("pi-integration.runtime")
 local sessions = require("pi-integration.sessions")
 local pins = require("pi-integration.session-pins")
 local statusline = require("pi-integration.statusline")
+local build_info = require("pi-integration.build-info")
 local session_navigation = require("pi-integration.session-navigation")
 local M = {}
 local ns = vim.api.nvim_create_namespace("pi-overview")
@@ -81,8 +82,15 @@ local function scratch(name)
 	return buf
 end
 
+function M.render_statusline()
+	local win = vim.g.statusline_winid or vim.api.nvim_get_current_win()
+	return build_info.statusline(vim.api.nvim_win_get_width(win), {
+		" 󰕮", "Enter: open/focus", "p: pin", "dd: kill", "/: filter", "c: clear", "r: refresh", "<leader>?: keys",
+	})
+end
+
 local function window_options(win, statusline)
-	for name, value in pairs({ number = false, relativenumber = false, signcolumn = "no", wrap = false, spell = false, fillchars = "stl:─,stlnc:─", statusline = statusline .. "%#PiPaneBorder#%=" }) do
+	for name, value in pairs({ number = false, relativenumber = false, signcolumn = "no", wrap = false, spell = false, fillchars = "stl:─,stlnc:─", statusline = statusline }) do
 		vim.api.nvim_set_option_value(name, value, { win = win })
 	end
 end
@@ -95,13 +103,13 @@ function M.open(config)
 	local list_buf = scratch("pi://overview")
 	local list_win = vim.api.nvim_get_current_win()
 	vim.api.nvim_win_set_buf(list_win, list_buf)
-	window_options(list_win, "%#PiOverviewTitle# 󰕮%#PiOverviewStatusLine# · Enter: open/focus · p: pin · dd: kill · /: filter · c: clear · r: refresh · <leader>?: keys ")
+	window_options(list_win, "%!v:lua.require('pi-integration.overview').render_statusline()")
 	vim.wo[list_win].cursorline = true
 	vim.cmd("botright 9split")
 	local detail_win = vim.api.nvim_get_current_win()
 	local detail_buf = scratch("pi://overview-details")
 	vim.api.nvim_win_set_buf(detail_win, detail_buf)
-	window_options(detail_win, "%#PiOverviewStatusLine# Selected conversation ")
+	window_options(detail_win, "%#PiOverviewStatusLine# Selected conversation %#PiPaneBorder#%=")
 	vim.wo[detail_win].cursorline = false
 	vim.wo[detail_win].wrap = true
 	vim.wo[detail_win].winfixheight = true
@@ -134,6 +142,11 @@ function M.open(config)
 				"",
 				" Status:    " .. text(entry.status) .. activity,
 			}
+			if type(entry.build) == "table" and (entry.build.channel == "dev" or entry.build.channel == "stable") then
+				table.insert(lines, " Build:     " .. build_info.detail_text(entry.build))
+			elseif entry.channel == "dev" or entry.channel == "stable" then
+				table.insert(lines, " Build:     " .. (entry.channel == "dev" and "DEV" or "stable"))
+			end
 			if waiting then
 				table.insert(lines, " Request:   " .. (text(waiting.label) ~= "" and text(waiting.label) or "Input requested"))
 				table.insert(lines, " Question:  " .. (text(waiting.question) ~= "" and text(waiting.question) or "Pi needs input."))
@@ -205,6 +218,7 @@ function M.open(config)
 		local indicator_prefix = " " .. column("", 13) .. "  "
 		local indicator_spans = {}
 		local title_start_cols = {}
+		local badge_start_cols = {}
 		local heading_rows = {}
 		for _, section in ipairs({ { title = " Pinned", entries = pinned_entries }, { title = "Sessions", entries = regular_entries } }) do
 			if #section.entries > 0 then
@@ -224,8 +238,10 @@ function M.open(config)
 					local indicators, spans = indicator_columns(entry)
 					local row_prefix = " " .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. "  "
 					indicator_spans[row] = spans
-					title_start_cols[row] = #row_prefix
-					table.insert(lines, row_prefix .. (entry.pinned and " " or "") .. text(entry.title))
+					local badge = build_info.is_dev(entry) and "DEV " or ""
+					badge_start_cols[row] = badge ~= "" and #row_prefix or nil
+					title_start_cols[row] = #row_prefix + #badge
+					table.insert(lines, row_prefix .. badge .. (entry.pinned and " " or "") .. text(entry.title))
 					if not nearest_row or math.abs(row - view.lnum) < math.abs(nearest_row - view.lnum) then
 						nearest_row = row
 					end
@@ -260,6 +276,11 @@ function M.open(config)
 				vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, #indicator_prefix + span.start_col, {
 					end_col = #indicator_prefix + span.end_col,
 					hl_group = span.highlight,
+				})
+			end
+			if badge_start_cols[row] then
+				vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, badge_start_cols[row], {
+					end_col = badge_start_cols[row] + 3, hl_group = "PiBuildDev",
 				})
 			end
 			vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, title_start_cols[row], {

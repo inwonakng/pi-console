@@ -1,5 +1,6 @@
 local json = require("pi-integration.utils.json")
 local icons = require("pi-integration.status-icons")
+local build_info = require("pi-integration.build-info")
 local M = {}
 local option = "@pi_console"
 local tab_option = "@pi_console_tab"
@@ -161,7 +162,8 @@ function M.launch(launcher, cwd, path)
 		shell_command = shell_command .. " --session " .. vim.fn.shellescape(path)
 	end
 	local name = tab_name("Starting")
-	local target, err = command({ "new-window", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}", "-t", "=agents:", "-n", name, "-c", cwd, shell_command })
+	local session = vim.env.PI_CONSOLE_TMUX_SESSION or "agents-dev"
+	local target, err = command({ "new-window", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}", "-t", "=" .. session .. ":", "-n", name, "-c", cwd, shell_command })
 	if not target then
 		return nil, err
 	end
@@ -184,6 +186,7 @@ function M.launch(launcher, cwd, path)
 		option,
 		json.encode({
 			version = 1,
+			build = build_info.snapshot(),
 			pid = tonumber(pid),
 			updated = os.time(),
 			path = path,

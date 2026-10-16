@@ -9,6 +9,8 @@ fi
 
 pane_id=$1
 client_name=${2-}
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+source "$script_dir/../../bin/channel-env.sh"
 
 # Query the running server, which may differ from the installed tmux binary.
 commands=$(tmux list-commands)
@@ -30,12 +32,12 @@ if [ "$modal_supported" -eq 1 ]; then
         bash -eu -c '
             tmux -S "$1" set-option -p -t "$TMUX_PANE" remain-on-exit off
             unset TMUX
-            exec env PI_CONSOLE_POPUP=1 tmux -S "$1" attach-session -t "=agents"
-        ' pi-agents "$socket_path"
+            exec env PI_CONSOLE_POPUP=1 tmux -S "$1" attach-session -t "=$2"
+        ' pi-agents "$socket_path" "$PI_CONSOLE_TMUX_SESSION"
 fi
 
 if [ -n "$client_name" ]; then
-    exec tmux display-popup -B -c "$client_name" -w 80% -h 85% -E env PI_CONSOLE_POPUP=1 tmux attach-session -t '=agents'
+    exec tmux display-popup -B -c "$client_name" -w 80% -h 85% -E env PI_CONSOLE_POPUP=1 tmux attach-session -t "=$PI_CONSOLE_TMUX_SESSION"
 else
-    exec tmux display-popup -B -t "$pane_id" -w 80% -h 85% -E env PI_CONSOLE_POPUP=1 tmux attach-session -t '=agents'
+    exec tmux display-popup -B -t "$pane_id" -w 80% -h 85% -E env PI_CONSOLE_POPUP=1 tmux attach-session -t "=$PI_CONSOLE_TMUX_SESSION"
 fi

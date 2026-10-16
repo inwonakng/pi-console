@@ -1,5 +1,5 @@
 local extras_dev = vim.fn.expand("~/.local/share/nvim-dev/nvim-extras")
-if vim.fn.isdirectory(extras_dev) == 1 then
+if vim.env.PI_CONSOLE_CHANNEL ~= "stable" and vim.fn.isdirectory(extras_dev) == 1 then
 	vim.opt.runtimepath:prepend(extras_dev)
 else
 	vim.pack.add({ "https://github.com/inwonakng/nvim-extras" })

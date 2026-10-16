@@ -87,7 +87,7 @@ end
 function M.argv(ctx)
 	local state = ctx.state
 	local config = ctx.config
-	local args = { config.binary, "--mode", "rpc", "--pi-console-trust-ui" }
+	local args = { config.binary, "--mode", "rpc", "-e", vim.fs.joinpath(vim.g.pi_console_root, "pi"), "--pi-console-trust-ui" }
 	if state.pending_session_file and state.pending_session_file ~= "" then
 		vim.list_extend(args, { "--session", vim.fn.expand(state.pending_session_file) })
 	end
