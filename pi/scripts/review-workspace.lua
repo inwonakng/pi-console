@@ -15,6 +15,7 @@ local function open_workspace_review()
 	local baseline = vim.env.PI_WORKSPACE_BASELINE
 	assert(baseline and baseline:match("^[0-9a-f]+$"), "PI_WORKSPACE_BASELINE must be a commit hash")
 	show_untracked_files_against_revision()
+	require("diffview.config").get_config().view.default.layout = "diff2_vertical"
 	vim.cmd("DiffviewOpen " .. baseline .. " --untracked-files=true")
 end
 
