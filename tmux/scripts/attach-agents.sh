@@ -30,12 +30,12 @@ if [ "$modal_supported" -eq 1 ]; then
         bash -eu -c '
             tmux -S "$1" set-option -p -t "$TMUX_PANE" remain-on-exit off
             unset TMUX
-            exec tmux -S "$1" attach-session -t "=agents"
+            exec env PI_CONSOLE_POPUP=1 tmux -S "$1" attach-session -t "=agents"
         ' pi-agents "$socket_path"
 fi
 
 if [ -n "$client_name" ]; then
-    exec tmux display-popup -B -c "$client_name" -w 80% -h 85% -E tmux attach-session -t '=agents'
+    exec tmux display-popup -B -c "$client_name" -w 80% -h 85% -E env PI_CONSOLE_POPUP=1 tmux attach-session -t '=agents'
 else
-    exec tmux display-popup -B -t "$pane_id" -w 80% -h 85% -E tmux attach-session -t '=agents'
+    exec tmux display-popup -B -t "$pane_id" -w 80% -h 85% -E env PI_CONSOLE_POPUP=1 tmux attach-session -t '=agents'
 fi

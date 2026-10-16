@@ -13,10 +13,13 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 current_session=$(tmux display-message -p -t "$pane_id" '#{session_name}')
 
 if [ "$current_session" = "agents" ]; then
-    if [ -n "$client_name" ]; then
+    if [ -z "$client_name" ]; then
+        client_name=$(tmux display-message -p -t "$pane_id" '#{client_name}')
+    fi
+    # The same agents pane can be visible in both a popup and a main client.
+    # Only detach clients launched by attach-agents.sh, never the main view.
+    if [ -n "$client_name" ] && [ "$(tmux display-message -p -c "$client_name" '#{I/e:PI_CONSOLE_POPUP}')" = "1" ]; then
         tmux detach-client -t "$client_name"
-    else
-        tmux detach-client
     fi
 else
     bash "$script_dir/open-agents-overview.sh" --ensure "$pane_id" "$client_name" >/dev/null
