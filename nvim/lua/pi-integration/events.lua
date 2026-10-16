@@ -588,14 +588,11 @@ function M.handle_extension_ui_request(ctx, event)
 			preview_text = prompt,
 		}
 		if compact_select and type(compact_select.previews) == "table" then
-			select_opts.preview_item = function(item)
+			select_opts.preview_title = prompt
+			select_opts.preview_filetype = "markdown"
+			select_opts.preview_text = function(item)
 				local text = compact_select.previews[item]
-				text = type(text) == "string" and text or prompt
-				local buf = vim.api.nvim_create_buf(false, true)
-				vim.bo[buf].bufhidden = "wipe"
-				vim.bo[buf].filetype = "markdown"
-				vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(text, "\n", { plain = true }))
-				return { buf = buf, pos = { 1, 1 } }
+				return type(text) == "string" and text or prompt
 			end
 		end
 		pending_picker.select(ctx, event.id, event.options or {}, select_opts, function(choice)

@@ -97,18 +97,18 @@ local function preview_rows(text, width)
 	return rows
 end
 
-local approval_ns = vim.api.nvim_create_namespace("PiApprovalPreview")
+local preview_ns = vim.api.nvim_create_namespace("PiSelectPreview")
+vim.api.nvim_set_hl(0, "PiSelectTitle", { bold = true, default = true })
 
 local function highlight_approval_preview(buf, header, padding, filetype)
-	vim.api.nvim_buf_clear_namespace(buf, approval_ns, 0, -1)
 	for i, field in ipairs(header) do
 		local row = padding + i - 1
 		local key, value = field[1] .. ":", field[2]
-		vim.api.nvim_buf_set_extmark(buf, approval_ns, row, 0, {
+		vim.api.nvim_buf_set_extmark(buf, preview_ns, row, 0, {
 			end_col = #key,
 			hl_group = "PiApprovalKey",
 		})
-		vim.api.nvim_buf_set_extmark(buf, approval_ns, row, #key + 1, {
+		vim.api.nvim_buf_set_extmark(buf, preview_ns, row, #key + 1, {
 			end_col = #key + 1 + #value,
 			hl_group = "PiApprovalValue",
 		})
@@ -135,7 +135,7 @@ local function highlight_approval_preview(buf, header, padding, filetype)
 	end)
 end
 
-local function set_preview_text(buf, text, padding, header, filetype)
+local function set_preview_text(buf, text, padding, header, filetype, title)
 	local lines = {}
 	for _ = 1, padding do
 		lines[#lines + 1] = ""
@@ -144,18 +144,25 @@ local function set_preview_text(buf, text, padding, header, filetype)
 	vim.bo[buf].modifiable = true
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 	vim.bo[buf].modifiable = false
+	vim.api.nvim_buf_clear_namespace(buf, preview_ns, 0, -1)
 	if header then
-		highlight_approval_preview(buf, header, padding, filetype)
+		highlight_approval_preview(buf, header, padding + (title and 2 or 0), filetype)
+	end
+	if title then
+		vim.api.nvim_buf_set_extmark(buf, preview_ns, padding, 0, {
+			end_col = #title,
+			hl_group = "PiSelectTitle",
+		})
 	end
 end
 
-local function text_preview_item(text, filetype, padding, header)
+local function text_preview_item(text, filetype, padding, header, title)
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[buf].buftype = "nofile"
 	vim.bo[buf].bufhidden = "wipe"
 	vim.bo[buf].swapfile = false
 	vim.bo[buf].filetype = header and "text" or filetype or "text"
-	set_preview_text(buf, text, padding, header, filetype)
+	set_preview_text(buf, text, padding, header, filetype, title)
 
 	return {
 		buf = buf,
@@ -176,40 +183,40 @@ local function add_prompt_preview(select_opts)
 		return true
 	end
 
-	local text = type(select_opts.preview_text) == "string" and select_opts.preview_text or nil
-	if not text and prompt_needs_preview(select_opts.prompt) then
-		text = select_opts.prompt
+	local source = select_opts.preview_text
+	if type(source) ~= "string" and type(source) ~= "function" then
+		source = prompt_needs_preview(select_opts.prompt) and select_opts.prompt or nil
 	end
-	if not text then
+	if not source then
 		return false
 	end
 
-	local header = select_opts.preview_header
+	local header, title = select_opts.preview_header, select_opts.preview_title
+	local prefix = title or ""
 	if header then
 		local lines = {}
 		for _, field in ipairs(header) do
 			lines[#lines + 1] = field[1] .. ": " .. field[2]
 		end
-		text = table.concat(lines, "\n") .. (text ~= "" and ("\n\n" .. text) or "")
+		prefix = prefix .. (prefix ~= "" and "\n\n" or "") .. table.concat(lines, "\n")
 	end
-	select_opts.preview_text = text
-	local preview, preview_padding
-	select_opts.preview_item = function()
+	local preview, preview_padding, preview_text
+	select_opts.preview_item = function(item)
+		local text = type(source) == "function" and source(item) or source
+		text = prefix .. (prefix ~= "" and text ~= "" and "\n\n" or "") .. text
 		local padding = 0
-		if select_opts.pi_select_layout == "compact" then
-			local win = require("fzf-lua").win.__SELF()
-			if win and win:validate_preview() then
-				local height = vim.api.nvim_win_get_height(win.preview_winid)
-				local width = vim.api.nvim_win_get_width(win.preview_winid)
-				padding = math.max(0, math.floor((height - preview_rows(text, width)) / 2))
-			end
+		local win = require("fzf-lua").win.__SELF()
+		if win and win:validate_preview() then
+			local height = vim.api.nvim_win_get_height(win.preview_winid)
+			local width = vim.api.nvim_win_get_width(win.preview_winid)
+			padding = math.max(0, math.floor((height - preview_rows(text, width)) / 2))
 		end
 		if not preview or not vim.api.nvim_buf_is_valid(preview.buf) then
-			preview = text_preview_item(text, select_opts.preview_filetype, padding, header)
-		elseif padding ~= preview_padding then
-			set_preview_text(preview.buf, text, padding, header, select_opts.preview_filetype)
+			preview = text_preview_item(text, select_opts.preview_filetype, padding, header, title)
+		elseif padding ~= preview_padding or text ~= preview_text then
+			set_preview_text(preview.buf, text, padding, header, select_opts.preview_filetype, title)
 		end
-		preview_padding = padding
+		preview_padding, preview_text = padding, text
 		return preview
 	end
 	return true
