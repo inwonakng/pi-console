@@ -64,6 +64,7 @@ local function open_workspace_review()
 	assert(baseline and baseline:match("^[0-9a-f]+$"), "PI_WORKSPACE_BASELINE must be a commit hash")
 	local config = require("diffview.config")
 	config.get_config().view.default.layout = "diff2_vertical"
+	config.get_config().file_panel.win_config.width = 20
 	local after = vim.env.PI_WORKSPACE_REVIEW_AFTER
 	if after and after ~= "" then
 		assert(after:match("^[0-9a-f]+$"), "PI_WORKSPACE_REVIEW_AFTER must be a commit hash")
