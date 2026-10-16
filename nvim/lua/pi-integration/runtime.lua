@@ -11,6 +11,7 @@ local publisher_state
 local publisher_rpc_address
 local publisher_rpc_mode
 local publisher_focused = false
+local publisher_last_focused_at
 local focus_group
 
 local function backend()
@@ -45,6 +46,18 @@ function M.list()
 		return {}
 	end
 	return transport.list()
+end
+
+-- Use the list already loaded by a viewer; this does not query the backend.
+function M.last_focused(instances)
+	local latest
+	for _, entry in ipairs(instances) do
+		if type(entry.last_focused_at) == "number" and entry.last_focused_at > 0
+			and (not latest or entry.last_focused_at > latest.last_focused_at) then
+			latest = entry
+		end
+	end
+	return latest
 end
 
 function M.find_session(path)
@@ -219,6 +232,7 @@ local function snapshot(state)
 		version = 1,
 		pid = vim.uv.os_getpid(),
 		updated = os.time(),
+		last_focused_at = publisher_last_focused_at,
 		path = path,
 		title = title,
 		is_new_session = is_new_session,
@@ -261,6 +275,7 @@ function M.stop()
 		focus_group = nil
 	end
 	publisher_focused = false
+	publisher_last_focused_at = nil
 	publisher_state = nil
 	publisher_rpc_address = nil
 	publisher_rpc_mode = nil
@@ -268,6 +283,12 @@ function M.stop()
 	if transport then
 		transport.clear()
 	end
+end
+
+local function record_focus()
+	-- Wall-clock microseconds are comparable across separate Neovim processes.
+	local seconds, microseconds = vim.uv.gettimeofday()
+	publisher_last_focused_at = seconds * 1000000 + microseconds
 end
 
 function M.start(state)
@@ -281,11 +302,17 @@ function M.start(state)
 		group = focus_group,
 		callback = function(event)
 			publisher_focused = event.event == "FocusGained"
+			if publisher_focused then
+				record_focus()
+			end
 			M.publish()
 		end,
 	})
 	-- A background pane may never have received a focus event during startup.
 	publisher_focused = transport.is_focused() == true
+	if publisher_focused then
+		record_focus()
+	end
 	publisher_rpc_address = vim.v.servername
 	if publisher_rpc_address == "" then
 		local ok, address = pcall(vim.fn.serverstart)

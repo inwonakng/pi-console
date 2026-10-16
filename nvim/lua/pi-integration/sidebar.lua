@@ -37,6 +37,7 @@ function M.open(config)
 	vim.o.ruler = false
 	local ns = vim.api.nvim_create_namespace("pi-sidebar")
 	local rows, starts = {}, {}
+	local last_focused_at = 0
 	local timer = vim.uv.new_timer()
 	local closed = false
 	local function selected()
@@ -62,6 +63,13 @@ function M.open(config)
 				id = 1, virt_lines = { { { "  " .. truncate(err, vim.api.nvim_win_get_width(win) - 4), "DiagnosticError" } } },
 			})
 			return
+		end
+		-- Follow a new focus event, not every refresh, so manual browsing sticks.
+		local latest = runtime.last_focused(instances)
+		if latest and latest.last_focused_at > last_focused_at then
+			previous = latest
+			-- Keep the newest observed time even if that conversation closes.
+			last_focused_at = latest.last_focused_at
 		end
 		local pinned, regular, waiting = {}, {}, 0
 		for _, entry in ipairs(entries) do

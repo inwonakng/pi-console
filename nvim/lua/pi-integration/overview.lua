@@ -110,6 +110,8 @@ function M.open(config)
 	local query = ""
 	local updating = false
 	local closed = false
+	local select_last_focused = true
+	local focus_autocmd
 	local timer = vim.uv.new_timer()
 	local function selected()
 		if vim.api.nvim_win_is_valid(list_win) then
@@ -176,6 +178,8 @@ function M.open(config)
 			set_lines(detail_buf, { " Could not refresh sessions:", " " .. text(err) })
 			return
 		end
+		local focus_target = select_last_focused and runtime.last_focused(instances) or nil
+		select_last_focused = false
 		local previous_rows = rows
 		rows = {}
 		local pinned_entries, regular_entries = {}, {}
@@ -195,7 +199,7 @@ function M.open(config)
 			"",
 			" " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. "  Title",
 		}
-		local cursor, nearest_row
+		local cursor, nearest_row, focused_row
 		local indicator_prefix = " " .. column("", 13) .. "  "
 		local indicator_spans = {}
 		local title_start_cols = {}
@@ -210,6 +214,9 @@ function M.open(config)
 				for _, entry in ipairs(section.entries) do
 					local row = #lines + 1
 					rows[row] = entry
+					if focus_target and entry.id == focus_target.id then
+						focused_row = row
+					end
 					local name = vim.fn.fnamemodify(project(entry), ":t")
 					local indicators, spans = indicator_columns(entry)
 					local row_prefix = " " .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. "  "
@@ -227,6 +234,7 @@ function M.open(config)
 				end
 			end
 		end
+		cursor = focused_row or cursor
 		if not next(rows) then
 			table.insert(lines, runtime.available() and " No matching open or pinned conversations. Press <leader>pn to start one." or " No supported session backend available.")
 		end
@@ -451,10 +459,17 @@ function M.open(config)
 	local function stop()
 		if not closed then
 			closed = true
+			vim.api.nvim_del_autocmd(focus_autocmd)
 			timer:stop()
 			timer:close()
 		end
 	end
+	focus_autocmd = vim.api.nvim_create_autocmd("FocusGained", {
+		callback = function()
+			select_last_focused = true
+			refresh()
+		end,
+	})
 	vim.api.nvim_create_autocmd("BufWipeout", { buffer = list_buf, once = true, callback = stop })
 	vim.api.nvim_create_autocmd("VimLeavePre", { once = true, callback = stop })
 	refresh()
