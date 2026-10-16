@@ -65,8 +65,18 @@ done
 [ -z "$missing" ] || fail "Missing required commands:$missing"
 
 legacy=no
-if [ -d "$install_root" ]; then
-    marker="$install_root/.pi-console-install"
+marker="$install_root/.pi-console-install"
+if [ -d "$install_root" ] && [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    # Older Neovim configurations stored plugins/parsers here before an
+    # application was installed. Preserve site/, but never adopt other data.
+    for path in "$install_root"/* "$install_root"/.[!.]* "$install_root"/..?*; do
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        if [ "$path" = "$install_root/site" ] && [ -d "$path" ] && [ ! -L "$path" ]; then
+            continue
+        fi
+        fail "Refusing an unowned installation directory: $install_root (unexpected path: $path)"
+    done
+elif [ -d "$install_root" ]; then
     [ ! -L "$marker" ] && [ -f "$marker" ] && [ "$(value "$marker" source)" = "$repository" ] \
         || fail "Refusing an unowned installation directory: $install_root"
     layout=$(value "$marker" layout)
