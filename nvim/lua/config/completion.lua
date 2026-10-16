@@ -25,7 +25,13 @@ cmp.setup({
 	},
 	keymap = {
 		["<C-space>"] = { "show", "show_documentation", "hide_documentation" },
-		["<Esc>"] = { "cancel", "fallback" },
+		["<Esc>"] = {
+			function(cmp)
+				cmp.cancel()
+				return false
+			end,
+			"fallback",
+		},
 		["<C-e>"] = { "cancel", "fallback" },
 		["<CR>"] = { "accept", "fallback" },
 		["<Tab>"] = { "snippet_forward", "fallback" },
