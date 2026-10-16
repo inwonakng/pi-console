@@ -1,4 +1,5 @@
 local buffer = require("pi-integration.utils.buffer")
+local diff_stats = require("pi-integration.diff-stats")
 
 local M = {}
 
@@ -46,10 +47,11 @@ end
 
 local function format_session_stats(state)
 	local stats = state.session_stats
-	if not stats then
+	if not stats and not state.workspace_diff then
 		return "tokens: --", statusline_escape("tokens: --"), "", ""
 	end
 
+	stats = stats or {}
 	local tokens = stats.tokens or {}
 	local primary_parts = {
 		{ text = "↑" .. format_count(tokens.input), highlight = "PiUsageInput" },
@@ -74,11 +76,22 @@ local function format_session_stats(state)
 		table.insert(secondary_parts, { text = "W" .. format_count(cache_write), highlight = "PiUsageStats" })
 	end
 
+	local diff = state.workspace_diff
+	if diff then
+		table.insert(secondary_parts, {
+			text = string.format("+%d -%d · %d %s", diff.added, diff.removed, diff.files, diff.files == 1 and "file" or "files"),
+			highlight = "PiDiffStats",
+		})
+	end
+
 	if non_null(stats.cost) then
 		table.insert(secondary_parts, { text = string.format("$%.2f", stats.cost), highlight = "PiUsageCost" })
 	end
 
 	local primary_text, primary_statusline = format_stat_parts(primary_parts)
+	if not state.session_stats then
+		primary_text, primary_statusline = "tokens: --", statusline_escape("tokens: --")
+	end
 	local secondary_text, secondary_statusline = format_stat_parts(secondary_parts)
 	return primary_text, primary_statusline, secondary_text, secondary_statusline
 end
@@ -210,7 +223,7 @@ local function activity_statusline_label(state)
 	end
 	local suffix = queued > 0 and (" · " .. tostring(queued) .. " queued") or ""
 	local request = state.active_ui_request_id and (state.pending_ui_requests or {})[state.active_ui_request_id]
-	if request and (not request.expires or request.expires > vim.uv.now()) then
+	if request and not request.navigation and (not request.expires or request.expires > vim.uv.now()) then
 		return " waiting · " .. request.label .. suffix .. (request.hidden and " · <leader>pa" or "")
 	end
 	if not state.is_loading and not state.is_agent_running and not state.is_streaming
@@ -433,9 +446,11 @@ function M.render_secondary(ctx)
 	local right_plain = stats_text ~= "" and (" " .. stats_text .. " ") or ""
 	local right_width = vim.fn.strdisplaywidth(right_plain)
 	local width = vim.api.nvim_win_get_width(state.status_win)
+	local right_label = stats_text ~= "" and ("%#PiUsageStats# " .. stats_statusline .. "%#PiUsageStats# ") or ""
 
 	if right_width >= width then
-		return "%#PiUsageStats#" .. statusline_escape(truncate_plain_to_width(right_plain, width)) .. "%*"
+		-- Let Neovim truncate styled segments without discarding their colors.
+		return right_label .. "%*"
 	end
 
 	local gap_width = left_text ~= "" and right_plain ~= "" and 3 or 0
@@ -445,7 +460,6 @@ function M.render_secondary(ctx)
 	if visible_left == left_text and activity_label ~= "" then
 		left_label = "%#PiActivity#" .. statusline_escape(activity_label) .. "%#PiUsageStats#" .. statusline_escape(spawn_label)
 	end
-	local right_label = stats_text ~= "" and ("%#PiUsageStats# " .. stats_statusline .. "%#PiUsageStats# ") or ""
 	return left_label .. "%#PiUsageStats#%=" .. right_label .. "%*"
 end
 
@@ -573,6 +587,7 @@ local function render_footer(ctx, buf, width)
 end
 
 function M.setup(ctx)
+	diff_stats.setup(ctx.state, function() M.update(ctx) end)
 	local update_scheduled = false
 	local function schedule_update()
 		if update_scheduled then
@@ -622,6 +637,7 @@ end
 
 function M.update(ctx)
 	local state = ctx.state
+	diff_stats.refresh(state, function() M.update(ctx) end)
 	if not ctx.transcript.win_valid() then
 		close_footer(state)
 		return

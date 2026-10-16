@@ -41,6 +41,7 @@ require("catppuccin").setup({
 			PiUsageOutput = { fg = colors.red, bg = M.status_bg },
 			PiUsageContext = { fg = colors.overlay1, bg = M.status_bg },
 			PiUsageCost = { fg = colors.green, bg = M.status_bg },
+			PiDiffStats = { fg = colors.peach, bg = M.status_bg },
 			PiUserHeader = { fg = colors.blue, bg = "#102033", bold = true },
 			PiAssistantHeader = { fg = colors.mauve, bg = "#1b1424", bold = true },
 			PiTreeUser = { fg = colors.blue, bg = M.ui_bg, bold = true },

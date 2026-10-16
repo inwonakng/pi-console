@@ -79,6 +79,7 @@ export type WorkspaceRecord = {
 export type WorkspaceDisplayState = {
   id?: string;
   kind?: WorkspaceKind;
+  baselineTree?: string;
   name: string;
   branch?: string;
   path: string;
@@ -973,6 +974,7 @@ export function workspaceDisplayState(cwd: string, sessionFile?: string): Worksp
     return {
       id: record.id,
       kind: record.kind,
+      baselineTree: record.kind === "task" ? record.baselineTree : undefined,
       name: basename(record.worktreePath),
       branch: branchAt(record.worktreePath),
       path: record.worktreePath,
