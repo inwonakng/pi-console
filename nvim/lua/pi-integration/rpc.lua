@@ -308,7 +308,7 @@ function M.start(ctx, sync_options)
 	process.job = job
 	state.job = job
 
-	local options = vim.tbl_extend("force", { publish_workspace = true }, sync_options or {})
+	local options = vim.tbl_extend("force", {}, sync_options or {})
 	local on_success = options.on_success
 	options.on_success = function()
 		require("pi-integration.directory-history").record(vim.fn.getcwd())

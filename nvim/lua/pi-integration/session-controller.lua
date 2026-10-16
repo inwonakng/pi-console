@@ -154,11 +154,9 @@ function M.sync(ctx, options)
 					ctx.actions.refresh_session_stats()
 					if options.on_success then options.on_success() end
 				end
-				if options.publish_workspace then
-					ctx.rpc.send({ type = "prompt", message = "/pi-workspace-publish" }, finish)
-				else
-					finish()
-				end
+				-- This also restores the execution workspace after trust setup. Every
+				-- sync must do it, including one that supersedes the startup sync.
+				ctx.rpc.send({ type = "prompt", message = "/pi-workspace-publish" }, finish)
 			end)
 		end)
 	end)
