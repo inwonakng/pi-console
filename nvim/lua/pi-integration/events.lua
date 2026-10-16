@@ -524,7 +524,9 @@ function M.handle_extension_ui_request(ctx, event)
 			return
 		end
 		local request = summarize_ui_request(event)
-		request.resumable = event.method == "select" or event.method == "confirm"
+		local compact_select = event.method == "select" and decode_compact_select_payload(event.title)
+		request.navigation = compact_select and compact_select.purpose == "navigation" or false
+		request.resumable = not request.navigation and (event.method == "select" or event.method == "confirm")
 		request.expires = type(event.timeout) == "number" and (vim.uv.now() + event.timeout) or nil
 		state.pending_ui_requests[event.id] = request
 		state.active_ui_request_id = event.id
@@ -540,7 +542,12 @@ function M.handle_extension_ui_request(ctx, event)
 		ctx.logs.add(log_level, message)
 		ctx.ui.notify(message, vim_level)
 	elseif event.method == "setStatus" then
-		if event.statusKey == "pi-access-mode" then
+		if event.statusKey == "pi-project-trust" then
+			state.trust_status = type(event.statusText) == "string" and json.decode_object(event.statusText) or nil
+			if not state.trust_status or state.trust_status.state ~= "ready" then
+				M.set_loading(ctx, true)
+			end
+		elseif event.statusKey == "pi-access-mode" then
 			update_access_mode_from_status(ctx, event.statusText)
 		elseif event.statusKey == "pi-integration-mode" then
 			update_integration_mode_from_status(ctx, event.statusText)
@@ -579,6 +586,17 @@ function M.handle_extension_ui_request(ctx, event)
 			pi_select_layout = "compact",
 			preview_text = prompt,
 		}
+		if compact_select and type(compact_select.previews) == "table" then
+			select_opts.preview_item = function(item)
+				local text = compact_select.previews[item]
+				text = type(text) == "string" and text or prompt
+				local buf = vim.api.nvim_create_buf(false, true)
+				vim.bo[buf].bufhidden = "wipe"
+				vim.bo[buf].filetype = "markdown"
+				vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(text, "\n", { plain = true }))
+				return { buf = buf, pos = { 1, 1 } }
+			end
+		end
 		pending_picker.select(ctx, event.id, event.options or {}, select_opts, function(choice)
 			send_extension_ui_response(ctx, event.id, choice and { value = choice } or { cancelled = true })
 		end)

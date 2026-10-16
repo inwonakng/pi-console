@@ -87,7 +87,7 @@ end
 function M.argv(ctx)
 	local state = ctx.state
 	local config = ctx.config
-	local args = { config.binary, "--mode", "rpc" }
+	local args = { config.binary, "--mode", "rpc", "--pi-console-trust-ui" }
 	if state.pending_session_file and state.pending_session_file ~= "" then
 		vim.list_extend(args, { "--session", vim.fn.expand(state.pending_session_file) })
 	end
@@ -104,10 +104,11 @@ function M.argv(ctx)
 end
 
 function M.job_env(ctx)
+	local env = { PI_CONSOLE_SESSION_FILE = ctx.state.pending_session_file or "" }
 	if ctx.config.agent_dir and ctx.config.agent_dir ~= "" then
-		return { PI_CODING_AGENT_DIR = vim.fn.expand(ctx.config.agent_dir) }
+		env.PI_CODING_AGENT_DIR = vim.fn.expand(ctx.config.agent_dir)
 	end
-	return nil
+	return next(env) and env or nil
 end
 
 local function reset_runtime_state(ctx)
@@ -125,6 +126,7 @@ local function reset_runtime_state(ctx)
 	state.is_loading = false
 	state.workspace_status_received = false
 	state.session_sync_complete = false
+	state.trust_status = nil
 	pending_picker.clear(ctx, false)
 	state.pending_ui_requests = {}
 	state.active_ui_request_id = nil
@@ -158,7 +160,9 @@ local function begin_teardown(ctx, message)
 	state.job = nil
 	local callbacks = state.callbacks
 	state.callbacks = {}
-	ctx.actions.fail_pending_prompts()
+	if not state.trust_restart then
+		ctx.actions.fail_pending_prompts()
+	end
 	reset_runtime_state(ctx)
 	for id, callback in pairs(callbacks) do
 		complete_callback(ctx, callback, failed_response(id, message))
@@ -199,6 +203,7 @@ local function finish_exit(ctx, process, code)
 	state.rpc_tearing_down = false
 	local restart_requested = state.restart_requested
 	state.restart_requested = false
+	state.trust_restart = false
 	if restart_requested and M.start(ctx) then
 		ctx.ui.notify("Pi restarted")
 	end
@@ -246,6 +251,7 @@ function M.start(ctx, sync_options)
 
 	local started, job = pcall(vim.fn.jobstart, M.argv(ctx), {
 		stdin = "pipe",
+		cwd = vim.fn.getcwd(),
 		env = M.job_env(ctx),
 		stdout_buffered = false,
 		stderr_buffered = false,
@@ -307,28 +313,28 @@ function M.start(ctx, sync_options)
 		if on_success then
 			on_success()
 		end
+		if state.pending_access_mode then
+			local mode = state.pending_access_mode
+			M.send(ctx, { type = "prompt", message = "/pi-mode " .. mode }, function(event)
+				if event.success then
+					state.pending_access_mode = nil
+				else
+					ctx.ui.notify(event.error or "Could not set access mode", vim.log.levels.ERROR)
+				end
+			end)
+		end
+		if state.pending_integration_mode then
+			local mode = state.pending_integration_mode
+			M.send(ctx, { type = "prompt", message = "/pi-integration-mode " .. mode }, function(event)
+				if event.success then
+					state.pending_integration_mode = nil
+				else
+					ctx.ui.notify(event.error or "Could not set integration mode", vim.log.levels.ERROR)
+				end
+			end)
+		end
 	end
 	ctx.session.sync(options)
-	if state.pending_access_mode then
-		local mode = state.pending_access_mode
-		M.send(ctx, { type = "prompt", message = "/pi-mode " .. mode }, function(event)
-			if event.success then
-				state.pending_access_mode = nil
-			else
-				ctx.ui.notify(event.error or "Could not set access mode", vim.log.levels.ERROR)
-			end
-		end)
-	end
-	if state.pending_integration_mode then
-		local mode = state.pending_integration_mode
-		M.send(ctx, { type = "prompt", message = "/pi-integration-mode " .. mode }, function(event)
-			if event.success then
-				state.pending_integration_mode = nil
-			else
-				ctx.ui.notify(event.error or "Could not set integration mode", vim.log.levels.ERROR)
-			end
-		end)
-	end
 	return state.job ~= nil and state.job > 0
 end
 
@@ -350,6 +356,14 @@ function M.send(ctx, cmd, callback)
 			complete_callback(ctx, callback, failed_response(cmd.id, message))
 		end
 		state.rpc_tearing_down = tearing_down
+		return
+	end
+
+	if cmd.type == "prompt" and cmd.message ~= "/pi-trust-setup"
+		and (not state.trust_status or state.trust_status.state ~= "ready") then
+		if callback then
+			complete_callback(ctx, callback, failed_response(cmd.id, "Resolve project trust before sending prompts or commands."))
+		end
 		return
 	end
 
@@ -393,12 +407,25 @@ end
 function M.restart(ctx, options)
 	local state = ctx.state
 	options = options or {}
-	if not M.can_restart(ctx) then
+	if options.trust_setup then
+		if not state.trust_status or state.trust_status.state ~= "restart"
+			or lifecycle.is_agent_active(state) or (state.spawn_running_count or 0) > 0 then
+			ctx.ui.notify("Cannot restart Pi during active work.", vim.log.levels.ERROR)
+			return
+		end
+		state.trust_restart = true
+	elseif not M.can_restart(ctx) then
 		return
 	end
 
 	pending_picker.clear(ctx, true)
-	if options.fresh_session then
+	if options.session_file then
+		state.session_file = nil
+		state.pending_session_file = options.session_file
+		state.session_name = nil
+		state.message_count = 0
+		state.has_sent_message = false
+	elseif options.fresh_session then
 		state.session_file = nil
 		state.pending_session_file = nil
 		state.session_name = nil
@@ -410,11 +437,18 @@ function M.restart(ctx, options)
 			state.pending_session_file = session_file
 		end
 	end
-	if state.access_mode and state.access_mode ~= "" then
-		state.pending_access_mode = state.access_mode
-	end
-	if state.integration_mode and state.integration_mode ~= "" then
-		state.pending_integration_mode = state.integration_mode
+	if options.session_file or options.fresh_session then
+		-- Destination conversations restore their own access settings. Never copy
+		-- an outgoing full-access mode into a readonly/new conversation.
+		state.pending_access_mode = nil
+		state.pending_integration_mode = nil
+	else
+		if state.access_mode and state.access_mode ~= "" then
+			state.pending_access_mode = state.access_mode
+		end
+		if state.integration_mode and state.integration_mode ~= "" then
+			state.pending_integration_mode = state.integration_mode
+		end
 	end
 	if state.rpc_process then
 		state.restart_requested = true
@@ -429,6 +463,7 @@ function M.restart(ctx, options)
 end
 
 function M.stop(ctx)
+	ctx.state.trust_restart = false
 	ctx.state.restart_requested = false
 	stop_process(ctx, "Pi stopped; request was not completed.")
 end

@@ -182,7 +182,7 @@ local function snapshot(state)
 	local waiting
 	local request_id = state.active_ui_request_id
 	local request = request_id and (state.pending_ui_requests or {})[request_id] or nil
-	if request and (not request.expires or request.expires > vim.uv.now()) then
+	if request and not request.navigation and (not request.expires or request.expires > vim.uv.now()) then
 		waiting = request
 	end
 	if not state.job or state.job <= 0 then

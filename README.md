@@ -36,7 +36,13 @@ in view.
   tree lets you revisit earlier messages and explore a different branch.
 - **Control over agent changes.** Choose an access mode, inspect approval
   requests with highlighted commands and diffs, and work in isolated Git
-  workspaces. Review workspace changes before integrating them.
+  workspaces. Review workspace changes before integrating them. Integration
+  results list changed files and added/deleted line counts; open the tool-result
+  float and press `d` to review the historical diff in Diffview. These read-only
+  snapshots remain available after workspace cleanup and later checkout edits.
+  Each result describes its own integration attempt; partially applied failures
+  keep their own diff. Binary files have no line counts; included ignored files
+  are listed separately and are not part of the Git diff.
 - **Subagents you can follow.** Delegate work to foreground or background
   agents and inspect their transcripts without leaving the parent conversation.
 - **Decisions and progress in the UI.** Multiple-choice questions with a
@@ -44,6 +50,44 @@ in view.
   controls.
 - **Usage at a glance.** Session token, context, and cost information in the
   statusline, plus OpenAI Codex quota and reset times in a dedicated view.
+  In a Pi task worktree, an orange summary before cost shows added/removed lines
+  and changed files relative to the task's creation baseline, including new
+  non-ignored files. Binary files count as changed files but have no line totals.
+
+## Project trust
+
+The bundled global Pi extension owns trust checks and metadata. Neovim only
+runs its startup handshake, displays standard RPC dialogs, and restarts Pi when
+requested. An undecided project starts untrusted; agent work and automatic
+workspace restoration wait for setup. Approval restarts Pi before loading project
+resources. Already-decided projects do not need this extra restart.
+
+When Pi's policy is `ask` and no decision applies, the picker offers trust,
+parent-folder trust, conversation-only trust, or decline. `<C-q>` declines for this
+conversation; `<Esc>` hides the picker and `<leader>pa` reopens it. `AGENTS.md`
+alone does not require approval; Pi gates project configuration and executable
+resources, not ordinary context files.
+
+Permanent choices use Pi's native `trust.json`, including parent inheritance and
+`PI_CODING_AGENT_DIR`. Conversation-only decisions live separately beneath
+`<agent-dir>/pi-console/session-trust/`, keyed by canonical session filename and
+project directory (an exact match, not blanket parent-folder approval). They
+survive RPC and full-console restarts without modifying the conversation JSONL or
+the global trust store. New conversations and unrelated projects do not inherit
+them. Forking asks before copying a conversation-only decision to the fork.
+
+Managed external workspaces inherit their originating project's decision through
+validated workspace/session records, including nested child workspaces. Unknown
+or unrelated worktrees get their own decision. Workspace/history transitions
+check the destination before switching; the session picker and new-session action
+restart RPC to avoid reusing another conversation's cached trust. Finish or abort
+active work before changing conversations.
+
+The global pi-console package must be enabled (verified with Pi 1.3.0). Personal
+trust handlers that run before ours retain Pi's precedence. There are no
+`--approve` overrides or separate Neovim-side JavaScript helpers. Trust setup
+errors keep agent work blocked rather than implicitly approving resources.
+Project trust controls resource loading, not tool permissions or filesystem access.
 
 ## Screenshots
 
@@ -142,7 +186,7 @@ long until then.
 
 ## Requirements
 
-The application is currently developed against Neovim 0.12, Pi 0.87.1, and
+The application is currently developed against Neovim 0.12, Pi 1.3.0, and
 tmux 3.7. It also requires:
 
 - Git, Bash, curl, Node.js 20.11 or newer, npm, `realpath`, and `ripgrep`;
@@ -283,14 +327,27 @@ Optional extension overrides may be copied from
 [`pi/pi-console-config.example.yaml`](pi/pi-console-config.example.yaml) to
 `~/.pi/agent/pi-console-config.yaml`.
 
-Access defaults can be changed with:
+Defaults and access paths can be changed with:
 
 ```yaml
+notifications:
+  default: enabled
+integration-mode:
+  default: ask
 access-mode:
+  default: ask
   read-paths: ["/"]
   write-paths: ["/tmp"]
   # temp-dir-prefix: /tmp/pi-console-
 ```
+
+Omitted defaults use the values shown. `notifications.default` accepts `enabled`
+or `disabled`; `access-mode.default` accepts `readonly`, `ask`, `edit`, or `full`;
+`integration-mode.default` accepts `ask` or `allowed`. Defaults apply on session
+start and tree navigation when there is no saved choice on the active branch.
+Saved session choices take precedence; spawned subagents also retain their
+explicit access-mode override. Editing these defaults does not change an active
+session immediately.
 
 Omitted path lists use the defaults shown. Lists contain absolute or `~/` paths,
 not wildcards, and include descendants. They add to workspace/system reads and

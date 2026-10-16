@@ -35,7 +35,7 @@ M.config = {
 }
 
 local function notify(msg, level)
-	vim.notify(msg, level or vim.log.levels.INFO, { title = "pi-console" })
+	vim.notify(msg, level or vim.log.levels.INFO, { title = "pi-console", _truncate = true })
 end
 
 local function valid_buf(buf)

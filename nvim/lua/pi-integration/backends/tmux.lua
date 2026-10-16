@@ -171,6 +171,34 @@ function M.launch(launcher, cwd, path)
 	return M.focus(pane)
 end
 
+function M.review_workspace(root, before, after)
+	if not M.available() then
+		return nil, "Workspace diff review requires tmux"
+	end
+	local script = vim.g.pi_console_root .. "/pi/scripts/review-workspace.sh"
+	local args = { "bash", script, root, before, after }
+	local quoted = vim.tbl_map(vim.fn.shellescape, args)
+	local pane, err = command({
+		"split-window",
+		"-h",
+		"-P",
+		"-F",
+		"#{pane_id}",
+		"-t",
+		vim.env.TMUX_PANE,
+		"-c",
+		root,
+		table.concat(quoted, " "),
+	})
+	if not pane then
+		return nil, err
+	end
+	if not pane:match("^%%%d+$") then
+		return nil, "tmux did not return the reviewer pane ID"
+	end
+	return command({ "select-pane", "-t", pane })
+end
+
 function M.start_overview()
 	local pane = vim.env.TMUX_PANE
 	local marked, err = command({ "set-option", "-w", "-t", pane, "@pi_overview", "1", ";", "set-option", "-w", "-t", pane, "@pi_overview_pane", pane })

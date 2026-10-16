@@ -118,43 +118,52 @@ function M.sync(ctx, options)
 					state.command_sources[command.name] = command.source
 				end
 			end
-			state.session_sync_complete = true
-			state.session_replacement_pending = false
-			ctx.actions.finish_loading_if_ready()
-			ctx.actions.refresh_messages()
-			ctx.actions.refresh_session_stats()
-			if options.publish_workspace then
-				ctx.rpc.send({ type = "prompt", message = "/pi-workspace-publish" })
+			if not state.command_sources["pi-trust-setup"] then
+				fail_sync("The pi-console project trust extension is missing; enable or update the global pi-console package.")
+				return
 			end
-			if options.on_success then
-				options.on_success()
-			end
+			state.trust_status = nil
+			ctx.rpc.send({ type = "prompt", message = "/pi-trust-setup" }, function(trust_event)
+				if generation ~= state.session_sync_generation then return end
+				local status = state.trust_status
+				if not trust_event.success or not status or status.state == "error" then
+					fail_sync((status and status.error) or trust_event.error or "Project trust setup returned no result")
+					return
+				end
+				if status.state == "restart" then
+					require("pi-integration.rpc").restart(ctx, { trust_setup = true })
+					return
+				end
+				if status.state ~= "ready" then
+					fail_sync("Project trust setup did not finish")
+					return
+				end
+				local function finish(publish_event)
+					if generation ~= state.session_sync_generation then return end
+					if publish_event and not publish_event.success then
+						fail_sync(publish_event.error or "Could not publish workspace state")
+						return
+					end
+					state.session_sync_complete = true
+					state.session_replacement_pending = false
+					ctx.actions.finish_loading_if_ready()
+					ctx.actions.refresh_messages()
+					ctx.actions.refresh_session_stats()
+					if options.on_success then options.on_success() end
+				end
+				if options.publish_workspace then
+					ctx.rpc.send({ type = "prompt", message = "/pi-workspace-publish" }, finish)
+				else
+					finish()
+				end
+			end)
 		end)
 	end)
 end
 
 function M.new_session(ctx)
-	local function proceed()
-		pending_picker.clear(ctx, true)
-		if not (ctx.state.job and ctx.state.job > 0) then
-			M.apply_state(ctx, { messageCount = 0 }, true)
-			ctx.transcript.append_status(ctx.notices.empty_session)
-			return
-		end
-		ctx.state.session_replacement_pending = true
-		ctx.rpc.send({ type = "new_session" }, function(event)
-			if event.success and not (event.data and event.data.cancelled) then
-				M.sync(ctx, { new_session = true, publish_workspace = true })
-			else
-				ctx.state.session_replacement_pending = false
-				if not event.success then
-					ctx.ui.notify(event.error or "Could not start a new session", vim.log.levels.ERROR)
-				end
-				ctx.actions.flush_queued_prompts()
-			end
-		end)
-	end
-	guard.confirm_abort_active_run(ctx, "Starting a new session", proceed)
+	if not guard.if_history_change_allowed(ctx, "starting another session") then return end
+	require("pi-integration.rpc").restart(ctx, { fresh_session = true })
 end
 
 function M.new_session_window(ctx)
@@ -167,35 +176,8 @@ function M.new_session_window(ctx)
 end
 
 function M.switch_session(ctx, path)
-	local function proceed()
-		pending_picker.clear(ctx, true)
-		ctx.state.session_replacement_pending = true
-		if not (ctx.state.job and ctx.state.job > 0) then
-			ctx.state.pending_session_file = path
-			M.sync(ctx, {
-				publish_workspace = true,
-				on_success = function()
-					ctx.ui.notify("Attached session")
-				end,
-			})
-			return
-		end
-		ctx.rpc.send({ type = "switch_session", sessionPath = path }, function(event)
-			if event.success and not (event.data and event.data.cancelled) then
-				M.sync(ctx, {
-					publish_workspace = true,
-					on_success = function()
-						ctx.ui.notify("Switched session")
-					end,
-				})
-			else
-				ctx.state.session_replacement_pending = false
-				ctx.ui.notify("Session switch cancelled or failed", vim.log.levels.ERROR)
-				ctx.actions.flush_queued_prompts()
-			end
-		end)
-	end
-	guard.confirm_abort_active_run(ctx, "Switching sessions", proceed)
+	if not guard.if_history_change_allowed(ctx, "switching sessions") then return end
+	require("pi-integration.rpc").restart(ctx, { session_file = runtime.canonical_path(path) })
 end
 
 return M

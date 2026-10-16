@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAccessMode } from "./shared/access-state";
+import { projectTrustReady } from "./shared/project-trust";
 import { resolveToolPath } from "./shared/paths";
 import {
   getIntegrationMode,
@@ -296,7 +297,11 @@ async function confirmDestructive(
 export default function workspaceExtension(pi: ExtensionAPI) {
   let runtimeCancellation = new AbortController();
   pi.on("session_shutdown", () => runtimeCancellation.abort());
-  pi.on("session_start", (event, ctx) => {
+  const restoreWorkspace = (event: { reason: string }, ctx: ExtensionContext) => {
+    if (!projectTrustReady()) {
+      publishWorkspaceState(ctx);
+      return;
+    }
     runtimeCancellation = new AbortController();
     restoreIntegrationMode(ctx);
     const envWorkspaceId = process.env.PI_WORKSPACE_ID;
@@ -330,7 +335,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     }
     refreshWorkspaceTool(ctx);
     publishWorkspaceState(ctx);
-  });
+  };
+  pi.on("session_start", restoreWorkspace);
 
   pi.on("session_tree", (_event, ctx) => {
     restoreIntegrationMode(ctx);
@@ -485,7 +491,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   pi.registerCommand("pi-workspace-publish", {
     description: "Publish the current workspace state to the active host",
     handler: async (_args, ctx) => {
-      publishWorkspaceState(ctx);
+      restoreWorkspace({ reason: "resume" }, ctx);
     },
   });
 

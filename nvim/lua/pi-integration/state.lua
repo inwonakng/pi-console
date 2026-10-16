@@ -36,6 +36,8 @@ function M.new()
 	return {
 		job = nil,
 		rpc_process = nil,
+		trust_status = nil,
+		trust_restart = false,
 		rpc_tearing_down = false,
 		stdout_pending = "",
 		stderr_pending = "",

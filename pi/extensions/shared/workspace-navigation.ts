@@ -2,6 +2,7 @@ import type { ExtensionCommandContext, ExtensionContext, SessionEntry } from "@e
 import { existsSync } from "node:fs";
 import { getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, workspaceDisplayState, type WorkspaceRecord } from "./workspace";
 import { hasRunningSubagents } from "./subagent-state";
+import { prepareProjectTrust, projectTrustReady } from "./project-trust";
 
 const LOCATION_ENTRY = "pi-workspace-location";
 const CURSOR_ENTRY = "pi-workspace-cursor";
@@ -65,6 +66,8 @@ export async function moveToLocation(
   if ((ctx.cwd !== cwd || options.reload) && hasRunningSubagents()) {
     throw new Error("Wait for running subagents before switching workspaces; replacing Pi's runtime would abort them.");
   }
+  if (!projectTrustReady()) throw new Error("Resolve project trust before switching workspaces");
+  if (ctx.cwd !== cwd || options.reload) await prepareProjectTrust(ctx, cwd);
   const ownsPending = (ctx.cwd !== cwd || options.reload === true) && !getPendingWorkspaceId();
   const arrival = async (nextCtx: ExtensionCommandContext, sendMessage?: MoveContext["sendMessage"]) => {
     try {

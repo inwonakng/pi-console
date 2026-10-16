@@ -139,7 +139,8 @@ end
 
 function M.flush_queued_prompts(ctx)
 	local state = ctx.state
-	if state.loading_error or state.is_loading or state.session_replacement_pending or state.rpc_tearing_down
+	if not state.trust_status or state.trust_status.state ~= "ready"
+		or state.loading_error or state.is_loading or state.session_replacement_pending or state.rpc_tearing_down
 		or lifecycle.is_agent_active(state) or state.is_compacting then
 		return
 	end
@@ -161,7 +162,8 @@ end
 
 function M.finish_loading_if_ready(ctx)
 	local state = ctx.state
-	if not state.workspace_status_received or not state.session_sync_complete then
+	if not state.workspace_status_received or not state.session_sync_complete
+		or not state.trust_status or state.trust_status.state ~= "ready" then
 		return
 	end
 	if state.workspace and state.workspace.transitionPending == true then
@@ -199,9 +201,20 @@ function M.submit_prompt(ctx)
 end
 
 function M.abort(ctx)
-	ctx.state.abort_requested = true
+	local state = ctx.state
+	local active = lifecycle.is_agent_active(state) or state.is_compacting
+	state.abort_requested = active
 	require("pi-integration.pending-picker").clear(ctx, true)
-	ctx.rpc.send({ type = "abort" })
+	if not active then
+		return
+	end
+	ctx.rpc.send({ type = "abort" }, function(event)
+		-- Abort acknowledges idle even when no agent_end event was emitted.
+		state.abort_requested = false
+		if not event.success then
+			ctx.ui.notify(event.error or "Could not abort Pi", vim.log.levels.ERROR)
+		end
+	end)
 end
 
 function M.history(ctx)

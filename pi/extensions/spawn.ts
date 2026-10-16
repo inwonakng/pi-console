@@ -1349,6 +1349,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       PI_INTERACTION_MODE: "noninteractive",
       PI_SUBAGENT_NAME: run.profile?.name ?? run.requestedAgent ?? run.role ?? "",
       PI_WORKSPACE_ID: run.worktree?.workspaceId ?? "",
+      PI_CONSOLE_SESSION_FILE: "",
     };
     if (process.env.PI_CODING_AGENT_DIR) {
       childEnv.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
