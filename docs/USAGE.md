@@ -185,6 +185,11 @@ and reattach existing clients. Then use:
 | `<prefix>o` | Open or focus the persistent overview; close the popup if already focused |
 | `<prefix>O` | Toggle the compact overview sidebar in the current window |
 
+Tmux 3.4 uses a popup; newer servers with modal-pane support use a modal pane.
+Toggling closes only the nested client launched for that popup/modal, not a main
+client viewing the same agents session. Pass the invoking client name when
+calling `toggle` manually; without one, closing from the agents session is a no-op.
+
 The sidebar shows open and pinned conversations with colored status icons,
 conversation titles, projects, and current activity. Focus it with normal tmux
 pane navigation, then use `j`/`k` to select a conversation, `Enter` to focus or
@@ -229,6 +234,12 @@ Catppuccin formats. Complex/indirect title expressions are left unchanged rather
 than rewritten. Manually renaming a window opts it out of icon naming and
 coloring; review splits do not take over its icon. On normal frontend exit, an
 icon-named window returns to `pi` and its original title formats are restored.
+
+On tmux 3.8 and newer, supported title formats use native status-line animation;
+the underlying window name stays stable while the working/loading state is
+unchanged. Older servers, or themes that cannot host the animation, retain
+asynchronous frame-based window-name updates. The running server determines
+support, not the version of the client binary in `PATH`.
 
 You can also run `pi-console` directly from a project directory. Inside
 pi-console, `<leader>?` shows the complete context-sensitive key list.

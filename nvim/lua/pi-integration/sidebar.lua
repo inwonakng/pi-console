@@ -51,19 +51,19 @@ function M.open(config)
 	local last_focused_at = 0
 	local timer = vim.uv.new_timer()
 	local closed = false
+	local refreshing = false
 	local function selected()
 		return vim.api.nvim_win_is_valid(win) and rows[vim.api.nvim_win_get_cursor(win)[1]] or nil
 	end
 	local function notify(err)
 		vim.notify(err or "Session operation failed", vim.log.levels.WARN, { title = "Pi sidebar" })
 	end
-	local function refresh()
+	local function render(instances, err)
 		if closed or not vim.api.nvim_win_is_valid(win) or not vim.api.nvim_buf_is_valid(buf) then
 			return
 		end
 		local previous = selected()
 		local view = vim.api.nvim_win_call(win, vim.fn.winsaveview)
-		local instances, err = runtime.list()
 		local entries
 		if instances then
 			entries, err = pins.merge(instances)
@@ -168,6 +168,14 @@ function M.open(config)
 		end)
 		navigation.set_rows(starts)
 		updating = false
+	end
+	local function refresh()
+		if closed or refreshing or not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_win_is_valid(win) then return end
+		refreshing = true
+		runtime.list_async(function(instances, err)
+			refreshing = false
+			render(instances, err)
+		end)
 	end
 	local function map(key, action, description)
 		vim.keymap.set("n", key, action, { buffer = buf, silent = true, desc = description })

@@ -38,9 +38,20 @@ function M.get(status)
 	return style
 end
 
-function M.tab_name(status)
-	local icon = M.get(status).icon
+local function tab_icon(icon)
 	return icon .. string.rep(" ", math.max(0, 2 - vim.fn.strdisplaywidth(icon)))
+end
+
+function M.tab_name(status, stable)
+	local style = styles[status] or styles.Error
+	return tab_icon(stable and style.frames and style.frames[1] or M.get(status).icon)
+end
+
+function M.tmux_animation(status)
+	local style = styles[status] or styles.Error
+	if not style.frames then return nil end
+	local frames = vim.tbl_map(tab_icon, style.frames)
+	return "#{A/" .. (M.animation_interval_ms / 100) .. ":" .. table.concat(frames, ",") .. "}"
 end
 
 function M.highlight(status)

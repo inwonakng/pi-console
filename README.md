@@ -24,7 +24,8 @@ setups. Future maintenance and support are not guaranteed.
 
 ## Requirements
 
-Developed against **Neovim 0.12, Pi 1.3.0, and tmux 3.7**. You also need:
+Developed against **Neovim 0.12, Pi 1.3.0, and tmux 3.7**. The tmux integration
+supports **3.4 and newer**; older versions are best-effort. You also need:
 
 - Git, Bash, curl, Node.js 20.11+, npm, `realpath`, `ripgrep`, and `fzf`;
 - Rust/Cargo for `blink.cmp`, plus a C compiler and Tree-sitter parser toolchain;

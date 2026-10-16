@@ -21,9 +21,10 @@ while read -r name alias flags rest; do
         break
     fi
 done <<< "$commands"
+socket_path=$(tmux display-message -p '#{socket_path}')
+client_script="$script_dir/popup-client.sh"
 
 if [ "$modal_supported" -eq 1 ]; then
-    socket_path=$(tmux display-message -p '#{socket_path}')
     # Forward every key, including the prefix, without using Escape to dismiss.
     # -W preserves display-popup's wait-until-detached behavior. Force only the
     # container to close on exit, even if its host has remain-on-exit enabled.
@@ -31,13 +32,12 @@ if [ "$modal_supported" -eq 1 ]; then
         -s "$(tmux show-options -gv popup-style)" \
         bash -eu -c '
             tmux -S "$1" set-option -p -t "$TMUX_PANE" remain-on-exit off
-            unset TMUX
-            exec env PI_CONSOLE_POPUP=1 tmux -S "$1" attach-session -t "=$2"
-        ' pi-agents "$socket_path" "$PI_CONSOLE_TMUX_SESSION"
+            exec bash "$3" "$1" "$2"
+        ' pi-agents "$socket_path" "$PI_CONSOLE_TMUX_SESSION" "$client_script"
 fi
 
 if [ -n "$client_name" ]; then
-    exec tmux display-popup -B -c "$client_name" -w 80% -h 85% -E env PI_CONSOLE_POPUP=1 tmux attach-session -t "=$PI_CONSOLE_TMUX_SESSION"
+    exec tmux display-popup -B -c "$client_name" -w 80% -h 85% -E bash "$client_script" "$socket_path" "$PI_CONSOLE_TMUX_SESSION"
 else
-    exec tmux display-popup -B -t "$pane_id" -w 80% -h 85% -E env PI_CONSOLE_POPUP=1 tmux attach-session -t "=$PI_CONSOLE_TMUX_SESSION"
+    exec tmux display-popup -B -t "$pane_id" -w 80% -h 85% -E bash "$client_script" "$socket_path" "$PI_CONSOLE_TMUX_SESSION"
 fi

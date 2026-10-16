@@ -1,5 +1,5 @@
 -- Session UI depends on this module, not on a particular multiplexer.
--- Backends implement available/list/focus/is_focused/launch/kill/publish/clear/start_overview.
+-- Backends implement available/list/list_async/focus/is_focused/launch/kill/publish/clear/start_overview.
 -- start_overview registers the overview's location for backend navigation.
 -- list() returns snapshots plus an opaque instance id and a readable location.
 -- Session controls use each Neovim instance's RPC server, independent of its backend.
@@ -48,6 +48,15 @@ function M.list()
 		return {}
 	end
 	return transport.list()
+end
+
+function M.list_async(callback)
+	local transport = backend()
+	if not transport then
+		vim.schedule(function() callback({}) end)
+		return
+	end
+	transport.list_async(callback)
 end
 
 -- Use the list already loaded by a viewer; this does not query the backend.

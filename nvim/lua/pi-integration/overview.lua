@@ -120,6 +120,7 @@ function M.open(config)
 	local query = ""
 	local updating = false
 	local closed = false
+	local refreshing = false
 	local select_last_focused = true
 	local focus_autocmd
 	local timer = vim.uv.new_timer()
@@ -177,13 +178,12 @@ function M.open(config)
 			end
 		end
 	end
-	local function refresh()
+	local function render(instances, err)
 		if closed or not vim.api.nvim_buf_is_valid(list_buf) or not vim.api.nvim_win_is_valid(list_win) then
 			return
 		end
 		local previous = selected()
 		local view = vim.api.nvim_win_call(list_win, vim.fn.winsaveview)
-		local instances, err = runtime.list()
 		local entries
 		if instances then
 			entries, err = pins.merge(instances)
@@ -302,6 +302,16 @@ function M.open(config)
 		navigation.set_rows(starts)
 		updating = false
 		details()
+	end
+	local function refresh()
+		if closed or refreshing or not vim.api.nvim_buf_is_valid(list_buf) or not vim.api.nvim_win_is_valid(list_win) then return end
+		refreshing = true
+		runtime.list_async(function(instances, err)
+			refreshing = false
+			-- Selection and viewport are read by render after the query returns,
+			-- preserving navigation performed while the subprocess was running.
+			render(instances, err)
+		end)
 	end
 	local function report(result, err)
 		if not result then

@@ -7,6 +7,7 @@ local tab_option = "@pi_console_tab"
 local owner_pane
 local owner_window
 local publication
+local native_animation
 
 local tab_name = icons.tab_name
 
@@ -28,11 +29,9 @@ local function command(args, raw)
 	return command_result(vim.system(argv, { text = true }):wait(2000), raw)
 end
 
-function M.list()
-	local output, err = command({ "list-panes", "-a", "-F", "#{pane_id}\t#{session_id}\t#{window_id}\t#{pane_dead}\t#{" .. option .. "}" })
-	if not output then
-		return nil, err
-	end
+local list_args = { "list-panes", "-a", "-F", "#{pane_id}\t#{session_id}\t#{window_id}\t#{pane_dead}\t#{" .. option .. "}" }
+
+local function parse_instances(output)
 	local instances = {}
 	local seen = {}
 	for line in output:gmatch("[^\n]+") do
@@ -66,6 +65,23 @@ function M.list()
 		return tonumber(a.id:sub(2)) < tonumber(b.id:sub(2))
 	end)
 	return instances
+end
+
+function M.list()
+	local output, err = command(list_args)
+	if not output then return nil, err end
+	return parse_instances(output)
+end
+
+function M.list_async(callback)
+	local argv = vim.list_extend({ "tmux" }, list_args)
+	local ok, process = pcall(vim.system, argv, { text = true, timeout = 2000 }, vim.schedule_wrap(function(result)
+		local output, err = command_result(result)
+		callback(output and parse_instances(output) or nil, err)
+	end))
+	if not ok then
+		vim.schedule(function() callback(nil, tostring(process)) end)
+	end
 end
 
 function M.is_focused()
@@ -255,21 +271,36 @@ end
 
 local tab_formats = { "window-status-format", "window-status-current-format" }
 
-local function local_format(window, option_name, run)
-	local output, err = run({ "show-options", "-wqv", "-t", window, option_name }, true)
-	if not output then
-		return nil, err
+local function read_formats(window, run)
+	-- Delimit raw results: no output means inherited, while a newline means
+	-- explicitly empty. A per-query boundary also permits multiline formats.
+	local boundary = "pi-console-format-" .. vim.uv.hrtime()
+	local args = {}
+	for _, name in ipairs(tab_formats) do
+		vim.list_extend(args, {
+			"show-options", "-wqv", "-t", window, name,
+			";", "display-message", "-p", boundary,
+			";", "show-options", "-gqv", name,
+			";", "display-message", "-p", boundary, ";",
+		})
 	end
-	-- No output means inherited; a single newline means explicitly empty.
-	return output ~= "" and output:gsub("\n$", "") or nil
+	table.remove(args) -- no trailing command separator
+	local output, err = run(args, true)
+	if not output then return nil, err end
+	local values = vim.split(output, boundary .. "\n", { plain = true })
+	if #values ~= 5 then return nil, "Unexpected tmux status-format output" end
+	local formats = {}
+	for index, name in ipairs(tab_formats) do
+		local current = values[index * 2 - 1]
+		formats[name] = {
+			current = current ~= "" and current:gsub("\n$", "") or nil,
+			global = values[index * 2]:gsub("\n$", ""),
+		}
+	end
+	return formats
 end
 
-local function global_format(option_name, run)
-	local output, err = run({ "show-options", "-gqv", option_name }, true)
-	return output and output:gsub("\n$", "") or nil, err
-end
-
-local function color_format(format, bold)
+local function color_format(format, bold, animation)
 	local parts, pos, foreground, restore = {}, 1, "default", "#[default]"
 	while pos <= #format do
 		local pair = format:sub(pos, pos + 1)
@@ -305,6 +336,7 @@ local function color_format(format, bold)
 		end
 		-- Do not rewrite names inside conditionals, comparisons, or escaped ##W.
 		if token == "#W" or token == "#{window_name}" then
+			token = animation or token
 			if bold then
 				token = "#[fg=#{@pi_console_tab_color},bold]" .. token .. restore
 			else
@@ -331,31 +363,37 @@ local function commit_tab(window, name, payload, changes, run)
 end
 
 local function style_tab(window, tab, status, run, changes)
+	local formats, err = read_formats(window, run)
+	if not formats then return nil, err end
 	tab.formats = tab.formats or {}
+	local animation = native_animation and icons.tmux_animation(status) or nil
+	local bold = icons.get(status).bold
 	for _, option_name in ipairs(tab_formats) do
-		local current, err = local_format(window, option_name, run)
-		if err then return nil, err end
-		local saved = tab.formats[option_name]
-		local inherited = current == nil or saved and current == saved.installed and saved.inherited
-		local base = current
-		if inherited then
-			base, err = global_format(option_name, run)
-		elseif saved and current == saved.installed then
-			base = saved.base
+		local format = formats[option_name]
+		local current, saved = format.current, tab.formats[option_name]
+		format.inherited = current == nil or saved and current == saved.installed and saved.inherited
+		format.base = format.inherited and format.global or saved and current == saved.installed and saved.base or current
+		-- If either theme format cannot host the animation, keep frame-based
+		-- window names so the active or inactive tab cannot freeze its icon.
+		if animation then
+			local decorated = color_format(format.base, bold, animation)
+			if not decorated or decorated == format.base then animation = nil end
 		end
-		if not base then return nil, err end
-		local decorated = color_format(base, icons.get(status).bold)
+	end
+	for _, option_name in ipairs(tab_formats) do
+		local format, saved = formats[option_name], tab.formats[option_name]
+		local current, base = format.current, format.base
+		local decorated = color_format(base, bold, animation)
 		if decorated and decorated ~= base then
 			if current ~= decorated then
 				change(changes, { "set-option", "-w", "-t", window, option_name, decorated })
 			end
-			tab.formats[option_name] = { base = base, installed = decorated, inherited = inherited == true }
+			tab.formats[option_name] = { base = base, installed = decorated, inherited = format.inherited == true }
 		else
-			-- A new theme may use an unsupported expression. Release our old
-			-- override instead of freezing the theme or rewriting its logic.
+			-- Release our override if a new theme uses an unsupported expression.
 			if saved and current == saved.installed then
-				local args = { "set-option", inherited and "-wu" or "-w", "-t", window, option_name }
-				if not inherited then table.insert(args, base) end
+				local args = { "set-option", format.inherited and "-wu" or "-w", "-t", window, option_name }
+				if not format.inherited then table.insert(args, base) end
 				change(changes, args)
 			end
 			tab.formats[option_name] = nil
@@ -366,12 +404,14 @@ local function style_tab(window, tab, status, run, changes)
 		change(changes, { "set-option", "-w", "-t", window, "@pi_console_tab_color", color })
 		tab.color = color
 	end
-	return true
+	return true, nil, animation ~= nil
 end
 
 local function release_tab_style(window, tab, run, changes)
+	local formats, err = read_formats(window, run)
+	if not formats then return nil, err end
 	for option_name, saved in pairs(tab.formats or {}) do
-		local current = local_format(window, option_name, run)
+		local current = formats[option_name] and formats[option_name].current
 		if current == saved.installed then
 			local args = { "set-option", saved.inherited and "-wu" or "-w", "-t", window, option_name }
 			if not saved.inherited then table.insert(args, saved.base) end
@@ -379,6 +419,7 @@ local function release_tab_style(window, tab, run, changes)
 		end
 	end
 	change(changes, { "set-option", "-wu", "-t", window, "@pi_console_tab_color" })
+	return true
 end
 
 local function release_tab(keep_managed, run)
@@ -391,7 +432,8 @@ local function release_tab(keep_managed, run)
 	local tab = payload and json.decode_object(payload)
 	if tab and tab.pane == owner_pane and tab.pid == vim.uv.os_getpid() then
 		local changes = {}
-		release_tab_style(owner_window, tab, run, changes)
+		local released, err = release_tab_style(owner_window, tab, run, changes)
+		if not released then return nil, err end
 		-- Leave manual renames and replacement instances alone.
 		if name == tab.name then
 			change(changes, { "rename-window", "-t", owner_window, "pi" })
@@ -412,12 +454,16 @@ local function publish_tab(snapshot, run)
 	-- Publish the heartbeat and read the tab in one tmux invocation.
 	local target, err = run({
 		"set-option", "-p", "-t", owner_pane, option, json.encode(snapshot),
-		";", "display-message", "-p", "-t", owner_pane, "#{window_id}\t#{window_name}\t#{" .. tab_option .. "}",
+		";", "display-message", "-p", "-t", owner_pane, "#{version}\t#{window_id}\t#{window_name}\t#{" .. tab_option .. "}",
 	})
 	if not target then
 		return nil, err
 	end
-	local window, name, payload = target:match("^(@%d+)\t(.-)\t(.*)$")
+	local version, window, name, payload = target:match("^(.-)\t(@%d+)\t(.-)\t(.*)$")
+	if native_animation == nil then
+		local major, minor = (version or ""):match("^(%d+)%.(%d+)")
+		native_animation = major ~= nil and (tonumber(major) > 3 or tonumber(major) == 3 and tonumber(minor) >= 8)
+	end
 	if owner_window and owner_window ~= window then
 		-- Moving a pane must not leave its old tab decorated or claim its destination.
 		release_tab(false, run)
@@ -429,22 +475,23 @@ local function publish_tab(snapshot, run)
 	if name ~= tab.name then
 		-- A user-supplied name permanently opts this window out of icon naming.
 		local changes = {}
-		release_tab_style(window, tab, run, changes)
+		local released, err = release_tab_style(window, tab, run, changes)
+		if not released then return nil, err end
 		change(changes, { "set-option", "-wu", "-t", window, tab_option })
 		owner_window = nil
 		return commit_tab(window, name, payload, changes, run)
 	end
 	owner_window = window
-	local previous = json.encode(tab)
+	local previous = vim.deepcopy(tab)
 	local changes = {}
-	local styled, style_err = style_tab(window, tab, snapshot.status, run, changes)
+	local styled, style_err, animated = style_tab(window, tab, snapshot.status, run, changes)
 	if not styled then return nil, style_err end
-	local next_name = tab_name(snapshot.status)
+	local next_name = tab_name(snapshot.status, animated)
 	tab.pane, tab.pid, tab.name = owner_pane, vim.uv.os_getpid(), next_name
-	local payload_next = json.encode(tab)
-	if #changes == 0 and name == next_name and payload_next == previous then
+	if #changes == 0 and name == next_name and vim.deep_equal(tab, previous) then
 		return true
 	end
+	local payload_next = json.encode(tab)
 	change(changes, { "rename-window", "-t", window, next_name })
 	change(changes, { "set-option", "-w", "-t", window, tab_option, payload_next })
 	return commit_tab(window, name, payload, changes, run)

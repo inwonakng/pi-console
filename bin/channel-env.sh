@@ -18,16 +18,23 @@ if [ -f "$pi_console_marker" ]; then
 else
     export PI_CONSOLE_CHANNEL=dev
     export PI_CONSOLE_BUILD_REF=checkout
-    if PI_CONSOLE_BUILD_COMMIT=$(git -C "$PI_CONSOLE_APP_ROOT" rev-parse HEAD); then
-        pi_console_changes=$(git --no-optional-locks -C "$PI_CONSOLE_APP_ROOT" status --porcelain) || return
-        [ -z "$pi_console_changes" ] || PI_CONSOLE_BUILD_DIRTY=1
-    else
-        return 1
-    fi
-    export PI_CONSOLE_BUILD_COMMIT
+    # Helpers need installation identity, not an inherited or freshly queried
+    # checkout snapshot. Launchers fill this in immediately before startup.
+    export PI_CONSOLE_BUILD_COMMIT=
     export PI_CONSOLE_NVIM_APPNAME=pi-console-dev-nvim
     export PI_CONSOLE_TMUX_SESSION=agents-dev
 fi
+
+pi_console_build_snapshot() {
+    if [ "$PI_CONSOLE_CHANNEL" = dev ]; then
+        local changes
+        PI_CONSOLE_BUILD_COMMIT=$(git -C "$PI_CONSOLE_APP_ROOT" rev-parse HEAD) || return
+        changes=$(git --no-optional-locks -C "$PI_CONSOLE_APP_ROOT" status --porcelain) || return
+        PI_CONSOLE_BUILD_DIRTY=0
+        [ -z "$changes" ] || PI_CONSOLE_BUILD_DIRTY=1
+        export PI_CONSOLE_BUILD_COMMIT PI_CONSOLE_BUILD_DIRTY
+    fi
+}
 
 pi_console_version() {
     printf 'Channel: %s\nRef: %s\nCommit: %s\nDirty at startup: %s\nInstallation: %s\n' \
