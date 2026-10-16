@@ -222,6 +222,9 @@ export function notifyPiWorkspaceIntegration(ctx: ExtensionContext): boolean {
 }
 
 export function notifyPiFinished(ctx: ExtensionContext, force = false): boolean {
+	if (process.env.PI_SPAWN_AGENT === "1") {
+		return false;
+	}
 	if (!notificationsEnabled() && !force) {
 		return false;
 	}
