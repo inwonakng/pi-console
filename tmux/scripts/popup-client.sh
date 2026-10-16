@@ -12,13 +12,19 @@ tmux -S "$socket_path" attach-session -t "=$session" <&0 &
 attach_pid=$!
 marker="@pi_console_popup_$attach_pid"
 cleanup() {
-    tmux -S "$socket_path" set-option -gu "$marker"
+    local error
+    if ! error=$(tmux -S "$socket_path" set-option -gu "$marker" </dev/null 2>&1); then
+        printf '%s\n' "$error" >&2
+    fi
 }
 trap cleanup EXIT
 trap 'kill "$attach_pid"; exit 1' HUP INT TERM
 # The process PID plus its terminal identifies this attachment, not the shared
 # session or pane. No client-specific environment queries are needed on 3.4.
-if ! tmux -S "$socket_path" set-option -g "$marker" "$terminal"; then
+# tmux restores all three standard streams to blocking on exit. Bookkeeping
+# must use /dev/null and pipes, not the attachment's shared terminal descriptor.
+if ! error=$(tmux -S "$socket_path" set-option -g "$marker" "$terminal" </dev/null 2>&1); then
+    printf '%s\n' "$error" >&2
     kill "$attach_pid"
     exit 1
 fi
