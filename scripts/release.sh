@@ -39,7 +39,12 @@ $local_tags
 $(printf '%s\n' "$remote_tags" | awk '{ sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }')
 EOF
 suggested="$prefix$((max + 1))"
-tag=${1:-$suggested}
+tag=${1:-}
+if [ -z "$tag" ]; then
+    printf 'Version [%s]: ' "$suggested"
+    IFS= read -r tag || fail 'Release cancelled.'
+    tag=${tag:-$suggested}
+fi
 [[ "$tag" =~ ^v[0-9]{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])\.[1-9][0-9]*$ ]] \
     || fail 'Release tags must use vYYYY.MM.DD.N (N starts at 1).'
 git check-ref-format "refs/tags/$tag" || fail 'Invalid release tag.'
@@ -54,9 +59,12 @@ existing_remote=$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{
 printf 'Commit:    %s\nSuggested: %s\nPublish:   %s\n' "$commit" "$suggested" "$tag"
 printf 'This creates an annotated tag, pushes it, and publishes the latest GitHub Release.\n'
 printf 'It does not publish npm packages or update any stable installation.\n'
-printf 'Type %s to confirm: ' "$tag"
+printf 'Publish %s? [y/N] ' "$tag"
 IFS= read -r answer || fail 'Release cancelled.'
-[ "$answer" = "$tag" ] || fail 'Release cancelled.'
+case "$answer" in
+    [yY]|[yY][eE][sS]) ;;
+    *) fail 'Release cancelled.' ;;
+esac
 # Recheck local state after confirmation; never tag changes made while prompting.
 [ -z "$(git --no-optional-locks status --porcelain)" ] && [ "$(git rev-parse HEAD)" = "$commit" ] \
     && [ "$(git branch --show-current)" = main ] || fail 'Checkout changed during confirmation.'
