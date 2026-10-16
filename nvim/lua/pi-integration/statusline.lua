@@ -253,7 +253,7 @@ local function spawn_statusline_label(state)
 	if count <= 0 then
 		return ""
 	end
-	return " 󰇥" .. tostring(count)
+	return " 󰇥 " .. tostring(count)
 end
 
 local function thinking_statusline_highlight(level)
@@ -442,7 +442,7 @@ function M.render_secondary(ctx)
 	local spawn_label = spawn_statusline_label(state)
 	local left_text = activity_label .. spawn_label
 	local width = vim.api.nvim_win_get_width(state.status_win)
-	local build_label = build_info.statusline_label(width)
+	local build_label = build_info.statusline_label(math.max(0, width - 1)) .. " "
 	local build_width = vim.fn.strdisplaywidth(build_label)
 	local _, _, _, _, parts = format_session_stats(state)
 	parts = parts or {}
