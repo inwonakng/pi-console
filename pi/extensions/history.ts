@@ -21,6 +21,7 @@ import { listWorkspaces, loadWorkspace, prepareWorkspaceDiscard, removeWorkspace
 import { locationForEntry, locationEntry, moveToLocation, workspaceIdAt } from "./shared/workspace-navigation";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import { pathInside, resolveToolPath } from "./shared/paths";
+import { selectNavigation } from "./shared/navigation";
 
 type SnapshotState =
   | { kind: "missing" }
@@ -487,7 +488,7 @@ async function pickUserMessage(ctx: ExtensionCommandContext) {
 		return undefined;
 	}
 	const options = entries.map((entry) => `${entry.id}  ${shortText(messageText(entry))}`);
-	const choice = await ctx.ui.select("Pi history", options);
+	const choice = await selectNavigation(ctx, "Pi history", options);
 	if (!choice) {
 		return undefined;
 	}
@@ -598,10 +599,7 @@ export default function historyExtension(pi: ExtensionAPI) {
 			if (!entry) {
 				return;
 			}
-			const title = ctx.mode === "rpc"
-				? JSON.stringify({ kind: "pi_compact_select", prompt: "History action" })
-				: "History action";
-			const action = await ctx.ui.select(title, ["Revert (undoes related file changes)", "Fork"]);
+			const action = await selectNavigation(ctx, "History action", ["Revert (undoes related file changes)", "Fork"]);
 			if (action === "Fork") {
 				const text = messageText(entry);
 				await ctx.fork(entry.id, {

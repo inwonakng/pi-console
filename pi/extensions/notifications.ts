@@ -10,6 +10,7 @@ import {
 } from "./shared/notifications";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 import { getPendingWorkspaceId } from "./shared/workspace";
+import { isNavigationPrompt } from "./shared/navigation";
 
 const NOTIFICATIONS_SETTING = "notifications";
 
@@ -47,7 +48,8 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 		finalStopReason = lastAssistantMessage(event.messages || [])?.stopReason;
 	});
 
-	pi.on("ui_prompt_start", (_event, ctx) => {
+	pi.on("ui_prompt_start", (event, ctx) => {
+		if (isNavigationPrompt(event.title)) return;
 		notifyPiNeedsInput(ctx);
 	});
 
