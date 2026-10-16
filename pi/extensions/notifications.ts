@@ -35,13 +35,30 @@ function lastAssistantMessage(messages: unknown[]): { stopReason?: string } | un
 
 export default function notificationsExtension(pi: ExtensionAPI) {
 	let finalStopReason: string | undefined;
+	let questionNotification: { toolCallId: string; notified: boolean } | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
+		questionNotification = undefined;
 		restoreNotifications(ctx);
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
+		questionNotification = undefined;
 		restoreNotifications(ctx);
+	});
+
+	// Unlike execution-start events, tool_call runs after a nested call's queue
+	// wait. A queued question must not absorb an earlier tool's approval prompt.
+	pi.on("tool_call", (event) => {
+		if (event.toolName === "question") {
+			questionNotification = { toolCallId: event.toolCallId, notified: false };
+		}
+	});
+
+	pi.on("tool_execution_end", (event) => {
+		if (event.toolCallId === questionNotification?.toolCallId) {
+			questionNotification = undefined;
+		}
 	});
 
 	pi.on("agent_end", (event) => {
@@ -50,10 +67,12 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 
 	pi.on("ui_prompt_start", (event, ctx) => {
 		if (isNavigationPrompt(event.title)) return;
-		notifyPiNeedsInput(ctx);
+		const notified = notifyPiNeedsInput(ctx, undefined, !questionNotification?.notified);
+		if (questionNotification && notified) questionNotification.notified = true;
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
+		questionNotification = undefined;
 		const stopReason = finalStopReason;
 		finalStopReason = undefined;
 		if (!stopReason || stopReason === "error" || getPendingWorkspaceId()) {

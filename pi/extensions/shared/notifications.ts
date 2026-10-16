@@ -183,12 +183,14 @@ function reportNotificationResult(ctx: ExtensionContext, notified: boolean): boo
 	return notified;
 }
 
-export function notifyPiNeedsInput(ctx: ExtensionContext, title = "Pi needs input"): boolean {
+export function notifyPiNeedsInput(ctx: ExtensionContext, title = "Pi needs input", allowNotification = true): boolean {
 	if (notificationState.suppressedInputNotifications > 0) {
 		notificationState.suppressedInputNotifications--;
 		return false;
 	}
-	if (!notificationsEnabled()) {
+	// Consume specialized approval suppression even when a repeated question
+	// prompt is silent, so it cannot suppress an unrelated later request.
+	if (!allowNotification || !notificationsEnabled()) {
 		return false;
 	}
 
