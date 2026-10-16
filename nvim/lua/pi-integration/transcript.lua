@@ -309,7 +309,7 @@ function M.scroll_to_bottom_unless_focused(ctx)
 	if M.win_valid(ctx) and not M.is_focused(ctx) then
 		vim.api.nvim_win_set_cursor(state.transcript_win, { vim.api.nvim_buf_line_count(state.transcript_buf), 0 })
 		M.with_win(ctx, function()
-			vim.cmd("normal! zb")
+			vim.cmd("noautocmd normal! zb")
 		end)
 	end
 end
