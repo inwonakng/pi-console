@@ -140,13 +140,13 @@ end
 
 local function mode_statusline_label(mode)
 	if mode == "full" then
-		return "󱓞"
+		return "󱓞 "
 	elseif mode == "edit" then
-		return "󱇧"
+		return "󱇧 "
 	elseif mode == "ask" then
-		return "󰋗"
+		return "󰋗 "
 	elseif mode == "readonly" then
-		return ""
+		return " "
 	end
 	return tostring(mode or "--")
 end
@@ -303,9 +303,9 @@ end
 
 local function notification_statusline_label(status)
 	if status == "notify on" then
-		return "󰂞"
+		return "󰂞 "
 	elseif status == "notify off" then
-		return "󰂛"
+		return "󰂛 "
 	end
 	return tostring(status or "")
 end
