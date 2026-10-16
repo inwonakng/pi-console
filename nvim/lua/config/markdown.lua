@@ -17,6 +17,11 @@ require("latex_renderer").setup({
 
 require("render-markdown").setup({
 	debounce = 0,
+	on = {
+		render = function(ctx)
+			require("pi-integration").on_transcript_rendered(ctx.buf)
+		end,
+	},
 	pipe_table = {
 		enabled = false,
 	},

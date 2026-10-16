@@ -588,6 +588,12 @@ local function scroll_transcript_to_bottom()
 	return pi_transcript.scroll_to_bottom(transcript_ctx())
 end
 
+function M.on_transcript_rendered(buf)
+	if buf == state.transcript_buf then
+		pi_transcript.scroll_to_bottom_unless_focused(transcript_ctx())
+	end
+end
+
 render_messages = function(messages)
 	if not valid_buf(state.transcript_buf) then
 		return
