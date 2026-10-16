@@ -4,6 +4,7 @@
 -- list() returns snapshots plus an opaque instance id and a readable location.
 -- Session controls use each Neovim instance's RPC server, independent of its backend.
 -- Operations return a non-nil value on success, or nil and an error message.
+-- publish() accepts a background refresh; a refresh already in flight may be skipped.
 local icons = require("pi-integration.status-icons")
 local build_info = require("pi-integration.build-info")
 local M = {}

@@ -6,6 +6,7 @@ local option = "@pi_console"
 local tab_option = "@pi_console_tab"
 local owner_pane
 local owner_window
+local publication
 
 local tab_name = icons.tab_name
 
@@ -13,15 +14,18 @@ function M.available()
 	return vim.env.TMUX ~= nil and vim.env.TMUX_PANE ~= nil and vim.fn.executable("tmux") == 1
 end
 
-local function command(args, raw)
-	local argv = { "tmux" }
-	vim.list_extend(argv, args)
-	local result = vim.system(argv, { text = true }):wait(2000)
+local function command_result(result, raw)
 	if result.code ~= 0 then
 		local message = vim.trim(result.stderr or "")
 		return nil, message ~= "" and message or ("tmux exited with code " .. tostring(result.code))
 	end
 	return raw and (result.stdout or "") or vim.trim(result.stdout or "")
+end
+
+local function command(args, raw)
+	local argv = { "tmux" }
+	vim.list_extend(argv, args)
+	return command_result(vim.system(argv, { text = true }):wait(2000), raw)
 end
 
 function M.list()
@@ -251,8 +255,8 @@ end
 
 local tab_formats = { "window-status-format", "window-status-current-format" }
 
-local function local_format(window, option_name)
-	local output, err = command({ "show-options", "-wqv", "-t", window, option_name }, true)
+local function local_format(window, option_name, run)
+	local output, err = run({ "show-options", "-wqv", "-t", window, option_name }, true)
 	if not output then
 		return nil, err
 	end
@@ -260,8 +264,8 @@ local function local_format(window, option_name)
 	return output ~= "" and output:gsub("\n$", "") or nil
 end
 
-local function global_format(option_name)
-	local output, err = command({ "show-options", "-gqv", option_name }, true)
+local function global_format(option_name, run)
+	local output, err = run({ "show-options", "-gqv", option_name }, true)
 	return output and output:gsub("\n$", "") or nil, err
 end
 
@@ -313,16 +317,29 @@ local function color_format(format, bold)
 	return table.concat(parts)
 end
 
-local function style_tab(window, tab, status)
+local function change(changes, args)
+	table.insert(changes, table.concat(vim.tbl_map(vim.fn.shellescape, args), " "))
+end
+
+local function commit_tab(window, name, payload, changes, run)
+	-- Reads yield to other clients. Commit tab writes together only if the
+	-- observed name and ownership marker are still current. Literal values
+	-- must escape tmux format delimiters, including those inside saved JSON.
+	local unchanged = "#{&&:#{==:#{window_name},#{l:" .. name:gsub("[#},]", "#%0")
+		.. "}},#{==:#{" .. tab_option .. "},#{l:" .. payload:gsub("[#},]", "#%0") .. "}}}"
+	return run({ "if-shell", "-F", "-t", window, unchanged, table.concat(changes, " ; ") })
+end
+
+local function style_tab(window, tab, status, run, changes)
 	tab.formats = tab.formats or {}
 	for _, option_name in ipairs(tab_formats) do
-		local current, err = local_format(window, option_name)
+		local current, err = local_format(window, option_name, run)
 		if err then return nil, err end
 		local saved = tab.formats[option_name]
 		local inherited = current == nil or saved and current == saved.installed and saved.inherited
 		local base = current
 		if inherited then
-			base, err = global_format(option_name)
+			base, err = global_format(option_name, run)
 		elseif saved and current == saved.installed then
 			base = saved.base
 		end
@@ -330,9 +347,7 @@ local function style_tab(window, tab, status)
 		local decorated = color_format(base, icons.get(status).bold)
 		if decorated and decorated ~= base then
 			if current ~= decorated then
-				local ok
-				ok, err = command({ "set-option", "-w", "-t", window, option_name, decorated })
-				if not ok then return nil, err end
+				change(changes, { "set-option", "-w", "-t", window, option_name, decorated })
 			end
 			tab.formats[option_name] = { base = base, installed = decorated, inherited = inherited == true }
 		else
@@ -341,68 +356,71 @@ local function style_tab(window, tab, status)
 			if saved and current == saved.installed then
 				local args = { "set-option", inherited and "-wu" or "-w", "-t", window, option_name }
 				if not inherited then table.insert(args, base) end
-				command(args)
+				change(changes, args)
 			end
 			tab.formats[option_name] = nil
 		end
 	end
 	local color = icons.get(status).color
 	if tab.color ~= color then
-		local ok, err = command({ "set-option", "-w", "-t", window, "@pi_console_tab_color", color })
-		if not ok then return nil, err end
+		change(changes, { "set-option", "-w", "-t", window, "@pi_console_tab_color", color })
 		tab.color = color
 	end
 	return true
 end
 
-local function release_tab_style(window, tab)
+local function release_tab_style(window, tab, run, changes)
 	for option_name, saved in pairs(tab.formats or {}) do
-		local current = local_format(window, option_name)
+		local current = local_format(window, option_name, run)
 		if current == saved.installed then
 			local args = { "set-option", saved.inherited and "-wu" or "-w", "-t", window, option_name }
 			if not saved.inherited then table.insert(args, saved.base) end
-			command(args)
+			change(changes, args)
 		end
 	end
-	command({ "set-option", "-wu", "-t", window, "@pi_console_tab_color" })
+	change(changes, { "set-option", "-wu", "-t", window, "@pi_console_tab_color" })
 end
 
-local function release_tab(keep_managed)
+local function release_tab(keep_managed, run)
+	run = run or command
 	if not owner_window then
 		return
 	end
-	local target = command({ "display-message", "-p", "-t", owner_window, "#{window_name}\t#{" .. tab_option .. "}" })
+	local target = run({ "display-message", "-p", "-t", owner_window, "#{window_name}\t#{" .. tab_option .. "}" })
 	local name, payload = (target or ""):match("^(.-)\t(.+)$")
 	local tab = payload and json.decode_object(payload)
 	if tab and tab.pane == owner_pane and tab.pid == vim.uv.os_getpid() then
-		release_tab_style(owner_window, tab)
+		local changes = {}
+		release_tab_style(owner_window, tab, run, changes)
 		-- Leave manual renames and replacement instances alone.
 		if name == tab.name then
-			local args = { "rename-window", "-t", owner_window, "pi" }
-			if keep_managed then
-				-- Keep the launcher marker so a frontend restart can reclaim this tab.
-				vim.list_extend(args, { ";", "set-option", "-w", "-t", owner_window, tab_option,
-					json.encode({ pane = owner_pane, name = "pi" }) })
-			else
-				vim.list_extend(args, { ";", "set-option", "-wu", "-t", owner_window, tab_option })
-			end
-			command(args)
-		else
-			command({ "set-option", "-wu", "-t", owner_window, tab_option })
+			change(changes, { "rename-window", "-t", owner_window, "pi" })
 		end
+		if name == tab.name and keep_managed then
+			-- Keep the launcher marker so a frontend restart can reclaim this tab.
+			change(changes, { "set-option", "-w", "-t", owner_window, tab_option,
+				json.encode({ pane = owner_pane, name = "pi" }) })
+		else
+			change(changes, { "set-option", "-wu", "-t", owner_window, tab_option })
+		end
+		commit_tab(owner_window, name, payload, changes, run)
 	end
 	owner_window = nil
 end
 
-local function publish_tab(status)
-	local target, err = command({ "display-message", "-p", "-t", owner_pane, "#{window_id}\t#{window_name}\t#{" .. tab_option .. "}" })
+local function publish_tab(snapshot, run)
+	-- Publish the heartbeat and read the tab in one tmux invocation.
+	local target, err = run({
+		"set-option", "-p", "-t", owner_pane, option, json.encode(snapshot),
+		";", "display-message", "-p", "-t", owner_pane, "#{window_id}\t#{window_name}\t#{" .. tab_option .. "}",
+	})
 	if not target then
 		return nil, err
 	end
 	local window, name, payload = target:match("^(@%d+)\t(.-)\t(.*)$")
 	if owner_window and owner_window ~= window then
 		-- Moving a pane must not leave its old tab decorated or claim its destination.
-		release_tab()
+		release_tab(false, run)
 	end
 	local tab = payload and json.decode_object(payload)
 	if not tab or tab.pane ~= owner_pane then
@@ -410,36 +428,76 @@ local function publish_tab(status)
 	end
 	if name ~= tab.name then
 		-- A user-supplied name permanently opts this window out of icon naming.
-		release_tab_style(window, tab)
+		local changes = {}
+		release_tab_style(window, tab, run, changes)
+		change(changes, { "set-option", "-wu", "-t", window, tab_option })
 		owner_window = nil
-		return command({ "set-option", "-wu", "-t", window, tab_option })
+		return commit_tab(window, name, payload, changes, run)
 	end
 	owner_window = window
 	local previous = json.encode(tab)
-	local styled, style_err = style_tab(window, tab, status)
+	local changes = {}
+	local styled, style_err = style_tab(window, tab, snapshot.status, run, changes)
 	if not styled then return nil, style_err end
-	local next_name = tab_name(status)
+	local next_name = tab_name(snapshot.status)
 	tab.pane, tab.pid, tab.name = owner_pane, vim.uv.os_getpid(), next_name
 	local payload_next = json.encode(tab)
-	if name == next_name and payload_next == previous then
+	if #changes == 0 and name == next_name and payload_next == previous then
 		return true
 	end
-	return command({
-		"rename-window", "-t", window, next_name,
-		";", "set-option", "-w", "-t", window, tab_option, payload_next,
-	})
+	change(changes, { "rename-window", "-t", window, next_name })
+	change(changes, { "set-option", "-w", "-t", window, tab_option, payload_next })
+	return commit_tab(window, name, payload, changes, run)
 end
 
 function M.publish(snapshot)
+	-- Skip overlapping refreshes rather than queueing stale snapshots.
+	if publication then return true end
 	owner_pane = owner_pane or vim.env.TMUX_PANE
-	local published, err = command({ "set-option", "-p", "-t", owner_pane, option, json.encode(snapshot) })
-	if not published then
-		return nil, err
+	local update = {}
+	publication = update
+	-- Keep the existing tab/ownership logic sequential, but yield at every
+	-- subprocess so Neovim can handle input while tmux is working.
+	update.thread = coroutine.create(function()
+		publish_tab(snapshot, function(args, raw)
+			-- Shutdown finishes the remaining operations synchronously so tab
+			-- cleanup sees all installed styles and their ownership marker.
+			if publication ~= update then return command(args, raw) end
+			return command_result(coroutine.yield(args), raw)
+		end)
+	end)
+	local function advance(...)
+		if publication ~= update then return end
+		local ok, args = coroutine.resume(update.thread, ...)
+		if not ok or coroutine.status(update.thread) == "dead" then
+			publication = nil
+			if not ok then error(args) end
+			return
+		end
+		local argv = { "tmux" }
+		vim.list_extend(argv, args)
+		local started, process = pcall(vim.system, argv, { text = true, timeout = 2000 }, vim.schedule_wrap(function(result)
+			advance(result)
+		end))
+		if not started then
+			publication = nil
+			error(process)
+		end
+		update.process = process
 	end
-	return publish_tab(snapshot.status)
+	advance()
+	return true
 end
 
 function M.clear()
+	-- Finish the in-flight update before cleanup. Its scheduled callback is
+	-- invalidated first, so it cannot restore metadata after shutdown.
+	local update = publication
+	publication = nil
+	if update and update.process then
+		local ok, err = coroutine.resume(update.thread, update.process:wait(2000))
+		if not ok then vim.notify(tostring(err), vim.log.levels.ERROR) end
+	end
 	if owner_pane then
 		-- Do not remove a replacement instance's metadata during shutdown.
 		local payload = command({ "show-options", "-pv", "-t", owner_pane, option })
