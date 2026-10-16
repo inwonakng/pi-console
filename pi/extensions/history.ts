@@ -22,6 +22,7 @@ import { locationForEntry, locationEntry, moveToLocation, workspaceIdAt } from "
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import { pathInside, resolveToolPath } from "./shared/paths";
 import { selectNavigation } from "./shared/navigation";
+import { suppressNextInputNotification } from "./shared/notifications";
 
 type SnapshotState =
   | { kind: "missing" }
@@ -449,6 +450,8 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 			return false;
 		}
 		const patches = await Promise.all(discarded.map((record) => prepareWorkspaceDiscard(record.id)));
+		// This confirmation follows user-initiated history navigation, not an agent request.
+		suppressNextInputNotification();
 		const approved = await ctx.ui.confirm("Change workspace during rollback?",
 			`Switch to ${target.cwd}?${patches.length ? `\nThe following worktrees will be discarded (recovery patches remain):\n${patches.map((record) => `- ${record.label}: ${record.worktreePath}\n  ${record.resultPatchPath}`).join("\n")}` : "\nNo worktree will be discarded."}\n${files.length ? `${files.length} recorded file change(s) in the destination workspace will be rolled back.` : "Destination files will remain at their current state."} Proceed?`);
 		if (!approved) return false;
