@@ -35,14 +35,21 @@ local function statusline_escape(text)
 	return tostring(text or ""):gsub("%%", "%%%%")
 end
 
+local function statusline_text(text, highlight)
+	local style = "%#" .. highlight .. "#"
+	return style .. statusline_escape(text):gsub("·", function()
+		return "%#PiStatusSeparator#·" .. style
+	end)
+end
+
 local function format_stat_parts(parts)
 	local plain_parts = {}
 	local statusline_parts = {}
 	for _, part in ipairs(parts) do
 		table.insert(plain_parts, part.text)
-		table.insert(statusline_parts, "%#" .. part.highlight .. "#" .. statusline_escape(part.text))
+		table.insert(statusline_parts, statusline_text(part.text, part.highlight))
 	end
-	return table.concat(plain_parts, "·"), table.concat(statusline_parts, "%#PiUsageStats#·")
+	return table.concat(plain_parts, "·"), table.concat(statusline_parts, "%#PiStatusSeparator#·")
 end
 
 local function format_session_stats(state)
@@ -66,6 +73,16 @@ local function format_session_stats(state)
 		table.insert(primary_parts, { text = "ctx " .. context_tokens .. "/" .. context_window, highlight = "PiUsageContext" })
 	end
 
+	local diff = state.workspace_diff
+	if diff then
+		table.insert(secondary_parts, { text = string.format("+%d", diff.added), highlight = "PiDiffAdded" })
+		table.insert(secondary_parts, { text = string.format("-%d", diff.removed), highlight = "PiDiffRemoved" })
+		table.insert(secondary_parts, {
+			text = string.format("%d %s", diff.files, diff.files == 1 and "file" or "files"),
+			highlight = "PiDiffStats",
+		})
+	end
+
 	-- Pi core currently reports cacheRead/cacheWrite as cumulative per-request
 	-- token events. For statusline purposes, show the session cache footprint
 	-- instead: the largest cache read/write reported by any single model turn.
@@ -74,14 +91,6 @@ local function format_session_stats(state)
 	if cache_read > 0 or cache_write > 0 then
 		table.insert(secondary_parts, { text = "R" .. format_count(cache_read), highlight = "PiUsageStats" })
 		table.insert(secondary_parts, { text = "W" .. format_count(cache_write), highlight = "PiUsageStats" })
-	end
-
-	local diff = state.workspace_diff
-	if diff then
-		table.insert(secondary_parts, {
-			text = string.format("+%d -%d · %d %s", diff.added, diff.removed, diff.files, diff.files == 1 and "file" or "files"),
-			highlight = "PiDiffStats",
-		})
 	end
 
 	if non_null(stats.cost) then
@@ -131,13 +140,13 @@ end
 
 local function mode_statusline_label(mode)
 	if mode == "full" then
-		return "󱓞 "
+		return "󱓞"
 	elseif mode == "edit" then
-		return "󱇧 "
+		return "󱇧"
 	elseif mode == "ask" then
-		return "󰋗 "
+		return "󰋗"
 	elseif mode == "readonly" then
-		return " "
+		return ""
 	end
 	return tostring(mode or "--")
 end
@@ -221,15 +230,15 @@ local function activity_statusline_label(state)
 			next_pending = next_pending or pending
 		end
 	end
-	local suffix = queued > 0 and (" · " .. tostring(queued) .. " queued") or ""
+	local suffix = queued > 0 and ("·" .. tostring(queued) .. " queued") or ""
 	local request = state.active_ui_request_id and (state.pending_ui_requests or {})[state.active_ui_request_id]
 	if request and not request.navigation and (not request.expires or request.expires > vim.uv.now()) then
-		return " waiting · " .. request.label .. suffix .. (request.hidden and " · <leader>pa" or "")
+		return " waiting·" .. request.label .. suffix .. (request.hidden and "·<leader>pa" or "")
 	end
 	if not state.is_loading and not state.is_agent_running and not state.is_streaming
 		and not state.is_retrying and not state.awaiting_agent_output then
 		if next_pending and next_pending.edit_buf then
-			return " waiting · editing queued message" .. suffix
+			return " waiting·editing queued message" .. suffix
 		end
 		return suffix
 	end
@@ -294,9 +303,9 @@ end
 
 local function notification_statusline_label(status)
 	if status == "notify on" then
-		return "󰂞 "
+		return "󰂞"
 	elseif status == "notify off" then
-		return "󰂛 "
+		return "󰂛"
 	end
 	return tostring(status or "")
 end
@@ -369,16 +378,16 @@ function M.render(ctx)
 	local available_right_width = width - left_width - 3
 	local stats_plain = " " .. stats_text .. " "
 	local limits_plain = limits_text ~= "" and (" " .. limits_text .. " ") or ""
-	local both_plain = limits_text ~= "" and (" " .. limits_text .. " · " .. stats_text .. " ") or ""
+	local both_plain = limits_text ~= "" and (" " .. limits_text .. "·" .. stats_text .. " ") or ""
 	local right_label = ""
 	if both_plain ~= "" and vim.fn.strdisplaywidth(both_plain) <= available_right_width then
 		right_label = "%#PiUsageStats# "
-			.. statusline_escape(limits_text)
-			.. " · "
+			.. statusline_text(limits_text, "PiUsageStats")
+			.. "%#PiStatusSeparator#·"
 			.. stats_statusline
 			.. "%#PiUsageStats# "
 	elseif limits_plain ~= "" and vim.fn.strdisplaywidth(limits_plain) <= available_right_width then
-		right_label = "%#PiUsageStats# " .. statusline_escape(limits_text) .. " "
+		right_label = "%#PiUsageStats# " .. statusline_text(limits_text, "PiUsageStats") .. " "
 	elseif vim.fn.strdisplaywidth(stats_plain) <= available_right_width then
 		right_label = "%#PiUsageStats# " .. stats_statusline .. "%#PiUsageStats# "
 	end
@@ -405,29 +414,27 @@ function M.render(ctx)
 
 	if width <= left_width then
 		return left_label
-			.. "%#PiUsageStats#"
-			.. statusline_escape(truncate_plain_to_width(integration_segment_label .. notification_segment_label .. workspace_label .. model_label .. thinking_label, width - mode_width))
+			.. statusline_text(truncate_plain_to_width(integration_segment_label .. notification_segment_label .. workspace_label .. model_label .. thinking_label, width - mode_width), "PiUsageStats")
 			.. "%*"
 	end
 
 	left_label = left_label
-		.. statusline_escape(status_delimiter)
+		.. "%#PiStatusSeparator#" .. status_delimiter
 		.. integration_statusline_highlight(integration_mode)
 		.. statusline_escape(integration_label)
 		.. "%#PiUsageStats#"
 	if notification_label ~= "" then
 		left_label = left_label
-			.. statusline_escape(status_delimiter)
+			.. "%#PiStatusSeparator#" .. status_delimiter
 			.. notification_statusline_highlight(state.notification_status)
 			.. statusline_escape(notification_label)
 			.. "%#PiUsageStats#"
 	end
 	left_label = left_label
-		.. statusline_escape(status_delimiter)
+		.. "%#PiStatusSeparator#" .. status_delimiter
 		.. workspace_statusline_highlight(state)
 		.. statusline_escape(workspace_text)
-		.. "%#PiUsageStats#"
-		.. statusline_escape(model_label)
+		.. statusline_text(model_label, "PiUsageStats")
 	if thinking_label ~= "" then
 		left_label = left_label
 			.. thinking_statusline_highlight(thinking_level)
@@ -456,9 +463,9 @@ function M.render_secondary(ctx)
 	local gap_width = left_text ~= "" and right_plain ~= "" and 3 or 0
 	local available_left_width = math.max(0, width - right_width - gap_width)
 	local visible_left = truncate_plain_to_width(left_text, available_left_width)
-	local left_label = "%#PiUsageStats#" .. statusline_escape(visible_left)
+	local left_label = statusline_text(visible_left, "PiUsageStats")
 	if visible_left == left_text and activity_label ~= "" then
-		left_label = "%#PiActivity#" .. statusline_escape(activity_label) .. "%#PiUsageStats#" .. statusline_escape(spawn_label)
+		left_label = statusline_text(activity_label, "PiActivity") .. statusline_text(spawn_label, "PiUsageStats")
 	end
 	return left_label .. "%#PiUsageStats#%=" .. right_label .. "%*"
 end
