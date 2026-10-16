@@ -7,6 +7,7 @@ local pi_skills = require("pi-integration.skills")
 local pi_thinking_output = require("pi-integration.thinking-output")
 local pi_usage = require("pi-integration.usage")
 local pending_picker = require("pi-integration.pending-picker")
+local runtime = require("pi-integration.runtime")
 
 local function run_id(run)
 	if type(run) ~= "table" then
@@ -733,6 +734,7 @@ function M.handle_event(ctx, event)
 	elseif event.type == "agent_start" then
 		state.is_agent_running = true
 		state.refresh_transcript_after_settled = false
+		state.completion_pending = false
 		state.is_loading = false
 		state.is_streaming = true
 		state.is_retrying = false
@@ -786,11 +788,18 @@ function M.handle_event(ctx, event)
 			ctx.transcript.clear_assistant_placeholder()
 		end
 		state.refresh_transcript_after_settled = not state.error_rendered_for_active_run and not abort_requested
+		state.completion_pending = not message and not state.error_rendered_for_active_run and not abort_requested
 		state.abort_requested = false
 		ctx.transcript.touch()
 		ctx.transcript.refresh_ui()
 		ctx.actions.refresh_session_stats()
 	elseif event.type == "agent_settled" then
+		-- Count only a final, successful turn end, never retries or bare settlements.
+		if state.completion_pending and not event.aborted and not state.error_rendered_for_active_run
+			and not state.is_loading and not state.session_replacement_pending then
+			state.completion_seq = state.completion_seq + 1
+		end
+		state.completion_pending = false
 		state.is_agent_running = false
 		state.is_streaming = false
 		state.is_retrying = false
@@ -805,6 +814,7 @@ function M.handle_event(ctx, event)
 		end
 		state.refresh_transcript_after_settled = false
 		ctx.actions.flush_queued_prompts()
+		runtime.publish()
 		local running = state.spawn_running_count or 0
 		if running > 0 then
 			ctx.ui.notify(string.format("Pi turn finished; %d subagent%s still running", running, running == 1 and "" or "s"))

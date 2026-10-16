@@ -94,8 +94,11 @@ Project trust controls resource loading, not tool permissions or filesystem acce
 ### Session overview
 
 This is where I go when I've lost track of which conversation is doing what.
-It lists open sessions, whether they're working, idle, or waiting for me, and
-their directories and workspaces. Press `p` on a saved session to toggle its pin
+It lists open sessions, whether they're working, idle, done, or waiting for me,
+and their directories and workspaces. `Done` means a turn finished normally while
+I was elsewhere; focusing that conversation clears it to `Idle`. `Waiting` means
+an outstanding question or approval still needs a response. Reopened sessions
+start idle; unread status is not saved. Press `p` on a saved session to toggle its pin
 (``). Pinned sessions move into the ` Pinned` group above the regular sessions.
 They stay in the overview after their windows close and across restarts, with
 status `Not Open`. Enter focuses an open session or reopens a
@@ -241,8 +244,10 @@ if-shell "command -v pi-console >/dev/null 2>&1" "run-shell 'pi-console --tmux s
 ```
 
 The command resolves its application directory and sources the matching tmux
-keybindings and modified-key settings. It does not enable graphics passthrough
-or install graphics-depth hooks. Reload tmux, then use:
+keybindings, modified-key settings, and focus reporting for completion badges.
+It does not enable graphics passthrough or install graphics-depth hooks. Reload
+tmux; when first enabling focus reporting, detach and reattach existing clients.
+Then use:
 
 | Binding | Action |
 |---|---|

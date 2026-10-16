@@ -245,7 +245,8 @@ function M.open(config)
 			vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, 1, { end_col = #lines[row], hl_group = "Title" })
 		end
 		for row, entry in pairs(rows) do
-			local group = entry.status == "Waiting" and "DiagnosticWarn"
+			local group = entry.status == "Done" and "DiagnosticOk"
+				or entry.status == "Waiting" and "DiagnosticWarn"
 				or (entry.status == "Error" or entry.status == "Stopped" or entry.status == "Unresponsive") and "DiagnosticError"
 				or (entry.status == "Idle" or entry.status == "Not Open") and "Comment"
 				or "DiagnosticInfo"

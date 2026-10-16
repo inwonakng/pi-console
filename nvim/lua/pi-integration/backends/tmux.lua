@@ -58,6 +58,20 @@ function M.list()
 	return instances
 end
 
+function M.is_focused()
+	local output, err = command({ "list-clients", "-F", "#{pane_id}\t#{client_flags}\t#{client_control_mode}" })
+	if not output then
+		return nil, err
+	end
+	for line in output:gmatch("[^\n]+") do
+		local pane, flags, control = line:match("^(%%%d+)\t(.-)\t([01])$")
+		if pane == vim.env.TMUX_PANE and control == "0" and ("," .. flags .. ","):find(",focused,", 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
 function M.focus(id)
 	if not id:match("^%%%d+$") then
 		return nil, "Invalid tmux pane ID"

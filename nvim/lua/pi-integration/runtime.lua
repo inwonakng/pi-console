@@ -1,5 +1,5 @@
 -- Session UI depends on this module, not on a particular multiplexer.
--- Backends implement available/list/focus/launch/kill/publish/clear/start_overview.
+-- Backends implement available/list/focus/is_focused/launch/kill/publish/clear/start_overview.
 -- start_overview registers the overview's location for backend navigation.
 -- list() returns snapshots plus an opaque instance id and a readable location.
 -- Session controls use each Neovim instance's RPC server, independent of its backend.
@@ -9,6 +9,8 @@ local timer
 local publisher_state
 local publisher_rpc_address
 local publisher_rpc_mode
+local publisher_focused = false
+local focus_group
 
 local function backend()
 	local tmux = require("pi-integration.backends.tmux")
@@ -121,7 +123,7 @@ function M.control(entry, action, argument)
 end
 
 function M.kill_needs_confirmation(entry)
-	return entry.status ~= "Idle" and entry.status ~= "Stopped" and entry.status ~= "Error"
+	return entry.status ~= "Idle" and entry.status ~= "Done" and entry.status ~= "Stopped" and entry.status ~= "Error"
 end
 
 function M.kill(entry, confirmed)
@@ -201,6 +203,8 @@ local function snapshot(state)
 		status = "Working"
 	elseif state.error_rendered_for_active_run then
 		status = "Error"
+	elseif state.completion_seq > state.seen_seq then
+		status = "Done"
 	end
 	local path = state.session_file or state.pending_session_file
 	local is_new_session = not state.session_name
@@ -238,6 +242,9 @@ end
 function M.publish()
 	local transport = backend()
 	if publisher_state and transport then
+		if publisher_focused then
+			publisher_state.seen_seq = publisher_state.completion_seq
+		end
 		return transport.publish(snapshot(publisher_state))
 	end
 end
@@ -248,6 +255,11 @@ function M.stop()
 		timer:close()
 		timer = nil
 	end
+	if focus_group then
+		vim.api.nvim_del_augroup_by_id(focus_group)
+		focus_group = nil
+	end
+	publisher_focused = false
 	publisher_state = nil
 	publisher_rpc_address = nil
 	publisher_rpc_mode = nil
@@ -258,10 +270,21 @@ function M.stop()
 end
 
 function M.start(state)
-	if timer or not M.available() then
+	local transport = backend()
+	if timer or not transport then
 		return
 	end
 	publisher_state = state
+	focus_group = vim.api.nvim_create_augroup("PiConversationFocus", { clear = true })
+	vim.api.nvim_create_autocmd({ "FocusGained", "FocusLost" }, {
+		group = focus_group,
+		callback = function(event)
+			publisher_focused = event.event == "FocusGained"
+			M.publish()
+		end,
+	})
+	-- A background pane may never have received a focus event during startup.
+	publisher_focused = transport.is_focused() == true
 	publisher_rpc_address = vim.v.servername
 	if publisher_rpc_address == "" then
 		local ok, address = pcall(vim.fn.serverstart)
@@ -281,7 +304,7 @@ function M.start(state)
 			end
 		end)
 	)
-	vim.api.nvim_create_autocmd("VimLeavePre", { once = true, callback = M.stop })
+	vim.api.nvim_create_autocmd("VimLeavePre", { group = focus_group, once = true, callback = M.stop })
 end
 
 return M

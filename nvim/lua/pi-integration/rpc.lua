@@ -119,6 +119,9 @@ local function reset_runtime_state(ctx)
 	state.job = nil
 	state.is_agent_running = false
 	state.refresh_transcript_after_settled = false
+	state.completion_pending = false
+	state.completion_seq = 0
+	state.seen_seq = 0
 	state.session_replacement_pending = false
 	state.is_streaming = false
 	state.is_retrying = false
