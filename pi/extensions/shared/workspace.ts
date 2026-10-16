@@ -33,6 +33,14 @@ export type WorkspaceLifecycle =
   | "discarded";
 export type WorkspaceIntegration = "pending" | "none" | "applied" | "conflict" | "failed";
 
+export type WorkspaceIntegrationReview = {
+  applied: boolean;
+  before: string;
+  after: string;
+  files: { path: string; status: string; additions: number | null; deletions: number | null }[];
+  ignoredFiles: string[];
+};
+
 export type WorkspaceRecord = {
   version: 1;
   id: string;
@@ -56,6 +64,7 @@ export type WorkspaceRecord = {
   runId?: string;
   integration: WorkspaceIntegration;
   integrationReason?: string;
+  integrationReview?: WorkspaceIntegrationReview;
   changedFiles: string[];
   includedIgnoredFiles?: { path: string; originalHash: string }[];
   unpreservedFiles?: string[];
@@ -288,22 +297,73 @@ function captureSnapshot(gitRoot: string, workspaceId: string, purpose: string):
     const env = { ...process.env, GIT_INDEX_FILE: tempIndex };
     gitBuffer(gitRoot, ["add", "-A"], { env });
     const tree = gitText(gitRoot, ["write-tree"], { env }).trim();
-    const commit = gitText(gitRoot, ["commit-tree", tree, "-p", head], {
-      env: {
-        ...env,
-        GIT_AUTHOR_NAME: "Pi Workspace",
-        GIT_AUTHOR_EMAIL: "workspace@pi.local",
-        GIT_COMMITTER_NAME: "Pi Workspace",
-        GIT_COMMITTER_EMAIL: "workspace@pi.local",
-      },
-      input: Buffer.from(`Pi workspace ${purpose}\n`, "utf8"),
-    }).trim();
+    const commit = commitSnapshotTree(gitRoot, tree, head, purpose);
     const ref = snapshotRef(workspaceId, purpose);
     updateRef(gitRoot, ref, commit);
     return { commit, tree, ref, indexFingerprint: fingerprint(indexPath) };
   } finally {
     rmSync(tempIndex, { force: true });
   }
+}
+
+function commitSnapshotTree(gitRoot: string, tree: string, parent: string, purpose: string): string {
+  return gitText(gitRoot, ["commit-tree", tree, "-p", parent], {
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Pi Workspace",
+      GIT_AUTHOR_EMAIL: "workspace@pi.local",
+      GIT_COMMITTER_NAME: "Pi Workspace",
+      GIT_COMMITTER_EMAIL: "workspace@pi.local",
+    },
+    input: Buffer.from(`Pi workspace ${purpose}\n`, "utf8"),
+  }).trim();
+}
+
+function integrationReview(record: WorkspaceRecord, destination: Snapshot, mergedTree: string): WorkspaceIntegrationReview {
+  const revisions = [destination.tree, mergedTree];
+  const statuses = splitNul(gitBuffer(record.destinationRoot, ["diff", "--no-renames", "--name-status", "-z", ...revisions]));
+  const statusByPath = new Map<string, string>();
+  for (let i = 0; i < statuses.length; i += 2) {
+    statusByPath.set(statuses[i + 1]!, statuses[i]!);
+  }
+  const files = splitNul(gitBuffer(record.destinationRoot, ["diff", "--no-renames", "--numstat", "-z", ...revisions])).map((entry) => {
+    const [, added, deleted, path] = /^(\d+|-)\t(\d+|-)\t([\s\S]+)$/.exec(entry) ?? [];
+    if (!path || !added || !deleted || !statusByPath.has(path)) throw new Error("Invalid integration diff statistics.");
+    return {
+      path,
+      status: statusByPath.get(path)!,
+      additions: added === "-" ? null : Number(added),
+      deletions: deleted === "-" ? null : Number(deleted),
+    };
+  });
+  const after = commitSnapshotTree(record.destinationRoot, mergedTree, destination.commit, "integration-after");
+  // These refs deliberately outlive worktree cleanup and keep the history
+  // reachable through Git garbage collection without changing a user branch.
+  const attempt = randomUUID();
+  updateRef(record.destinationRoot, snapshotRef(record.id, `integration-${attempt}-before`), destination.commit);
+  updateRef(record.destinationRoot, snapshotRef(record.id, `integration-${attempt}-after`), after);
+  return { applied: false, before: destination.commit, after, files, ignoredFiles: [] };
+}
+
+export function formatIntegrationSummary(record: WorkspaceRecord): string {
+  const review = record.integrationReview;
+  if (!review) return "";
+  const displayPath = (path: string): string => /[\s"\\]/.test(path) ? JSON.stringify(path) : path;
+  const lines = review.files.map((file) => {
+    const counts = file.additions === null || file.deletions === null ? "binary" : `+${file.additions}  -${file.deletions}`;
+    return `${file.status}  ${displayPath(file.path)}  ${counts}`;
+  });
+  if (lines.length > 0) {
+    const additions = review.files.reduce((sum, file) => sum + (file.additions ?? 0), 0);
+    const deletions = review.files.reduce((sum, file) => sum + (file.deletions ?? 0), 0);
+    lines.push("", `${review.files.length} ${review.files.length === 1 ? "file" : "files"} changed, ${additions} insertions(+), ${deletions} deletions(-)`);
+  } else if (review.ignoredFiles.length === 0) {
+    lines.push("No changes applied.");
+  }
+  if (review.ignoredFiles.length > 0) {
+    lines.push("", "Updated ignored files (outside Git diff; line counts unavailable):", ...review.ignoredFiles.map(displayPath));
+  }
+  return lines.join("\n");
 }
 
 function recordPath(id: string): string {
@@ -717,6 +777,12 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal): Prom
       // Finalized contributions are idempotent, including after cleanup.
       if (isWorkspaceFinalized(record)) return record;
       assertWorkspaceAvailable(record);
+      // Each tool result owns one attempt; previous results keep their pinned
+      // revisions even when a retry fails before preparing a new comparison.
+      delete record.integrationReview;
+      record.integration = "pending";
+      delete record.integrationReason;
+      saveWorkspace(record);
       record = snapshotWorkspaceResult(record);
       changedIgnoredFiles(record);
       const destination = captureSnapshot(record.destinationRoot, record.id, `destination-${randomUUID()}`);
@@ -766,12 +832,18 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal): Prom
           }
           const ignoredChanges = changedIgnoredFiles(record);
           checkCancellation(signal);
-          changedIncludedFile = ignoredChanges.length > 0;
+          const review = integrationReview(record, destination, merge.mergedTree!);
+          record.integrationReview = review;
+          // Preserve the attempted comparison even if application fails partway.
+          // The UI exposes failed attempts only after a recorded application.
+          saveWorkspace(record);
           if (applicationPatch.length > 0) {
             gitBuffer(record.destinationRoot, ["apply", "--check", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
             const indexBefore = realIndexFingerprint(record.destinationRoot);
             applicationStarted = true;
             gitBuffer(record.destinationRoot, ["apply", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
+            review.applied = true;
+            saveWorkspace(record);
             const indexAfter = realIndexFingerprint(record.destinationRoot);
             if (indexAfter !== indexBefore) {
               throw new Error("Destination index changed during integration.");
@@ -788,6 +860,10 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal): Prom
               }
               applicationStarted = true;
               renameSync(temporary, destinationPath);
+              changedIncludedFile = true;
+              review.ignoredFiles.push(file.path);
+              review.applied = true;
+              saveWorkspace(record);
             } finally {
               rmSync(temporary, { force: true });
             }

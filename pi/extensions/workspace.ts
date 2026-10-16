@@ -24,6 +24,7 @@ import {
   createWorkspace,
   findGitRoot,
   formatWorkspaceRecord,
+  formatIntegrationSummary,
   getExpectedWorkspaceMissing,
   getPendingWorkspaceId,
   integrateWorkspace,
@@ -696,7 +697,10 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         const integrated = await integrateWorkspace(selected.id, operationSignal);
         if (integrated.integration !== "applied" && integrated.integration !== "none") {
           return {
-            content: [{ type: "text", text: `Workspace was retained; integration=${integrated.integration}.\n${formatWorkspaceRecord(integrated)}` }],
+            content: [{
+              type: "text",
+              text: `Workspace was retained; integration=${integrated.integration}.\n${formatWorkspaceRecord(integrated)}${integrated.integrationReview?.applied ? `\n\nAlready applied in this attempt:\n${formatIntegrationSummary(integrated)}` : ""}`,
+            }],
             details: integrated,
           };
         }
@@ -706,7 +710,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         return {
           content: [{
             type: "text",
-            text: `Applied the task contribution to ${integrated.destinationRoot}. The return cwd switch is queued; wait before using more tools.`,
+            text: `${integrated.integration === "none" ? "No changes needed in" : "Applied the task contribution to"} ${integrated.destinationRoot}.\n\n${formatIntegrationSummary(integrated)}\n\nThe return cwd switch is queued; wait before using more tools.`,
           }],
           details: integrated,
           terminate: true,

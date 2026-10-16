@@ -967,6 +967,31 @@ local function highlight_codemode(buf, source_end, output_start, text)
 	end)
 end
 
+local function historical_workspace_review(output)
+	if output.name ~= "workspace" or output.is_error then
+		return nil
+	end
+	local details = type(output.details) == "table" and output.details or {}
+	local review = details.integrationReview
+	if type(review) ~= "table" then
+		return nil
+	end
+	local finalized = details.integration == "applied" or details.integration == "none"
+	if not finalized and not (details.integration == "failed" and review.applied == true) then
+		return nil
+	end
+	if
+		type(details.destinationRoot) ~= "string"
+		or type(review.before) ~= "string"
+		or not review.before:match("^%x+$")
+		or type(review.after) ~= "string"
+		or not review.after:match("^%x+$")
+	then
+		return nil
+	end
+	return review
+end
+
 function M.open_float(ctx, output_id)
 	local state = ctx.state
 	local output = state.tool_outputs[output_id]
@@ -1006,6 +1031,10 @@ function M.open_float(ctx, output_id)
 	end
 	vim.api.nvim_set_option_value("filetype", rendered_filetype or output.filetype or "text", { buf = buf })
 	local content_lines = vim.split(rendered_text or "", "\n", { plain = true })
+	local workspace_review = not pending and historical_workspace_review(output) or nil
+	if workspace_review then
+		vim.list_extend(content_lines, { "", "[d] Full diff (read-only snapshots)" })
+	end
 	local path = output_path(output)
 	local source_end, output_start
 	if output.name == "codemode" then
@@ -1069,6 +1098,21 @@ function M.open_float(ctx, output_id)
 		floats.close_window(win)
 	end
 	floats.close_on_win_leave(buf, close_tool_win, { win = win, parent = ctx.window.parent })
+	if workspace_review then
+		vim.keymap.set("n", "d", function()
+			local opened, err = require("pi-integration.backends.tmux").review_workspace(
+				output.details.destinationRoot,
+				workspace_review.before,
+				workspace_review.after
+			)
+			if not opened then
+				ctx.ui.notify(
+					"Could not open historical workspace diff: " .. (err or "unknown error"),
+					vim.log.levels.ERROR
+				)
+			end
+		end, { buffer = buf, silent = true, desc = "Review historical workspace diff" })
+	end
 	vim.keymap.set("n", "q", close_tool_win, { buffer = buf, silent = true, desc = "Close tool output" })
 	vim.keymap.set("n", "<Esc>", close_tool_win, { buffer = buf, silent = true, desc = "Close tool output" })
 	vim.keymap.set("n", "y", function()
