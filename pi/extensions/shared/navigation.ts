@@ -3,10 +3,15 @@ import { suppressNextInputNotification } from "./notifications";
 
 // RPC has no prompt-purpose field, so use the existing structured-title format.
 // Notifications and the frontend both recognize this explicit navigation marker.
-export function selectNavigation(ctx: ExtensionContext, prompt: string, options: string[]): Promise<string | undefined> {
+export function selectNavigation(
+	ctx: ExtensionContext,
+	prompt: string,
+	options: string[],
+	previews?: Record<string, string>,
+): Promise<string | undefined> {
 	if (ctx.mode === "tui") suppressNextInputNotification();
 	const title = ctx.mode === "rpc"
-		? JSON.stringify({ kind: "pi_compact_select", prompt, purpose: "navigation" })
+		? JSON.stringify({ kind: "pi_compact_select", prompt, purpose: "navigation", previews })
 		: prompt;
 	return ctx.ui.select(title, options);
 }

@@ -488,7 +488,8 @@ async function pickUserMessage(ctx: ExtensionCommandContext) {
 		return undefined;
 	}
 	const options = entries.map((entry) => `${entry.id}  ${shortText(messageText(entry))}`);
-	const choice = await selectNavigation(ctx, "Pi history", options);
+	const previews = Object.fromEntries(entries.map((entry, index) => [options[index], messageText(entry)]));
+	const choice = await selectNavigation(ctx, "Pi history", options, previews);
 	if (!choice) {
 		return undefined;
 	}
