@@ -2,8 +2,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { loadExtensionSettings } from "./shared/extension-settings";
 
 const TITLE_LIMIT = 80;
-const MODEL_TITLE_LIMIT = 80;
-const MODEL_TITLE_WORD_LIMIT = 12;
 const TITLE_MAX_TOKENS = 800;
 const TITLE_TIMEOUT_MS = 60_000;
 const TITLE_SYSTEM_PROMPT = [
@@ -111,29 +109,9 @@ function cleanTitle(text: string, limit = TITLE_LIMIT) {
 		.trim();
 }
 
-function isUsefulModelTitle(title: string) {
-	if (!title || title.length > MODEL_TITLE_LIMIT || title.split(/\s+/).length > MODEL_TITLE_WORD_LIMIT) {
-		return false;
-	}
-	if (/[`{}<>]|<tool_call>|```/i.test(title)) {
-		return false;
-	}
-	if (/\b(i\s+am|i'm|i\s+will|i'll|i\s+can|i\s+cannot|i\s+can't|i\s+don't|let\s+me|sure|sorry)\b/i.test(title)) {
-		return false;
-	}
-	return true;
-}
-
 function cleanModelTitle(text: string) {
 	const withoutThinking = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
-	const firstLine = withoutThinking
-		.split("\n")
-		.map((line) => cleanTitle(line, MODEL_TITLE_LIMIT))
-		.find((line) => line.length > 0);
-	if (!firstLine || !isUsefulModelTitle(firstLine)) {
-		return undefined;
-	}
-	return firstLine;
+	return cleanTitle(withoutThinking) || undefined;
 }
 
 function titleUserPrompt(text: string) {
@@ -216,7 +194,7 @@ async function modelTitle(prompt: string, ctx: ExtensionContext, sessionSignal: 
 	const title = cleanModelTitle(content);
 	if (!title) {
 		throw new Error(
-			`Title response from ${model.provider}/${model.id} was not a useful title; stop_reason=${response.stopReason}; content=${previewText(content) || "<empty>"}`,
+			`Title response from ${model.provider}/${model.id} was empty after cleanup; stop_reason=${response.stopReason}; content=${previewText(content) || "<empty>"}`,
 		);
 	}
 	return title;
