@@ -38,10 +38,12 @@ local function archive_after_days()
 end
 
 local overview = vim.env.PI_CONSOLE_OVERVIEW == "1"
+local sidebar = vim.env.PI_CONSOLE_SIDEBAR == "1"
 local session_file = vim.env.PI_CONSOLE_SESSION
 local restart_file = vim.env.PI_CONSOLE_RESTART_FILE
 -- Startup choices must not leak into tools or subsequently launched editors.
 vim.env.PI_CONSOLE_OVERVIEW = nil
+vim.env.PI_CONSOLE_SIDEBAR = nil
 vim.env.PI_CONSOLE_SESSION = nil
 vim.env.PI_CONSOLE_RESTART_FILE = nil
 local restart_state
@@ -54,7 +56,7 @@ if restore_file and vim.fn.filereadable(restore_file) == 1 then
 	session_file = restart_state.session_file
 end
 local integration = require("pi-integration")
-vim.g.pi_overview = overview
+vim.g.pi_overview = overview or sidebar
 local config = vim.tbl_deep_extend("force", integration.config, {
 	binary = vim.env.PI_BINARY or "pi",
 	agent_dir = agent_dir,
@@ -67,14 +69,16 @@ local config = vim.tbl_deep_extend("force", integration.config, {
 	restart_file = restart_file,
 })
 
-if not overview then
+if not overview and not sidebar then
 	integration.setup(config)
 end
 
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,
 	callback = function()
-		if overview then
+		if sidebar then
+			require("pi-integration.sidebar").open(config)
+		elseif overview then
 			require("pi-integration.overview").open(config)
 		else
 			integration.open(session_file, restart_state)

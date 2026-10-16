@@ -1,34 +1,18 @@
 local json = require("pi-integration.utils.json")
+local icons = require("pi-integration.status-icons")
 local M = {}
 local option = "@pi_console"
 local tab_option = "@pi_console_tab"
 local owner_pane
 local owner_window
 
-local tab_icons = {
-	Done = "",
-	Working = "",
-	Retrying = "",
-	Waiting = "",
-	Compacting = "",
-	Starting = "",
-	Loading = "",
-	Idle = "",
-	Error = "",
-	Stopped = "",
-	Unresponsive = "",
-}
-
-local function tab_name(status)
-	local icon = tab_icons[status] or tab_icons.Error
-	return icon .. string.rep(" ", math.max(0, 2 - vim.fn.strdisplaywidth(icon)))
-end
+local tab_name = icons.tab_name
 
 function M.available()
 	return vim.env.TMUX ~= nil and vim.env.TMUX_PANE ~= nil and vim.fn.executable("tmux") == 1
 end
 
-local function command(args)
+local function command(args, raw)
 	local argv = { "tmux" }
 	vim.list_extend(argv, args)
 	local result = vim.system(argv, { text = true }):wait(2000)
@@ -36,7 +20,7 @@ local function command(args)
 		local message = vim.trim(result.stderr or "")
 		return nil, message ~= "" and message or ("tmux exited with code " .. tostring(result.code))
 	end
-	return vim.trim(result.stdout or "")
+	return raw and (result.stdout or "") or vim.trim(result.stdout or "")
 end
 
 function M.list()
@@ -153,12 +137,15 @@ function M.kill(entry)
 	if not window or dead ~= "0" then
 		return nil, "That pane is no longer open"
 	end
-	local panes, panes_err = command({ "list-panes", "-t", window, "-F", "#{pane_id}" })
+	local panes, panes_err = command({ "list-panes", "-t", window, "-F", "#{pane_id}\t#{==:#{@pi_sidebar},1}" })
 	if not panes then
 		return nil, panes_err
 	end
-	if panes ~= entry.id then
-		return nil, "Cannot close a tmux window containing other panes"
+	for line in panes:gmatch("[^\n]+") do
+		local pane, sidebar = line:match("^(%%%d+)\t([01])$")
+		if pane ~= entry.id and sidebar ~= "1" then
+			return nil, "Cannot close a tmux window containing other panes"
+		end
 	end
 	return command({ "kill-window", "-t", window })
 end
@@ -259,6 +246,114 @@ function M.start_overview()
 	return true
 end
 
+local tab_formats = { "window-status-format", "window-status-current-format" }
+
+local function local_format(window, option_name)
+	local output, err = command({ "show-options", "-wqv", "-t", window, option_name }, true)
+	if not output then
+		return nil, err
+	end
+	-- No output means inherited; a single newline means explicitly empty.
+	return output ~= "" and output:gsub("\n$", "") or nil
+end
+
+local function global_format(option_name)
+	local output, err = command({ "show-options", "-gqv", option_name }, true)
+	return output and output:gsub("\n$", "") or nil, err
+end
+
+local function color_format(format)
+	local parts, pos, foreground = {}, 1, "default"
+	while pos <= #format do
+		local pair = format:sub(pos, pos + 1)
+		local token, finish
+		if pair == "#[" then
+			finish = format:find("]", pos + 2, true)
+			if not finish then return nil end
+			token = format:sub(pos, finish)
+			if token:match("^#%[%s*default") or token:match("^#%[%s*none") then
+				foreground = "default"
+			end
+			local fg = token:match("fg=([^,%]]+)")
+			-- Simple literal colors and option lookups cover the bundled/default
+			-- and Catppuccin formats. Leave complex style expressions untouched.
+			if fg then
+				if fg:find("#{", 1, true) and not fg:match("^#{[%w_@%-]+}$") then return nil end
+				foreground = fg
+			end
+		elseif pair == "#{" then
+			token = format:match("#%b{}", pos)
+			if not token then return nil end
+			finish = pos + #token - 1
+		elseif pair == "#W" or pair == "##" then
+			token, finish = pair, pos + 1
+		else
+			token, finish = format:sub(pos, pos), pos
+		end
+		-- Do not rewrite names inside conditionals, comparisons, or escaped ##W.
+		if token == "#W" or token == "#{window_name}" then
+			token = "#[fg=#{@pi_console_tab_color}]" .. token .. "#[fg=" .. foreground .. "]"
+		end
+		table.insert(parts, token)
+		pos = finish + 1
+	end
+	return table.concat(parts)
+end
+
+local function style_tab(window, tab, status)
+	tab.formats = tab.formats or {}
+	for _, option_name in ipairs(tab_formats) do
+		local current, err = local_format(window, option_name)
+		if err then return nil, err end
+		local saved = tab.formats[option_name]
+		local inherited = current == nil or saved and current == saved.installed and saved.inherited
+		local base = current
+		if inherited then
+			base, err = global_format(option_name)
+		elseif saved and current == saved.installed then
+			base = saved.base
+		end
+		if not base then return nil, err end
+		local decorated = color_format(base)
+		if decorated and decorated ~= base then
+			if current ~= decorated then
+				local ok
+				ok, err = command({ "set-option", "-w", "-t", window, option_name, decorated })
+				if not ok then return nil, err end
+			end
+			tab.formats[option_name] = { base = base, installed = decorated, inherited = inherited == true }
+		else
+			-- A new theme may use an unsupported expression. Release our old
+			-- override instead of freezing the theme or rewriting its logic.
+			if saved and current == saved.installed then
+				local args = { "set-option", inherited and "-wu" or "-w", "-t", window, option_name }
+				if not inherited then table.insert(args, base) end
+				command(args)
+			end
+			tab.formats[option_name] = nil
+		end
+	end
+	local color = icons.get(status).color
+	if tab.color ~= color then
+		local ok, err = command({ "set-option", "-w", "-t", window, "@pi_console_tab_color", color })
+		if not ok then return nil, err end
+		tab.color = color
+	end
+	return true
+end
+
+local function release_tab_style(window, tab)
+	for option_name, saved in pairs(tab.formats or {}) do
+		local current = local_format(window, option_name)
+		if current == saved.installed then
+			local args = { "set-option", saved.inherited and "-wu" or "-w", "-t", window, option_name }
+			if not saved.inherited then table.insert(args, saved.base) end
+			command(args)
+		end
+	end
+	command({ "set-option", "-wu", "-t", window, "@pi_console_tab_color" })
+end
+
 local function release_tab(keep_managed)
 	if not owner_window then
 		return
@@ -267,6 +362,7 @@ local function release_tab(keep_managed)
 	local name, payload = (target or ""):match("^(.-)\t(.+)$")
 	local tab = payload and json.decode_object(payload)
 	if tab and tab.pane == owner_pane and tab.pid == vim.uv.os_getpid() then
+		release_tab_style(owner_window, tab)
 		-- Leave manual renames and replacement instances alone.
 		if name == tab.name then
 			local args = { "rename-window", "-t", owner_window, "pi" }
@@ -301,18 +397,23 @@ local function publish_tab(status)
 	end
 	if name ~= tab.name then
 		-- A user-supplied name permanently opts this window out of icon naming.
+		release_tab_style(window, tab)
 		owner_window = nil
 		return command({ "set-option", "-wu", "-t", window, tab_option })
 	end
 	owner_window = window
+	local previous = json.encode(tab)
+	local styled, style_err = style_tab(window, tab, status)
+	if not styled then return nil, style_err end
 	local next_name = tab_name(status)
-	if tab.pid == vim.uv.os_getpid() and name == next_name then
+	tab.pane, tab.pid, tab.name = owner_pane, vim.uv.os_getpid(), next_name
+	local payload_next = json.encode(tab)
+	if name == next_name and payload_next == previous then
 		return true
 	end
 	return command({
 		"rename-window", "-t", window, next_name,
-		";", "set-option", "-w", "-t", window, tab_option,
-		json.encode({ pane = owner_pane, pid = vim.uv.os_getpid(), name = next_name }),
+		";", "set-option", "-w", "-t", window, tab_option, payload_next,
 	})
 end
 

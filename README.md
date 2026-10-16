@@ -254,24 +254,50 @@ Then use:
 | `<prefix>g` | Toggle the `agents` popup |
 | `<prefix>G` | Start a conversation in the current pane's directory |
 | `<prefix>o` | Open or focus the persistent overview; close the popup if already focused |
+| `<prefix>O` | Toggle the compact overview sidebar in the current window |
+
+The sidebar shows open and pinned conversations with colored status icons,
+conversation titles, projects, and current activity. Focus it with normal tmux
+pane navigation, then use `j`/`k` to select a conversation, `Enter` to focus or
+reopen it, `o` for the full overview, and `q` to close the sidebar. It is only a
+viewer and does not start an agent.
+
+The sidebar is normally 34 columns wide, capped at one third of the window and
+shrunk further if the content panes need the space. Opening it requires at
+least 20 sidebar columns. Toggling inserts/removes only its marked pane and
+resizes the current content layout proportionally; edits to that layout while
+it is open are retained. Terminal resizing keeps the width while the sidebar
+remains a full-height left pane. If you rearrange it into another layout, tmux
+controls its size until you toggle it off and on. It does not follow you to
+other windows or sessions. Native tmux zoom hides other panes as usual.
+
+For a command-line toggle, use `pi-console --tmux sidebar "$TMUX_PANE"`.
+After updating, run `pi-console --tmux setup` to load the new binding, and
+restart existing frontends to pick up status-title colors.
 
 Conversation windows created by the launcher use a fixed two-cell state icon
 instead of the `pi` window name (requires a Nerd Font):
 
-| State | Tab icon |
-|---|---|
-| Done / unread | `` |
-| Working / retrying | `` |
-| Waiting for you | `` |
-| Compacting | `` |
-| Loading / starting | `` |
-| Idle | `` |
-| Error / stopped | `` |
+| State | Tab/sidebar icon | Color |
+|---|---|---|
+| Done / unread | `` | Green |
+| Working / retrying | `` | Blue |
+| Waiting for you | `` | Yellow |
+| Compacting | `` | Mauve |
+| Loading / starting | `` | Blue |
+| Idle | `` | Muted |
+| Error / stopped / unresponsive | `` | Red |
+| Pinned, not open (sidebar only) | `` | Muted |
 
 The bell follows the overview's unread state and clears when the conversation
-is focused. Window indices and theme styling are unchanged. Manually renaming a
-window opts it out of icon naming; review splits do not take over its icon.
-On normal frontend exit, an icon-named window returns to `pi`.
+is focused. Tab titles and sidebar icons share the same RGB colors. Only managed
+conversation tabs receive title-color overrides; window indices, backgrounds,
+and ordinary tabs retain their theme styling. Formats using direct `#W` or
+`#{window_name}` title tokens are supported, including the default and
+Catppuccin formats. Complex/indirect title expressions are left unchanged rather
+than rewritten. Manually renaming a window opts it out of icon naming and
+coloring; review splits do not take over its icon. On normal frontend exit, an
+icon-named window returns to `pi` and its original title formats are restored.
 
 You can also run `pi-console` directly from a project directory. Inside
 pi-console, `<leader>?` shows the complete context-sensitive key list.
