@@ -481,8 +481,9 @@ function M.open(session_file, restart_state)
 		state.pending_integration_mode = restart_state.integration_mode
 		vim.api.nvim_buf_set_lines(state.input_buf, 0, -1, false, restart_state.input_lines)
 	end
-	require("pi-integration.runtime").start(state)
 	pi_rpc.start(integration_ctx())
+	-- Publish only after the launch attempt, so startup is not reported as stopped.
+	require("pi-integration.runtime").start(state)
 end
 
 function M.follow_markdown_link()
