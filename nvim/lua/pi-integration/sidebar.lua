@@ -131,7 +131,13 @@ function M.open(config)
 		for _, hl in ipairs(highlights) do
 			vim.api.nvim_buf_set_extmark(buf, ns, hl.row, hl.start, { end_col = hl.finish, hl_group = hl.group })
 		end
-		view.topline = math.max(1, view.topline + cursor - view.lnum)
+		-- Keep the viewport stable unless the selected session moves out of view.
+		local height = vim.api.nvim_win_get_height(win)
+		if cursor < view.topline then
+			view.topline = cursor
+		elseif cursor >= view.topline + height then
+			view.topline = cursor - height + 1
+		end
 		view.lnum = cursor
 		vim.api.nvim_win_call(win, function()
 			vim.fn.winrestview(view)

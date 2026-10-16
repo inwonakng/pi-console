@@ -262,8 +262,12 @@ function M.open(config)
 				hl_group = entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle",
 			})
 		end
-		if previous then
-			view.topline = math.max(1, view.topline + cursor - view.lnum)
+		-- Keep the viewport stable unless the selected session moves out of view.
+		local height = vim.api.nvim_win_get_height(list_win)
+		if cursor < view.topline then
+			view.topline = cursor
+		elseif cursor >= view.topline + height then
+			view.topline = cursor - height + 1
 		end
 		view.lnum = cursor
 		vim.api.nvim_win_call(list_win, function()
