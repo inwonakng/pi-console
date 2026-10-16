@@ -25,6 +25,7 @@ import {
   type Permission,
 } from "./shared/permissions";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
+import { loadExtensionSettings } from "./shared/extension-settings";
 
 const READONLY_TOOLS = new Set(["web_search", "web_fetch", "todowrite", "question"]);
 const PATH_READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -165,7 +166,7 @@ function saveAccessState(pi: ExtensionAPI): void {
 function restoreAccessState(ctx: ExtensionContext, restoreGrants = true): void {
   const stored = loadSessionSetting(ctx, ACCESS_SETTING) as PersistedAccessState | undefined;
   const spawnMode = parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE);
-  setAccessMode(spawnMode ?? parseAccessMode(stored?.mode) ?? "ask");
+  setAccessMode(spawnMode ?? parseAccessMode(stored?.mode) ?? loadExtensionSettings()["access-mode"]?.default ?? "ask");
   const legacy: Permission[] = [];
   for (const path of Array.isArray(stored?.readPaths) ? stored.readPaths : []) {
     if (typeof path === "string" && path.startsWith("/")) legacy.push({ kind: "read", scope: path });

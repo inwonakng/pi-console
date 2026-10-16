@@ -1,8 +1,20 @@
 # Optional pi-console extension settings.
 # Copy this file to ~/.pi/agent/pi-console-config.yaml and change only the
 # values you want to override. Extension changes are read on demand.
+# Defaults apply on session start or tree navigation when no saved session
+# choice exists. Saved choices take precedence over these defaults.
+
+notifications:
+  # enabled | disabled
+  default: enabled
+
+integration-mode:
+  # ask | allowed
+  default: ask
 
 access-mode:
+  # readonly | ask | edit | full
+  default: ask
   # Defaults: all reads (including credentials), and writes under /tmp.
   # These lists add to workspace/system reads and mode-specific writes.
   # Use read-paths: [] to restrict reads, or write-paths: [] to remove /tmp.

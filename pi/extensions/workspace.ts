@@ -19,6 +19,7 @@ import {
 import { getInteractionMode } from "./shared/interaction-mode";
 import { notifyPiWorkspaceIntegration, suppressNextInputNotification } from "./shared/notifications";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
+import { loadExtensionSettings } from "./shared/extension-settings";
 import { activeLocation, moveToLocation, publishWorkspaceState } from "./shared/workspace-navigation";
 import {
   createWorkspace,
@@ -156,7 +157,8 @@ function publishIntegrationMode(ctx: ExtensionContext): void {
 
 function restoreIntegrationMode(ctx: ExtensionContext): void {
   const stored = loadSessionSetting(ctx, INTEGRATION_SETTING);
-  setIntegrationMode(parseIntegrationMode(typeof stored === "string" ? stored : undefined) ?? "ask");
+  setIntegrationMode(parseIntegrationMode(typeof stored === "string" ? stored : undefined)
+    ?? loadExtensionSettings()["integration-mode"]?.default ?? "ask");
   publishIntegrationMode(ctx);
 }
 

@@ -9,6 +9,7 @@ import {
 	toggleNotificationsEnabled,
 } from "./shared/notifications";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
+import { loadExtensionSettings } from "./shared/extension-settings";
 import { getPendingWorkspaceId } from "./shared/workspace";
 import { isNavigationPrompt } from "./shared/navigation";
 
@@ -19,7 +20,10 @@ function setStatus(ctx: ExtensionContext): void {
 }
 
 function restoreNotifications(ctx: ExtensionContext): void {
-	setNotificationsEnabled(loadSessionSetting(ctx, NOTIFICATIONS_SETTING) === true);
+	const stored = loadSessionSetting(ctx, NOTIFICATIONS_SETTING);
+	setNotificationsEnabled(typeof stored === "boolean"
+		? stored
+		: loadExtensionSettings().notifications?.default !== "disabled");
 	setStatus(ctx);
 }
 

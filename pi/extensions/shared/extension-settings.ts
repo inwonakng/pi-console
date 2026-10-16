@@ -2,9 +2,18 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { parseDocument } from "yaml";
+import type { AccessMode } from "./access-state";
+import type { IntegrationMode } from "./integration-state";
 
 export interface ExtensionSettings {
+	notifications?: {
+		default?: "enabled" | "disabled";
+	};
+	"integration-mode"?: {
+		default?: IntegrationMode;
+	};
 	"access-mode"?: {
+		default?: AccessMode;
 		"read-paths"?: string[];
 		"write-paths"?: string[];
 		"temp-dir-prefix"?: string;
@@ -62,13 +71,46 @@ export function loadExtensionSettings(): ExtensionSettings {
 		const value: unknown = document.toJS();
 		if (value === null && document.contents === null) return {};
 		const root = requireMapping(value, "settings");
-		requireKnownKeys(root, ["access-mode", "auto-title", "session-picker"], "settings");
+		requireKnownKeys(root, ["notifications", "access-mode", "integration-mode", "auto-title", "session-picker"], "settings");
 		const settings: ExtensionSettings = {};
+
+		if (Object.hasOwn(root, "notifications")) {
+			const notifications = requireMapping(root.notifications, "notifications");
+			requireKnownKeys(notifications, ["default"], "notifications");
+			settings.notifications = {};
+			if (Object.hasOwn(notifications, "default")) {
+				const value = notifications.default;
+				if (value !== "enabled" && value !== "disabled") {
+					throw new Error("notifications.default must be enabled or disabled");
+				}
+				settings.notifications.default = value;
+			}
+		}
+
+		if (Object.hasOwn(root, "integration-mode")) {
+			const integrationMode = requireMapping(root["integration-mode"], "integration-mode");
+			requireKnownKeys(integrationMode, ["default"], "integration-mode");
+			settings["integration-mode"] = {};
+			if (Object.hasOwn(integrationMode, "default")) {
+				const value = integrationMode.default;
+				if (value !== "ask" && value !== "allowed") {
+					throw new Error("integration-mode.default must be ask or allowed");
+				}
+				settings["integration-mode"].default = value;
+			}
+		}
 
 		if (Object.hasOwn(root, "access-mode")) {
 			const accessMode = requireMapping(root["access-mode"], "access-mode");
-			requireKnownKeys(accessMode, ["read-paths", "write-paths", "temp-dir-prefix"], "access-mode");
+			requireKnownKeys(accessMode, ["default", "read-paths", "write-paths", "temp-dir-prefix"], "access-mode");
 			const parsedAccessMode: NonNullable<ExtensionSettings["access-mode"]> = {};
+			if (Object.hasOwn(accessMode, "default")) {
+				const value = accessMode.default;
+				if (value !== "readonly" && value !== "ask" && value !== "edit" && value !== "full") {
+					throw new Error("access-mode.default must be readonly, ask, edit, or full");
+				}
+				parsedAccessMode.default = value;
+			}
 			for (const key of ["read-paths", "write-paths"] as const) {
 				if (!Object.hasOwn(accessMode, key)) continue;
 				const paths = accessMode[key];

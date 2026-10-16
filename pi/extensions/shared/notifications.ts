@@ -27,7 +27,7 @@ type NotificationState = {
 const notificationStateKey = Symbol.for("pi.extensions.notifications.state");
 const notificationStateHost = globalThis as Record<PropertyKey, unknown>;
 const notificationState = (notificationStateHost[notificationStateKey] ??= {
-	desktopNotificationsEnabled: false,
+	desktopNotificationsEnabled: true,
 	suppressedInputNotifications: 0,
 }) as NotificationState;
 notificationState.suppressedInputNotifications ??= 0;
