@@ -310,6 +310,11 @@ export default function accessModeExtension(pi: ExtensionAPI) {
       }
     }
 
+    if (!KNOWN_TOOLS.has(event.toolName)) {
+      const tool = pi.getAllTools().find((tool) => tool.name === event.toolName);
+      if (tool?.annotations?.readOnlyHint === true) return undefined;
+    }
+
     if (mode === "edit" && KNOWN_TOOLS.has(event.toolName)) return undefined;
     if (!readonlyToolBlockReason(event.toolName, input)) return undefined;
     try {
