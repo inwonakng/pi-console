@@ -594,6 +594,13 @@ function M.handle_extension_ui_request(ctx, event)
 				local text = compact_select.previews[item]
 				return type(text) == "string" and text or prompt
 			end
+		elseif compact_select and type(compact_select.preview) == "string" then
+			select_opts.preview_title = prompt
+			select_opts.preview_text = compact_select.preview
+			select_opts.preview_filetype = compact_select.preview_filetype
+			if compact_select.preview_kind == "workspace_summary" then
+				select_opts.preview_highlight = require("pi-integration.workspace-summary").highlight
+			end
 		end
 		pending_picker.select(ctx, event.id, event.options or {}, select_opts, function(choice)
 			send_extension_ui_response(ctx, event.id, choice and { value = choice } or { cancelled = true })

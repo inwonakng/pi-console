@@ -135,7 +135,7 @@ local function highlight_approval_preview(buf, header, padding, filetype)
 	end)
 end
 
-local function set_preview_text(buf, text, padding, header, filetype, title)
+local function set_preview_text(buf, text, padding, header, filetype, title, highlight)
 	local lines = {}
 	for _ = 1, padding do
 		lines[#lines + 1] = ""
@@ -154,15 +154,18 @@ local function set_preview_text(buf, text, padding, header, filetype, title)
 			hl_group = "PiSelectTitle",
 		})
 	end
+	if highlight then
+		highlight(buf)
+	end
 end
 
-local function text_preview_item(text, filetype, padding, header, title)
+local function text_preview_item(text, filetype, padding, header, title, highlight)
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[buf].buftype = "nofile"
 	vim.bo[buf].bufhidden = "wipe"
 	vim.bo[buf].swapfile = false
 	vim.bo[buf].filetype = header and "text" or filetype or "text"
-	set_preview_text(buf, text, padding, header, filetype, title)
+	set_preview_text(buf, text, padding, header, filetype, title, highlight)
 
 	return {
 		buf = buf,
@@ -212,9 +215,9 @@ local function add_prompt_preview(select_opts)
 			padding = math.max(0, math.floor((height - preview_rows(text, width)) / 2))
 		end
 		if not preview or not vim.api.nvim_buf_is_valid(preview.buf) then
-			preview = text_preview_item(text, select_opts.preview_filetype, padding, header, title)
+			preview = text_preview_item(text, select_opts.preview_filetype, padding, header, title, select_opts.preview_highlight)
 		elseif padding ~= preview_padding or text ~= preview_text then
-			set_preview_text(preview.buf, text, padding, header, select_opts.preview_filetype, title)
+			set_preview_text(preview.buf, text, padding, header, select_opts.preview_filetype, title, select_opts.preview_highlight)
 		end
 		preview_padding, preview_text = padding, text
 		return preview

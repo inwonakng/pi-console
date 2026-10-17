@@ -684,7 +684,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
             decision = await ctx.ui.select(
               ctx.mode === "rpc" ? JSON.stringify({
                 kind: "pi_compact_select", prompt, resumable: true,
-                preview, preview_filetype: "pi_workspace_summary",
+                preview, preview_kind: "workspace_summary",
               }) : `${prompt}\n\n${preview}`,
               [INTEGRATE_ACTION, REVIEW_ACTION, RETURN_ACTION],
               { signal: ctx.signal },

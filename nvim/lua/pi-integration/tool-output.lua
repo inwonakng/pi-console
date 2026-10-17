@@ -1029,9 +1029,9 @@ function M.open_float(ctx, output_id)
 		rendered_text, full_output_note = codemode_output(output)
 		rendered_filetype = "text"
 	end
+	local workspace_review = not pending and historical_workspace_review(output) or nil
 	vim.api.nvim_set_option_value("filetype", rendered_filetype or output.filetype or "text", { buf = buf })
 	local content_lines = vim.split(rendered_text or "", "\n", { plain = true })
-	local workspace_review = not pending and historical_workspace_review(output) or nil
 	if workspace_review then
 		vim.list_extend(content_lines, { "", "[d] Full diff (read-only snapshots)" })
 	end
@@ -1070,6 +1070,7 @@ function M.open_float(ctx, output_id)
 		content_lines = rendered
 	end
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, content_lines)
+	if workspace_review then require("pi-integration.workspace-summary").highlight(buf) end
 	if source_end then highlight_codemode(buf, source_end, output_start, rendered_text) end
 	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 
