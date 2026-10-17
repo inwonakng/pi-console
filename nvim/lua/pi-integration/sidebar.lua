@@ -118,7 +118,7 @@ function M.open(config)
 				end
 			elseif node.kind == "subagent" then
 				table.insert(lines, truncate(session_list.subagent_label(node), width))
-				highlight(row, 0, #lines[row], "Comment")
+				highlight(row, 0, #lines[row], "PiSubagent")
 			else
 				local entry = node.entry
 				local icon = icons.get(entry.status).icon
@@ -136,7 +136,8 @@ function M.open(config)
 				local suffix = session_list.session_suffix(node)
 				-- Reserve space for the running count even when activity is long.
 				table.insert(lines, "     " .. truncate(detail, width - 5 - vim.fn.strdisplaywidth(suffix)) .. suffix)
-				highlight(row + 1, 0, #lines[row + 1], "Comment")
+				highlight(row + 1, 0, #lines[row + 1] - #suffix, "Comment")
+				if suffix ~= "" then highlight(row + 1, #lines[row + 1] - #suffix, #lines[row + 1], "PiSubagent") end
 				if reveal and entry.id == reveal.id then focused_row = row end
 			end
 			if node.kind ~= "subagent" then

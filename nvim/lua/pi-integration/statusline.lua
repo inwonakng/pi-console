@@ -7,7 +7,8 @@ local M = {}
 local footer_ns = vim.api.nvim_create_namespace("pi-console-status-footer")
 local footer_height = 1
 
-local activity_spinner_frames = require("pi-integration.status-icons").working_frames
+local icons = require("pi-integration.status-icons")
+local activity_spinner_frames = icons.working_frames
 
 local function non_null(value)
 	return value ~= nil and value ~= vim.NIL
@@ -253,7 +254,7 @@ local function spawn_statusline_label(state)
 	if count <= 0 then
 		return ""
 	end
-	return " 󰇥 " .. tostring(count)
+	return " " .. icons.subagent_icon .. " " .. tostring(count)
 end
 
 local function thinking_statusline_highlight(level)
@@ -458,11 +459,11 @@ function M.render_secondary(ctx)
 
 	local gap_width = left_text ~= "" and 3 or 0
 	local available_left_width = math.max(0, width - right_width - gap_width)
-	local visible_left = truncate_plain_to_width(left_text, available_left_width)
-	local left_label = statusline_text(visible_left, "PiUsageStats")
-	if visible_left == left_text and activity_label ~= "" then
-		left_label = statusline_text(activity_label, "PiActivity") .. statusline_text(spawn_label, "PiUsageStats")
-	end
+	local visible_activity = truncate_plain_to_width(activity_label, available_left_width)
+	local visible_spawn = visible_activity == activity_label
+		and truncate_plain_to_width(spawn_label, math.max(0, available_left_width - vim.fn.strdisplaywidth(visible_activity)))
+		or ""
+	local left_label = statusline_text(visible_activity, "PiActivity") .. statusline_text(visible_spawn, "PiSubagent")
 	return left_label .. "%#PiUsageStats#%=" .. right_label .. "%*"
 end
 

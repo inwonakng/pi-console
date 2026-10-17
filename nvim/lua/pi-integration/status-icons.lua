@@ -1,6 +1,6 @@
 -- Shared by the compact overview and managed tmux window titles.
 -- Colors match the dedicated frontend's Catppuccin Frappe palette.
-local M = { animation_interval_ms = 500 }
+local M = { animation_interval_ms = 500, subagent_icon = "󰇥" }
 -- The conversation footer uses these same frames at its faster local cadence.
 M.working_frames = { "⠖", "⠲", "⢒", "⢰", "⣰", "⣠", "⣄", "⣆" }
 local loading_frames = { "󰞌", "󰔟", "󰚭" }

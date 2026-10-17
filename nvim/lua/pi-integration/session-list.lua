@@ -49,7 +49,7 @@ function M.session_prefix(node)
 end
 
 function M.session_suffix(node)
-	return node.running > 0 and not node.expanded and (" ·  " .. node.running) or ""
+	return node.running > 0 and not node.expanded and (" · " .. icons.subagent_icon .. " " .. node.running) or ""
 end
 
 function M.subagent_label(node)
@@ -58,7 +58,7 @@ function M.subagent_label(node)
 	if name == "" then name = M.text(run.role) end
 	if name == "" then name = "Subagent" end
 	local progress = M.text(run.progress)
-	return "       " .. icons.get("Working").icon .. " " .. name .. " · running" .. (progress ~= "" and (" — " .. progress) or "")
+	return "       " .. icons.subagent_icon .. " " .. name .. " · running" .. (progress ~= "" and (" — " .. progress) or "")
 end
 
 function M.new()

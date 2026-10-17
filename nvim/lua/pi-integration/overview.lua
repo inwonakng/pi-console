@@ -228,7 +228,7 @@ function M.open(config)
 				highlight(row, 0, #lines[row], "Title")
 			elseif node.kind == "subagent" then
 				table.insert(lines, session_list.subagent_label(node))
-				highlight(row, 0, #lines[row], "Comment")
+				highlight(row, 0, #lines[row], "PiSubagent")
 			else
 				local entry = node.entry
 				local name = vim.fn.fnamemodify(project(entry), ":t")
@@ -237,14 +237,16 @@ function M.open(config)
 				local indicator_start = #prefix + #column(entry.status, 13) + 2
 				local row_prefix = prefix .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. "  "
 				local badge = build_info.is_dev(entry) and "DEV " or ""
-				local title = badge .. text(entry.title) .. session_list.session_suffix(node)
+				local suffix = session_list.session_suffix(node)
+				local title = badge .. text(entry.title) .. suffix
 				table.insert(lines, row_prefix .. title)
 				highlight(row, #prefix, #prefix + #text(entry.status), icons.highlight(entry.status))
 				for _, span in ipairs(spans) do
 					highlight(row, indicator_start + span.start_col, indicator_start + span.end_col, span.highlight)
 				end
 				if badge ~= "" then highlight(row, #row_prefix, #row_prefix + 3, "PiBuildDev") end
-				highlight(row, #row_prefix + #badge, #lines[row], entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle")
+				highlight(row, #row_prefix + #badge, #lines[row] - #suffix, entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle")
+				if suffix ~= "" then highlight(row, #lines[row] - #suffix, #lines[row], "PiSubagent") end
 				if focus_target and entry.id == focus_target.id then focused_row = row end
 			end
 			if node.kind ~= "subagent" then
