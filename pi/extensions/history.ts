@@ -493,13 +493,15 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	const patches = await Promise.all(discarded.map((record) => prepareWorkspaceDiscard(record.id)));
 	const fileCount = rollback.reduce((count, item) => count + item.files.length, 0);
 	const text = selected ? messageText(selected) : undefined;
-	suppressNextInputNotification();
-	const approved = await ctx.ui.confirm("Permanently revert history?",
-		`Delete ${deletedIds.size} history entries${selected ? ", including the selected message and every branch beneath it" : " after the selected point"}? This cannot be undone through the tree.\n`
-		+ `Restore ${fileCount} recorded file change(s) on the active path.\n`
-		+ `Continue in ${target.cwd}.\n`
-		+ (patches.length ? workspaceDiscardWarning(patches) : "No worktree will be discarded."));
-	if (!approved) return;
+	if (fileCount > 0 || discarded.length > 0) {
+		suppressNextInputNotification();
+		const approved = await ctx.ui.confirm("Permanently revert history?",
+			`Delete ${deletedIds.size} history entries${selected ? ", including the selected message and every branch beneath it" : " after the selected point"}? This cannot be undone through the tree.\n`
+			+ `Restore ${fileCount} recorded file change(s) on the active path.\n`
+			+ `Continue in ${target.cwd}.\n`
+			+ (patches.length ? workspaceDiscardWarning(patches) : "No worktree will be discarded."));
+		if (!approved) return;
+	}
 	let historyDeleted = false;
 	let filesRestored = false;
 	try {
