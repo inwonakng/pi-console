@@ -58,13 +58,39 @@ It lists open sessions, whether they're working, idle, done, or waiting for me,
 and their directories and workspaces. `Done` means a turn finished normally while
 I was elsewhere; focusing that conversation clears it to `Idle`. `Waiting` means
 an outstanding question or approval still needs a response. Reopened sessions
-start idle; unread status is not saved. Press `p` on a saved session to toggle its pin
-(``). Pinned sessions move into the ` Pinned` group above the regular sessions.
-They stay in the overview after their windows close and across restarts, with
-status `Not Open`. Enter focuses an open session or reopens a
-closed pinned session; `dd` closes its window without removing the pin. Unpinning
-a closed session removes it from the overview, not from session history. I keep
-this bound to `<prefix>o` so I don't have to remember where each conversation lives.
+start idle; unread status is not saved. The overview and sidebar share named
+groups and manual ordering. Pins (``) stay within their groups: press `p` on a
+saved session to keep it visible after its window closes and across restarts,
+with status `Not Open`. Enter focuses an open session or reopens a closed pin.
+Unpinning a closed session hides it, without removing its history or group assignment.
+
+Both lists use the same controls:
+
+| Binding | Action |
+|---|---|
+| `j` / `k`, arrows | Select a group or session; skip display-only rows |
+| `Tab` | Expand/collapse a group or a session's running subagents |
+| `Enter` | Focus/reopen a session, or expand/collapse a group |
+| `J` / `K` | Move a session within its group, or reorder a selected group |
+| `g` | Assign a session to an existing/new group; on a header, create an empty group |
+| `p` | Toggle a session's pin |
+| `dd` | Kill/close a session, or delete a group without killing its sessions |
+| `<leader>?` | Show the list's keys |
+
+Deleting a nonempty group asks for confirmation and appends all its sessions,
+including remembered closed sessions, to Ungrouped in their existing order.
+Pins are preserved. Ungrouped cannot be deleted or reordered and stays last;
+it hides when empty. Explicit groups remain even when empty. Closing an unpinned
+session hides its row but preserves its group and position for reopening.
+
+Collapsed groups show session-status icon counts. Collapsed sessions show their
+running-subagent count; expanded sessions show one display-only row per running
+subagent. Collapse state is independent in each viewer. These are highlight-only
+lists, with the normal cursor restored in inputs and dialogs. Ordinary Neovim
+scrolling is unchanged; there are no Shift-Enter or Ctrl-x list bindings.
+The overview also provides `/` to filter and `c` to clear the filter. Filtering
+hides groups without matching sessions but never deletes them. I keep the overview
+bound to `<prefix>o` so I don't have to remember where each conversation lives.
 
 ![Session overview showing working, idle, and waiting conversations](../assets/overview.png)
 
@@ -192,9 +218,10 @@ calling `toggle` manually; without one, closing from the agents session is a no-
 
 The sidebar shows open and pinned conversations with colored status icons,
 conversation titles, projects, and current activity. Focus it with normal tmux
-pane navigation, then use `j`/`k` to select a conversation, `Enter` to focus or
-reopen it, `o` for the full overview, and `q` to close the sidebar. It is only a
-viewer and does not start an agent.
+pane navigation, then use the [shared list controls](#session-overview) to organize
+or focus sessions, `o` for the full overview, and `q` to close the sidebar. Its
+collapsed-group summaries wrap beneath the heading to fit the narrow pane.
+It is only a viewer and does not start an agent.
 
 The sidebar is normally 34 columns wide, capped at one third of the window and
 shrunk further if the content panes need the space. Opening it requires at

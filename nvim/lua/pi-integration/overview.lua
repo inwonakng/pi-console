@@ -1,7 +1,9 @@
 local help = require("pi-integration.help")
 local runtime = require("pi-integration.runtime")
 local sessions = require("pi-integration.sessions")
-local pins = require("pi-integration.session-pins")
+local session_list = require("pi-integration.session-list")
+local list_cursor = require("pi-integration.list-cursor")
+local icons = require("pi-integration.status-icons")
 local statusline = require("pi-integration.statusline")
 local build_info = require("pi-integration.build-info")
 local session_navigation = require("pi-integration.session-navigation")
@@ -85,7 +87,7 @@ end
 function M.render_statusline()
 	local win = vim.g.statusline_winid or vim.api.nvim_get_current_win()
 	return build_info.statusline(vim.api.nvim_win_get_width(win), {
-		" 󰕮", "Enter: open/focus", "p: pin", "dd: kill", "/: filter", "c: clear", "r: refresh", "<leader>?: keys",
+		" 󰕮", "Enter: open", "Tab: expand", "J/K: move", "g: group", "p: pin", "dd: kill/delete", "/: filter", "<leader>?: keys",
 	})
 end
 
@@ -105,6 +107,7 @@ function M.open(config)
 	vim.api.nvim_win_set_buf(list_win, list_buf)
 	window_options(list_win, "%!v:lua.require('pi-integration.overview').render_statusline()")
 	vim.wo[list_win].cursorline = true
+	vim.wo[list_win].cursorlineopt = "line"
 	vim.cmd("botright 9split")
 	local detail_win = vim.api.nvim_get_current_win()
 	local detail_buf = scratch("pi://overview-details")
@@ -114,7 +117,10 @@ function M.open(config)
 	vim.wo[detail_win].wrap = true
 	vim.wo[detail_win].winfixheight = true
 	vim.api.nvim_set_current_win(list_win)
+	list_cursor.attach(list_buf)
+	list_cursor.attach(detail_buf)
 
+	local list = session_list.new()
 	local rows = {}
 	local navigation = session_navigation.new(list_win)
 	local query = ""
@@ -133,8 +139,12 @@ function M.open(config)
 		if not vim.api.nvim_buf_is_valid(detail_buf) then
 			return
 		end
-		local entry = selected()
+		local node = selected()
+		local entry = node and node.kind == "session" and node.entry or nil
 		local lines = { "", " Select a conversation to see its details." }
+		if node and node.kind == "group" then
+			lines = { " " .. node.name, "", " Sessions:  " .. #node.entries .. " visible · " .. node.count .. " remembered", " Tab: expand/collapse · J/K: move group · g: create group", " dd: delete group, keeping its sessions in Ungrouped" }
+		end
 		if entry then
 			local waiting = type(entry.waiting) == "table" and entry.waiting or nil
 			local activity = not waiting and entry.activity and entry.activity ~= "" and (" · " .. text(entry.activity)) or ""
@@ -184,121 +194,86 @@ function M.open(config)
 		end
 		local previous = selected()
 		local view = vim.api.nvim_win_call(list_win, vim.fn.winsaveview)
-		local entries
-		if instances then
-			entries, err = pins.merge(instances)
-		end
-		-- Keep the last successful list on a backend or pin-storage failure.
-		if not entries then
-			set_lines(detail_buf, { " Could not refresh sessions:", " " .. text(err) })
+		local focus_target = select_last_focused and runtime.last_focused(instances or {}) or nil
+		local nodes, entries
+		if instances then nodes, entries = list.build(instances, query, focus_target) end
+		-- Keep the last successful list on backend or persistence failures.
+		if not nodes then
+			set_lines(detail_buf, { " Could not refresh sessions:", " " .. text(entries or err) })
 			return
 		end
-		local focus_target = select_last_focused and runtime.last_focused(instances) or nil
 		select_last_focused = false
 		rows = {}
-		local starts = {}
-		local pinned_entries, regular_entries = {}, {}
+		local starts, highlights = {}, {}
 		local pinned_count = 0
 		for _, entry in ipairs(entries) do
-			if entry.pinned then
-				pinned_count = pinned_count + 1
-			end
-			local searchable = (text(entry.title) .. " " .. text(project(entry)) .. " " .. text(entry.cwd) .. " " .. workspace_hash(entry) .. " " .. text(entry.status)):lower()
-			if query == "" or searchable:find(query:lower(), 1, true) then
-				table.insert(entry.pinned and pinned_entries or regular_entries, entry)
-			end
+			if entry.pinned then pinned_count = pinned_count + 1 end
 		end
 		local lines = {
 			" Pi sessions · " .. #instances .. " open · " .. pinned_count .. " pinned",
 			query == "" and "" or (" Filter: " .. query),
 			"",
-			" " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. "  Title",
+			"     " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. "  Title",
 		}
+		local function highlight(row, first, last, group)
+			table.insert(highlights, { row = row - 1, first = first, last = last, group = group })
+		end
+		highlight(1, 0, #lines[1], "Title")
 		local cursor, nearest_row, focused_row
-		local indicator_prefix = " " .. column("", 13) .. "  "
-		local indicator_spans = {}
-		local title_start_cols = {}
-		local badge_start_cols = {}
-		local heading_rows = {}
-		for _, section in ipairs({ { title = " Pinned", entries = pinned_entries }, { title = "Sessions", entries = regular_entries } }) do
-			if #section.entries > 0 then
-				if #heading_rows > 0 then
-					table.insert(lines, "")
+		for _, node in ipairs(nodes) do
+			if node.kind == "group" and #starts > 0 then table.insert(lines, "") end
+			local row = #lines + 1
+			if node.kind == "group" then
+				table.insert(lines, session_list.group_label(node))
+				highlight(row, 0, #lines[row], "Title")
+			elseif node.kind == "subagent" then
+				table.insert(lines, session_list.subagent_label(node))
+				highlight(row, 0, #lines[row], "Comment")
+			else
+				local entry = node.entry
+				local name = vim.fn.fnamemodify(project(entry), ":t")
+				local indicators, spans = indicator_columns(entry)
+				local prefix = " " .. session_list.session_prefix(node)
+				local indicator_start = #prefix + #column(entry.status, 13) + 2
+				local row_prefix = prefix .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. "  "
+				local badge = build_info.is_dev(entry) and "DEV " or ""
+				local title = badge .. text(entry.title) .. session_list.session_suffix(node)
+				table.insert(lines, row_prefix .. title)
+				highlight(row, #prefix, #prefix + #text(entry.status), icons.highlight(entry.status))
+				for _, span in ipairs(spans) do
+					highlight(row, indicator_start + span.start_col, indicator_start + span.end_col, span.highlight)
 				end
-				table.insert(lines, " " .. section.title)
-				table.insert(heading_rows, #lines)
-				for _, entry in ipairs(section.entries) do
-					local row = #lines + 1
-					rows[row] = entry
-					table.insert(starts, row)
-					if focus_target and entry.id == focus_target.id then
-						focused_row = row
-					end
-					local name = vim.fn.fnamemodify(project(entry), ":t")
-					local indicators, spans = indicator_columns(entry)
-					local row_prefix = " " .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. "  "
-					indicator_spans[row] = spans
-					local badge = build_info.is_dev(entry) and "DEV " or ""
-					badge_start_cols[row] = badge ~= "" and #row_prefix or nil
-					title_start_cols[row] = #row_prefix + #badge
-					table.insert(lines, row_prefix .. badge .. (entry.pinned and " " or "") .. text(entry.title))
-					if not nearest_row or math.abs(row - view.lnum) < math.abs(nearest_row - view.lnum) then
-						nearest_row = row
-					end
-					if previous and (previous.id == entry.id
-						or (previous.status == "Not Open" or entry.status == "Not Open")
-							and runtime.canonical_path(previous.path) == runtime.canonical_path(entry.path)) then
-						cursor = row
-					end
-				end
+				if badge ~= "" then highlight(row, #row_prefix, #row_prefix + 3, "PiBuildDev") end
+				highlight(row, #row_prefix + #badge, #lines[row], entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle")
+				if focus_target and entry.id == focus_target.id then focused_row = row end
+			end
+			if node.kind ~= "subagent" then
+				rows[row] = node
+				table.insert(starts, row)
+				if not nearest_row or math.abs(row - view.lnum) < math.abs(nearest_row - view.lnum) then nearest_row = row end
+				if session_list.same(previous, node) then cursor = row end
 			end
 		end
 		cursor = focused_row or cursor
-		if not next(rows) then
-			table.insert(lines, runtime.available() and " No matching open or pinned conversations. Press <leader>pn to start one." or " No supported session backend available.")
+		if #starts == 0 then
+			table.insert(lines, runtime.available() and " No matching conversations. Press <leader>pn to start one." or " No supported session backend available.")
 		end
 		cursor = cursor or nearest_row or math.max(1, math.min(view.lnum, #lines))
 		updating = true
 		set_lines(list_buf, lines)
 		vim.api.nvim_buf_clear_namespace(list_buf, ns, 0, -1)
-		vim.api.nvim_buf_set_extmark(list_buf, ns, 0, 0, { end_col = #lines[1], hl_group = "Title" })
-		for _, row in ipairs(heading_rows) do
-			vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, 1, { end_col = #lines[row], hl_group = "Title" })
+		for _, hl in ipairs(highlights) do
+			vim.api.nvim_buf_set_extmark(list_buf, ns, hl.row, hl.first, { end_col = hl.last, hl_group = hl.group })
 		end
-		for row, entry in pairs(rows) do
-			local group = entry.status == "Done" and "DiagnosticOk"
-				or entry.status == "Waiting" and "DiagnosticWarn"
-				or (entry.status == "Error" or entry.status == "Stopped" or entry.status == "Unresponsive") and "DiagnosticError"
-				or (entry.status == "Idle" or entry.status == "Not Open") and "Comment"
-				or "DiagnosticInfo"
-			vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, 1, { end_col = 14, hl_group = group })
-			for _, span in ipairs(indicator_spans[row]) do
-				vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, #indicator_prefix + span.start_col, {
-					end_col = #indicator_prefix + span.end_col,
-					hl_group = span.highlight,
-				})
-			end
-			if badge_start_cols[row] then
-				vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, badge_start_cols[row], {
-					end_col = badge_start_cols[row] + 3, hl_group = "PiBuildDev",
-				})
-			end
-			vim.api.nvim_buf_set_extmark(list_buf, ns, row - 1, title_start_cols[row], {
-				end_col = #lines[row],
-				hl_group = entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle",
-			})
-		end
-		-- Keep the viewport stable unless the selected session moves out of view.
+		-- Preserve ordinary scrolling; only reveal selection if its row moved.
 		local height = vim.api.nvim_win_get_height(list_win)
 		if cursor < view.topline then
 			view.topline = cursor
 		elseif cursor >= view.topline + height then
 			view.topline = cursor - height + 1
 		end
-		view.lnum = cursor
-		vim.api.nvim_win_call(list_win, function()
-			vim.fn.winrestview(view)
-		end)
+		view.lnum, view.col = cursor, 0
+		vim.api.nvim_win_call(list_win, function() vim.fn.winrestview(view) end)
 		navigation.set_rows(starts)
 		updating = false
 		details()
@@ -338,14 +313,15 @@ function M.open(config)
 	local help_state = {}
 	local function map(key, callback, description)
 		table.insert(mapping_specs, { lhs = key, desc = description })
-		vim.keymap.set("n", key, callback, { buffer = list_buf, desc = description, silent = true })
+		vim.keymap.set("n", key, callback, { buffer = list_buf, desc = description, silent = true, nowait = key == "g" })
 	end
 	local function require_selected()
 		local entry = selected()
-		if not entry then
+		if not entry or entry.kind ~= "session" then
 			vim.notify("Select a conversation first", vim.log.levels.WARN, { title = "Pi overview" })
+			return nil
 		end
-		return entry
+		return entry.entry
 	end
 	local function control_selected(action, argument)
 		local entry = require_selected()
@@ -365,57 +341,7 @@ function M.open(config)
 		end)
 	end
 
-	map("j", function() navigation.move(vim.v.count1) end, "Next session")
-	map("k", function() navigation.move(-vim.v.count1) end, "Previous session")
-	map("<Down>", function() navigation.move(vim.v.count1) end, "Next session")
-	map("<Up>", function() navigation.move(-vim.v.count1) end, "Previous session")
-	map("<CR>", function()
-		local entry = selected()
-		if entry then
-			if entry.status == "Not Open" then
-				report(runtime.launch(config.launcher, entry.cwd, entry.path))
-			else
-				report(runtime.focus(entry.id))
-			end
-		end
-	end, "Focus or reopen conversation")
-	map("p", function()
-		local entry = require_selected()
-		if entry then
-			report(pins.toggle(entry))
-		end
-	end, "Toggle session pin")
-	map("dd", function()
-		local entry = selected()
-		if not entry then
-			return
-		end
-		local entries, err = runtime.list()
-		if not entries then
-			report(nil, err)
-			return
-		end
-		local current
-		for _, candidate in ipairs(entries) do
-			if candidate.id == entry.id and candidate.pid == entry.pid then
-				current = candidate
-				break
-			end
-		end
-		if not current then
-			report(nil, "That conversation is no longer open")
-			return
-		end
-		if runtime.kill_needs_confirmation(current) then
-			vim.ui.select({ "Yes", "No" }, { prompt = "Kill running conversation " .. text(current.title) .. " and close its window?", pi_select_layout = "compact" }, function(choice)
-				if choice == "Yes" then
-					report(runtime.kill(current, true))
-				end
-			end)
-		else
-			report(runtime.kill(current, false))
-		end
-	end, "Kill conversation")
+	list.bind(map, selected, navigation, config, report, refresh)
 	map("/", function()
 		vim.ui.input({ prompt = "Filter sessions: ", default = query }, function(value)
 			if value then

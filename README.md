@@ -105,10 +105,12 @@ reporting, detach and reattach existing tmux clients.
 | `<prefix>o` | Open or focus the overview |
 | `<prefix>O` | Toggle the compact sidebar |
 
-In the overview or sidebar, use `j`/`k` and Enter to select a conversation. Pin
-saved conversations with `p` in the overview to keep them available after closing
-their windows. See the [user guide](docs/USAGE.md#tmux-integration) for layout and
-custom tmux configuration details.
+In the overview or sidebar, use `j`/`k` and Enter to select a conversation.
+Use `g` to organize sessions into groups, `J`/`K` to reorder, and Tab to expand
+groups or running subagents. Pin saved conversations with `p` to keep them
+available within their groups after closing their windows. See the
+[user guide](docs/USAGE.md#session-overview) for list controls and
+[tmux integration](docs/USAGE.md#tmux-integration) for layout details.
 
 ## Configuration and permissions
 

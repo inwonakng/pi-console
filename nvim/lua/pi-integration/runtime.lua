@@ -211,6 +211,21 @@ function M.launch(launcher, cwd, path)
 end
 
 local function snapshot(state)
+	-- Publish only small display summaries, never prompts or artifact paths.
+	local subagent_runs = {}
+	if state.spawn_runs_session_file == state.session_file then
+		for _, run in ipairs(state.spawn_runs or {}) do
+			if run.status == "running" then
+				table.insert(subagent_runs, {
+					runId = run.runId,
+					status = run.status,
+					agent = run.agent,
+					role = run.role,
+					progress = type(run.progress) == "string" and vim.fn.strcharpart(run.progress, 0, 240) or nil,
+				})
+			end
+		end
+	end
 	local status = "Idle"
 	local waiting
 	local request_id = state.active_ui_request_id
@@ -268,7 +283,8 @@ local function snapshot(state)
 		integration_mode = state.integration_mode,
 		notification_status = state.notification_status,
 		model = state.model_id,
-		subagents = state.spawn_running_count or 0,
+		subagents = #subagent_runs,
+		subagent_runs = subagent_runs,
 	}
 end
 

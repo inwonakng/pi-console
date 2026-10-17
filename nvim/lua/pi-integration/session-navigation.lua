@@ -1,6 +1,6 @@
 local M = {}
 
--- Both session lists navigate by entry; headings and details are display-only.
+-- Both lists navigate selectable group/session rows; details are display-only.
 function M.new(win)
 	local starts = {}
 	local last_row = vim.api.nvim_win_get_cursor(win)[1]
@@ -9,8 +9,8 @@ function M.new(win)
 	local function select_row(row)
 		last_row = row
 		local cursor = vim.api.nvim_win_get_cursor(win)
-		if cursor[1] ~= row then
-			vim.api.nvim_win_set_cursor(win, { row, cursor[2] })
+		if cursor[1] ~= row or cursor[2] ~= 0 then
+			vim.api.nvim_win_set_cursor(win, { row, 0 })
 		end
 	end
 
