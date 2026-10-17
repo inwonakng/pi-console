@@ -13,7 +13,7 @@ function M.restart_block_reason(state)
 			return "Wait for the current subagent work to finish before restarting."
 		end
 	end
-	if M.is_agent_active(state) or state.is_compacting or state.is_loading
+	if M.is_agent_active(state) or state.is_compacting or state.is_loading or state.reverting_history
 		or state.session_replacement_pending or state.rpc_tearing_down or state.restart_requested
 		or (state.workspace and state.workspace.transitionPending) then
 		return "Wait for the current Pi work to finish before restarting."
@@ -77,6 +77,8 @@ function M.new()
 		is_compacting = false,
 		is_loading = false,
 		loading_error = nil,
+		reverting_history = nil,
+		revert_cover = nil,
 		workspace_status_received = false,
 		session_sync_complete = false,
 		session_sync_generation = 0,
@@ -108,6 +110,7 @@ function M.new()
 		session_name = nil,
 		message_count = 0,
 		has_conversation_history = false,
+		conversation_history_loaded = false,
 		provider = nil,
 		model_id = nil,
 		thinking_level = nil,

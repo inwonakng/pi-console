@@ -387,6 +387,9 @@ local integration_context = {
 		show = show_logs,
 	},
 	transcript = {
+		set_reverting = function(phase)
+			return pi_transcript.set_reverting(integration_ctx(), phase)
+		end,
 		win_valid = transcript_win_valid,
 		metadata_lines = metadata_lines,
 		update_statusline = update_transcript_statusline,
@@ -624,6 +627,7 @@ function M.restore_session_transcript(path, leaf_id)
 end
 
 function M.refresh_messages()
+	if state.reverting_history == "pending" then return end
 	if is_agent_active() then
 		notify("Pi is active; transcript refresh will run after the current run finishes.", vim.log.levels.WARN)
 		return
@@ -634,17 +638,23 @@ function M.refresh_messages()
 		local session_file = state.session_file
 		local generation = state.session_sync_generation
 		send({ type = "get_entries" }, function(event)
-			if state.job ~= job or is_agent_active() or session_file ~= state.session_file or generation ~= state.session_sync_generation then
+			if state.job ~= job or is_agent_active() or state.reverting_history == "pending"
+				or session_file ~= state.session_file or generation ~= state.session_sync_generation then
 				return
 			end
 			if not event.success or not event.data then
+				local was_reverting = state.reverting_history ~= nil
+				pi_transcript.set_reverting(integration_ctx(), nil)
 				notify("Could not get session entries", vim.log.levels.ERROR)
+				if was_reverting then M.flush_queued_prompts() end
 				return
 			end
 
 			state.tree_leaf_id = normalize_leaf_id(event.data.leafId)
 			render_messages(load_session_messages_from_records(event.data.entries or {}, state.tree_leaf_id))
+			pi_transcript.set_reverting(integration_ctx(), nil)
 			M.refresh_session_stats()
+			M.flush_queued_prompts()
 		end)
 		return
 	end

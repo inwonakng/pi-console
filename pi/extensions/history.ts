@@ -504,6 +504,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	}
 	let historyDeleted = false;
 	let filesRestored = false;
+	ctx.ui.setStatus("pi-history-revert", "pending");
 	try {
 		const moved = await moveToLocation(ctx, target.cwd, plan.desiredLeafId, {
 			reload: true,
@@ -556,6 +557,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 				}
 				if (text !== undefined) nextCtx.ui.setEditorText(text);
 				nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
+				nextCtx.ui.setStatus("pi-history-revert", "complete");
 				markHistoryChanged(nextCtx);
 				nextCtx.ui.notify(warnings.length
 					? `History was permanently reverted, but cleanup is incomplete:\n${warnings.join("\n")}`
@@ -586,12 +588,16 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 				}
 			}
 			filesRestored = false;
+			ctx.ui.setStatus("pi-history-revert", undefined);
 			ctx.ui.notify("Revert cancelled. Original history and files were restored; no worktrees were removed.", "warning");
 		}
 	} catch (error) {
 		// A switch can throw before teardown as well as after it. Only the former
 		// leaves an old runtime able to append beneath deleted entries.
-		if (historyDeleted && isRuntimeActive()) ctx.shutdown();
+		if (isRuntimeActive()) {
+			ctx.ui.setStatus("pi-history-revert", undefined);
+			if (historyDeleted) ctx.shutdown();
+		}
 		const reason = error instanceof Error ? error.message : String(error);
 		throw new Error(historyDeleted
 			? `History was deleted, but revert could not finish: ${reason}. Restart or resume ${sessionFile} before continuing; inspect workspace cleanup.`

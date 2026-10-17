@@ -17,6 +17,7 @@ local function reset_conversation(ctx, keep_transcript, keep_pending_messages, s
 	state.session_name = nil
 	state.message_count = 0
 	state.has_conversation_history = false
+	state.conversation_history_loaded = false
 	state.session_stats = nil
 	state.todo_status = nil
 	state.todo_tool_output_id = nil
@@ -64,8 +65,11 @@ function M.apply_state(ctx, data, new_session)
 	state.pending_session_file = nil
 	state.session_name = data.sessionName
 	state.message_count = data.messageCount or state.message_count
-	-- Keep known inactive-branch history until the full entry refresh arrives.
-	state.has_conversation_history = state.has_conversation_history or (tonumber(state.message_count) or 0) > 0
+	-- Until entries arrive, conservatively block nonempty sessions. Once loaded,
+	-- their records are authoritative: messageCount also includes system prompts.
+	if not state.conversation_history_loaded then
+		state.has_conversation_history = (tonumber(state.message_count) or 0) > 0
+	end
 	state.is_streaming = data.isStreaming or false
 	-- isStreaming can be false between agent_end and agent_settled. An ordinary
 	-- state sync must not release the queue before the settlement event.
@@ -92,6 +96,7 @@ function M.sync(ctx, options)
 	state.session_sync_generation = (state.session_sync_generation or 0) + 1
 	local generation = state.session_sync_generation
 	local function fail_sync(message)
+		ctx.transcript.set_reverting(nil)
 		state.session_replacement_pending = false
 		state.session_sync_complete = false
 		ctx.events.set_loading(false)

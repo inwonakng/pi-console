@@ -37,6 +37,9 @@ end
 
 function M.handle_response(ctx, event)
 	local state = ctx.state
+	if event.success == false and event.command == "prompt" then
+		ctx.transcript.set_reverting(nil)
+	end
 	local callback = event.id and state.callbacks[event.id]
 	if callback then
 		state.callbacks[event.id] = nil
@@ -113,6 +116,7 @@ end
 
 local function reset_runtime_state(ctx)
 	local state = ctx.state
+	ctx.transcript.set_reverting(nil)
 	for _, output_id in ipairs(tool_output.interrupt_executions(state)) do
 		ctx.transcript.write_tool_output(output_id)
 	end
@@ -428,12 +432,14 @@ function M.restart(ctx, options)
 		state.session_name = nil
 		state.message_count = 0
 		state.has_conversation_history = false
+		state.conversation_history_loaded = false
 	elseif options.fresh_session then
 		state.session_file = nil
 		state.pending_session_file = nil
 		state.session_name = nil
 		state.message_count = 0
 		state.has_conversation_history = false
+		state.conversation_history_loaded = false
 	else
 		local session_file = state.session_file or state.pending_session_file
 		if session_file and session_file ~= "" then

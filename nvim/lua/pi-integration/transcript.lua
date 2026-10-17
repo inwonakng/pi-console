@@ -244,8 +244,75 @@ function M.apply_quote_highlights(ctx)
 	M.apply_quote_highlights_to_buffer(state.transcript_buf, state)
 end
 
+local function update_revert_cover(ctx)
+	local state = ctx.state
+	local cover = state.revert_cover
+	if not cover then return end
+	local visible = {}
+	for _, win in ipairs(vim.api.nvim_list_wins()) do
+		if buffer.window_matches(win, state.transcript_buf) then
+			visible[win] = true
+			local config = {
+				relative = "win", win = win, row = 0, col = 0,
+				width = vim.api.nvim_win_get_width(win), height = vim.api.nvim_win_get_height(win),
+				focusable = false, style = "minimal", zindex = 40,
+			}
+			local overlay = cover.windows[win]
+			if overlay and vim.api.nvim_win_is_valid(overlay) then
+				vim.api.nvim_win_set_config(overlay, config)
+			else
+				overlay = vim.api.nvim_open_win(cover.buf, false, config)
+				cover.windows[win] = overlay
+				vim.wo[overlay].winblend = 0
+				vim.wo[overlay].winhl = "Normal:Normal,NormalFloat:Normal,EndOfBuffer:Normal"
+				vim.wo[overlay].fillchars = "eob: "
+			end
+		end
+	end
+	for win, overlay in pairs(cover.windows) do
+		if not visible[win] then
+			if vim.api.nvim_win_is_valid(overlay) then vim.api.nvim_win_close(overlay, true) end
+			cover.windows[win] = nil
+		end
+	end
+end
+
+function M.set_reverting(ctx, phase)
+	local state = ctx.state
+	state.reverting_history = phase
+	if not phase then
+		local cover = state.revert_cover
+		state.revert_cover = nil
+		if cover then
+			vim.api.nvim_del_autocmd(cover.autocmd)
+			for _, win in pairs(cover.windows) do
+				if vim.api.nvim_win_is_valid(win) then vim.api.nvim_win_close(win, true) end
+			end
+			if vim.api.nvim_buf_is_valid(cover.buf) then vim.api.nvim_buf_delete(cover.buf, { force = true }) end
+		end
+		return
+	end
+	if not state.revert_cover then
+		-- Cover, rather than replace, the transcript so cancellation can reveal it unchanged.
+		local buf = vim.api.nvim_create_buf(false, true)
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "", " Reverting..." })
+		vim.bo[buf].modifiable = false
+		local cover = { buf = buf, windows = {} }
+		state.revert_cover = cover
+		cover.autocmd = vim.api.nvim_create_autocmd({ "VimResized", "WinResized", "WinClosed", "BufWinEnter" }, {
+			callback = function()
+				vim.schedule(function()
+					if state.revert_cover == cover then update_revert_cover(ctx) end
+				end)
+			end,
+		})
+	end
+	update_revert_cover(ctx)
+end
+
 function M.render(ctx)
 	local state = ctx.state
+	update_revert_cover(ctx)
 	if not ctx.buffer.valid(state.transcript_buf) then
 		return
 	end
@@ -726,6 +793,7 @@ function M.ensure_assistant_turn_started(ctx, role)
 end
 
 function M.render_error_message(ctx, title, message)
+	M.set_reverting(ctx, nil)
 	M.clear_assistant_placeholder(ctx)
 	ctx.state.error_rendered_for_active_run = true
 	M.append_message_header(ctx, title)

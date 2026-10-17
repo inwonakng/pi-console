@@ -140,7 +140,7 @@ end
 function M.flush_queued_prompts(ctx)
 	local state = ctx.state
 	if not state.trust_status or state.trust_status.state ~= "ready"
-		or state.loading_error or state.is_loading or state.session_replacement_pending or state.rpc_tearing_down
+		or state.loading_error or state.is_loading or state.reverting_history or state.session_replacement_pending or state.rpc_tearing_down
 		or lifecycle.is_agent_active(state) or state.is_compacting then
 		return
 	end
@@ -225,6 +225,7 @@ function M.history(ctx)
 		if not event.success then
 			ctx.ui.notify(event.error or "Could not open history", vim.log.levels.ERROR)
 		end
+		M.flush_queued_prompts(ctx)
 	end)
 end
 

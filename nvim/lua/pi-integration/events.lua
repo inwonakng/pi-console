@@ -453,6 +453,7 @@ local function modified_buffers_under(path)
 end
 
 local function fail_workspace_loading(ctx, message, detail)
+	ctx.transcript.set_reverting(nil)
 	ctx.logs.add("error", message, detail)
 	M.set_loading(ctx, false)
 	ctx.state.loading_error = message
@@ -552,6 +553,16 @@ function M.handle_extension_ui_request(ctx, event)
 			update_access_mode_from_status(ctx, event.statusText)
 		elseif event.statusKey == "pi-integration-mode" then
 			update_integration_mode_from_status(ctx, event.statusText)
+		elseif event.statusKey == "pi-history-revert" then
+			if event.statusText == "pending" then
+				-- Invalidate entry requests issued before the revert started.
+				state.session_sync_generation = (state.session_sync_generation or 0) + 1
+				ctx.transcript.set_reverting("pending")
+			elseif event.statusText == "complete" then
+				ctx.transcript.set_reverting("refreshing")
+			else
+				ctx.transcript.set_reverting(nil)
+			end
 		elseif event.statusKey == "pi-history-changed" then
 			ctx.actions.refresh_messages()
 		elseif event.statusKey == "pi-session-title" then
@@ -938,6 +949,12 @@ function M.handle_event(ctx, event)
 	elseif event.type == "session_info_changed" then
 		state.session_name = event.name
 		ctx.transcript.refresh_ui()
+	elseif event.type == "extension_error"
+		and (event.extensionPath == "command:pi-history" or event.extensionPath == "command:pi-revert-after") then
+		-- Extension command errors are reported separately from the successful prompt acknowledgement.
+		ctx.transcript.set_reverting(nil)
+		ctx.logs.add("error", "History revert failed", event.error)
+		ctx.ui.notify(event.error or "Could not revert history", vim.log.levels.ERROR)
 	elseif event.type == "extension_ui_request" then
 		M.handle_extension_ui_request(ctx, event)
 	end
