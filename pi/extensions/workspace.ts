@@ -36,6 +36,7 @@ import {
   loadWorkspace,
   pathInside,
   prepareWorkspaceDiscard,
+  previewWorkspaceIntegration,
   removeWorkspace,
   retainedChildWorkspaces,
   sameSessionFile,
@@ -674,15 +675,25 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         let decision = integrationMode === "allowed" || params.approved === true
           ? INTEGRATE_ACTION
           : RETURN_ACTION;
+        const operationSignal = signal ? AbortSignal.any([signal, runtimeCancellation.signal]) : runtimeCancellation.signal;
         if (integrationMode === "ask" && getInteractionMode(ctx) === "interactive") {
           while (true) {
+            const preview = await previewWorkspaceIntegration(selected.id, operationSignal);
             notifyPiWorkspaceIntegration(ctx);
             const prompt = `Apply ${selected.label} to ${selected.destinationRoot}?${ignoredReviewNote(selected)}`;
             decision = await ctx.ui.select(
-              ctx.mode === "rpc" ? JSON.stringify({ kind: "pi_compact_select", prompt, resumable: true }) : prompt,
+              ctx.mode === "rpc" ? JSON.stringify({
+                kind: "pi_compact_select", prompt, resumable: true,
+                preview, preview_filetype: "pi_workspace_summary",
+              }) : `${prompt}\n\n${preview}`,
               [INTEGRATE_ACTION, REVIEW_ACTION, RETURN_ACTION],
               { signal: ctx.signal },
             ) ?? RETURN_ACTION;
+            if (decision === INTEGRATE_ACTION && await previewWorkspaceIntegration(selected.id, operationSignal) !== preview) {
+              ctx.ui.notify("Workspace or destination changes updated the integration summary. Review the refreshed preview before integrating.", "warning");
+              suppressNextInputNotification();
+              continue;
+            }
             if (decision !== REVIEW_ACTION) {
               break;
             }
@@ -701,7 +712,6 @@ export default function workspaceExtension(pi: ExtensionAPI) {
             terminate: true,
           };
         }
-        const operationSignal = signal ? AbortSignal.any([signal, runtimeCancellation.signal]) : runtimeCancellation.signal;
         const integrated = await integrateWorkspace(selected.id, operationSignal);
         if (integrated.integration !== "applied" && integrated.integration !== "none") {
           return {

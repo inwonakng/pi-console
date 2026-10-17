@@ -320,14 +320,14 @@ function commitSnapshotTree(gitRoot: string, tree: string, parent: string, purpo
   }).trim();
 }
 
-function integrationReview(record: WorkspaceRecord, destination: Snapshot, mergedTree: string): WorkspaceIntegrationReview {
-  const revisions = [destination.tree, mergedTree];
-  const statuses = splitNul(gitBuffer(record.destinationRoot, ["diff", "--no-renames", "--name-status", "-z", ...revisions]));
+function integrationFiles(root: string, before: string, after: string): WorkspaceIntegrationReview["files"] {
+  const revisions = [before, after];
+  const statuses = splitNul(gitBuffer(root, ["diff", "--no-renames", "--name-status", "-z", ...revisions]));
   const statusByPath = new Map<string, string>();
   for (let i = 0; i < statuses.length; i += 2) {
     statusByPath.set(statuses[i + 1]!, statuses[i]!);
   }
-  const files = splitNul(gitBuffer(record.destinationRoot, ["diff", "--no-renames", "--numstat", "-z", ...revisions])).map((entry) => {
+  return splitNul(gitBuffer(root, ["diff", "--no-renames", "--numstat", "-z", ...revisions])).map((entry) => {
     const [, added, deleted, path] = /^(\d+|-)\t(\d+|-)\t([\s\S]+)$/.exec(entry) ?? [];
     if (!path || !added || !deleted || !statusByPath.has(path)) throw new Error("Invalid integration diff statistics.");
     return {
@@ -337,6 +337,10 @@ function integrationReview(record: WorkspaceRecord, destination: Snapshot, merge
       deletions: deleted === "-" ? null : Number(deleted),
     };
   });
+}
+
+function integrationReview(record: WorkspaceRecord, destination: Snapshot, mergedTree: string): WorkspaceIntegrationReview {
+  const files = integrationFiles(record.destinationRoot, destination.tree, mergedTree);
   const after = commitSnapshotTree(record.destinationRoot, mergedTree, destination.commit, "integration-after");
   // These refs deliberately outlive worktree cleanup and keep the history
   // reachable through Git garbage collection without changing a user branch.
@@ -347,8 +351,10 @@ function integrationReview(record: WorkspaceRecord, destination: Snapshot, merge
 }
 
 export function formatIntegrationSummary(record: WorkspaceRecord): string {
-  const review = record.integrationReview;
-  if (!review) return "";
+  return record.integrationReview ? formatIntegrationChanges(record.integrationReview) : "";
+}
+
+function formatIntegrationChanges(review: Pick<WorkspaceIntegrationReview, "files" | "ignoredFiles">, pending = false): string {
   const displayPath = (path: string): string => /[\s"\\]/.test(path) ? JSON.stringify(path) : path;
   const lines = review.files.map((file) => {
     const counts = file.additions === null || file.deletions === null ? "binary" : `+${file.additions}  -${file.deletions}`;
@@ -359,10 +365,10 @@ export function formatIntegrationSummary(record: WorkspaceRecord): string {
     const deletions = review.files.reduce((sum, file) => sum + (file.deletions ?? 0), 0);
     lines.push("", `${review.files.length} ${review.files.length === 1 ? "file" : "files"} changed, ${additions} insertions(+), ${deletions} deletions(-)`);
   } else if (review.ignoredFiles.length === 0) {
-    lines.push("No changes applied.");
+    lines.push(pending ? "No changes to apply." : "No changes applied.");
   }
   if (review.ignoredFiles.length > 0) {
-    lines.push("", "Updated ignored files (outside Git diff; line counts unavailable):", ...review.ignoredFiles.map(displayPath));
+    lines.push("", `${pending ? "Ignored files to update" : "Updated ignored files"} (outside Git diff; line counts unavailable):`, ...review.ignoredFiles.map(displayPath));
   }
   return lines.join("\n");
 }
@@ -770,6 +776,45 @@ function assertWorkspaceAvailable(record: WorkspaceRecord): void {
   }
 }
 
+function prepareIntegration(record: WorkspaceRecord): {
+  destination: Snapshot;
+  merge: ReturnType<typeof mergeTree>;
+  ignoredChanges: { path: string; hash: string }[];
+} {
+  snapshotWorkspaceResult(record);
+  const ignoredChanges = changedIgnoredFiles(record);
+  const destination = captureSnapshot(record.destinationRoot, record.id, `destination-${randomUUID()}`);
+  try {
+    return { destination, merge: mergeTree(record, destination), ignoredChanges };
+  } catch (error) {
+    deleteRef(record.destinationRoot, destination.ref);
+    throw error;
+  }
+}
+
+/** Prepare the same destination-relative comparison as integration, without applying it. */
+export async function previewWorkspaceIntegration(id: string, signal?: AbortSignal): Promise<string> {
+  return withWorkspaceLock(id, async (record) => {
+    if (isWorkspaceFinalized(record)) return formatIntegrationSummary(record);
+    assertWorkspaceAvailable(record);
+    const { destination, merge, ignoredChanges } = prepareIntegration(record);
+    try {
+      checkCancellation(signal);
+      if (!merge.mergedTree) {
+        return `Integration conflicts prevent application. Review / modify the workspace before trying again.\n\n${merge.diagnostics ?? "Git reported a merge conflict."}`;
+      }
+      return formatIntegrationChanges({
+        files: integrationFiles(record.destinationRoot, destination.tree, merge.mergedTree),
+        ignoredFiles: ignoredChanges
+          .filter((file) => regularFileHash(record.destinationRoot, file.path) !== file.hash)
+          .map((file) => file.path),
+      }, true);
+    } finally {
+      deleteRef(record.destinationRoot, destination.ref);
+    }
+  }, signal);
+}
+
 export async function integrateWorkspace(id: string, signal?: AbortSignal): Promise<WorkspaceRecord> {
   return withWorkspaceLock(id, async (record) => {
     let applicationStarted = false;
@@ -784,11 +829,8 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal): Prom
       record.integration = "pending";
       delete record.integrationReason;
       saveWorkspace(record);
-      record = snapshotWorkspaceResult(record);
-      changedIgnoredFiles(record);
-      const destination = captureSnapshot(record.destinationRoot, record.id, `destination-${randomUUID()}`);
+      const { destination, merge } = prepareIntegration(record);
       destinationRef = destination.ref;
-      const merge = mergeTree(record, destination);
       if (!merge.mergedTree) {
         const diagnostics = merge.diagnostics ?? "Git reported a merge conflict.";
         writeFileSync(record.conflictPath, `${diagnostics}\n`, "utf8");

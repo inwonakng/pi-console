@@ -1,5 +1,4 @@
-import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
 import {
@@ -59,66 +58,12 @@ function editorTextForTreeEntry(entry: unknown): string | undefined {
 	return undefined;
 }
 
-function readSessionRecords(sessionFile: string): JsonRecord[] {
-	return readFileSync(sessionFile, "utf8")
-		.split(/\r?\n/)
-		.filter((line) => line.trim() !== "")
-		.map((line) => JSON.parse(line) as JsonRecord);
-}
-
-function recordId(record: JsonRecord): string | undefined {
-	return typeof record.id === "string" ? record.id : undefined;
-}
-
-function parentId(record: JsonRecord): string | null | undefined {
-	if (record.parentId === null) {
-		return null;
-	}
-	return typeof record.parentId === "string" ? record.parentId : undefined;
-}
-
-function collectDeletedIds(records: JsonRecord[], targetId: string): Set<string> {
-	const deleted = new Set<string>([targetId]);
-	let changed = true;
-	while (changed) {
-		changed = false;
-		for (const record of records) {
-			const id = recordId(record);
-			const parent = parentId(record);
-			if (!id || deleted.has(id) || !parent || !deleted.has(parent)) {
-				continue;
-			}
-			deleted.add(id);
-			changed = true;
-		}
-	}
-	return deleted;
-}
-
-function locationWorkspaceId(record: JsonRecord): string | undefined {
-	if (record.type !== "custom" || record.customType !== "pi-workspace-location"
-		|| !record.data || typeof record.data !== "object") {
-		return undefined;
-	}
-	const workspaceId = (record.data as Record<string, unknown>).workspaceId;
-	return typeof workspaceId === "string" && workspaceId !== "" ? workspaceId : undefined;
-}
-
 function workspacesRemovedWithSubtree(
 	records: JsonRecord[],
 	deletedIds: Set<string>,
 	sessionFile: string,
 ): WorkspaceRecord[] {
-	const deletedWorkspaceIds = new Set<string>();
-	const survivingWorkspaceIds = new Set<string>();
-	for (const record of records) {
-		const workspaceId = locationWorkspaceId(record);
-		const id = recordId(record);
-		if (!workspaceId || !id) continue;
-		(deletedIds.has(id) ? deletedWorkspaceIds : survivingWorkspaceIds).add(workspaceId);
-	}
-	return [...deletedWorkspaceIds]
-		.filter((id) => !survivingWorkspaceIds.has(id))
+	return workspaceIdsRemovedWithSubtree(records, deletedIds)
 		.map(loadWorkspace)
 		.filter((record): record is WorkspaceRecord => !!record
 			&& record.kind === "task"
@@ -136,33 +81,6 @@ function deletionConfirmation(entryId: string, deleteCount: number, workspaces: 
 	return lines.join("\n");
 }
 
-function makeId(existingIds: Set<string>): string {
-	for (let attempt = 0; attempt < 100; attempt++) {
-		const id = Math.floor(Math.random() * 0xffffffff)
-			.toString(16)
-			.padStart(8, "0")
-			.slice(0, 8);
-		if (!existingIds.has(id)) {
-			return id;
-		}
-	}
-	throw new Error("Could not allocate unique session entry id");
-}
-
-function appendLeafMarker(records: JsonRecord[], leafParentId: string | null): string {
-	const existingIds = new Set(records.map(recordId).filter((id): id is string => typeof id === "string"));
-	const id = makeId(existingIds);
-	records.push({
-		type: "custom",
-		id,
-		parentId: leafParentId,
-		timestamp: new Date().toISOString(),
-		customType: "pi-tree-delete-leaf",
-		data: { reason: "preserve active leaf after subtree deletion" },
-	});
-	return id;
-}
-
 function rewriteSessionWithoutSubtree(sessionFile: string, targetId: string, currentLeafId: string | null) {
 	const records = readSessionRecords(sessionFile);
 	const target = records.find((record) => recordId(record) === targetId);
@@ -170,45 +88,10 @@ function rewriteSessionWithoutSubtree(sessionFile: string, targetId: string, cur
 		throw new Error(`Unknown tree entry: ${targetId}`);
 	}
 	const deletedIds = collectDeletedIds(records, targetId);
-	const targetParentId = parentId(target) ?? null;
-	let desiredLeafParentId = currentLeafId && !deletedIds.has(currentLeafId) ? currentLeafId : targetParentId;
-
-	const kept = records.filter((record) => {
-		const id = recordId(record);
-		return !id || !deletedIds.has(id);
-	});
-
-	const keptEntryIds = new Set(kept.map(recordId).filter((id): id is string => typeof id === "string"));
-	const orphan = kept.find((record) => {
-		const parent = parentId(record);
-		return typeof parent === "string" && !keptEntryIds.has(parent);
-	});
-	if (orphan) {
-		throw new Error(`Deletion would orphan retained entry ${recordId(orphan) ?? "unknown"}.`);
-	}
-
-	const removedCount = deletedIds.size;
-	if (desiredLeafParentId !== null && !keptEntryIds.has(desiredLeafParentId)) {
-		desiredLeafParentId = null;
-	}
-	const lastKeptId = kept.length > 0 ? recordId(kept[kept.length - 1]!) : undefined;
-	let markerId: string | undefined;
-	if (desiredLeafParentId === null || lastKeptId !== desiredLeafParentId) {
-		markerId = appendLeafMarker(kept, desiredLeafParentId);
-	}
-
-	const temporary = `${sessionFile}.${process.pid}.${randomUUID()}.tmp`;
-	try {
-		writeFileSync(temporary, kept.map((record) => JSON.stringify(record)).join("\n") + "\n", "utf8");
-		renameSync(temporary, sessionFile);
-	} finally {
-		rmSync(temporary, { force: true });
-	}
-
-	return {
-		deletedCount: removedCount,
-		desiredLeafId: markerId ?? desiredLeafParentId,
-	};
+	const leafParentId = currentLeafId && !deletedIds.has(currentLeafId) ? currentLeafId : parentId(target) ?? null;
+	const plan = planSessionDeletion(records, deletedIds, leafParentId);
+	writeJsonlFile(sessionFile, plan.records);
+	return plan;
 }
 
 export default function treeExtension(pi: ExtensionAPI) {

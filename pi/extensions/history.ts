@@ -17,8 +17,9 @@ import {
 import { appendFile } from "fs/promises";
 import { dirname, join, relative, resolve } from "path";
 import { createHash } from "crypto";
-import { listWorkspaces, loadWorkspace, prepareWorkspaceDiscard, removeWorkspace, retainedChildWorkspaces, workspaceForContext } from "./shared/workspace";
-import { locationForEntry, locationEntry, moveToLocation, workspaceIdAt } from "./shared/workspace-navigation";
+import { loadWorkspace, prepareWorkspaceDiscard, removeWorkspace, retainedChildWorkspaces, sameSessionFile, workspaceDiscardWarning, workspaceForContext } from "./shared/workspace";
+import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
+import { collectDeletedIds, locationWorkspaceId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import { pathInside, resolveToolPath } from "./shared/paths";
 import { selectNavigation } from "./shared/navigation";
@@ -39,6 +40,7 @@ type TurnRecord = {
 	version: 1;
 	sessionFile: string | undefined;
 	baseEntryId: string | null;
+	entryId?: string;
 	workspaceId: string;
 	timestamp: string;
 	files: FileRecord[];
@@ -298,6 +300,25 @@ function readRecords(sessionFile: string | undefined) {
 		.map((line) => JSON.parse(line) as TurnRecord);
 }
 
+// Older records only identify the leaf before turn_start, which precedes saving
+// the user prompt. Resolve their final assistant/tool-result entry from the tree and completion time.
+function recordEntryId(record: TurnRecord, entries: SessionEntry[]): string | undefined {
+	if (record.entryId) return record.entryId;
+	const byId = new Map(entries.map((entry) => [entry.id, entry]));
+	let owner: string | undefined;
+	for (const entry of entries) {
+		if (entry.id === record.baseEntryId || entry.type !== "message"
+			|| (entry.message.role !== "assistant" && entry.message.role !== "toolResult")
+			|| entry.timestamp > record.timestamp) continue;
+		let ancestor: SessionEntry | undefined = entry;
+		while (ancestor && ancestor.id !== record.baseEntryId) {
+			ancestor = ancestor.parentId ? byId.get(ancestor.parentId) : undefined;
+		}
+		if (record.baseEntryId === null || ancestor) owner = entry.id;
+	}
+	return owner;
+}
+
 function messageText(entry: SessionEntry) {
 	if (entry.type !== "message" || entry.message.role !== "user") {
 		return "";
@@ -393,90 +414,187 @@ function validateCurrentState(root: string, files: FileRecord[]) {
 	return conflicts;
 }
 
-async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null, navigateTo?: string): Promise<"same" | "switched" | false> {
+async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null, selected: SessionEntry | undefined, isRuntimeActive: () => boolean): Promise<void> {
 	const blocked = subagentHistoryBlockReason();
 	if (blocked) {
 		ctx.ui.notify(blocked, "warning");
-		return false;
+		return;
+	}
+	if (!ctx.isIdle() || hasRunningSubagents()) {
+		ctx.ui.notify("Wait for Pi and its subagents to finish before reverting session history.", "warning");
+		return;
 	}
 	const sessionFile = ctx.sessionManager.getSessionFile();
+	assertOk(sessionFile, "Reverting history requires a persisted session.");
 	const branch = ctx.sessionManager.getBranch();
 	const afterIds = branchIdsAfter(branch, targetId);
-	const beforeIds = new Set(branch.filter((entry) => !afterIds.has(entry.id)).map((entry) => entry.id));
-	const retainedBefore = new Set(branch.filter((entry) => beforeIds.has(entry.id) && locationEntry(entry))
-		.map((entry) => (entry.data as { workspaceId?: string } | undefined)?.workspaceId));
-	const discardedIds = new Set(branch.filter((entry) => afterIds.has(entry.id) && locationEntry(entry))
-		.map((entry) => (entry.data as { workspaceId?: string } | undefined)?.workspaceId)
-		.filter((id): id is string => !!id && !retainedBefore.has(id)));
-	const referenced = listWorkspaces().filter((record) => discardedIds.has(record.id));
-	if (referenced.length !== discardedIds.size) throw new Error("Cannot roll back: a workspace record is missing.");
-	if (referenced.some((record) => record.integration === "applied")) {
-		ctx.ui.notify("Cannot roll back an already integrated workspace; its changes were applied to the destination checkout.", "error");
-		return false;
+	const records = readSessionRecords(sessionFile);
+	const deletedIds = selected
+		? collectDeletedIds(records, selected.id)
+		: targetId ? collectDeletedIds(records, targetId)
+			: new Set(records.filter((record) => record.type !== "session").map(recordId).filter((id): id is string => !!id));
+	if (!selected && targetId) deletedIds.delete(targetId);
+	if (deletedIds.size === 0) {
+		ctx.ui.notify("No history to revert.", "info");
+		return;
+	}
+	const plan = planSessionDeletion(records, deletedIds, targetId);
+	const target = locationForEntry(ctx, targetId);
+	const removedWorkspaceIds = workspaceIdsRemovedWithSubtree(records, deletedIds);
+	const referenced = removedWorkspaceIds.map((id) => {
+		const record = loadWorkspace(id);
+		assertOk(record, `Cannot revert: workspace record ${id} is missing.`);
+		assertOk(record.kind === "task" && sameSessionFile(record.sourceSessionFile, sessionFile),
+			`Cannot revert workspace ${id}: it does not belong to this conversation.`);
+		return record;
+	});
+	// Applied changes cannot be undone by deleting their worktree, even if another branch references it.
+	const retainedBefore = new Set(branch.filter((entry) => !afterIds.has(entry.id))
+		.map(locationWorkspaceId).filter(Boolean));
+	const introduced = branch.filter((entry) => afterIds.has(entry.id))
+		.map(locationWorkspaceId)
+		.filter((id): id is string => !!id && !retainedBefore.has(id))
+		.map((id) => {
+			const workspace = loadWorkspace(id);
+			assertOk(workspace, `Cannot revert: workspace record ${id} is missing.`);
+			return workspace;
+		});
+	if ([...referenced, ...introduced].some((record) => record.integration === "applied")) {
+		ctx.ui.notify("Cannot revert an already integrated workspace; its changes were applied to the destination checkout.", "error");
+		return;
 	}
 	const discarded = referenced.filter((record) => record.retained);
 	if (discarded.some((record) => retainedChildWorkspaces(record.id).length)) {
-		ctx.ui.notify("Join or discard child workspaces before rolling back their parent worktree.", "warning");
-		return false;
+		ctx.ui.notify("Join or discard child workspaces before reverting their parent worktree.", "warning");
+		return;
 	}
-	if (hasRunningSubagents() && discarded.length) {
-		ctx.ui.notify("Join or stop running subagents before discarding their parent workspace.", "warning");
-		return false;
+	// Only active-path snapshots are rolled back. Inactive descendants are deleted, not replayed.
+	const entries = ctx.sessionManager.getEntries();
+	const snapshots = readRecords(sessionFile).map((record) => ({ record, entryId: recordEntryId(record, entries) }));
+	for (const { record, entryId } of snapshots) {
+		assertOk(entryId || (record.baseEntryId !== targetId && !afterIds.has(record.baseEntryId ?? "")),
+			"Cannot determine which turn owns an older rollback record; history was not changed.");
 	}
-	const targetWorkspaceId = workspaceIdAt(ctx, targetId);
-	const targetWorkspace = targetWorkspaceId ? loadWorkspace(targetWorkspaceId) : undefined;
-	if (targetWorkspaceId && (!targetWorkspace?.retained || !existsSync(targetWorkspace.worktreePath))) {
-		ctx.ui.notify(`Destination workspace ${targetWorkspaceId} is unavailable.`, "error");
-		return false;
-	}
-	const files = targetWorkspace ? restorePlan(readRecords(sessionFile).filter((record) =>
-		record.workspaceId === targetWorkspace.id && record.baseEntryId !== null && afterIds.has(record.baseEntryId),
-	)) : [];
-	if (targetWorkspace && files.length) {
-		const conflicts = validateCurrentState(targetWorkspace.worktreePath, files);
-		if (conflicts.length) {
-			ctx.ui.notify(`Rollback blocked; files changed since the agent turn:\n${conflicts.join("\n")}`, "error");
-			return false;
-		}
-	}
-	const target = locationForEntry(ctx, targetId);
-	if (discarded.length || target.cwd !== ctx.cwd) {
-		if (hasRunningSubagents()) {
-			ctx.ui.notify("Join or stop running subagents before switching workspaces during rollback.", "warning");
-			return false;
-		}
-		if (!navigateTo) {
-			ctx.ui.notify("Cross-workspace rollback requires selecting a message through /pi-history.", "warning");
-			return false;
-		}
-		const patches = await Promise.all(discarded.map((record) => prepareWorkspaceDiscard(record.id)));
-		// This confirmation follows user-initiated history navigation, not an agent request.
-		suppressNextInputNotification();
-		const approved = await ctx.ui.confirm("Change workspace during rollback?",
-			`Switch to ${target.cwd}?${patches.length ? `\nThe following worktrees will be discarded (recovery patches remain):\n${patches.map((record) => `- ${record.label}: ${record.worktreePath}\n  ${record.resultPatchPath}`).join("\n")}` : "\nNo worktree will be discarded."}\n${files.length ? `${files.length} recorded file change(s) in the destination workspace will be rolled back.` : "Destination files will remain at their current state."} Proceed?`);
-		if (!approved) return false;
-	}
-	for (const file of files) restoreState(targetWorkspace!.worktreePath, file.path, file.before);
-	if (!discarded.length && target.cwd === ctx.cwd) {
-		if (files.length) ctx.ui.notify(`Reverted ${files.length} file(s).`, "info");
-		return "same";
-	}
-	const moved = await moveToLocation(ctx, target.cwd, ctx.sessionManager.getLeafId(), {
-		navigateTo,
-		onArrival: async (nextCtx) => {
-			for (const record of discarded) {
-				const cleaned = await removeWorkspace(record.id, "discarded");
-				if (cleaned.lifecycle === "cleanup_failed") nextCtx.ui.notify(`Could not remove ${record.label}: ${cleaned.integrationReason}`, "warning");
-			}
-			if (navigateTo) {
-				const selected = nextCtx.sessionManager.getEntry(navigateTo);
-				if (selected) nextCtx.ui.setEditorText(messageText(selected));
-			}
-			nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
-			markHistoryChanged(nextCtx);
-		},
+	const rollbackRecords = snapshots.filter(({ entryId }) => entryId && afterIds.has(entryId))
+		.map(({ record }) => record).filter((record) => !removedWorkspaceIds.includes(record.workspaceId));
+	const rollback = [...new Set(rollbackRecords.map((record) => record.workspaceId))].map((id) => {
+		const workspace = loadWorkspace(id);
+		assertOk(workspace?.retained && existsSync(workspace.worktreePath), `Rollback workspace ${id} is unavailable.`);
+		assertOk(workspace.kind === "task" && sameSessionFile(workspace.sourceSessionFile, sessionFile),
+			`Rollback workspace ${id} does not belong to this conversation.`);
+		return { workspace, files: restorePlan(rollbackRecords.filter((record) => record.workspaceId === id)) };
 	});
-	return moved ? "switched" : false;
+	const validateFiles = () => {
+		const conflicts = rollback.flatMap(({ workspace, files }) =>
+			validateCurrentState(workspace.worktreePath, files).map((path) => `${workspace.label}: ${path}`));
+		assertOk(conflicts.length === 0, `Revert blocked; files changed since the agent turn:\n${conflicts.join("\n")}`);
+	};
+	validateFiles();
+	const patches = await Promise.all(discarded.map((record) => prepareWorkspaceDiscard(record.id)));
+	const fileCount = rollback.reduce((count, item) => count + item.files.length, 0);
+	const text = selected ? messageText(selected) : undefined;
+	suppressNextInputNotification();
+	const approved = await ctx.ui.confirm("Permanently revert history?",
+		`Delete ${deletedIds.size} history entries${selected ? ", including the selected message and every branch beneath it" : " after the selected point"}? This cannot be undone through the tree.\n`
+		+ `Restore ${fileCount} recorded file change(s) on the active path.\n`
+		+ `Continue in ${target.cwd}.\n`
+		+ (patches.length ? workspaceDiscardWarning(patches) : "No worktree will be discarded."));
+	if (!approved) return;
+	let historyDeleted = false;
+	let filesRestored = false;
+	try {
+		const moved = await moveToLocation(ctx, target.cwd, plan.desiredLeafId, {
+			reload: true,
+			saveCursor: false,
+			beforeSwitch: async () => {
+				assertOk(ctx.isIdle() && !hasRunningSubagents(), "Pi or a subagent became busy; revert cancelled.");
+				const validateSession = () => assertOk(
+					JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(records),
+					"Session history changed while preparing revert; select the rollback point again.");
+				validateSession();
+				validateFiles();
+				for (const { workspace, files } of rollback) {
+					for (const file of files) {
+						await withFileMutationQueue(absolutePath(workspace.worktreePath, file.path), async () => {
+							assertOk(sameState(snapshotCurrentFile(workspace.worktreePath, file.path), file.after),
+								`File changed while preparing revert: ${file.path}`);
+							filesRestored = true;
+							restoreState(workspace.worktreePath, file.path, file.before);
+						});
+					}
+				}
+				await withFileMutationQueue(sessionFile, async () => {
+					validateSession();
+					writeJsonlFile(sessionFile, plan.records);
+					historyDeleted = true;
+				});
+			},
+			onArrival: async (nextCtx) => {
+				const warnings: string[] = [];
+				try {
+					const path = historyFile(sessionFile);
+					await withFileMutationQueue(path, async () => {
+						writeJsonlFile(path, readRecords(sessionFile).filter((record) => {
+							const entryId = recordEntryId(record, entries);
+							return !entryId || !deletedIds.has(entryId);
+						}));
+					});
+				} catch (error) {
+					warnings.push(`Could not prune rollback records: ${error instanceof Error ? error.message : String(error)}`);
+				}
+				for (const record of discarded) {
+					try {
+						const cleaned = await removeWorkspace(record.id, "discarded");
+						if (cleaned.lifecycle === "cleanup_failed") {
+							warnings.push(`Could not remove ${record.label}: ${cleaned.integrationReason}`);
+						}
+					} catch (error) {
+						warnings.push(`Could not remove ${record.label}: ${error instanceof Error ? error.message : String(error)}`);
+					}
+				}
+				if (text !== undefined) nextCtx.ui.setEditorText(text);
+				nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
+				markHistoryChanged(nextCtx);
+				nextCtx.ui.notify(warnings.length
+					? `History was permanently reverted, but cleanup is incomplete:\n${warnings.join("\n")}`
+					: `Permanently reverted ${deletedIds.size} history entries and ${fileCount} recorded file change(s).`,
+					warnings.length ? "warning" : "info");
+			},
+		});
+		if (!moved) {
+			// Cancellation happens before runtime replacement, so ctx is still live.
+			// Restore its original tree before allowing it to append anything else.
+			try {
+				await withFileMutationQueue(sessionFile, async () => {
+					assertOk(JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(plan.records),
+						"Session changed after the revert commit; refusing to overwrite concurrent entries.");
+					writeJsonlFile(sessionFile, records);
+					historyDeleted = false;
+				});
+			} catch (error) {
+				throw new Error(`Reload was cancelled and the original history could not be restored; Pi is shutting down to prevent stale history writes: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			for (const { workspace, files } of rollback) {
+				for (const file of files) {
+					await withFileMutationQueue(absolutePath(workspace.worktreePath, file.path), async () => {
+						assertOk(sameState(snapshotCurrentFile(workspace.worktreePath, file.path), file.before),
+							`File changed after revert was cancelled: ${file.path}`);
+						restoreState(workspace.worktreePath, file.path, file.after);
+					});
+				}
+			}
+			filesRestored = false;
+			ctx.ui.notify("Revert cancelled. Original history and files were restored; no worktrees were removed.", "warning");
+		}
+	} catch (error) {
+		// A switch can throw before teardown as well as after it. Only the former
+		// leaves an old runtime able to append beneath deleted entries.
+		if (historyDeleted && isRuntimeActive()) ctx.shutdown();
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(historyDeleted
+			? `History was deleted, but revert could not finish: ${reason}. Restart or resume ${sessionFile} before continuing; inspect workspace cleanup.`
+			: `Revert stopped without deleting history: ${reason}${filesRestored ? ". File restoration started and may be partial; inspect the affected files." : ""}`);
+	}
 }
 
 async function pickUserMessage(ctx: ExtensionCommandContext) {
@@ -501,6 +619,9 @@ async function pickUserMessage(ctx: ExtensionCommandContext) {
 }
 
 export default function historyExtension(pi: ExtensionAPI) {
+	let runtimeActive = true;
+	pi.on("session_shutdown", () => { runtimeActive = false; });
+
 	pi.on("turn_start", (_event, ctx) => {
 		turn = undefined;
 		const workspace = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile());
@@ -568,7 +689,7 @@ export default function historyExtension(pi: ExtensionAPI) {
 		return undefined;
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
+	pi.on("turn_end", async (event, ctx) => {
 		if (!turn) {
 			return;
 		}
@@ -588,6 +709,7 @@ export default function historyExtension(pi: ExtensionAPI) {
 				version: 1,
 				sessionFile: ctx.sessionManager.getSessionFile(),
 				baseEntryId: turn.baseEntryId,
+				entryId: event.toolResultEntryIds.at(-1) ?? event.messageEntryId,
 				workspaceId: turn.workspaceId,
 				timestamp: new Date().toISOString(),
 				files,
@@ -597,13 +719,13 @@ export default function historyExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("pi-history", {
-		description: "Pick an earlier user message and fork or revert to it; revert undoes related file changes",
+		description: "Fork before a user message, or permanently revert its subtree and recorded file changes",
 		handler: async (_args, ctx) => {
 			const entry = await pickUserMessage(ctx);
 			if (!entry) {
 				return;
 			}
-			const action = await selectNavigation(ctx, "History action", ["Revert (undoes related file changes)", "Fork"]);
+			const action = await selectNavigation(ctx, "History action", ["Revert (permanently deletes history and undoes file changes)", "Fork"]);
 			if (action === "Fork") {
 				const text = messageText(entry);
 				await ctx.fork(entry.id, {
@@ -613,28 +735,17 @@ export default function historyExtension(pi: ExtensionAPI) {
 						markHistoryChanged(newCtx);
 					},
 				});
-			} else if (action === "Revert (undoes related file changes)") {
-				const reverted = await revertAfter(ctx, entry.parentId, entry.id);
-				if (!reverted) return;
-				if (reverted === "same") {
-					const result = await ctx.navigateTree(entry.id);
-					if (result.cancelled) return;
-					ctx.sessionManager.appendCustomEntry("pi-workspace-cursor", {});
-					markHistoryChanged(ctx);
-					ctx.ui.setEditorText(messageText(entry));
-				}
+			} else if (action === "Revert (permanently deletes history and undoes file changes)") {
+				await revertAfter(ctx, entry.parentId, entry, () => runtimeActive);
 			}
 		},
 	});
 
 	pi.registerCommand("pi-revert-after", {
-		description: "Revert recorded file changes after an entry id",
+		description: "Permanently delete descendants after an active-branch entry id and undo recorded file changes",
 		handler: async (args, ctx) => {
 			const targetId = args.trim() || null;
-			const reverted = await revertAfter(ctx, targetId);
-			if (reverted) {
-				markHistoryChanged(ctx);
-			}
+			await revertAfter(ctx, targetId, undefined, () => runtimeActive);
 		},
 	});
 

@@ -53,7 +53,7 @@ export async function moveToLocation(
   ctx: ExtensionCommandContext,
   cwd: string,
   leafId: string | null,
-  options: { workspaceId?: string; workspaceLabel?: string; markLocation?: boolean; navigateTo?: string; reload?: boolean; saveCursor?: boolean; continueWith?: string; onArrival?: (ctx: ExtensionCommandContext) => void | Promise<void> } = {},
+  options: { workspaceId?: string; workspaceLabel?: string; markLocation?: boolean; navigateTo?: string; reload?: boolean; saveCursor?: boolean; continueWith?: string; beforeSwitch?: () => void | Promise<void>; onArrival?: (ctx: ExtensionCommandContext) => void | Promise<void> } = {},
 ): Promise<boolean> {
   if (leafId !== null && !options.reload && !ctx.sessionManager.getEntry(leafId)) throw new Error(`Unknown session entry: ${leafId}`);
   const file = ctx.sessionManager.getSessionFile();
@@ -115,6 +115,7 @@ export async function moveToLocation(
   if (ownsPending) setPendingWorkspace("navigation");
   let arrived = false;
   try {
+    await options.beforeSwitch?.();
     const result = await switchWithCwd(file, {
       cwdOverride: cwd,
       withSession: async (nextCtx) => {
