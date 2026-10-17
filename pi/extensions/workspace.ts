@@ -10,6 +10,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAccessMode } from "./shared/access-state";
 import { projectTrustReady } from "./shared/project-trust";
+import { hasRunningSubagents } from "./shared/subagent-state";
 import { resolveToolPath } from "./shared/paths";
 import {
   getIntegrationMode,
@@ -570,6 +571,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       "Before making implementation changes with edit or write inside the git repository containing the current session cwd, call workspace with action=enter as the only tool call in that assistant response, unless the current session is already in an associated workspace. To edit existing ignored files, provide their paths relative to the original cwd in ignoredFiles on the first enter call; only those files are copied and later integrated. Wait for the cwd switch before using more tools.",
       "Temporary probes, scripts, and generated artifacts may be created under $TMPDIR without entering a workspace; keep them outside the repository and remove them when finished.",
       "Call workspace with action=status when the expected workspace is missing or its lifecycle is unclear.",
+      "Join or stop running subagents and collect their results before switching workspaces.",
       ...guidance,
       "Call workspace with action=integrate or action=discard as the only tool call in that assistant response when the action will leave the active workspace. Wait for the cwd switch before using more tools.",
     ],
@@ -597,6 +599,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       }
       if (params.ignoredFiles !== undefined && action !== "enter") {
         throw new Error("ignoredFiles only applies to action=enter.");
+      }
+      if (TRANSITION_ACTIONS.has(action) && hasRunningSubagents()) {
+        throw new Error("Cannot change workspaces while subagents are running. Use spawn_control join/join_all, or stop them and collect their results, then retry this workspace action.");
       }
       if (action === "enter") {
         const active = taskForCurrentContext(ctx);

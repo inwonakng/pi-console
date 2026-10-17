@@ -1524,6 +1524,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       "spawn defaults to background. If your response depends on the subagent result, call spawn_control with action=join or join_all before answering.",
       "Prefer researcher for investigation and summarization, reviewer for review, verifier for verification, and worker for self-contained tasks requiring file changes.",
       "Use accessMode=readonly for research, planning, review, and verification. Delegate file changes with accessMode=edit and worktree isolation; join reconciles their changes. Use full only when the parent is in full mode and unrestricted access is required, not to bypass write isolation.",
+      "For implementation tasks in a Git repository, enter the task workspace before spawning any subagents, including read-only researchers.",
       writingGuidance,
     ],
     parameters: Type.Object({
