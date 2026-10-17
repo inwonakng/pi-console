@@ -68,29 +68,25 @@ function M.is_focused(ctx)
 	return buffer.window_matches(vim.api.nvim_get_current_win(), ctx.state.transcript_buf)
 end
 
-function M.preserve_focused_view(ctx, callback)
-	local state = ctx.state
-	if not M.is_focused(ctx) then
-		callback()
-		return
+function M.preserve_view(ctx, callback)
+	local buf = ctx.state.transcript_buf
+	local views = {}
+	for _, win in ipairs(vim.api.nvim_list_wins()) do
+		if buffer.window_matches(win, buf) then
+			views[win] = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+		end
 	end
-
-	local win = vim.api.nvim_get_current_win()
-	local buf = state.transcript_buf
-	local cursor = vim.api.nvim_win_get_cursor(win)
-	local view = vim.fn.winsaveview()
 	callback()
 
-	if not buffer.window_matches(win, buf) then
-		return
+	for win, view in pairs(views) do
+		if buffer.window_matches(win, buf) then
+			view.lnum = math.min(view.lnum, vim.api.nvim_buf_line_count(buf))
+			vim.api.nvim_win_call(win, function()
+				vim.api.nvim_win_set_cursor(win, { view.lnum, view.col })
+				vim.fn.winrestview(view)
+			end)
+		end
 	end
-	local line_count = vim.api.nvim_buf_line_count(buf)
-	cursor[1] = math.min(cursor[1], line_count)
-	view.lnum = cursor[1]
-	vim.api.nvim_win_call(win, function()
-		vim.api.nvim_win_set_cursor(win, cursor)
-		vim.fn.winrestview(view)
-	end)
 end
 
 local function lines_equal(left, right)
@@ -118,7 +114,7 @@ function M.update_metadata(ctx)
 			return
 		end
 	end
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		if end_line then
 			vim.api.nvim_buf_set_lines(state.transcript_buf, 0, end_line, false, lines)
@@ -260,7 +256,7 @@ function M.render(ctx)
 	local buf = state.transcript_buf
 	vim.schedule(function()
 		if state.transcript_buf == buf and ctx.buffer.valid(buf) and M.win_valid(ctx) then
-			M.preserve_focused_view(ctx, function()
+			M.preserve_view(ctx, function()
 				for _, win in ipairs(vim.api.nvim_list_wins()) do
 					if buffer.window_matches(win, buf) then
 						tool_groups.apply_folds(state, win)
@@ -304,13 +300,28 @@ function M.line_count(ctx)
 	return vim.api.nvim_buf_line_count(ctx.state.transcript_buf)
 end
 
+local function align_bottom(buf, win)
+	vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
+	vim.api.nvim_win_call(win, function()
+		vim.cmd("noautocmd normal! zb")
+	end)
+end
+
 function M.scroll_to_bottom_unless_focused(ctx)
+	if not M.is_focused(ctx) then
+		M.scroll_to_bottom(ctx)
+	end
+end
+
+function M.finish_pending_scroll(ctx)
 	local state = ctx.state
-	if M.win_valid(ctx) and not M.is_focused(ctx) then
-		vim.api.nvim_win_set_cursor(state.transcript_win, { vim.api.nvim_buf_line_count(state.transcript_buf), 0 })
-		M.with_win(ctx, function()
-			vim.cmd("noautocmd normal! zb")
-		end)
+	local pending = state.pending_transcript_scroll
+	-- Consume before moving the view: rendering caused by the scroll must not
+	-- turn this one-shot alignment into a persistent auto-follow mode.
+	state.pending_transcript_scroll = nil
+	if pending and pending.buf == state.transcript_buf
+		and buffer.window_matches(pending.win, pending.buf) and not M.is_focused(ctx) then
+		align_bottom(pending.buf, pending.win)
 	end
 end
 
@@ -330,7 +341,7 @@ function M.append_lines(ctx, lines)
 	if type(lines) == "string" then
 		lines = vim.split(lines, "\n", { plain = true })
 	end
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		local line_count = vim.api.nvim_buf_line_count(state.transcript_buf)
 		local last_line = vim.api.nvim_buf_get_lines(state.transcript_buf, line_count - 1, line_count, false)[1]
@@ -355,7 +366,7 @@ function M.append_text(ctx, text)
 	end
 
 	local parts = vim.split(text, "\n", { plain = true })
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 
 		local last = vim.api.nvim_buf_line_count(state.transcript_buf)
@@ -427,7 +438,7 @@ function M.remove_status(ctx, text)
 		return
 	end
 	local target = "> " .. text
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		local lines = vim.api.nvim_buf_get_lines(state.transcript_buf, 0, -1, false)
 		for index = #lines, 1, -1 do
@@ -449,7 +460,7 @@ function M.set_line(ctx, line, text)
 	if line < 1 or line > line_count then
 		return
 	end
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		vim.api.nvim_buf_set_lines(state.transcript_buf, line - 1, line, false, { text or "" })
 		ctx.buffer.set_modifiable(state.transcript_buf, false)
@@ -460,10 +471,8 @@ end
 function M.scroll_to_bottom(ctx)
 	local state = ctx.state
 	if M.win_valid(ctx) and ctx.buffer.valid(state.transcript_buf) then
-		vim.api.nvim_win_set_cursor(state.transcript_win, { vim.api.nvim_buf_line_count(state.transcript_buf), 0 })
-		M.with_win(ctx, function()
-			vim.cmd("normal! zb")
-		end)
+		align_bottom(state.transcript_buf, state.transcript_win)
+		state.pending_transcript_scroll = { buf = state.transcript_buf, win = state.transcript_win }
 	end
 end
 
@@ -528,7 +537,7 @@ function M.remove_pending_transcript_item_separator(ctx)
 	end
 
 	local removed = false
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		local line_count = vim.api.nvim_buf_line_count(state.transcript_buf)
 		local last_line = vim.api.nvim_buf_get_lines(state.transcript_buf, line_count - 1, line_count, false)[1]
@@ -544,7 +553,7 @@ end
 
 function M.append_transcript_item_separator(ctx)
 	local state = ctx.state
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		local line_count = vim.api.nvim_buf_line_count(state.transcript_buf)
 		vim.api.nvim_buf_set_lines(state.transcript_buf, line_count, line_count, false, { "" })
@@ -576,7 +585,7 @@ function M.begin_trace_item(ctx)
 	if previous_line ~= "" then
 		return false
 	end
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		vim.api.nvim_buf_set_lines(state.transcript_buf, line_count - 1, line_count, false, {})
 		ctx.buffer.set_modifiable(state.transcript_buf, false)
@@ -606,7 +615,7 @@ function M.set_placeholder_line(ctx, text)
 	if state.placeholder_line < 1 or state.placeholder_line > line_count then
 		return
 	end
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		vim.api.nvim_buf_set_lines(state.transcript_buf, state.placeholder_line - 1, state.placeholder_line, false, { text })
 		ctx.buffer.set_modifiable(state.transcript_buf, false)
@@ -630,7 +639,7 @@ function M.clear_assistant_placeholder(ctx)
 		state.placeholder_line = nil
 		return
 	end
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		vim.api.nvim_buf_set_lines(state.transcript_buf, start_line, end_line, false, {})
 		ctx.buffer.set_modifiable(state.transcript_buf, false)
@@ -654,7 +663,7 @@ function M.clear_assistant_placeholder_spinner(ctx)
 		state.placeholder_line = nil
 		return
 	end
-	M.preserve_focused_view(ctx, function()
+	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		vim.api.nvim_buf_set_lines(state.transcript_buf, state.placeholder_line - 1, state.placeholder_line, false, {})
 		ctx.buffer.set_modifiable(state.transcript_buf, false)

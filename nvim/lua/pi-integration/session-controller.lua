@@ -31,6 +31,7 @@ local function reset_conversation(ctx, keep_transcript, keep_pending_messages, s
 	state.spawn_run_output_by_id = {}
 	state.is_agent_running = false
 	state.refresh_transcript_after_settled = false
+	state.pending_transcript_scroll = nil
 	state.completion_pending = false
 	state.completion_seq = 0
 	state.seen_seq = 0

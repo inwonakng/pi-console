@@ -116,6 +116,7 @@ function M.new()
 		spawn_running_count = 0,
 		last_updated = nil,
 		transcript_refresh_scheduled = false,
+		pending_transcript_scroll = nil,
 		pending_user_messages = {},
 		placeholder_timer = nil,
 		placeholder_start_line = nil,

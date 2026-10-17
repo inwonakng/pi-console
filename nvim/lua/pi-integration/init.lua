@@ -590,7 +590,7 @@ end
 
 function M.on_transcript_rendered(buf)
 	if buf == state.transcript_buf then
-		pi_transcript.scroll_to_bottom_unless_focused(transcript_ctx())
+		pi_transcript.finish_pending_scroll(transcript_ctx())
 	end
 end
 
@@ -601,11 +601,12 @@ render_messages = function(messages)
 
 	local ctx = transcript_ctx()
 	local preserve_view = pi_transcript.is_focused(ctx)
+	state.pending_transcript_scroll = nil
 
 	touch_transcript()
 	reset_transcript_outputs()
 	local lines, items = collect_message_lines(messages)
-	pi_transcript.preserve_focused_view(ctx, function()
+	pi_transcript.preserve_view(ctx, function()
 		set_buffer_lines(state.transcript_buf, lines, false)
 	end)
 	apply_collected_transcript_items(items)
@@ -613,7 +614,6 @@ render_messages = function(messages)
 	render_transcript()
 	if not preserve_view then
 		scroll_transcript_to_bottom()
-		vim.schedule(scroll_transcript_to_bottom)
 	end
 end
 
