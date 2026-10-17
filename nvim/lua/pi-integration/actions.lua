@@ -187,7 +187,7 @@ function M.submit_prompt(ctx)
 		ctx.ui.notify("Pi is switching sessions; wait before submitting.", vim.log.levels.WARN)
 		return
 	end
-	state.has_sent_message = true
+	state.has_conversation_history = true
 	clear_input(ctx)
 	ctx.transcript.remove_status(ctx.notices.empty_session)
 	state.pending_user_messages = state.pending_user_messages or {}

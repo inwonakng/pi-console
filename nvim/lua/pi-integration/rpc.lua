@@ -427,13 +427,13 @@ function M.restart(ctx, options)
 		state.pending_session_file = options.session_file
 		state.session_name = nil
 		state.message_count = 0
-		state.has_sent_message = false
+		state.has_conversation_history = false
 	elseif options.fresh_session then
 		state.session_file = nil
 		state.pending_session_file = nil
 		state.session_name = nil
 		state.message_count = 0
-		state.has_sent_message = false
+		state.has_conversation_history = false
 	else
 		local session_file = state.session_file or state.pending_session_file
 		if session_file and session_file ~= "" then

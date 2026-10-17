@@ -725,6 +725,17 @@ function M.get_commands(callback)
 	end)
 end
 
+local function can_change_cwd()
+	if not pi_rpc.can_restart(integration_ctx()) then
+		return false
+	end
+	if state.has_conversation_history or state.pending_session_file then
+		notify("CWD can only be changed in an empty session. Revert all conversation history or start a new session to use another directory.", vim.log.levels.WARN)
+		return false
+	end
+	return true
+end
+
 local function restart_in_cwd(path)
 	local cwd = vim.fs.normalize(vim.fn.fnamemodify(vim.fn.expand(path), ":p"))
 	if vim.fn.isdirectory(cwd) ~= 1 then
@@ -736,7 +747,8 @@ local function restart_in_cwd(path)
 		return
 	end
 
-	if not pi_rpc.can_restart(integration_ctx()) then
+	-- The session may have changed while the directory picker was open.
+	if not can_change_cwd() then
 		return
 	end
 	local ok, error_message = pcall(vim.api.nvim_set_current_dir, cwd)
@@ -748,8 +760,7 @@ local function restart_in_cwd(path)
 end
 
 function M.change_cwd(path)
-	if state.has_sent_message or state.pending_session_file then
-		notify("CWD can only be changed before the first message. Start a new session to use another directory.", vim.log.levels.WARN)
+	if not can_change_cwd() then
 		return
 	end
 

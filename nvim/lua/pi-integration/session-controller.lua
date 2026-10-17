@@ -16,7 +16,7 @@ local function reset_conversation(ctx, keep_transcript, keep_pending_messages, s
 	state.pending_user_messages = pending_user_messages
 	state.session_name = nil
 	state.message_count = 0
-	state.has_sent_message = false
+	state.has_conversation_history = false
 	state.session_stats = nil
 	state.todo_status = nil
 	state.todo_tool_output_id = nil
@@ -57,7 +57,6 @@ function M.apply_state(ctx, data, new_session)
 	local restore_transcript = not new_session and session_changed
 		and type(data.sessionFile) == "string" and vim.fn.filereadable(data.sessionFile) == 1
 	local previous_leaf_id = state.tree_leaf_id
-	local sent_before_sync = state.has_sent_message
 	if new_session or session_changed then
 		reset_conversation(ctx, restore_transcript, state.is_loading and not new_session and not state.session_replacement_pending, data.sessionFile)
 	end
@@ -65,7 +64,8 @@ function M.apply_state(ctx, data, new_session)
 	state.pending_session_file = nil
 	state.session_name = data.sessionName
 	state.message_count = data.messageCount or state.message_count
-	state.has_sent_message = (not new_session and sent_before_sync) or (tonumber(state.message_count) or 0) > 0
+	-- Keep known inactive-branch history until the full entry refresh arrives.
+	state.has_conversation_history = state.has_conversation_history or (tonumber(state.message_count) or 0) > 0
 	state.is_streaming = data.isStreaming or false
 	-- isStreaming can be false between agent_end and agent_settled. An ordinary
 	-- state sync must not release the queue before the settlement event.

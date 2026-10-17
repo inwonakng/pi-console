@@ -107,7 +107,7 @@ function M.new()
 		pending_session_file = nil,
 		session_name = nil,
 		message_count = 0,
-		has_sent_message = false,
+		has_conversation_history = false,
 		provider = nil,
 		model_id = nil,
 		thinking_level = nil,

@@ -96,9 +96,15 @@ function M.load_session_messages_from_records(ctx, records, leaf_id)
 	local by_id = {}
 	local fallback_leaf_id = nil
 
+	-- CWD eligibility depends on the whole conversation, not just the visible branch.
+	ctx.state.has_conversation_history = false
 	for _, record in ipairs(records or {}) do
 		if record then
 			table.insert(all_records, record)
+			if record.type == "message" or record.type == "custom_message"
+				or record.type == "compaction" or record.type == "branch_summary" then
+				ctx.state.has_conversation_history = true
+			end
 		end
 		if record and record.id then
 			by_id[record.id] = record
