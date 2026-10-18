@@ -258,6 +258,7 @@ access-mode:
   default: ask
   read-paths: ["/"]
   write-paths: ["/tmp"]
+  macos-denial-monitor: false
 ```
 
 - Notifications accept `enabled` or `disabled`.
@@ -315,6 +316,18 @@ new conversations, forks, or subagents.
 
 A sandbox error can occur after a command has partly run. Check what changed
 before approving another attempt; the console does not automatically rerun it.
+
+On macOS, the diagnostic log reader is off by default to avoid continuous idle
+CPU use. Sandbox restrictions and approval rules remain enforced. Command output
+and exit status are retained, and directly recorded proxy denials still produce
+blocked-command reports. A program that suppresses a filesystem or socket denial
+and exits successfully may therefore appear to succeed.
+
+For troubleshooting, set `access-mode.macos-denial-monitor: true` in the config
+and start a new Pi session. This restores the existing best-effort OS-log
+collection, including reports for some commands that exit zero. The reader runs
+continuously until session shutdown, including while idle. Set it back to
+`false` and start a new session when finished. Linux monitoring is unchanged.
 
 **Commands you type with `!` or `!!` bypass the agent sandbox and its approvals.**
 

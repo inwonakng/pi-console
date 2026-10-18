@@ -17,6 +17,7 @@ export interface ExtensionSettings {
 		"read-paths"?: string[];
 		"write-paths"?: string[];
 		"temp-dir-prefix"?: string;
+		"macos-denial-monitor"?: boolean;
 	};
 	"auto-title"?: {
 		"provider-models"?: Record<string, string>;
@@ -102,7 +103,7 @@ export function loadExtensionSettings(): ExtensionSettings {
 
 		if (Object.hasOwn(root, "access-mode")) {
 			const accessMode = requireMapping(root["access-mode"], "access-mode");
-			requireKnownKeys(accessMode, ["default", "read-paths", "write-paths", "temp-dir-prefix"], "access-mode");
+			requireKnownKeys(accessMode, ["default", "read-paths", "write-paths", "temp-dir-prefix", "macos-denial-monitor"], "access-mode");
 			const parsedAccessMode: NonNullable<ExtensionSettings["access-mode"]> = {};
 			if (Object.hasOwn(accessMode, "default")) {
 				const value = accessMode.default;
@@ -121,6 +122,11 @@ export function loadExtensionSettings(): ExtensionSettings {
 				const prefix = requirePath(accessMode["temp-dir-prefix"], "access-mode.temp-dir-prefix");
 				if (prefix.endsWith("/")) throw new Error("access-mode.temp-dir-prefix must include a directory-name prefix, for example /tmp/pi-console-");
 				parsedAccessMode["temp-dir-prefix"] = prefix;
+			}
+			if (Object.hasOwn(accessMode, "macos-denial-monitor")) {
+				const monitor = accessMode["macos-denial-monitor"];
+				if (typeof monitor !== "boolean") throw new Error("access-mode.macos-denial-monitor must be a boolean");
+				parsedAccessMode["macos-denial-monitor"] = monitor;
 			}
 			settings["access-mode"] = parsedAccessMode;
 		}

@@ -24,6 +24,10 @@ access-mode:
   # Omitted: use the OS temp directory. Takes effect on the next Pi session.
   # The generated directory is always writable and removed on shutdown.
   # temp-dir-prefix: /tmp/pi-console-
+  # Optional macOS diagnostic log reader; sandbox enforcement stays enabled.
+  # true runs continuously until shutdown, including while idle. Restart the
+  # session after changing this. Suppressed failures may go unreported when off.
+  macos-denial-monitor: false
 
 session-picker:
   archive-after-days: 180

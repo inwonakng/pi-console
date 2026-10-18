@@ -32,6 +32,7 @@ const sandboxEnvironment = [
 const localBash = createLocalBashOperations();
 let sandboxConfig: SandboxRuntimeConfig | undefined;
 let sandboxError: string | undefined;
+let macosDenialMonitor = false;
 let commandQueue: Promise<void> = Promise.resolve();
 let commandNetworkAccess = false;
 let commandUnixSocketPaths: string[] = [];
@@ -73,8 +74,9 @@ function filesystemConfig(cwd: string, reads: string[], writes: string[]): Sandb
 }
 
 async function collectViolations(commandId: string, filesystem: SandboxRuntimeConfig["filesystem"]): Promise<string[]> {
-  // macOS diagnostics arrive asynchronously, including for commands that exit zero.
-  if (process.platform === "darwin") await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
+  // Only the optional macOS log reader needs a delivery delay. Proxy denials
+  // are still collected when that reader is disabled.
+  if (macosDenialMonitor) await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
   return [...new Set(SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId)
     .map((violation) => violation.line).filter((line) => {
       if (process.platform === "darwin") return /\b(?:file-(?:read|write)|network-)|^deny http-request\b/.test(line);
@@ -264,7 +266,8 @@ export function createAccessControlledBashOperations(
 }
 
 export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void> {
-  const prefix = resolveToolPath(loadExtensionSettings()["access-mode"]?.["temp-dir-prefix"]
+  const settings = loadExtensionSettings()["access-mode"];
+  const prefix = resolveToolPath(settings?.["temp-dir-prefix"]
     ?? join(tmpdir(), "pi-console-sandbox-"), ctx.cwd);
   sandboxError = undefined;
   sandboxConfig = undefined;
@@ -274,11 +277,15 @@ export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void
     mkdirSync(dirname(prefix), { recursive: true });
     setScratchDirectory(canonicalPath(mkdtempSync(prefix)));
     sandboxConfig = { network: networkConfig(), filesystem: filesystemConfig(canonicalPath(ctx.cwd), [], []) };
-    await SandboxManager.initialize(sandboxConfig, allowApprovedNetwork, true);
-    if (process.platform === "darwin") await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    // The reader only supplies diagnostics; macOS enforces the profile without it.
+    // Keep Linux monitoring unchanged and read this setting once per session.
+    macosDenialMonitor = process.platform === "darwin" && settings?.["macos-denial-monitor"] === true;
+    await SandboxManager.initialize(sandboxConfig, allowApprovedNetwork, process.platform !== "darwin" || macosDenialMonitor);
+    if (macosDenialMonitor) await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   } catch (error) {
     sandboxError = error instanceof Error ? error.message : String(error);
     sandboxConfig = undefined;
+    macosDenialMonitor = false;
     if (SandboxManager.isSandboxingEnabled()) {
       try { await SandboxManager.reset(); } catch { /* Keep the initialization error. */ }
     }
@@ -294,6 +301,7 @@ export async function shutdownBashSandbox(): Promise<void> {
     const scratch = getScratchDirectory();
     setScratchDirectory(undefined);
     sandboxConfig = undefined;
+    macosDenialMonitor = false;
     commandNetworkAccess = false;
     commandUnixSocketPaths = [];
     if (scratch) rmSync(scratch, { recursive: true, force: true });
