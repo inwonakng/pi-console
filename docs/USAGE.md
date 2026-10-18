@@ -125,8 +125,9 @@ bound to `<prefix>o` so I don't have to remember where each conversation lives.
 
 When I want to pick up an older conversation, I search for it here and check
 the transcript preview before opening it. Like the other pickers, this uses
-[fzf-lua](https://github.com/ibhagwan/fzf-lua). You can also select several
-sessions at once to archive or delete them.
+[fzf-lua](https://github.com/ibhagwan/fzf-lua). Search uses ripgrep regex over
+the displayed title, directory, and timestamp; `pwd:.*console` filters by directory.
+You can also select several sessions at once to archive or delete them.
 
 ![Session history picker with a preview of the selected conversation](../assets/session-picker.png)
 

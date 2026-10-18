@@ -686,11 +686,13 @@ function M.pick(ctx, opts)
 		return
 	end
 
-	local entries, by_id = {}, {}
+	local entries, labels, by_id = {}, {}, {}
 	for index, candidate in ipairs(candidates) do
 		local id = string.format("%06d", index)
 		by_id[id] = candidate
-		table.insert(entries, id .. "\t" .. item_label(candidate))
+		-- Keep one line per candidate so ripgrep line numbers map back to IDs.
+		labels[index] = item_label(candidate):gsub("[\r\n]", " ")
+		table.insert(entries, id .. "\t" .. labels[index])
 	end
 
 	local reopen_opts = vim.deepcopy(opts)
@@ -866,10 +868,32 @@ function M.pick(ctx, opts)
 
 	local keymap = { fzf = { ["ctrl-a"] = "toggle-all" } }
 	if opts.select_all then
-		keymap.fzf.start = "select-all"
+		keymap.fzf.load = "select-all+unbind(load)"
 	end
-	require("fzf-lua").fzf_exec(entries, {
-		prompt = opts.paths ~= nil and "Archive sessions > " or (archived and "Archived > " or "Sessions > "),
+	require("fzf-lua").fzf_live(function(args)
+		local query = args[1] or ""
+		if query == "" then
+			return entries
+		end
+		local result = vim.system({ "rg", "--no-config", "--color=never", "--smart-case", "--line-number", "--", query }, {
+			stdin = labels,
+			text = true,
+		}):wait()
+		if result.code == 1 then
+			return {}
+		elseif result.code ~= 0 then
+			return { "\t" .. vim.trim(result.stderr):gsub("\n", " ") }
+		end
+		local matches = {}
+		for line in result.stdout:gmatch("[^\n]+") do
+			local index = tonumber(line:match("^(%d+):"))
+			if index and entries[index] then
+				table.insert(matches, entries[index])
+			end
+		end
+		return matches
+	end, {
+		prompt = opts.paths ~= nil and "Archive sessions (regex) > " or (archived and "Archived (regex) > " or "Sessions (regex) > "),
 		previewer = session_previewer(ctx, by_id),
 		fzf_opts = {
 			["--multi"] = true,
