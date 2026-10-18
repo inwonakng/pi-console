@@ -224,11 +224,15 @@ end
 
 local function geometry()
 	local width = math.max(1, math.min(110, math.floor(vim.o.columns * 0.86), vim.o.columns - 4))
-	local total = math.max(5, math.min(math.floor(vim.o.lines * 0.82), vim.o.lines - 5))
+	local top = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1 or 0
+	local bottom = vim.o.cmdheight + (vim.o.laststatus > 0 and 1 or 0) + 1
+	local usable_height = math.max(6, vim.o.lines - top - bottom)
+	local total = math.max(6, math.floor(usable_height * 0.75))
 	local input_height = math.max(1, math.min(8, math.floor(total * 0.25)))
-	local transcript_height = math.max(1, total - input_height - 3)
+	-- Both floats have a top and bottom border, included in the total footprint.
+	local transcript_height = math.max(1, total - input_height - 4)
 	return width, transcript_height, input_height,
-		math.max(0, math.floor((vim.o.lines - total) / 2)), math.max(0, math.floor((vim.o.columns - width) / 2))
+		top + math.floor((usable_height - total) / 2), math.max(0, math.floor((vim.o.columns - width) / 2))
 end
 
 local function resize(side)
