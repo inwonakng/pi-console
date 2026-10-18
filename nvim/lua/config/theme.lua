@@ -27,6 +27,7 @@ require("catppuccin").setup({
 			PiStatusFooterNormal = { fg = colors.text, bg = M.status_bg },
 			PiInputTitle = { fg = colors.subtext1, bg = M.ui_bg },
 			PiOverviewStatusLine = { fg = colors.subtext1, bg = M.ui_bg },
+			PiOverviewKey = { fg = colors.blue, bg = M.ui_bg, bold = true },
 			PiOverviewTitle = { fg = colors.text, bg = M.ui_bg, bold = true },
 			PiOverviewNewSession = { fg = colors.text, bg = M.ui_bg, italic = true },
 			PiOverviewDetailTitle = { fg = colors.red, bg = M.ui_bg, bold = true },

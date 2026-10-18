@@ -73,10 +73,13 @@ function M.statusline(width, hints)
 	for _, hint in ipairs(hints or {}) do
 		local needed = vim.fn.strdisplaywidth(hint) + (#visible > 0 and 1 or 0)
 		if needed > available then break end
-		table.insert(visible, hint)
+		local styled = hint:gsub("%%", "%%%%"):gsub("^([^:]+):", function(key)
+			return "%#PiOverviewKey#" .. key .. "%#PiOverviewStatusLine#:"
+		end)
+		table.insert(visible, styled)
 		available = available - needed
 	end
-	local left = table.concat(visible, "·"):gsub("%%", "%%%%")
+	local left = table.concat(visible, "·")
 	return "%#PiOverviewStatusLine#" .. left .. "%=" .. "%#" .. M.highlight() .. "#" .. label:gsub("%%", "%%%%") .. "%*"
 end
 
