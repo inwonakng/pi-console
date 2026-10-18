@@ -1,7 +1,6 @@
 local fzf_opts = {
 	default = {
 		["--no-scrollbar"] = true,
-		["--no-mouse"] = true,
 		["--pointer"] = "> ",
 		["--gap"] = 0,
 		["--info"] = "inline-right",
@@ -27,26 +26,8 @@ local fzf_keymap = {
 	},
 }
 
-local saved_mouse
-
-local function disable_mouse_for_fzf()
-	if saved_mouse == nil then
-		saved_mouse = vim.o.mouse
-		vim.o.mouse = ""
-	end
-end
-
-local function restore_mouse_after_fzf()
-	if saved_mouse ~= nil then
-		vim.o.mouse = saved_mouse
-		saved_mouse = nil
-	end
-end
-
 local fzf_winopts = {
 	default = {
-		on_create = disable_mouse_for_fzf,
-		on_close = restore_mouse_after_fzf,
 		border = "none",
 		title = false,
 		height = 1.0,
@@ -340,7 +321,6 @@ fzf.register_ui_select(function(select_opts, items)
 	end
 	size_select_picker(select_opts, items, winopts)
 	winopts.on_create = function(event)
-		disable_mouse_for_fzf()
 		-- Reused fzf windows inherit the previous picker's preview visibility.
 		-- Restore this select's layout before fzf-lua renders its preview.
 		local win = fzf.win.__SELF()
@@ -351,13 +331,7 @@ fzf.register_ui_select(function(select_opts, items)
 		end
 	end
 	if type(select_opts.on_close) == "function" then
-		local default_on_close = winopts.on_close
-		winopts.on_close = function(...)
-			if default_on_close then
-				default_on_close(...)
-			end
-			select_opts.on_close(...)
-		end
+		winopts.on_close = select_opts.on_close
 	end
 	return {
 		prompt = has_prompt_preview and not winopts.preview.hidden and "Choose > " or select_prompt(select_opts.prompt),

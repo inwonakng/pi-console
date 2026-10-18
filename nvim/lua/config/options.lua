@@ -1,6 +1,7 @@
 vim.g.mapleader = " "
 vim.g.maplocalleader = " "
 
+vim.opt.mouse = "a"
 vim.opt.number = false
 vim.opt.laststatus = 2
 vim.opt.wrap = true
