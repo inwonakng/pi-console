@@ -165,7 +165,7 @@ function saveAccessState(pi: ExtensionAPI): void {
 
 function restoreAccessState(ctx: ExtensionContext, restoreGrants = true): void {
   const stored = loadSessionSetting(ctx, ACCESS_SETTING) as PersistedAccessState | undefined;
-  const spawnMode = parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE);
+  const spawnMode = process.env.PI_SIDE_AGENT === "1" ? "ask" : parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE);
   setAccessMode(spawnMode ?? parseAccessMode(stored?.mode) ?? loadExtensionSettings()["access-mode"]?.default ?? "ask");
   const legacy: Permission[] = [];
   for (const path of Array.isArray(stored?.readPaths) ? stored.readPaths : []) {
@@ -333,6 +333,11 @@ export default function accessModeExtension(pi: ExtensionAPI) {
       const requestedMode = parseAccessMode(args);
       if (!requestedMode) {
         ctx.ui.notify("Usage: /pi-mode readonly|ask|edit|full", "warning");
+        setStatus(ctx);
+        return;
+      }
+      if (process.env.PI_SIDE_AGENT === "1" && requestedMode !== "ask") {
+        ctx.ui.notify("Side conversations have fixed ask access mode.", "warning");
         setStatus(ctx);
         return;
       }

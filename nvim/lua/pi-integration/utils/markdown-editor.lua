@@ -2,9 +2,6 @@ local floats = require("pi-integration.floats")
 
 local M = {}
 
--- A question can open above a queued-message edit; only the newest editor owns focus.
-local editor_windows = {}
-
 -- A write records the saved text; closing completes the edit with that text,
 -- or nil if nothing was written. Editing keys and write/quit commands remain native.
 function M.open(opts, on_close)
@@ -32,7 +29,7 @@ function M.open(opts, on_close)
 		footer = opts.footer,
 	})
 	vim.wo[win].wrap = true
-	table.insert(editor_windows, win)
+	local focus = floats.focus_group({ win })
 
 	local saved_text
 	vim.api.nvim_create_autocmd("BufWriteCmd", {
@@ -55,40 +52,18 @@ function M.open(opts, on_close)
 			return
 		end
 		closed = true
-		for index, editor_win in ipairs(editor_windows) do
-			if editor_win == win then
-				table.remove(editor_windows, index)
-				break
-			end
-		end
+		focus:release()
 		local text = saved_text
 		vim.schedule(function()
 			floats.close_window(win)
 			if vim.api.nvim_buf_is_valid(buf) then
 				vim.api.nvim_buf_delete(buf, { force = true })
 			end
-			local active_win = editor_windows[#editor_windows]
-			if active_win and vim.api.nvim_win_is_valid(active_win) then
-				vim.api.nvim_set_current_win(active_win)
-			end
 			on_close(text)
 		end)
 	end
 	vim.api.nvim_create_autocmd("WinClosed", { pattern = tostring(win), once = true, callback = finish })
 	vim.api.nvim_create_autocmd({ "BufHidden", "BufWipeout" }, { buffer = buf, once = true, callback = finish })
-	vim.api.nvim_create_autocmd("WinLeave", {
-		buffer = buf,
-		desc = "Keep focus in the floating editor until it closes",
-		callback = function()
-			-- Wait for navigation or an intentional close to finish first.
-			vim.schedule(function()
-				if not closed and editor_windows[#editor_windows] == win
-					and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
-					vim.api.nvim_set_current_win(win)
-				end
-			end)
-		end,
-	})
 	return buf, win
 end
 

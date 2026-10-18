@@ -22,14 +22,17 @@ const globalAccessState = globalThis as typeof globalThis & Record<symbol, Acces
 // space in a process-global slot so the extensions share the same live state
 // even when their shared imports are evaluated as separate module instances.
 const state = globalAccessState[ACCESS_STATE_KEY] ??= {
-  accessMode: parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE) ?? "ask",
+  accessMode: process.env.PI_SIDE_AGENT === "1" ? "ask" : parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE) ?? "ask",
 };
 
 export function getAccessMode(): AccessMode {
-  return state.accessMode;
+  return process.env.PI_SIDE_AGENT === "1" ? "ask" : state.accessMode;
 }
 
 export function setAccessMode(mode: AccessMode): void {
+  if (process.env.PI_SIDE_AGENT === "1" && mode !== "ask") {
+    throw new Error("Side conversations have fixed ask access mode.");
+  }
   state.accessMode = mode;
 }
 

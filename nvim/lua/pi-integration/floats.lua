@@ -8,6 +8,130 @@ local function win_valid(win)
 	return win and vim.api.nvim_win_is_valid(win)
 end
 
+-- Independent of transient tracking: only the newest focus group owns focus.
+local focus_groups = {}
+local restore_focus
+
+local function schedule_focus_restore()
+	local group = focus_groups[#focus_groups]
+	if group then
+		vim.schedule(function()
+			if focus_groups[#focus_groups] == group then
+				restore_focus(group)
+			end
+		end)
+	end
+end
+
+local function member_valid(win, buf)
+	return win_valid(win) and vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_win_get_buf(win) == buf
+end
+
+restore_focus = function(group)
+	local fallback
+	for win, buf in pairs(group.members) do
+		if member_valid(win, buf) then
+			fallback = fallback or win
+		else
+			group.members[win] = nil
+		end
+	end
+	if not fallback then
+		group:release()
+		return
+	end
+	local current = vim.api.nvim_get_current_win()
+	if group.members[current] then
+		group.last_win = current
+		return
+	end
+	local target = group.members[group.last_win] and group.last_win or fallback
+	pcall(vim.api.nvim_set_current_win, target)
+end
+
+-- Acquire with {win, ...}; :add(win) includes another member. A nested group
+-- temporarily owns focus. :release() is idempotent and resumes its parent,
+-- never refocusing the released group. Closing its last member also releases it.
+function M.has_focus_group()
+	return focus_groups[#focus_groups] ~= nil
+end
+
+function M.focus_group(wins)
+	local group = { members = {}, released = false }
+
+	function group:add(win)
+		if self.released or not win_valid(win) then
+			return
+		end
+		self.members[win] = vim.api.nvim_win_get_buf(win)
+		if not self.last_win or vim.api.nvim_get_current_win() == win then
+			self.last_win = win
+		end
+	end
+
+	function group:release()
+		if self.released then
+			return
+		end
+		self.released = true
+		local was_active = focus_groups[#focus_groups] == self
+		for index, active in ipairs(focus_groups) do
+			if active == self then
+				table.remove(focus_groups, index)
+				break
+			end
+		end
+		self.members = {}
+		if was_active then
+			schedule_focus_restore()
+		end
+	end
+
+	for _, win in ipairs(wins) do
+		group:add(win)
+	end
+	if next(group.members) then
+		table.insert(focus_groups, group)
+		schedule_focus_restore()
+	else
+		group:release()
+	end
+	return group
+end
+
+local focus_augroup = vim.api.nvim_create_augroup("PiFloatFocus", { clear = true })
+vim.api.nvim_create_autocmd({ "WinLeave", "BufEnter" }, {
+	group = focus_augroup,
+	callback = schedule_focus_restore,
+})
+vim.api.nvim_create_autocmd("WinEnter", {
+	group = focus_augroup,
+	callback = function()
+		local group = focus_groups[#focus_groups]
+		local win = vim.api.nvim_get_current_win()
+		if group and group.members[win] and member_valid(win, group.members[win]) then
+			group.last_win = win
+		end
+	end,
+})
+vim.api.nvim_create_autocmd({ "WinClosed", "BufHidden", "BufWipeout" }, {
+	group = focus_augroup,
+	callback = function(event)
+		for index = #focus_groups, 1, -1 do
+			local group = focus_groups[index]
+			for win, buf in pairs(group.members) do
+				if (event.event == "WinClosed" and win == tonumber(event.match))
+					or (event.event ~= "WinClosed" and buf == event.buf) then
+					group.members[win] = nil
+				end
+			end
+			if not next(group.members) then
+				group:release()
+			end
+		end
+	end,
+})
+
 local function normalize_options(buf, close_fn, opts)
 	opts = opts or {}
 	local win = opts.win
@@ -122,6 +246,13 @@ end
 local function close_stack_for(win)
 	local root = root_of(win) or win
 	close_subtree(root)
+end
+
+function M.close_descendants(win)
+	if not win then return end
+	for _, child in ipairs(children_of(win)) do
+		close_subtree(child)
+	end
 end
 
 function M.close_window(win)

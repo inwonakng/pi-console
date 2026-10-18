@@ -5,6 +5,9 @@ function M.is_agent_active(state)
 end
 
 function M.restart_block_reason(state)
+	if state.side and (state.side.submitting or state.side.data.running) then
+		return "The side conversation is working. Wait or use :PiSideAbort before restarting."
+	end
 	if (state.spawn_running_count or 0) > 0 then
 		return "There are running subagents. Join or stop them before restarting."
 	end
@@ -23,7 +26,7 @@ function M.restart_block_reason(state)
 			return "Wait for pending prompts to finish before restarting."
 		end
 	end
-	if state.active_ui_request_id or next(state.pending_ui_requests or {}) then
+	if state.active_ui_request_id or next(state.pending_ui_requests or {}) or #(state.pending_ui_queue or {}) > 0 then
 		return "Resolve the pending Pi request before restarting."
 	end
 	if next(state.callbacks or {}) then

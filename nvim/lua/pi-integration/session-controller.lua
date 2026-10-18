@@ -61,6 +61,7 @@ function M.apply_state(ctx, data, new_session)
 	if new_session or session_changed then
 		reset_conversation(ctx, restore_transcript, state.is_loading and not new_session and not state.session_replacement_pending, data.sessionFile)
 	end
+	require("pi-integration.side").session_changed(ctx, data.sessionFile)
 	state.session_file = data.sessionFile
 	state.pending_session_file = nil
 	state.session_name = data.sessionName

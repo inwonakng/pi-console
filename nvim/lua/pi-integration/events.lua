@@ -349,6 +349,7 @@ local function approval_select_opts(payload, prompt)
 			table.insert(header, { key, (value:gsub("[\r\n]+", " ")) })
 		end
 	end
+	if payload.sideConversationId then field("Conversation", "Side") end
 	field("Tool", payload.tool or "tool")
 	field("Request", payload.request or prompt)
 	field("Access scope", payload.path)
@@ -373,6 +374,7 @@ local function confirm_with_preview(ctx, event)
 		return false
 	end
 
+	payload.sideConversationId = event.side_conversation_id
 	local prompt = type(event.title) == "string" and event.title ~= "" and event.title
 		or (payload.tool and ("Allow " .. payload.tool .. "?") or "Pi confirm")
 	pending_picker.select(ctx, event.id, { "Allow", "Deny" }, approval_select_opts(payload, prompt), function(choice)
@@ -518,14 +520,16 @@ local function update_workspace_from_status(ctx, text)
 	ctx.transcript.refresh_ui()
 end
 
-function M.handle_extension_ui_request(ctx, event)
+local function handle_extension_ui_request(ctx, event)
 	local state = ctx.state
 	if event.id and (event.method == "select" or event.method == "confirm" or event.method == "input" or event.method == "editor") then
-		if state.abort_requested or not pending_picker.can_open(event.id) then
+		if (state.abort_requested and not event.side_dialog_id) or not pending_picker.can_open(event.id) then
 			ctx.rpc.send({ type = "extension_ui_response", id = event.id, cancelled = true })
 			return
 		end
 		local request = summarize_ui_request(event)
+		request.side_dialog_id = event.side_dialog_id
+		request.side_conversation_id = event.side_conversation_id
 		local compact_select = event.method == "select" and decode_compact_select_payload(event.title)
 		request.navigation = compact_select and compact_select.purpose == "navigation" or false
 		request.resumable = not request.navigation and (event.method == "select" or event.method == "confirm")
@@ -576,6 +580,10 @@ function M.handle_extension_ui_request(ctx, event)
 		elseif event.statusKey == "pi-notifications" then
 			state.notification_status = event.statusText
 			ctx.transcript.refresh_ui()
+		elseif event.statusKey == "pi-side-response" then
+			require("pi-integration.side").reply(ctx, event.statusText)
+		elseif event.statusKey == "pi-side" then
+			require("pi-integration.side").status(ctx, event.statusText)
 		elseif event.statusKey == "pi-spawn-runs" then
 			update_spawn_runs_from_status(ctx, event.statusText)
 		elseif event.statusKey == "pi-codex-usage" then
@@ -594,7 +602,7 @@ function M.handle_extension_ui_request(ctx, event)
 		local prompt = compact_select and compact_select.prompt or event.title or "Pi select"
 		local select_opts = {
 			prompt = prompt,
-			prompt_label = "Choice",
+			prompt_label = event.side_dialog_id and "Side choice" or "Choice",
 			pi_select_layout = "compact",
 			preview_text = prompt,
 		}
@@ -644,8 +652,26 @@ function M.handle_extension_ui_request(ctx, event)
 			end
 		end)
 	elseif event.method == "editor" then
-		ctx.ui.notify("Pi requested an editor UI, which pi-console does not support yet", vim.log.levels.WARN)
-		send_extension_ui_response(ctx, event.id, { cancelled = true })
+		pending_picker.input(ctx, event, function(value)
+			send_extension_ui_response(ctx, event.id, value and { value = value } or { cancelled = true })
+		end)
+	end
+end
+
+function M.handle_extension_ui_request(ctx, event)
+	if event.id and (event.method == "select" or event.method == "confirm"
+		or event.method == "input" or event.method == "editor") then
+		local title = type(event.title) == "string" and json.decode_object(event.title) or nil
+		if title and type(title.sideDialogId) == "string" then
+			event.side_dialog_id = title.sideDialogId
+			event.side_conversation_id = title.sideConversationId
+			if title.kind == "pi_side_dialog" then event.title = title.title end
+		end
+		pending_picker.enqueue(ctx, event, function(request)
+			handle_extension_ui_request(ctx, request)
+		end)
+	else
+		handle_extension_ui_request(ctx, event)
 	end
 end
 

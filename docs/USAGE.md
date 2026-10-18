@@ -36,6 +36,34 @@ even after the workspace has been cleaned up.
 
 To stop the current run, press Escape twice in the transcript buffer.
 
+### Steering and side conversations
+
+Use `<leader>pS` or `:PiSteer` while Pi is working to open a steering editor.
+`:wq` sends the instruction after the current assistant turn's tool calls;
+`:q!` cancels. A visual selection followed by `:PiSteer` prefills the editor.
+If Pi finishes first, the unsent instruction remains in the steer draft.
+
+Use `<leader>pb` or `:PiSide` to toggle an independent side conversation.
+It has a transcript float above an editable input float. Normal Vim editing,
+including Escape and macro recording, remains available. In normal mode,
+Ctrl+K focuses the transcript and Ctrl+J focuses the input. Ctrl+Enter sends.
+The toggle or `:q` hides both floats without resetting the conversation or draft.
+
+Side conversations use fixed `ask` access mode and built-in file/shell tools
+plus codemode, independently of the main agent's access mode. Approvals share
+the normal dialog UI and wait their turn if another request is open. The main
+agent keeps working; neither side prompts nor answers enter its model context.
+
+The first side prompt captures finalized main context. Follow-ups retain that
+snapshot. `:PiSideReset` cancels side work, clears side history, and captures fresh
+main context; `:PiSideAbort` stops only the side run. Select side transcript lines
+and use `:PiSteer` to explicitly send them to the main run.
+
+Side history and drafts are stored inside the parent session and restored on
+restart. Send a main prompt first to create the saved parent session. Navigating
+within the parent's history does not rewind the side conversation; a different
+parent session has its own side conversation. Stop side work before restarting.
+
 ### Restarting
 
 Use `<leader>pR` or `:PiConsoleRestart` to restart Neovim and Pi in the same

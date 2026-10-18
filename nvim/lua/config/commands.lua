@@ -74,6 +74,26 @@ vim.api.nvim_create_user_command("PiConsoleRestart", function()
 	require("pi-integration").restart_console()
 end, { desc = "Restart pi-console and Pi" })
 
+vim.api.nvim_create_user_command("PiSteer", function(opts)
+	local text
+	if opts.range > 0 then
+		text = table.concat(vim.api.nvim_buf_get_lines(0, opts.line1 - 1, opts.line2, false), "\n")
+	end
+	require("pi-integration").steer(text)
+end, { range = true, desc = "Steer the active run, optionally using selected lines" })
+
+vim.api.nvim_create_user_command("PiSide", function()
+	require("pi-integration").toggle_side()
+end, { desc = "Toggle the side conversation" })
+
+vim.api.nvim_create_user_command("PiSideReset", function()
+	require("pi-integration").reset_side()
+end, { desc = "Reset side history and capture fresh main context" })
+
+vim.api.nvim_create_user_command("PiSideAbort", function()
+	require("pi-integration").abort_side()
+end, { desc = "Abort only the side conversation" })
+
 vim.api.nvim_create_user_command("PiLogs", function()
 	require("pi-integration").show_logs()
 end, { desc = "Show pi-console runtime logs" })

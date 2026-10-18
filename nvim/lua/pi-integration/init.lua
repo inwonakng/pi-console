@@ -464,6 +464,7 @@ update_transcript_statusline = function()
 	local ctx = integration_ctx()
 	pi_statusline.update(ctx)
 	pi_layout.update_input_sidebar(ctx)
+	require("pi-integration.side").refresh_status(ctx)
 end
 
 function M.setup(opts)
@@ -519,6 +520,22 @@ end
 
 function M.submit_prompt()
 	pi_actions.submit_prompt(integration_ctx())
+end
+
+function M.steer(text)
+	require("pi-integration.steer").open(integration_ctx(), text)
+end
+
+function M.toggle_side()
+	require("pi-integration.side").toggle(integration_ctx())
+end
+
+function M.reset_side()
+	require("pi-integration.side").reset(integration_ctx())
+end
+
+function M.abort_side()
+	require("pi-integration.side").abort(integration_ctx())
 end
 
 function M.fail_pending_prompts()

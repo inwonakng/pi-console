@@ -204,16 +204,24 @@ function M.abort(ctx)
 	local state = ctx.state
 	local active = lifecycle.is_agent_active(state) or state.is_compacting
 	state.abort_requested = active
-	require("pi-integration.pending-picker").clear(ctx, true)
+	require("pi-integration.pending-picker").clear_main(ctx, true)
 	if not active then
 		return
 	end
-	ctx.rpc.send({ type = "abort" }, function(event)
-		-- Abort acknowledges idle even when no agent_end event was emitted.
-		state.abort_requested = false
-		if not event.success then
-			ctx.ui.notify(event.error or "Could not abort Pi", vim.log.levels.ERROR)
+	ctx.rpc.send({ type = "clear_queue" }, function(queued)
+		if queued.success and queued.data and #(queued.data.steering or {}) > 0 then
+			state.steer_draft = table.concat(queued.data.steering, "\n\n")
+			ctx.ui.notify("Unsent steering messages were returned to the steer draft.")
+		elseif not queued.success then
+			ctx.ui.notify(queued.error or "Could not clear native Pi queues", vim.log.levels.ERROR)
 		end
+		ctx.rpc.send({ type = "abort" }, function(event)
+			-- Abort acknowledges idle even when no agent_end event was emitted.
+			state.abort_requested = false
+			if not event.success then
+				ctx.ui.notify(event.error or "Could not abort Pi", vim.log.levels.ERROR)
+			end
+		end)
 	end)
 end
 

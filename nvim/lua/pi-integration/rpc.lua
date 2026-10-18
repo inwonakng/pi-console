@@ -148,6 +148,7 @@ local function reset_runtime_state(ctx)
 	state.activity_tool_call_id = nil
 	state.activity_spinner_tick = 1
 	state.abort_requested = false
+	require("pi-integration.side").disconnected(ctx)
 	ctx.transcript.refresh_ui()
 end
 
@@ -425,6 +426,7 @@ function M.restart(ctx, options)
 		return
 	end
 
+	if not require("pi-integration.side").flush_draft(ctx) then return end
 	pending_picker.clear(ctx, true)
 	if options.session_file then
 		state.session_file = nil
@@ -472,6 +474,7 @@ function M.restart(ctx, options)
 end
 
 function M.stop(ctx)
+	require("pi-integration.side").flush_draft(ctx)
 	ctx.state.trust_restart = false
 	ctx.state.restart_requested = false
 	stop_process(ctx, "Pi stopped; request was not completed.")
