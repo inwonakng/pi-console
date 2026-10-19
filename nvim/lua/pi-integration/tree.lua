@@ -1,6 +1,7 @@
 local floats = require("pi-integration.floats")
 local guard = require("pi-integration.utils.guard")
 local json = require("pi-integration.utils.json")
+local time_utils = require("pi-integration.utils.time")
 local tree_model = require("pi-integration.tree-model")
 
 local M = {}
@@ -363,9 +364,9 @@ local function preview_lines(ctx, node)
 		table.insert(lines, "parent: " .. node.parent.target_id)
 	end
 	if first.timestamp then
-		local time = tostring(first.timestamp)
+		local time = time_utils.format_timestamp(first.timestamp)
 		if last.timestamp and last.timestamp ~= first.timestamp then
-			time = time .. " → " .. tostring(last.timestamp)
+			time = time .. " → " .. time_utils.format_timestamp(last.timestamp)
 		end
 		table.insert(lines, "time: " .. time)
 	end

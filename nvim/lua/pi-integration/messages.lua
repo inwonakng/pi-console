@@ -5,6 +5,7 @@ local pi_skills = require("pi-integration.skills")
 local pi_tool_output = require("pi-integration.tool-output")
 local pi_thinking_output = require("pi-integration.thinking-output")
 local message_utils = require("pi-integration.utils.message")
+local time_utils = require("pi-integration.utils.time")
 local tool_groups = require("pi-integration.tool-groups")
 
 function M.decode_session_record(line)
@@ -202,7 +203,7 @@ local function append_compaction_summary(lines, items, message, has_body)
 		table.insert(parts, "kept from " .. message.firstKeptEntryId)
 	end
 	if type(message.timestamp) == "string" and message.timestamp ~= "" then
-		table.insert(parts, message.timestamp)
+		table.insert(parts, time_utils.format_timestamp(message.timestamp))
 	end
 	vim.list_extend(lines, { "> " .. table.concat(parts, " · "), "" })
 	table.insert(items, {
