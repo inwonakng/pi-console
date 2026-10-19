@@ -310,7 +310,10 @@ export default function autoTitleExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			let title = cleanTitle(args);
 			if (!title) {
-				const value = await ctx.ui.input("Rename Session: ", pi.getSessionName() || "");
+				const value = await ctx.ui.input(
+					JSON.stringify({ kind: "pi_input", prompt: "Rename Session: ", notify: false }),
+					pi.getSessionName() || "",
+				);
 				title = cleanTitle(value || "");
 			}
 			if (!title) {

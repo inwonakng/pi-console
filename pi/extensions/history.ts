@@ -22,7 +22,6 @@ import { locationForEntry, moveToLocation } from "./shared/workspace-navigation"
 import { collectDeletedIds, locationWorkspaceId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import { pathInside, resolveToolPath } from "./shared/paths";
-import { suppressNextInputNotification } from "./shared/notifications";
 
 type SnapshotState =
   | { kind: "missing" }
@@ -473,8 +472,8 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	validateFiles();
 	const patches = await Promise.all(discarded.map((record) => prepareWorkspaceDiscard(record.id)));
 	const fileCount = rollback.reduce((count, item) => count + item.files.length, 0);
-	suppressNextInputNotification();
-	const approved = await ctx.ui.confirm("Permanently revert history?",
+	const approved = await ctx.ui.confirm(
+		JSON.stringify({ kind: "pi_confirmation", prompt: "Permanently revert history?", notify: false }),
 		`Delete ${deletedIds.size} history entries${selected ? ", including the selected message and every branch beneath it" : " after the selected point"}? This cannot be undone through the tree.\n`
 		+ `Restore ${fileCount} recorded file change(s) on the active path.\n`
 		+ `Continue in ${target.cwd}.\n`

@@ -1155,7 +1155,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
     const action = event.reason === "new" ? "starting a new session" : "switching sessions";
     try {
       const choice = await ctx.ui.select(
-        `There are running subagents. Continuing will stop them. Continue ${action}?`,
+        JSON.stringify({
+          kind: "pi_compact_select",
+          prompt: `There are running subagents. Continuing will stop them. Continue ${action}?`,
+          notify: false,
+        }),
         ["Cancel", "Continue and stop subagents"],
       );
       if (choice !== "Continue and stop subagents") return { cancel: true };

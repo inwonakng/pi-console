@@ -112,7 +112,8 @@ export default function projectTrustExtension(pi: ExtensionAPI) {
       if (decision === undefined) return;
       // Pi caches trust by cwd across forks. Authorize carrying a temporary
       // choice before the new runtime can load any project resources.
-      const approved = await ctx.ui.confirm("Copy conversation-only project trust to the fork?",
+      const approved = await ctx.ui.confirm(
+        JSON.stringify({ kind: "pi_confirmation", prompt: "Copy conversation-only project trust to the fork?", notify: false }),
         `The new conversation will start ${decision ? "trusted" : "untrusted"} for this project and its managed workspaces.`);
       if (!approved) return { cancel: true };
       trustState.forkDecision = { cwd: trustScope(ctx.cwd, ctx.sessionManager.getSessionFile()).cwd, trusted: decision };

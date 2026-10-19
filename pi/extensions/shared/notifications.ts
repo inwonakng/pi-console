@@ -21,16 +21,13 @@ const DISABLED_SOUND_VALUES = new Set(["0", "false", "no", "none", "off", "silen
 type NotificationState = {
 	desktopNotificationsEnabled: boolean;
 	missingAlerterWarned?: boolean;
-	suppressedInputNotifications: number;
 };
 
 const notificationStateKey = Symbol.for("pi.extensions.notifications.state");
 const notificationStateHost = globalThis as Record<PropertyKey, unknown>;
 const notificationState = (notificationStateHost[notificationStateKey] ??= {
 	desktopNotificationsEnabled: true,
-	suppressedInputNotifications: 0,
 }) as NotificationState;
-notificationState.suppressedInputNotifications ??= 0;
 
 export function notificationsEnabled(): boolean {
 	return notificationState.desktopNotificationsEnabled;
@@ -45,8 +42,18 @@ export function toggleNotificationsEnabled(): boolean {
 	return notificationState.desktopNotificationsEnabled;
 }
 
-export function suppressNextInputNotification(): void {
-	notificationState.suppressedInputNotifications++;
+// Prompt policy travels with our structured RPC title, never with a later request.
+export function promptDisablesNotification(title: string | undefined): boolean {
+	if (!title) return false;
+	try {
+		const payload: unknown = JSON.parse(title);
+		return typeof payload === "object" && payload !== null
+			&& "kind" in payload && typeof payload.kind === "string"
+			&& ["pi_confirmation", "pi_compact_select", "pi_input", "pi_approval_preview", "pi_side_dialog"].includes(payload.kind)
+			&& "notify" in payload && payload.notify === false;
+	} catch {
+		return false;
+	}
 }
 
 export function parseNotificationMode(input: string | undefined): boolean | "toggle" | undefined {
@@ -184,12 +191,6 @@ function reportNotificationResult(ctx: ExtensionContext, notified: boolean): boo
 }
 
 export function notifyPiNeedsInput(ctx: ExtensionContext, title = "Pi needs input", allowNotification = true): boolean {
-	if (notificationState.suppressedInputNotifications > 0) {
-		notificationState.suppressedInputNotifications--;
-		return false;
-	}
-	// Consume specialized approval suppression even when a repeated question
-	// prompt is silent, so it cannot suppress an unrelated later request.
 	if (!allowNotification || !notificationsEnabled()) {
 		return false;
 	}
@@ -207,18 +208,12 @@ export function notifyPiNeedsInput(ctx: ExtensionContext, title = "Pi needs inpu
 	}));
 }
 
-function notifySpecificInputRequest(ctx: ExtensionContext, title: string): boolean {
-	const notified = notifyPiNeedsInput(ctx, title);
-	suppressNextInputNotification();
-	return notified;
-}
-
 export function notifyPiToolApproval(ctx: ExtensionContext): boolean {
-	return notifySpecificInputRequest(ctx, "Pi: Tool Approval");
+	return notifyPiNeedsInput(ctx, "Pi: Tool Approval");
 }
 
 export function notifyPiWorkspaceIntegration(ctx: ExtensionContext): boolean {
-	return notifySpecificInputRequest(ctx, "Pi: Workspace Integration");
+	return notifyPiNeedsInput(ctx, "Pi: Workspace Integration");
 }
 
 export function notifyPiFinished(ctx: ExtensionContext, force = false): boolean {

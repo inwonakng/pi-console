@@ -225,7 +225,9 @@ export default function sideExtension(pi: ExtensionAPI) {
     if (!title || typeof title !== "object" || Array.isArray(title)) {
       title = { kind: "pi_side_dialog", title: `Side: ${request.title}` };
     }
-    const taggedTitle = JSON.stringify({ ...title, sideDialogId: dialogId, sideConversationId: g.id });
+    // The child owns notifications (including question deduplication and approval
+    // titles). Relaying its dialog must not send a second notification in the parent.
+    const taggedTitle = JSON.stringify({ ...title, notify: false, sideDialogId: dialogId, sideConversationId: g.id });
     g.dialogIds.add(dialogId);
     publish(g);
     try {

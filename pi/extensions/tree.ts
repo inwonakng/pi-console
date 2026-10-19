@@ -221,7 +221,11 @@ export default function treeExtension(pi: ExtensionAPI) {
 
 			if (!yes) {
 				const confirmed = await ctx.ui.confirm(
-					removedWorkspaces.length > 0 ? "Delete session history and workspaces?" : "Delete session history?",
+					JSON.stringify({
+						kind: "pi_confirmation",
+						prompt: removedWorkspaces.length > 0 ? "Delete session history and workspaces?" : "Delete session history?",
+						notify: false,
+					}),
 					deletionConfirmation(entryId, removedIds.size, removedWorkspaces),
 				);
 				if (!confirmed) return;

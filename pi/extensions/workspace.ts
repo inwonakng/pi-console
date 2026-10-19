@@ -19,7 +19,7 @@ import {
   type IntegrationMode,
 } from "./shared/integration-state";
 import { getInteractionMode } from "./shared/interaction-mode";
-import { notifyPiWorkspaceIntegration, suppressNextInputNotification } from "./shared/notifications";
+import { notifyPiWorkspaceIntegration } from "./shared/notifications";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 import { loadExtensionSettings } from "./shared/extension-settings";
 import { activeLocation, moveToLocation, publishWorkspaceState } from "./shared/workspace-navigation";
@@ -682,21 +682,24 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           : RETURN_ACTION;
         const operationSignal = signal ? AbortSignal.any([signal, runtimeCancellation.signal]) : runtimeCancellation.signal;
         if (integrationMode === "ask" && getInteractionMode(ctx) === "interactive") {
+          let firstPrompt = true;
           while (true) {
             const preview = await previewWorkspaceIntegration(selected.id, operationSignal);
-            notifyPiWorkspaceIntegration(ctx);
+            if (firstPrompt) {
+              notifyPiWorkspaceIntegration(ctx);
+              firstPrompt = false;
+            }
             const prompt = `Apply ${selected.label} to ${selected.destinationRoot}?${ignoredReviewNote(selected)}`;
             decision = await ctx.ui.select(
-              ctx.mode === "rpc" ? JSON.stringify({
-                kind: "pi_compact_select", prompt, resumable: true,
+              JSON.stringify({
+                kind: "pi_compact_select", prompt, notify: false, resumable: true,
                 preview, preview_kind: "workspace_summary",
-              }) : `${prompt}\n\n${preview}`,
+              }),
               [INTEGRATE_ACTION, REVIEW_ACTION, RETURN_ACTION],
               { signal: ctx.signal },
             ) ?? RETURN_ACTION;
             if (decision === INTEGRATE_ACTION && await previewWorkspaceIntegration(selected.id, operationSignal) !== preview) {
               ctx.ui.notify("Workspace or destination changes updated the integration summary. Review the refreshed preview before integrating.", "warning");
-              suppressNextInputNotification();
               continue;
             }
             if (decision !== REVIEW_ACTION) {
@@ -706,8 +709,6 @@ export default function workspaceExtension(pi: ExtensionAPI) {
             if (!review.launched) {
               return retainedForManualReview(selected, review.reason);
             }
-            // The loop immediately reopens the same picker after Review; only its first appearance should ping.
-            suppressNextInputNotification();
           }
         }
         if (decision !== INTEGRATE_ACTION) {

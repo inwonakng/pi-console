@@ -67,7 +67,8 @@ export async function cloneThroughEntry(
   const scope = trustScope(cwd, sourceFile);
   if (decision !== undefined) {
     if (!ctx.hasUI) return undefined;
-    const approved = await ctx.ui.confirm("Copy conversation-only project trust to the clone?",
+    const approved = await ctx.ui.confirm(
+      JSON.stringify({ kind: "pi_confirmation", prompt: "Copy conversation-only project trust to the clone?", notify: false }),
       `The new conversation will start ${decision ? "trusted" : "untrusted"} for this project and its managed workspaces.`);
     if (!approved) return undefined;
   }

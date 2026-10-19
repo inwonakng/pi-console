@@ -4,6 +4,7 @@ import {
 	notificationsEnabled,
 	notifyPiFinished,
 	notifyPiNeedsInput,
+	promptDisablesNotification,
 	parseNotificationMode,
 	setNotificationsEnabled,
 	toggleNotificationsEnabled,
@@ -11,7 +12,6 @@ import {
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 import { loadExtensionSettings } from "./shared/extension-settings";
 import { getPendingWorkspaceId } from "./shared/workspace";
-import { isNavigationPrompt } from "./shared/navigation";
 
 const NOTIFICATIONS_SETTING = "notifications";
 
@@ -70,7 +70,7 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("ui_prompt_start", (event, ctx) => {
-		if (isNavigationPrompt(event.title)) return;
+		if (promptDisablesNotification(event.title)) return;
 		const notified = notifyPiNeedsInput(ctx, undefined, !questionNotification?.notified);
 		if (questionNotification && notified) questionNotification.notified = true;
 	});

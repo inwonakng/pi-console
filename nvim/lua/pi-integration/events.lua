@@ -669,6 +669,9 @@ function M.handle_extension_ui_request(ctx, event)
 			event.side_conversation_id = title.sideConversationId
 			if title.kind == "pi_side_dialog" then event.title = title.title end
 		end
+		if title and title.kind == "pi_input" and type(title.prompt) == "string" then
+			event.title = title.prompt
+		end
 		pending_picker.enqueue(ctx, event, function(request)
 			handle_extension_ui_request(ctx, request)
 		end)
