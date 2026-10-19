@@ -15,6 +15,10 @@ if [ -f "$pi_console_marker" ]; then
     esac
     export PI_CONSOLE_NVIM_APPNAME="pi-console-release-$PI_CONSOLE_BUILD_COMMIT"
     export PI_CONSOLE_TMUX_SESSION="agents-${PI_CONSOLE_BUILD_COMMIT:0:12}"
+    if [[ "$PI_CONSOLE_BUILD_REF" =~ ^v[0-9]+(\.[0-9]+)+$ ]]; then
+        # Dots are reserved separators in tmux targets, not session names.
+        export PI_CONSOLE_TMUX_SESSION="agents-${PI_CONSOLE_BUILD_REF//./_}"
+    fi
 else
     export PI_CONSOLE_CHANNEL=dev
     export PI_CONSOLE_BUILD_REF=checkout
