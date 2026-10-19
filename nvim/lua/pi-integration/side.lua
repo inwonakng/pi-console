@@ -269,6 +269,7 @@ local function ensure_buffers(ctx, side)
 	end
 	for _, buf in ipairs({ side.transcript_buf, side.input_buf }) do
 		vim.keymap.set("n", "<leader>pb", function() M.toggle(ctx) end, { buffer = buf, desc = "Toggle side conversation" })
+		vim.keymap.set("n", "<leader>n", function() M.new(ctx) end, { buffer = buf, desc = "New side conversation" })
 		vim.keymap.set("n", "<leader>pa", ctx.actions.restore_pending_action, { buffer = buf, desc = "Restore pending action" })
 		for _, lhs in ipairs({ "<C-k>", "<C-w>k", "<C-w><C-k>" }) do
 			vim.keymap.set("n", lhs, function() if valid(side.transcript_win) then vim.api.nvim_set_current_win(side.transcript_win) end end, { buffer = buf })
@@ -297,7 +298,11 @@ function M.toggle(ctx)
 	side.input_win = vim.api.nvim_open_win(side.input_buf, true, {
 		relative = "editor", width = width, height = ih, row = row + th + 2, col = col,
 		style = "minimal", border = "rounded", title = " Side input ",
-		footer = " Ctrl+Enter: send | Space pb or :q: hide | :PiSideReset: reset ",
+		footer = {
+			{ " " }, { "Ctrl+Enter", "PiOverviewKey" }, { " send · " },
+			{ "<leader>pb", "PiOverviewKey" }, { "/" }, { ":q", "PiOverviewKey" }, { " hide · " },
+			{ "<leader>n", "PiOverviewKey" }, { " new chat " },
+		},
 	})
 	side.window_group = vim.api.nvim_create_augroup("PiSideWindows", { clear = true })
 	for _, win in ipairs({ side.transcript_win, side.input_win }) do
@@ -322,7 +327,7 @@ function M.toggle(ctx)
 	command(ctx, { action = "open" })
 end
 
-function M.reset(ctx)
+function M.new(ctx)
 	local side = ctx.state.side
 	if side then side.draft_sequence = side.draft_sequence + 1 end
 	command(ctx, { action = "reset" })

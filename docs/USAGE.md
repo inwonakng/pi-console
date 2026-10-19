@@ -55,9 +55,10 @@ the normal dialog UI and wait their turn if another request is open. The main
 agent keeps working; neither side prompts nor answers enter its model context.
 
 The first side prompt captures finalized main context. Follow-ups retain that
-snapshot. `:PiSideReset` cancels side work, clears side history, and captures fresh
-main context; `:PiSideAbort` stops only the side run. Select side transcript lines
-and use `:PiSteer` to explicitly send them to the main run.
+snapshot. In either side buffer, normal-mode `<leader>n` (or `:PiSideNew`) starts
+a new side conversation: it cancels side work, clears side history and the draft,
+and captures fresh main context. `:PiSideAbort` stops only the side run. Select
+side transcript lines and use `:PiSteer` to explicitly send them to the main run.
 
 Side history and drafts are stored inside the parent session and restored on
 restart. Send a main prompt first to create the saved parent session. Navigating

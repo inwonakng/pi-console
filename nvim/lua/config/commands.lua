@@ -86,9 +86,9 @@ vim.api.nvim_create_user_command("PiSide", function()
 	require("pi-integration").toggle_side()
 end, { desc = "Toggle the side conversation" })
 
-vim.api.nvim_create_user_command("PiSideReset", function()
-	require("pi-integration").reset_side()
-end, { desc = "Reset side history and capture fresh main context" })
+vim.api.nvim_create_user_command("PiSideNew", function()
+	require("pi-integration").new_side()
+end, { desc = "Start a new side conversation with fresh main context" })
 
 vim.api.nvim_create_user_command("PiSideAbort", function()
 	require("pi-integration").abort_side()

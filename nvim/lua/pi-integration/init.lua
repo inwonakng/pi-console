@@ -530,8 +530,8 @@ function M.toggle_side()
 	require("pi-integration.side").toggle(integration_ctx())
 end
 
-function M.reset_side()
-	require("pi-integration.side").reset(integration_ctx())
+function M.new_side()
+	require("pi-integration.side").new(integration_ctx())
 end
 
 function M.abort_side()

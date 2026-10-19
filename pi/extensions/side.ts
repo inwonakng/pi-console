@@ -470,7 +470,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       const g = current ??= restore(ctx);
       g.ctx = ctx;
       if (request.action === "open") { publish(g); reply(true); return; }
-      if (transition) { reject("Side conversation is stopping or resetting."); return; }
+      if (transition) { reject("Side conversation is stopping or starting a new chat."); return; }
       if (request.action === "draft") {
         if (typeof request.draft !== "string") { reject("Side draft must be a string."); return; }
         if (g.draft !== request.draft) {
@@ -489,7 +489,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       if (request.action === "reset") {
         // Capture now, before waiting for the old child, even while main streams.
         const next = fresh(ctx, snapshot(ctx, pi));
-        g.activity = "Resetting side conversation";
+        g.activity = "Starting new side conversation";
         publish(g);
         transition = retire(g).then(() => {
           current = next;
@@ -508,7 +508,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       }
       if (g.running) { reject("Side conversation is busy; the prompt was not queued."); return; }
       if (g.pendingPrompt || g.child?.stopped) {
-        reject("The previous side request was interrupted or could not start. Use :PiSideReset before sending another prompt.");
+        reject("The previous side request was interrupted or could not start. Use :PiSideNew before sending another prompt.");
         return;
       }
       if (typeof request.message !== "string" || !request.message.trim()) { reject("Side prompt must not be empty."); return; }
