@@ -33,9 +33,9 @@ fi
 printf -v launch 'bash %q' "$app_root/bin/pi-console"
 tmux source-file "$script_dir/../pi-console.conf"
 bash "$app_root/tmux/scripts/popup-client.sh" --install-hooks "$(tmux display-message -p '#{socket_path}')"
-tmux bind-key g run-shell "$launch tmux toggle '#{pane_id}' '#{client_name}'"
-tmux bind-key G run-shell "$launch tmux new '#{pane_id}' '#{client_name}'"
-tmux bind-key o run-shell "$launch tmux overview '#{pane_id}' '#{client_name}'"
+tmux bind-key g run-shell -b "$launch tmux toggle '#{pane_id}' '#{client_name}'"
+tmux bind-key G run-shell -b "$launch tmux new '#{pane_id}' '#{client_name}'"
+tmux bind-key o run-shell -b "$launch tmux overview '#{pane_id}' '#{client_name}'"
 tmux bind-key O run-shell "$launch tmux sidebar '#{pane_id}'"
 if [ "$#" -eq 0 ]; then
     printf 'Applied %s bindings to the running tmux server.\n' "$PI_CONSOLE_CHANNEL"
