@@ -317,7 +317,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       writeFileSync(g.file, [g.seed.header, ...g.entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
       const promptFile = join(g.directory, "system-prompt.md");
       writeFileSync(promptFile, `${g.seed.source.systemPrompt}\n\nYou are answering an independent side conversation. The earlier conversation is a fixed snapshot for reference. Do not resume its task or assume its tools are available: use only your currently declared tools. Act only on requests in this side conversation. Your access mode is fixed to ask; request approval for writes and additional shell capabilities. Side answers are not sent to the main agent.\n`, { mode: 0o600 });
-      const args = ["--mode", "rpc", "--session", g.file, "--no-extensions", "--no-approve", "--no-context-files", "--system-prompt", promptFile,
+      const args = ["--mode", "rpc", "--session", g.file, "--no-approve", "--no-context-files", "--system-prompt", promptFile,
         "-e", join(dirname(fileURLToPath(import.meta.url)), "access-mode.ts"),
         "-e", "builtin:codemode", "-e", "builtin:tool-search", "--tools", "read,bash,edit,write,grep,find,ls,codemode,tool_search"];
       if (g.seed.source.model) args.push("--provider", g.seed.source.model.provider, "--model", g.seed.source.model.id);
