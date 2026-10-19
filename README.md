@@ -96,7 +96,7 @@ but do not automatically close their attachments after session destruction.
 | Key | Action |
 |---|---|
 | `<prefix>g` | Toggle the conversation popup |
-| `<prefix>G` | Start a conversation in the current pane's directory |
+| `<prefix>G` | Start a conversation in the agents session, using the current pane's directory |
 | `<prefix>o` | Open or focus the overview |
 | `<prefix>O` | Toggle the sidebar |
 

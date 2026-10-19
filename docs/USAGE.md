@@ -244,7 +244,7 @@ server. If no server is running, they take effect next startup. A custom
 | Key | Action |
 |---|---|
 | `<prefix>g` | Toggle the conversation popup |
-| `<prefix>G` | Start a conversation in the current tmux session and pane's directory |
+| `<prefix>G` | Start a conversation in the agents session, using the current pane's directory |
 | `<prefix>o` | Open or focus the overview; close the popup if already focused |
 | `<prefix>O` | Toggle the sidebar in the current window |
 
@@ -255,8 +255,9 @@ other session on the same tmux server.
 
 For independent terminal windows, create a separate tmux session in each and run
 `pi-console` or `pi-console-dev` there. `<leader>pN` creates a new conversation tab
-in that same tmux session, using the current project directory. `<prefix>G` also
-creates locally; `<prefix>g` remains access to the central conversation popup.
+in that same tmux session, using the current project directory. `<prefix>G` always
+creates in the channel's central agents session and opens its popup when invoked
+from another session; `<prefix>g` toggles access to that popup.
 The overview stays global: selecting a running conversation visits its existing
 location; reopening a stopped conversation creates a tab in the overview's own
 session. Enter in the overview/sidebar carries the sending tmux client's identity,
