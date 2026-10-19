@@ -121,7 +121,7 @@ export function hasPermission(permission: Permission, cwd: string): boolean {
     if (permission.kind === "unsandboxed" && grant.kind === "unsandboxed") {
       return grant.scope === scope && grant.cwd === permission.cwd && grant.cwd === canonicalPath(cwd);
     }
-    if (kind === "network") return grant.scope === scope || scope.startsWith(`${grant.scope}:`);
+    if (kind === "network") return grant.scope === "*" || grant.scope === scope || scope.startsWith(`${grant.scope}:`);
     return grant.scope === scope;
   });
 }
@@ -131,7 +131,7 @@ function permissionSummary(permission: Permission): string {
     case "read": return `Allow reading ${permission.scope}? Directory approval includes descendants.`;
     case "write": return `Allow reading and writing ${permission.scope}? Directory approval includes descendants.`;
     case "network": return permission.scope === "*"
-      ? "Allow outbound network access to any host for this command only? The command can send data it can read, including inherited environment values. Filesystem restrictions and sandbox network safeguards remain in place."
+      ? "Allow outbound network access to any host, once or for this session? Commands can send data they can read, including inherited environment values. Filesystem restrictions and sandbox network safeguards remain in place."
       : `Allow network access to ${permission.scope}?`;
     case "tool": return `Allow running ${permission.scope}?`;
     case "unix-socket": return `Allow Unix-socket binding and connections at ${permission.scope}? Directory approval includes descendants and can expose local services. Filesystem and outbound-network restrictions remain in place.`;
@@ -149,7 +149,7 @@ export function requestPermission(
 ): Promise<void> {
   const requestedGeneration = generation;
   const scopeLabel = permission.kind === "network" && permission.scope === "*"
-    ? "outbound network access to any host (this command only)" : permission.scope;
+    ? "outbound network access to any host" : permission.scope;
   const signal = ctx.signal ? AbortSignal.any([ctx.signal, approvalLifetime.signal]) : approvalLifetime.signal;
   const run = async () => {
     const assertCurrent = () => {
@@ -162,7 +162,6 @@ export function requestPermission(
     if (getInteractionMode(ctx) !== "interactive") {
       throw new Error(`${permission.kind} access requires approval, but interaction mode is noninteractive: ${scopeLabel}`);
     }
-    const canRemember = remember && !(permission.kind === "network" && permission.scope === "*");
     const summary = permissionSummary(permission);
     const contents = typeof preview === "function" ? preview() : preview;
     const title = ctx.mode === "rpc" ? JSON.stringify({
@@ -174,12 +173,13 @@ export function requestPermission(
     }) : `${summary}\n${contents.text}`;
     notifyPiToolApproval(ctx);
     const sessionChoice = permission.kind === "unsandboxed"
-      ? "Allow this command outside the sandbox for this session" : "Allow for session";
-    const choices = canRemember ? ["Allow once", sessionChoice, "Deny"] : ["Allow once", "Deny"];
+      ? "Allow this command outside the sandbox for this session"
+      : permission.kind === "network" ? "Allow network for this session" : "Allow for session";
+    const choices = remember ? ["Allow once", sessionChoice, "Deny"] : ["Allow once", "Deny"];
     const choice = await ctx.ui.select(title, choices, { signal });
     assertCurrent();
     if (getAccessMode() === "readonly") throw new Error("Permission request cancelled because access mode changed to readonly.");
-    if (choice !== "Allow once" && !(canRemember && choice === sessionChoice)) {
+    if (choice !== "Allow once" && !(remember && choice === sessionChoice)) {
       throw new Error(`${permission.kind} access denied by user: ${scopeLabel}`);
     }
     if (choice === sessionChoice) {

@@ -301,9 +301,13 @@ Check the requested access scope as well as the command's working directory.
 Approving a directory includes its descendants.
 
 - File access can be allowed once or for the session.
-- Shell network approval applies to one command and can reach any host. It can
-  send any data that command can read, including environment values. Existing
-  saved host-specific grants still apply.
+- Shell network access can be allowed once or with **Allow network for this
+  session**. The session choice permits subsequent commands to reach any host,
+  including after resuming this conversation, without changing the access mode
+  or lifting filesystem restrictions. Commands can send any data they can read,
+  including environment values. Sandbox network safeguards still apply, and
+  `readonly` mode still blocks shell network access. Existing saved host-specific
+  grants also apply.
 - An **unsandboxed** command has unrestricted host access, including its child
   processes. Session approval covers the exact command and working directory,
   including future edits to scripts it runs.
@@ -312,7 +316,7 @@ Approving a directory includes its descendants.
   Path-scoped socket grants are unavailable on Linux.
 
 Unsandboxed and socket approvals expire on session/branch replacement or process
-exit. Saved file and host grants can survive resume. Grants are not inherited by
+exit. Saved file and network grants survive resume. Grants are not inherited by
 new conversations, forks, or subagents.
 
 A sandbox error can occur after a command has partly run. Check what changed

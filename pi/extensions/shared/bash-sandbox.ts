@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { getAccessMode, getScratchDirectory, setScratchDirectory } from "./access-state";
 import { loadExtensionSettings } from "./extension-settings";
-import { baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, pathInside, requestPermission, resolveToolPath } from "./permissions";
+import { baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, hasPermission, pathInside, requestPermission, resolveToolPath } from "./permissions";
 
 export type BashAccessRequest = {
   readPaths?: string[];
@@ -39,10 +39,10 @@ let commandUnixSocketPaths: string[] = [];
 
 function networkConfig(): SandboxRuntimeConfig["network"] {
   return {
-    allowedDomains: getGrantedScopes("network"),
+    allowedDomains: getGrantedScopes("network").filter((scope) => scope !== "*"),
     deniedDomains: [],
     // The runtime rejects an allowedDomains "*". Its callback checks the
-    // command's upfront grant instead; it never asks for permission at runtime.
+    // command's upfront or session grant instead; it never prompts at runtime.
     strictAllowlist: !commandNetworkAccess || getAccessMode() === "readonly",
     allowLocalBinding: false,
     allowUnixSockets: getAccessMode() === "readonly" ? [] : commandUnixSocketPaths,
@@ -242,10 +242,11 @@ async function executeRestricted(
   }
   sockets.push(...getGrantedScopes("unix-socket"));
   if (request.networkAccess) {
-    await requestPermission(context, { kind: "network", scope: "*" }, "bash", preview, onSessionGrant, false);
+    await requestPermission(context, { kind: "network", scope: "*" }, "bash", preview, onSessionGrant);
   }
   if (options.signal?.aborted) throw new Error("aborted");
-  return runSandboxed(command, root, options, context, filesystem, request.networkAccess === true,
+  const networkAccess = request.networkAccess === true || hasPermission({ kind: "network", scope: "*" }, root);
+  return runSandboxed(command, root, options, context, filesystem, networkAccess,
     [...new Set(sockets)], onSessionGrant, onBlocked);
 }
 
