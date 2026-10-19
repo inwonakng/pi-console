@@ -136,9 +136,12 @@ You can also select several sessions at once to archive or delete them.
 <details>
 <summary>Conversation tree</summary>
 
-`<leader>h` and `<leader>T` open the same conversation history tree. Assistant
-messages and their tool round-trips stay grouped into turns; the lower pane
-previews the full text.
+`<leader>h` opens the conversation history tree on the active turn. Selection
+uses a line highlight, without a text cursor; search and other editors retain
+the normal cursor. Assistant messages and their tool round-trips stay grouped
+into turns; the lower pane previews the full text. The compact header highlights
+common keys in blue; `?` shows all bindings, including preview scrolling, summary
+jumps, and refresh.
 
 - `b` toggles the full tree and the current branch. `o` cycles entry-type filters.
 - `/` searches full user/assistant turn text with fuzzy matching, keeping tree

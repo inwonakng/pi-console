@@ -1,4 +1,6 @@
 local floats = require("pi-integration.floats")
+local help = require("pi-integration.help")
+local list_cursor = require("pi-integration.list-cursor")
 local guard = require("pi-integration.utils.guard")
 local json = require("pi-integration.utils.json")
 local time_utils = require("pi-integration.utils.time")
@@ -177,7 +179,11 @@ local function read_session_tree(ctx, path)
 		leaf_node = leaf_node.parent
 	end
 	local leaf_view = leaf_node and visible_by_node[leaf_node] or nil
-	return roots, leaf_view and leaf_view.target_id or nil
+	local focus_view = leaf_view
+	while focus_view and focus_view.kind ~= "user" and focus_view.kind ~= "assistant" do
+		focus_view = focus_view.parent
+	end
+	return roots, leaf_view and leaf_view.target_id or nil, focus_view and focus_view.target_id or nil
 end
 
 local function node_title_highlight(node)
@@ -355,7 +361,7 @@ local function apply_tree_highlights(ctx)
 			vim.api.nvim_buf_set_extmark(state.tree_buf, tree_highlight_ns, line - 1, highlight.start_col, {
 				end_col = highlight.end_col,
 				hl_group = highlight.hl_group,
-				priority = 250,
+				priority = highlight.priority or 250,
 			})
 		end
 	end
@@ -371,6 +377,7 @@ end
 
 local function close_tree_window(ctx)
 	local state = ctx.state
+	floats.close_descendants(state.tree_win)
 	floats.close_window(state.tree_win)
 	floats.close_window(state.tree_preview_win)
 	state.tree_win = nil
@@ -551,7 +558,7 @@ local function render_tree_buffer(ctx, opts)
 		return false
 	end
 
-	local roots, leaf_id = read_session_tree(ctx, path)
+	local roots, leaf_id, focus_id = read_session_tree(ctx, path)
 	if #roots == 0 and not opts.allow_empty and (state.tree_search_query or "") == "" and state.tree_scope ~= "branch" then
 		ctx.ui.notify("No tree entries found in this session.", vim.log.levels.WARN)
 		return false
@@ -564,19 +571,32 @@ local function render_tree_buffer(ctx, opts)
 		state.tree_preview_buf = ctx.buffer.create("pi://tree-preview", "markdown", false)
 	end
 
-	local lines = {
-		"Pi session tree",
-		"Scope: " .. (state.tree_scope == "branch" and "current branch" or "full tree")
-			.. "    Filter: " .. (state.tree_filter_mode or "default"),
-		"<CR> jump   S jump with summary   c clone   d delete subtree",
-		"b scope   o entry filter   / search   n/N next/previous match",
-		"<C-f>/<C-b> preview   r refresh   q close",
-		"Search: " .. (state.tree_search_query or ""),
-		"",
-	}
+	local lines, highlights = {}, {}
+	local function hint_line(items)
+		local text, spans = "", {}
+		for _, item in ipairs(items) do
+			if text ~= "" then text = text .. " · " end
+			table.insert(spans, { start_col = #text, end_col = #text + #item[1], hl_group = "PiOverviewKey" })
+			text = text .. item[1] .. " " .. item[2]
+		end
+		table.insert(lines, text)
+		table.insert(spans, 1, { start_col = 0, end_col = #text, hl_group = "PiOverviewStatusLine", priority = 200 })
+		highlights[#lines] = spans
+	end
+	local filters = { default = "Default", ["user-only"] = "User only", all = "All entries" }
+	local mode = state.tree_filter_mode or "default"
+	hint_line({ { "b", state.tree_scope == "branch" and "Current branch" or "Full tree" }, { "o", filters[mode] or mode } })
+	hint_line({ { "Enter", "Jump" }, { "c", "Clone" }, { "d", "Delete" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
+	local query = state.tree_search_query or ""
+	local search_row
+	if query ~= "" then
+		table.insert(lines, "")
+		search_row = #lines
+	end
+	table.insert(lines, "")
 	state.tree_nodes_by_line = {}
 	state.tree_match_rows = {}
-	state.tree_highlights_by_line = {}
+	state.tree_highlights_by_line = highlights
 	state.tree_workspace_highlights = {}
 	state.tree_workspace_highlight_slots = {}
 	if #roots == 0 then
@@ -588,10 +608,20 @@ local function render_tree_buffer(ctx, opts)
 		if node.match_positions then table.insert(state.tree_match_rows, row) end
 	end
 	table.sort(state.tree_match_rows)
-	lines[6] = lines[6] .. ((state.tree_search_query or "") ~= "" and (" · " .. #state.tree_match_rows .. " matching turns") or "")
+	if search_row then
+		local suffix = " · " .. #state.tree_match_rows .. " matches · "
+		local key_hint = "n/N Next/previous"
+		local query_width = tree_window_width(ctx) - display_width("Search: " .. suffix .. key_hint)
+		local prefix = "Search: " .. truncate_display(query, math.max(1, query_width)) .. suffix
+		lines[search_row] = prefix .. key_hint
+		highlights[search_row] = {
+			{ start_col = 0, end_col = #lines[search_row], hl_group = "PiOverviewStatusLine", priority = 200 },
+			{ start_col = #prefix, end_col = #prefix + 3, hl_group = "PiOverviewKey" },
+		}
+	end
 	ctx.buffer.set_lines(state.tree_buf, lines, false)
 	apply_tree_highlights(ctx)
-	return true
+	return true, focus_id
 end
 
 local function restore_tree_view(ctx, opts)
@@ -821,7 +851,8 @@ function M.show(ctx)
 
 	local width = math.min(math.max(72, math.floor(vim.o.columns * 0.82)), vim.o.columns - 4)
 	state.tree_width = width
-	if not render_tree_buffer(ctx) then
+	local rendered, focus_id = render_tree_buffer(ctx)
+	if not rendered then
 		return
 	end
 
@@ -856,8 +887,14 @@ function M.show(ctx)
 	})
 	vim.api.nvim_set_option_value("wrap", false, { win = state.tree_win })
 	vim.api.nvim_set_option_value("cursorline", true, { win = state.tree_win })
+	vim.api.nvim_set_option_value("cursorlineopt", "line", { win = state.tree_win })
 	vim.api.nvim_set_option_value("wrap", true, { win = state.tree_preview_win })
 	vim.api.nvim_set_option_value("cursorline", false, { win = state.tree_preview_win })
+	list_cursor.attach(state.tree_buf)
+	list_cursor.attach(state.tree_preview_buf)
+	local first_row
+	for row in pairs(state.tree_nodes_by_line) do first_row = math.min(first_row or row, row) end
+	restore_tree_view(ctx, { entry_id = focus_id, row = state.tree_match_rows[1] or first_row or 1 })
 	update_preview(ctx)
 	floats.close_on_win_leave(state.tree_buf, function()
 		close_tree_window(ctx)
@@ -872,6 +909,27 @@ function M.show(ctx)
 	vim.keymap.set("n", "<CR>", function()
 		jump_to_node(ctx, false)
 	end, { buffer = state.tree_buf, desc = "Jump to tree entry" })
+	vim.keymap.set("n", "?", function()
+		state.tree_help = state.tree_help or {}
+		help.toggle_window(state.tree_help, {
+			name = "pi://tree-help", title = "History keys", parent = state.tree_win,
+			lines = {
+				"# Conversation history", "",
+				"- `Enter` jump to the selected turn (preserves history).",
+				"- `S` jump with a branch summary.",
+				"- `c` clone through the selected turn into a new window.",
+				"- `d` delete the turn and all descendants; choose whether to undo recorded work.",
+				"- `b` toggle full tree / current branch.",
+				"- `o` cycle entry filters.",
+				"- `/` fuzzy search full turn text; Enter accepts, Esc cancels.",
+				"- `n` / `N` locate the next / previous matching turn without jumping.",
+				"- Clear the search query to reveal the located turn in the unfiltered tree.",
+				"- `<C-f>` / `<C-b>` scroll the preview down / up.",
+				"- `r` refresh without changing the selection.",
+				"- `q` / `<Esc>` close this view.",
+			},
+		})
+	end, { buffer = state.tree_buf, desc = "History tree help" })
 	vim.keymap.set("n", "S", function()
 		jump_to_node(ctx, true)
 	end, { buffer = state.tree_buf, desc = "Jump to tree entry with summary" })

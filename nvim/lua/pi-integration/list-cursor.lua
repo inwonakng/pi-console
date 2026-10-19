@@ -22,6 +22,7 @@ local function update()
 end
 
 function M.attach(buf)
+	if buffers[buf] then update(); return end
 	buffers[buf] = true
 	if not group then
 		group = vim.api.nvim_create_augroup("PiListCursor", { clear = true })

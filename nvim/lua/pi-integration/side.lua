@@ -116,7 +116,8 @@ local function render(ctx, side, follow_tail)
 	if type(side.data.partialMessage) == "table" then table.insert(all, side.data.partialMessage) end
 	local lines, items = messages.collect_message_lines(render_ctx(ctx, side), all)
 	if side.data.error and side.data.error ~= "" then
-		vim.list_extend(lines, { "", "### Side error", "", side.data.error })
+		vim.list_extend(lines, { "", "### Side error", "" })
+		vim.list_extend(lines, vim.split(side.data.error, "\n", { plain = true }))
 	end
 	local preserve_view = follow_tail ~= true or vim.api.nvim_get_current_win() == side.transcript_win
 	local view = valid(side.transcript_win) and vim.api.nvim_win_call(side.transcript_win, vim.fn.winsaveview)

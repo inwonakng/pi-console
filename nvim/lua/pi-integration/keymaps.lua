@@ -30,7 +30,6 @@ M.specs = {
 		{ lhs = "<leader>t", action = "pick_thinking", desc = "Pick thinking level" },
 		{ lhs = "<leader>s", action = "pick_session", desc = "Pick session" },
 		{ lhs = "<leader>h", action = "show_tree", desc = "Conversation history tree" },
-		{ lhs = "<leader>T", action = "show_tree", desc = "Session tree" },
 		{ lhs = "<leader>pn", action = "new_session", desc = "New session in current window" },
 		{ lhs = "<leader>pN", action = "new_session_window", desc = "New session in project directory" },
 		{ lhs = "<leader>n", action = "toggle_notifications", desc = "Toggle notifications" },

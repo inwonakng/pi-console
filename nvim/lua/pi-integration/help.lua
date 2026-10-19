@@ -55,7 +55,7 @@ function M.toggle_window(state, options)
 		floats.close_window(state.help_win)
 		state.help_win = nil
 	end
-	floats.close_on_win_leave(state.help_buf, close_help_win, { win = state.help_win })
+	floats.close_on_win_leave(state.help_buf, close_help_win, { win = state.help_win, parent = options.parent })
 	vim.keymap.set("n", "q", close_help_win, { buffer = state.help_buf, desc = "Close help" })
 	vim.keymap.set("n", "<Esc>", close_help_win, { buffer = state.help_buf, desc = "Close help" })
 end
@@ -122,7 +122,8 @@ function M.toggle(ctx)
 		"",
 		"## Conversation history tree",
 		"",
-		"- `<leader>h` / `<leader>T`: one history viewer, grouped by turn, with full-text preview.",
+		"- `<leader>h`: history tree, grouped by turn, opening on the active turn with highlight-only selection.",
+		"- `?` in the tree shows all bindings; the compact header shows common actions.",
 		"- `b`: full tree/current branch; `o`: entry filter; `/`: fuzzy search full turn text in tree order.",
 		"- Search Enter only locates; `n` / `N` select matches. Clear `/` query to reveal the located turn in the full view.",
 		"- Tree Enter jumps; `S` jumps with summary. Neither deletes history.",
