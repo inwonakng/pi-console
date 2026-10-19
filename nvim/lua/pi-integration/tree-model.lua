@@ -282,7 +282,7 @@ function M.node_text(node, extract_text)
 		if #names > 0 then
 			return "(tool activity: " .. table.concat(names, ", ") .. ")"
 		end
-		return "(workspace activity)"
+		return "(no response text or tool activity)"
 	end
 
 	local record = node.record
@@ -324,6 +324,12 @@ function M.node_title(node)
 	if node.kind == "user" then
 		return "User"
 	elseif node.kind == "assistant" then
+		for index = #node.records, 1, -1 do
+			local record = node.records[index]
+			if record.type == "message" and record.message and record.message.role == "assistant" then
+				return record.message.stopReason == "aborted" and "Assistant (interrupted)" or "Assistant"
+			end
+		end
 		return "Assistant"
 	elseif node.kind == "branch_summary" then
 		return "Branch summary"
