@@ -88,6 +88,11 @@ pi-console tmux setup
 This backs up changed configuration, saves the bindings, and applies them to the
 running server. Detach and reattach existing clients when first enabling it.
 
+On tmux 3.8+, destroying the session currently viewed in a popup closes that
+popup. Intentional session switches keep it open, and normal clients retain
+your `detach-on-destroy` policy. Older servers still support launching popups,
+but do not automatically close their attachments after session destruction.
+
 | Key | Action |
 |---|---|
 | `<prefix>g` | Toggle the conversation popup |

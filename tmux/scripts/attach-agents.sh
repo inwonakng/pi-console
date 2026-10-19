@@ -11,6 +11,14 @@ pane_id=$1
 client_name=${2-}
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 source "$script_dir/../../bin/channel-env.sh"
+socket_path=$(tmux display-message -p '#{socket_path}')
+client_script="$script_dir/popup-client.sh"
+owned=$(bash "$client_script" --owned "$socket_path" "$client_name")
+if [ "$owned" = 1 ]; then
+    # Overview/new/toggle can be invoked after intentionally switching away.
+    # Reuse the owned attachment instead of opening another popup inside it.
+    exec tmux switch-client -c "$client_name" -t "=$PI_CONSOLE_TMUX_SESSION"
+fi
 
 # Query the running server, which may differ from the installed tmux binary.
 commands=$(tmux list-commands)
@@ -21,9 +29,6 @@ while read -r name alias flags rest; do
         break
     fi
 done <<< "$commands"
-socket_path=$(tmux display-message -p '#{socket_path}')
-client_script="$script_dir/popup-client.sh"
-
 if [ "$modal_supported" -eq 1 ]; then
     # Forward every key, including the prefix, without using Escape to dismiss.
     # -W preserves display-popup's wait-until-detached behavior. Force only the
@@ -32,6 +37,7 @@ if [ "$modal_supported" -eq 1 ]; then
         -s "$(tmux show-options -gv popup-style)" \
         bash -eu -c '
             tmux -S "$1" set-option -p -t "$TMUX_PANE" remain-on-exit off
+            tmux -S "$1" set-option -p -t "$TMUX_PANE" synchronize-panes off
             exec bash "$3" "$1" "$2"
         ' pi-agents "$socket_path" "$PI_CONSOLE_TMUX_SESSION" "$client_script"
 fi
