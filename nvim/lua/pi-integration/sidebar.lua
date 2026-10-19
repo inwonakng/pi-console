@@ -192,6 +192,9 @@ function M.open(config)
 	local function map(key, action, description)
 		table.insert(mapping_specs, { key, buffer = buf, desc = description })
 		vim.keymap.set("n", key, action, { buffer = buf, silent = true, desc = description, nowait = key == "g" })
+		if key == "<CR>" then
+			require("pi-integration.backends.tmux-input").register(buf, action)
+		end
 	end
 	local function tmux_action(action)
 		vim.system({ "bash", config.launcher, "tmux", action, vim.env.TMUX_PANE }, { text = true }, vim.schedule_wrap(function(result)

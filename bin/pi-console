@@ -89,6 +89,16 @@ while :; do
     else
         status=$?
     fi
+    # A crashed editor cannot run VimLeavePre, and an interactive parent shell
+    # may keep its tmux pane alive. Refresh saved tab state before returning to
+    # that shell (also covering a full frontend restart).
+    if [ -n "${TMUX-}" ]; then
+        socket_path=${TMUX%,*}
+        socket_path=${socket_path%,*}
+        if ! nvim --headless -u NONE -i NONE -l "$app_root/tmux/scripts/refresh-tabs.lua" "$socket_path"; then
+            printf 'pi-console: could not refresh tmux tabs after editor exit\n' >&2
+        fi
+    fi
     if [ "$status" -ne 0 ] || [ ! -f "$PI_CONSOLE_RESTART_FILE" ]; then
         exit "$status"
     fi

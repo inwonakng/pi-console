@@ -244,23 +244,59 @@ server. If no server is running, they take effect next startup. A custom
 | Key | Action |
 |---|---|
 | `<prefix>g` | Toggle the conversation popup |
-| `<prefix>G` | Start a conversation in the current pane's directory |
+| `<prefix>G` | Start a conversation in the current tmux session and pane's directory |
 | `<prefix>o` | Open or focus the overview; close the popup if already focused |
 | `<prefix>O` | Toggle the sidebar in the current window |
 
 The popup uses a modal pane on servers that support it. Closing it leaves the
-conversations running. Release and development builds use separate tmux sessions,
-but their overview lists can show conversations from both.
+conversations running. Release and development builds use separate central popup
+sessions, but their overview lists can show conversations from both and from any
+other session on the same tmux server.
+
+For independent terminal windows, create a separate tmux session in each and run
+`pi-console` or `pi-console-dev` there. `<leader>pN` creates a new conversation tab
+in that same tmux session, using the current project directory. `<prefix>G` also
+creates locally; `<prefix>g` remains access to the central conversation popup.
+The overview stays global: selecting a running conversation visits its existing
+location; reopening a stopped conversation creates a tab in the overview's own
+session. Enter in the overview/sidebar carries the sending tmux client's identity,
+so a cross-session jump switches only that terminal or popup, even when several
+clients display the overview. Clients attached to the same tmux session still
+share that session's selected window; use separate sessions for independent tabs.
+The client bridge is installed automatically when either list opens and preserves
+any existing root Enter binding outside an active overview/sidebar list.
 
 Focus the sidebar with normal tmux pane navigation, then use the
 [overview controls](#session-overview). Press `o` for the full overview or `q`
 to close the sidebar. It needs at least 20 columns of available space and stays
 in the window where you opened it.
 
-Conversation window icons show activity: blue for working, yellow for waiting
-for you, green for a completed unread turn, and red for an error. Focusing a
-completed conversation clears its unread indicator. Manually renaming a window
-opts it out of automatic icon naming.
+Each window displays its label followed by one status icon per conversation
+pane, ordered by numeric pane ID. Icons show activity independently: blue for
+working, yellow for waiting for you, green for a completed unread turn, and red
+for an error. Focusing a completed conversation clears its unread indicator.
+Icons follow panes when moved, disappear when their frontend exits, and do not
+become part of the actual window name.
+
+A single conversation in an automatically named window uses its short Pi slug;
+launcher-created tabs do too. The title model generates both the full title and a
+1–4-word lowercase, dash-joined slug (for example, `zotero-tag-cleanup`) in one
+request. The overview and history picker keep the full title. Both labels are
+saved with the conversation and restored on reopen.
+
+Existing sessions without a slug keep the truncated-title fallback; reopening
+one does not request a model call. Use `/pi-retitle` to regenerate both labels.
+An explicit Pi rename (`/pi-title` or `/pi-rename`) clears the previous slug and
+uses the new title until regenerated. Failed generation keeps the existing
+labels, or uses the deterministic title fallback for an untitled conversation.
+
+Manually named tmux windows retain their label, and renaming a window overrides
+only the label, not the icons. Multi-pane windows
+keep their existing label instead of choosing between conversation titles.
+Standard tab formats display labels up to 40 characters; themes with their own
+name expression keep their formatting. The full window name and overview title
+remain available.
+When the last conversation leaves, the previous tab display format is restored.
 
 Rerun setup after updates to pick up changed bindings, and close and relaunch
 frontends to use the new release. When enabling focus reporting for the first

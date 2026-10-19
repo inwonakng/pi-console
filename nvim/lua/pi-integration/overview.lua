@@ -316,6 +316,9 @@ function M.open(config)
 	local function map(key, callback, description)
 		table.insert(mapping_specs, { lhs = key, desc = description })
 		vim.keymap.set("n", key, callback, { buffer = list_buf, desc = description, silent = true, nowait = key == "g" })
+		if key == "<CR>" then
+			require("pi-integration.backends.tmux-input").register(list_buf, callback)
+		end
 	end
 	local function require_selected()
 		local entry = selected()

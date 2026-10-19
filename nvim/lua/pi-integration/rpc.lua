@@ -247,6 +247,7 @@ function M.start(ctx, sync_options)
 	end
 	local process = { active = true }
 	state.rpc_process = process
+	state.session_label = nil
 	state.stdout_pending = ""
 	state.stderr_pending = ""
 	state.last_stderr_lines = {}

@@ -15,6 +15,10 @@ local function reset_conversation(ctx, keep_transcript, keep_pending_messages, s
 	state.active_ui_request_id = nil
 	state.pending_user_messages = pending_user_messages
 	state.session_name = nil
+	-- Startup label status can precede get_state; preserve only its own session.
+	if not session_file or not state.session_label or state.session_label.sessionFile ~= session_file then
+		state.session_label = nil
+	end
 	state.message_count = 0
 	state.has_conversation_history = false
 	state.conversation_history_loaded = false

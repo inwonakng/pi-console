@@ -4,10 +4,15 @@ import { loadExtensionSettings } from "./shared/extension-settings";
 const TITLE_LIMIT = 80;
 const TITLE_MAX_TOKENS = 800;
 const TITLE_TIMEOUT_MS = 60_000;
+const LABEL_ENTRY = "pi-session-label";
+type SessionLabel = { title: string; slug?: string };
 const TITLE_SYSTEM_PROMPT = [
-	"You are a title generator. You output ONLY a thread title. Nothing else.",
+	'You generate conversation labels. Output ONLY a JSON object: {"title":"...","slug":"..."}.',
 	"Generate a brief title that would help the user find this conversation later.",
-	"Your output must be:",
+	"Also generate a concise slug for a narrow terminal tab: 1–4 lowercase words joined by single hyphens.",
+	"The slug must capture the topic, not just copy the first four words of the title. Use only letters, numbers, and hyphens.",
+	"Example output: {\"title\":\"Cleaning up Zotero library tags\",\"slug\":\"zotero-tag-cleanup\"}",
+	"No Markdown fences or text outside the JSON object. The title must be:",
 	"- A single line",
 	"- ≤80 characters",
 	"- No explanations",
@@ -109,13 +114,39 @@ function cleanTitle(text: string, limit = TITLE_LIMIT) {
 		.trim();
 }
 
-function cleanModelTitle(text: string) {
-	const withoutThinking = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
-	return cleanTitle(withoutThinking) || undefined;
+function validSlug(value: unknown): value is string {
+	return typeof value === "string" && value === value.toLowerCase()
+		&& /^[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+){0,3}$/u.test(value);
+}
+
+function cleanModelLabel(text: string): SessionLabel | undefined {
+	const content = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim()
+		.replace(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i, "$1");
+	let value: unknown;
+	try { value = JSON.parse(content); } catch { return undefined; }
+	if (!value || typeof value !== "object" || !("title" in value) || !("slug" in value)
+		|| typeof value.title !== "string" || !validSlug(value.slug)) return undefined;
+	const title = cleanTitle(value.title);
+	return title ? { title, slug: value.slug } : undefined;
+}
+
+function savedLabel(ctx: ExtensionContext, title: string | undefined): SessionLabel | undefined {
+	// Labels, like Pi session names, are session-wide rather than branch-local.
+	const entries = ctx.sessionManager.getEntries();
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type !== "custom" || entry.customType !== LABEL_ENTRY) continue;
+		const data = entry.data;
+		if (data && typeof data === "object" && "title" in data && data.title === title
+			&& typeof data.title === "string" && "slug" in data && validSlug(data.slug)) {
+			return { title: data.title, slug: data.slug };
+		}
+		return undefined;
+	}
 }
 
 function titleUserPrompt(text: string) {
-	return `Generate a title for this conversation:\n${text.slice(0, 1200)}`;
+	return `Generate a title and short slug for this conversation:\n${text.slice(0, 1200)}`;
 }
 
 function previewText(value: unknown, limit = 160) {
@@ -191,19 +222,30 @@ async function modelTitle(prompt: string, ctx: ExtensionContext, sessionSignal: 
 	}
 
 	const content = messageText(response);
-	const title = cleanModelTitle(content);
-	if (!title) {
+	const label = cleanModelLabel(content);
+	if (!label) {
 		throw new Error(
-			`Title response from ${model.provider}/${model.id} was empty after cleanup; stop_reason=${response.stopReason}; content=${previewText(content) || "<empty>"}`,
+			`Title response from ${model.provider}/${model.id} did not contain a valid title and 1–4-word lowercase slug; stop_reason=${response.stopReason}; content=${previewText(content) || "<empty>"}`,
 		);
 	}
-	return title;
+	return label;
 }
 
-function setTitle(pi: ExtensionAPI, ctx: ExtensionContext, title: string) {
+function publishLabel(ctx: ExtensionContext, label: SessionLabel | undefined) {
+	// Structured metadata is for the RPC frontend, not the terminal footer.
+	if (ctx.mode === "rpc") {
+		ctx.ui.setStatus(LABEL_ENTRY, JSON.stringify({ sessionFile: ctx.sessionManager.getSessionFile(), ...label }));
+	}
+}
+
+function setTitle(pi: ExtensionAPI, ctx: ExtensionContext, title: string, slug?: string) {
 	pi.setSessionName(title);
+	// An explicit rename or fallback without a slug also invalidates an old one.
+	const label = { title, slug };
+	pi.appendEntry<SessionLabel>(LABEL_ENTRY, label);
 	ctx.ui.setTitle(`Pi - ${title}`);
 	ctx.ui.setStatus("pi-session-title", title);
+	publishLabel(ctx, label);
 }
 
 export default function autoTitleExtension(pi: ExtensionAPI) {
@@ -219,6 +261,7 @@ export default function autoTitleExtension(pi: ExtensionAPI) {
 		sessionController = new AbortController();
 		titleGenerationInFlightForSession = undefined;
 		const title = pi.getSessionName();
+		publishLabel(ctx, savedLabel(ctx, title));
 		if (title) {
 			ctx.ui.setTitle(`Pi - ${title}`);
 			ctx.ui.setStatus("pi-session-title", title);
@@ -247,11 +290,11 @@ export default function autoTitleExtension(pi: ExtensionAPI) {
 
 		const signal = sessionController.signal;
 		void modelTitle(prompt, ctx, signal)
-			.then((title) => {
+			.then((label) => {
 				if (signal.aborted || currentSessionKey() !== sessionKey || pi.getSessionName()) {
 					return;
 				}
-				setTitle(pi, ctx, title);
+				setTitle(pi, ctx, label.title, label.slug);
 			})
 			.catch((error: unknown) => {
 				if (signal.aborted) return;
@@ -283,7 +326,7 @@ export default function autoTitleExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("pi-retitle", {
-		description: "Regenerate the current session title using the title model",
+		description: "Regenerate the current session title and short tab slug using the title model",
 		handler: async (_args, ctx) => {
 			const prompt = branchUserMessages(ctx).slice(0, 3).join("\n\n");
 			if (!prompt) {
@@ -294,8 +337,8 @@ export default function autoTitleExtension(pi: ExtensionAPI) {
 			const signal = sessionController.signal;
 			const originalTitle = pi.getSessionName();
 			try {
-				const title = await modelTitle(prompt, ctx, signal);
-				if (!signal.aborted && pi.getSessionName() === originalTitle) setTitle(pi, ctx, title);
+				const label = await modelTitle(prompt, ctx, signal);
+				if (!signal.aborted && pi.getSessionName() === originalTitle) setTitle(pi, ctx, label.title, label.slug);
 			} catch (error) {
 				if (signal.aborted) return;
 				if (!pi.getSessionName()) setTitle(pi, ctx, deterministicTitle(prompt));

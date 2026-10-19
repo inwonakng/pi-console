@@ -574,6 +574,9 @@ local function handle_extension_ui_request(ctx, event)
 		elseif event.statusKey == "pi-session-title" then
 			state.session_name = event.statusText
 			ctx.transcript.refresh_ui()
+		elseif event.statusKey == "pi-session-label" then
+			state.session_label = type(event.statusText) == "string" and json.decode_object(event.statusText) or nil
+			runtime.publish()
 		elseif event.statusKey == "pi-tree-leaf" then
 			state.tree_leaf_id = normalize_leaf_id(event.statusText)
 		elseif event.statusKey == "pi-todos" then

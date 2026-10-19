@@ -260,6 +260,9 @@ local function snapshot(state)
 		or (is_new_session and "New Session")
 		or (path and vim.fn.fnamemodify(path, ":t"))
 		or "New Session"
+	local label = state.session_label
+	local slug = label and label.sessionFile == path and label.title == title
+		and type(label.slug) == "string" and label.slug ~= "" and label.slug or nil
 	return {
 		version = 1,
 		build = build_info.snapshot(),
@@ -268,6 +271,7 @@ local function snapshot(state)
 		last_focused_at = publisher_last_focused_at,
 		path = path,
 		title = title,
+		slug = slug,
 		is_new_session = is_new_session,
 		is_starting = not state.workspace_status_received or not state.session_sync_complete,
 		rpc_address = publisher_rpc_address,

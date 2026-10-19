@@ -32,6 +32,7 @@ fi
 
 printf -v launch 'bash %q' "$app_root/bin/pi-console"
 tmux source-file "$script_dir/../pi-console.conf"
+node "$app_root/tmux/scripts/client-enter.mjs" --install "$(tmux display-message -p '#{socket_path}')"
 bash "$app_root/tmux/scripts/popup-client.sh" --install-hooks "$(tmux display-message -p '#{socket_path}')"
 tmux bind-key g run-shell -b "$launch tmux toggle '#{pane_id}' '#{client_name}'"
 tmux bind-key G run-shell -b "$launch tmux new '#{pane_id}' '#{client_name}'"

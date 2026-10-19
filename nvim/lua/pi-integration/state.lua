@@ -116,6 +116,7 @@ function M.new()
 		session_file = nil,
 		pending_session_file = nil,
 		session_name = nil,
+		session_label = nil,
 		message_count = 0,
 		has_conversation_history = false,
 		conversation_history_loaded = false,
