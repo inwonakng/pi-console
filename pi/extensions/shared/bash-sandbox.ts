@@ -100,7 +100,7 @@ function reportBlockedCommand(lines: string[], onData: (data: Buffer) => void): 
     + "For a proxy network allowlist denial, request networkAccess=true on your continuation command; approval happens before it starts. "
     + "Network approval does not lift filesystem restrictions or fix DNS, TLS, or server errors. "
     + "For Unix-socket denials on macOS, request narrow unixSocketPaths (inspect $TMPDIR for temporary socket directories). "
-    + "If the sandbox cannot support the operation, request unsandboxed=true for explicit unrestricted approval, once or for this exact command/CWD during the session. "
+    + "If the sandbox cannot support the operation, request unsandboxed=true for unrestricted approval: once, or for this session covering the exact command/CWD, any command from this CWD, or any command from any CWD. "
     + "Choose a continuation that does not duplicate completed work. Denied access is not task completion.\n", "utf8"));
 }
 
@@ -290,7 +290,7 @@ export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void
     if (SandboxManager.isSandboxingEnabled()) {
       try { await SandboxManager.reset(); } catch { /* Keep the initialization error. */ }
     }
-    ctx.ui.notify(`Sandbox unavailable: ${sandboxError}. Shell commands require explicit unrestricted approval (once or for the exact command/CWD during this session); readonly mode cannot grant it.`, "warning");
+    ctx.ui.notify(`Sandbox unavailable: ${sandboxError}. Shell commands require unrestricted approval (once, or for this session covering the exact command/CWD, any command from this CWD, or any command from any CWD); readonly mode cannot grant it.`, "warning");
   }
 }
 

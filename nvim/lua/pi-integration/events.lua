@@ -567,6 +567,8 @@ local function handle_extension_ui_request(ctx, event)
 			else
 				ctx.transcript.set_reverting(nil)
 			end
+		elseif event.statusKey == "pi-tree-clone" then
+			state.tree_clone_result = type(event.statusText) == "string" and json.decode_object(event.statusText) or nil
 		elseif event.statusKey == "pi-history-changed" then
 			ctx.actions.refresh_messages()
 		elseif event.statusKey == "pi-session-title" then
@@ -976,7 +978,7 @@ function M.handle_event(ctx, event)
 		state.session_name = event.name
 		ctx.transcript.refresh_ui()
 	elseif event.type == "extension_error"
-		and (event.extensionPath == "command:pi-history" or event.extensionPath == "command:pi-revert-after") then
+		and (event.extensionPath == "command:pi-tree-delete" or event.extensionPath == "command:pi-revert-after") then
 		-- Extension command errors are reported separately from the successful prompt acknowledgement.
 		ctx.transcript.set_reverting(nil)
 		ctx.logs.add("error", "History revert failed", event.error)

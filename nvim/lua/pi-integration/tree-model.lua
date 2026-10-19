@@ -308,6 +308,18 @@ function M.node_text(node, extract_text)
 	return ""
 end
 
+-- Neovim's fuzzy matcher returns character offsets; extmarks need byte offsets.
+function M.match_positions(text, query)
+	if query == "" or text == "" then return {} end
+	local result = vim.fn.matchfuzzypos({ text }, query)
+	local positions = {}
+	for _, char in ipairs(result[2][1] or {}) do
+		table.insert(positions, vim.fn.byteidx(text, char))
+	end
+	table.sort(positions)
+	return positions
+end
+
 function M.node_title(node)
 	if node.kind == "user" then
 		return "User"

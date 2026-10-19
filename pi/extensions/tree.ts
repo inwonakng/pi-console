@@ -1,5 +1,8 @@
 import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { revertSubtree } from "./history";
+import { cloneThroughEntry } from "./shared/session-clone";
+import { selectNavigation } from "./shared/navigation";
 import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
 import {
 	loadWorkspace,
@@ -81,20 +84,26 @@ function deletionConfirmation(entryId: string, deleteCount: number, workspaces: 
 	return lines.join("\n");
 }
 
-function rewriteSessionWithoutSubtree(sessionFile: string, targetId: string, currentLeafId: string | null) {
-	const records = readSessionRecords(sessionFile);
-	const target = records.find((record) => recordId(record) === targetId);
-	if (!target) {
-		throw new Error(`Unknown tree entry: ${targetId}`);
-	}
-	const deletedIds = collectDeletedIds(records, targetId);
-	const leafParentId = currentLeafId && !deletedIds.has(currentLeafId) ? currentLeafId : parentId(target) ?? null;
-	const plan = planSessionDeletion(records, deletedIds, leafParentId);
-	writeJsonlFile(sessionFile, plan.records);
-	return plan;
-}
-
 export default function treeExtension(pi: ExtensionAPI) {
+	let runtimeActive = true;
+	pi.on("session_shutdown", () => { runtimeActive = false; });
+	pi.registerCommand("pi-tree-clone", {
+		description: "Copy the branch through a turn without replacing this session",
+		handler: async (args, ctx) => {
+			const [entryId, requestId] = args.trim().split(/\s+/);
+			if (!entryId || !requestId) throw new Error("Usage: /pi-tree-clone <entry-id> <request-id>");
+			const sourceSessionFile = ctx.sessionManager.getSessionFile();
+			try {
+				const result = await cloneThroughEntry(ctx, entryId, () => runtimeActive);
+				ctx.ui.setStatus("pi-tree-clone", JSON.stringify({ requestId, sourceSessionFile, cancelled: !result, ...result }));
+			} catch (error) {
+				if (runtimeActive) ctx.ui.setStatus("pi-tree-clone", JSON.stringify({
+					requestId, sourceSessionFile, error: error instanceof Error ? error.message : String(error),
+				}));
+			}
+		},
+	});
+
 	pi.registerCommand("pi-tree-jump", {
 		description: "Navigate to an entry in the current session tree",
 		handler: async (args, ctx) => {
@@ -164,6 +173,26 @@ export default function treeExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			const selectionLeafId = ctx.sessionManager.getLeafId();
+			const undoOption = "History + undo work";
+			const options = ["History only"];
+			if (ctx.sessionManager.getBranch().some((entry) => entry.id === entryId)) options.push(undoOption);
+			const mode = await selectNavigation(ctx, "Delete subtree (selected turn and all descendants)", options);
+			if (!mode) return;
+			if (!runtimeActive || ctx.sessionManager.getSessionFile() !== sessionFile
+				|| ctx.sessionManager.getLeafId() !== selectionLeafId) {
+				ctx.ui.notify("Session history changed; select the subtree again.", "warning");
+				return;
+			}
+			if (mode === undoOption) {
+				await revertSubtree(ctx, entryId, () => runtimeActive);
+				return;
+			}
+			if (!runtimeActive || !ctx.isIdle() || hasRunningSubagents() || subagentHistoryBlockReason()) {
+				ctx.ui.notify("Session activity changed; select the subtree again.", "warning");
+				return;
+			}
+
 			const records = readSessionRecords(sessionFile);
 			const target = records.find((record) => recordId(record) === entryId);
 			if (!target) {
@@ -198,36 +227,67 @@ export default function treeExtension(pi: ExtensionAPI) {
 				if (!confirmed) return;
 			}
 
-			let result: ReturnType<typeof rewriteSessionWithoutSubtree>;
-			try {
-				result = rewriteSessionWithoutSubtree(sessionFile, entryId, currentLeafId);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Could not delete tree entry: ${message}`, "error");
-				return;
-			}
-
-			const switched = await moveToLocation(ctx, location.cwd, result.desiredLeafId, {
-				reload: true,
-				onArrival: async (nextCtx) => {
-					for (const record of removedWorkspaces) {
-						const lifecycle = record.integration === "applied" || record.integration === "none"
-							? "integrated"
-							: "discarded";
-						const cleaned = await removeWorkspace(record.id, lifecycle);
-						if (cleaned.lifecycle === "cleanup_failed") {
-							nextCtx.ui.notify(`Could not remove ${record.label}: ${cleaned.integrationReason ?? cleaned.worktreePath}`, "warning");
-						}
+			const plan = planSessionDeletion(records, removedIds, expectedLeaf);
+			let committed = false;
+			const restoreOriginal = async () => {
+				await withFileMutationQueue(sessionFile, async () => {
+					if (JSON.stringify(readSessionRecords(sessionFile)) !== JSON.stringify(plan.records)) {
+						throw new Error("Session changed after deletion; refusing to overwrite concurrent history.");
 					}
-					nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
-					nextCtx.ui.setStatus("pi-history-changed", new Date().toISOString());
-				},
-			});
-			if (!switched) {
-				ctx.ui.notify(
-					`Deleted entries, but session reload was cancelled. Restart or resume ${sessionFile} to pick up the change.`,
-					"warning",
-				);
+					writeJsonlFile(sessionFile, records);
+					committed = false;
+				});
+			};
+			try {
+				const switched = await moveToLocation(ctx, location.cwd, plan.desiredLeafId, {
+					reload: true,
+					beforeSwitch: async () => {
+						await withFileMutationQueue(sessionFile, async () => {
+							if (!runtimeActive || !ctx.isIdle() || hasRunningSubagents() || subagentHistoryBlockReason()
+								|| ctx.sessionManager.getSessionFile() !== sessionFile || ctx.sessionManager.getLeafId() !== selectionLeafId
+								|| JSON.stringify(readSessionRecords(sessionFile)) !== JSON.stringify(records)) {
+								throw new Error("Session history or activity changed; select the subtree again.");
+							}
+							writeJsonlFile(sessionFile, plan.records);
+							committed = true;
+						});
+					},
+					onArrival: async (nextCtx) => {
+						for (const record of removedWorkspaces) {
+							try {
+								const lifecycle = record.integration === "applied" || record.integration === "none"
+									? "integrated" : "discarded";
+								const cleaned = await removeWorkspace(record.id, lifecycle);
+								if (cleaned.lifecycle === "cleanup_failed") {
+									nextCtx.ui.notify(`Could not remove ${record.label}: ${cleaned.integrationReason ?? cleaned.worktreePath}`, "warning");
+								}
+							} catch (error) {
+								nextCtx.ui.notify(`Could not remove ${record.label}: ${String(error)}`, "warning");
+							}
+						}
+						nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
+						nextCtx.ui.setStatus("pi-history-changed", new Date().toISOString());
+					},
+				});
+				if (!switched) {
+					if (!runtimeActive) throw new Error("Session runtime changed before deletion completed.");
+					await restoreOriginal();
+					ctx.ui.notify("Deletion cancelled. Original history was restored; no workspaces were removed.", "warning");
+				}
+			} catch (error) {
+				// A cancelled/failed switch can leave the old manager alive. Restore
+				// its original tree before allowing another append from that manager.
+				if (committed && runtimeActive) {
+					try {
+						await restoreOriginal();
+					} catch (restoreError) {
+						ctx.shutdown();
+						throw new Error(`Deletion failed and original history could not be restored; Pi is stopping to prevent stale history writes: ${String(restoreError)}`);
+					}
+				}
+				throw new Error(committed
+					? `History was deleted, but reload could not finish. Restart or resume ${sessionFile}: ${String(error)}`
+					: `Deletion stopped without changing history: ${String(error)}`);
 			}
 		},
 	});

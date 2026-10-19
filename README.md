@@ -69,7 +69,7 @@ in normal mode.
 |---|---|
 | `<leader>?` | Show help and the full key list |
 | `<leader>s` | Resume a saved conversation |
-| `<leader>T` | Open the conversation tree |
+| `<leader>h` / `<leader>T` | Open the searchable conversation history tree |
 | `<leader>m` / `<leader>t` | Choose the model / thinking level |
 | `<leader>pq` | Review queued prompts |
 | `<leader>pa` | Reopen a pending question or approval |

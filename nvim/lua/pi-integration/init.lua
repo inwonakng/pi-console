@@ -554,10 +554,6 @@ function M.abort()
 	pi_actions.abort(integration_ctx())
 end
 
-function M.history()
-	pi_actions.history(integration_ctx())
-end
-
 function M.show_workspace_diff()
 	pi_actions.show_workspace_diff(integration_ctx())
 end

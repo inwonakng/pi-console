@@ -22,7 +22,6 @@ import { locationForEntry, moveToLocation } from "./shared/workspace-navigation"
 import { collectDeletedIds, locationWorkspaceId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import { pathInside, resolveToolPath } from "./shared/paths";
-import { selectNavigation } from "./shared/navigation";
 import { suppressNextInputNotification } from "./shared/notifications";
 
 type SnapshotState =
@@ -319,25 +318,6 @@ function recordEntryId(record: TurnRecord, entries: SessionEntry[]): string | un
 	return owner;
 }
 
-function messageText(entry: SessionEntry) {
-	if (entry.type !== "message" || entry.message.role !== "user") {
-		return "";
-	}
-	const content = entry.message.content;
-	if (typeof content === "string") {
-		return content;
-	}
-	return content
-		.filter((item) => item.type === "text")
-		.map((item) => item.text)
-		.join("");
-}
-
-function shortText(text: string) {
-	const firstLine = text.trim().split(/\r?\n/, 1)[0] || "(empty)";
-	return firstLine.length > 80 ? `${firstLine.slice(0, 77)}...` : firstLine;
-}
-
 function branchIdsAfter(entries: SessionEntry[], targetId: string | null) {
 	const ids = new Set<string>();
 	const targetIndex = targetId ? entries.findIndex((entry) => entry.id === targetId) : -1;
@@ -426,6 +406,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	}
 	const sessionFile = ctx.sessionManager.getSessionFile();
 	assertOk(sessionFile, "Reverting history requires a persisted session.");
+	const sourceLeaf = ctx.sessionManager.getLeafId();
 	const branch = ctx.sessionManager.getBranch();
 	const afterIds = branchIdsAfter(branch, targetId);
 	const records = readSessionRecords(sessionFile);
@@ -492,16 +473,15 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	validateFiles();
 	const patches = await Promise.all(discarded.map((record) => prepareWorkspaceDiscard(record.id)));
 	const fileCount = rollback.reduce((count, item) => count + item.files.length, 0);
-	const text = selected ? messageText(selected) : undefined;
-	if (fileCount > 0 || discarded.length > 0) {
-		suppressNextInputNotification();
-		const approved = await ctx.ui.confirm("Permanently revert history?",
-			`Delete ${deletedIds.size} history entries${selected ? ", including the selected message and every branch beneath it" : " after the selected point"}? This cannot be undone through the tree.\n`
-			+ `Restore ${fileCount} recorded file change(s) on the active path.\n`
-			+ `Continue in ${target.cwd}.\n`
-			+ (patches.length ? workspaceDiscardWarning(patches) : "No worktree will be discarded."));
-		if (!approved) return;
-	}
+	suppressNextInputNotification();
+	const approved = await ctx.ui.confirm("Permanently revert history?",
+		`Delete ${deletedIds.size} history entries${selected ? ", including the selected message and every branch beneath it" : " after the selected point"}? This cannot be undone through the tree.\n`
+		+ `Restore ${fileCount} recorded file change(s) on the active path.\n`
+		+ `Continue in ${target.cwd}.\n`
+		+ (patches.length ? workspaceDiscardWarning(patches) : "No worktree will be discarded."));
+	if (!approved) return;
+	assertOk(isRuntimeActive() && ctx.sessionManager.getSessionFile() === sessionFile
+		&& ctx.sessionManager.getLeafId() === sourceLeaf, "Session history changed; select the subtree again.");
 	let historyDeleted = false;
 	let filesRestored = false;
 	ctx.ui.setStatus("pi-history-revert", "pending");
@@ -510,7 +490,10 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 			reload: true,
 			saveCursor: false,
 			beforeSwitch: async () => {
-				assertOk(ctx.isIdle() && !hasRunningSubagents(), "Pi or a subagent became busy; revert cancelled.");
+				assertOk(isRuntimeActive() && ctx.isIdle() && !hasRunningSubagents() && !subagentHistoryBlockReason(),
+					"Pi or a subagent became busy; revert cancelled.");
+				assertOk(ctx.sessionManager.getSessionFile() === sessionFile && ctx.sessionManager.getLeafId() === sourceLeaf,
+					"Session history changed; select the subtree again.");
 				const validateSession = () => assertOk(
 					JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(records),
 					"Session history changed while preparing revert; select the rollback point again.");
@@ -555,7 +538,6 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 						warnings.push(`Could not remove ${record.label}: ${error instanceof Error ? error.message : String(error)}`);
 					}
 				}
-				if (text !== undefined) nextCtx.ui.setEditorText(text);
 				nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
 				nextCtx.ui.setStatus("pi-history-revert", "complete");
 				markHistoryChanged(nextCtx);
@@ -605,25 +587,13 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	}
 }
 
-async function pickUserMessage(ctx: ExtensionCommandContext) {
-	const entries = ctx.sessionManager
-		.getBranch()
-		.filter((entry) => {
-			return entry.type === "message" && entry.message.role === "user";
-		})
-		.reverse();
-	if (entries.length === 0) {
-		ctx.ui.notify("No user messages in this session.", "warning");
-		return undefined;
-	}
-	const options = entries.map((entry) => `${entry.id}  ${shortText(messageText(entry))}`);
-	const previews = Object.fromEntries(entries.map((entry, index) => [options[index], messageText(entry)]));
-	const choice = await selectNavigation(ctx, "History", options, previews);
-	if (!choice) {
-		return undefined;
-	}
-	const id = choice.split(/\s+/, 1)[0];
-	return entries.find((entry) => entry.id === id);
+export async function revertSubtree(ctx: ExtensionCommandContext, entryId: string, isRuntimeActive: () => boolean): Promise<void> {
+	assertOk(isRuntimeActive(), "Session changed; select the subtree again.");
+	const entry = ctx.sessionManager.getEntry(entryId);
+	assertOk(entry, `Unknown tree entry: ${entryId}`);
+	assertOk(ctx.sessionManager.getBranch().some((item) => item.id === entryId),
+		"Undo work is only available for a subtree on the active conversation path.");
+	await revertAfter(ctx, entry.parentId, entry, isRuntimeActive);
 }
 
 export default function historyExtension(pi: ExtensionAPI) {
@@ -726,52 +696,11 @@ export default function historyExtension(pi: ExtensionAPI) {
 		turn = undefined;
 	});
 
-	pi.registerCommand("pi-history", {
-		description: "Fork before a user message, or permanently revert its subtree and recorded file changes",
-		handler: async (_args, ctx) => {
-			const entry = await pickUserMessage(ctx);
-			if (!entry) {
-				return;
-			}
-			const action = await selectNavigation(ctx, "History action", ["Revert (permanently deletes history and undoes file changes)", "Fork"]);
-			if (action === "Fork") {
-				const text = messageText(entry);
-				await ctx.fork(entry.id, {
-					position: "before",
-					withSession: async (newCtx) => {
-						newCtx.ui.setEditorText(text);
-						markHistoryChanged(newCtx);
-					},
-				});
-			} else if (action === "Revert (permanently deletes history and undoes file changes)") {
-				await revertAfter(ctx, entry.parentId, entry, () => runtimeActive);
-			}
-		},
-	});
-
 	pi.registerCommand("pi-revert-after", {
 		description: "Permanently delete descendants after an active-branch entry id and undo recorded file changes",
 		handler: async (args, ctx) => {
 			const targetId = args.trim() || null;
 			await revertAfter(ctx, targetId, undefined, () => runtimeActive);
-		},
-	});
-
-	pi.registerCommand("pi-fork-message", {
-		description: "Fork before a user message and prefill it for editing",
-		handler: async (args, ctx) => {
-			const id = args.trim();
-			assertOk(id, "Usage: /pi-fork-message <entry-id>");
-			const entry = ctx.sessionManager.getEntry(id);
-			assertOk(entry, `Unknown entry: ${id}`);
-			const text = messageText(entry);
-			await ctx.fork(id, {
-				position: "before",
-				withSession: async (newCtx) => {
-					newCtx.ui.setEditorText(text);
-					markHistoryChanged(newCtx);
-				},
-			});
 		},
 	});
 }

@@ -225,18 +225,6 @@ function M.abort(ctx)
 	end)
 end
 
-function M.history(ctx)
-	if not guard.if_history_change_allowed(ctx, "changing history") then
-		return
-	end
-	ctx.rpc.send({ type = "prompt", message = "/pi-history" }, function(event)
-		if not event.success then
-			ctx.ui.notify(event.error or "Could not open history", vim.log.levels.ERROR)
-		end
-		M.flush_queued_prompts(ctx)
-	end)
-end
-
 function M.show_workspace_diff(ctx)
 	ctx.rpc.send({ type = "prompt", message = "/pi-workspace-review" }, function(event)
 		if not event.success then

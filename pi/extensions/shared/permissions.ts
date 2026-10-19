@@ -15,6 +15,8 @@ export type Permission = {
   kind: "unsandboxed";
   scope: string;
   cwd: string;
+  // Individual requests and exact-command grants default to command matching.
+  scopeType?: "command" | "directory" | "session";
 };
 
 export type PermissionPreview = { text: string; filetype: string };
@@ -119,7 +121,10 @@ export function hasPermission(permission: Permission, cwd: string): boolean {
     if (kind === "read" || kind === "write") return pathInside(grant.scope, scope);
     if (kind === "unix-socket") return canonicalPath(grant.scope) === grant.scope && pathInside(grant.scope, scope);
     if (permission.kind === "unsandboxed" && grant.kind === "unsandboxed") {
-      return grant.scope === scope && grant.cwd === permission.cwd && grant.cwd === canonicalPath(cwd);
+      const commandCwd = canonicalPath(cwd);
+      if (permission.cwd !== commandCwd) return false;
+      if (grant.scopeType === "session") return true;
+      return grant.cwd === commandCwd && (grant.scopeType === "directory" || grant.scope === scope);
     }
     if (kind === "network") return grant.scope === "*" || grant.scope === scope || scope.startsWith(`${grant.scope}:`);
     return grant.scope === scope;
@@ -135,7 +140,7 @@ function permissionSummary(permission: Permission): string {
       : `Allow network access to ${permission.scope}?`;
     case "tool": return `Allow running ${permission.scope}?`;
     case "unix-socket": return `Allow Unix-socket binding and connections at ${permission.scope}? Directory approval includes descendants and can expose local services. Filesystem and outbound-network restrictions remain in place.`;
-    case "unsandboxed": return `Run this exact command outside the sandbox in ${permission.cwd}? Approval grants unrestricted host filesystem, environment, and network access, including child processes. Session approval includes future script modifications, but not different command text or working directories.`;
+    case "unsandboxed": return `Run this command outside the sandbox in ${permission.cwd}? Approval grants unrestricted host filesystem, environment, and network access, including child processes and future script modifications. Allow once, or remember this exact command/CWD, any command from this CWD, or any command from any CWD for this session. CWD limits which executions qualify, not what they can access. Normally sandboxed commands remain sandboxed. Session grants expire on session/branch replacement or process exit.`;
   }
 }
 
@@ -175,16 +180,24 @@ export function requestPermission(
     const sessionChoice = permission.kind === "unsandboxed"
       ? "Allow this command outside the sandbox for this session"
       : permission.kind === "network" ? "Allow network for this session" : "Allow for session";
-    const choices = remember ? ["Allow once", sessionChoice, "Deny"] : ["Allow once", "Deny"];
+    const sessionChoices = new Map<string, Permission>([[sessionChoice, { ...permission }]]);
+    if (permission.kind === "unsandboxed") {
+      sessionChoices.set("Allow any command outside the sandbox from this working directory for this session",
+        { ...permission, scopeType: "directory" });
+      sessionChoices.set("Allow any command outside the sandbox for this session",
+        { ...permission, scopeType: "session" });
+    }
+    const choices = remember ? ["Allow once", ...sessionChoices.keys(), "Deny"] : ["Allow once", "Deny"];
     const choice = await ctx.ui.select(title, choices, { signal });
     assertCurrent();
     if (getAccessMode() === "readonly") throw new Error("Permission request cancelled because access mode changed to readonly.");
-    if (choice !== "Allow once" && !(remember && choice === sessionChoice)) {
+    const grant = remember && choice ? sessionChoices.get(choice) : undefined;
+    if (choice !== "Allow once" && !grant) {
       throw new Error(`${permission.kind} access denied by user: ${scopeLabel}`);
     }
-    if (choice === sessionChoice) {
-      sessionGrants.push({ ...permission });
-      if (permission.kind !== "unsandboxed" && permission.kind !== "unix-socket") onSessionGrant();
+    if (grant) {
+      sessionGrants.push(grant);
+      if (grant.kind !== "unsandboxed" && grant.kind !== "unix-socket") onSessionGrant();
     }
   };
   // All file-tool and network requests share the frontend's one active picker.

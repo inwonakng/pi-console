@@ -136,10 +136,29 @@ You can also select several sessions at once to archive or delete them.
 <details>
 <summary>Conversation tree</summary>
 
-The tree lets you revisit earlier messages, take a different branch, or remove
-messages you no longer need. I find this useful for asking clarifying questions:
-once I understand the answer, I can go back to the original message and ask the
-agent to start working, without keeping that whole detour in context.
+`<leader>h` and `<leader>T` open the same conversation history tree. Assistant
+messages and their tool round-trips stay grouped into turns; the lower pane
+previews the full text.
+
+- `b` toggles the full tree and the current branch. `o` cycles entry-type filters.
+- `/` searches full user/assistant turn text with fuzzy matching, keeping tree
+  order and dimmed ancestors for context. Enter accepts the search without
+  navigating the conversation; `n` / `N` select the next/previous matching turn.
+  The preview highlights matches. Use `/` and clear the query to restore the tree
+  while keeping the located turn selected; Esc cancels search editing.
+- Enter jumps to a turn; `S` jumps with a branch summary. These preserve history.
+- `c` clones the path through the selected user/assistant turn, **including it**,
+  into a new session in a new window. The original stays open. Cloning is blocked
+  inside managed workspaces; return to the origin checkout first. This copies
+  conversation history, not project files or rollback snapshots. Permission
+  grants and live workspace ownership are not inherited.
+- `d` deletes the selected turn and **all descendants**, including other branches
+  below it. Choose **History only** to keep existing file changes (existing
+  workspace cleanup rules still apply), or **History + undo work** to also roll
+  back recorded changes on the active path. Undo work is offered only for turns
+  on that path. Confirmations describe affected history, files, and workspaces;
+  arbitrary external effects cannot be undone.
+- `<C-f>` / `<C-b>` scroll the preview, `r` refreshes, and `q` closes the tree.
 
 ![Conversation tree showing multiple branches and the current message](../assets/tree-view.png)
 
@@ -309,8 +328,19 @@ Approving a directory includes its descendants.
   `readonly` mode still blocks shell network access. Existing saved host-specific
   grants also apply.
 - An **unsandboxed** command has unrestricted host access, including its child
-  processes. Session approval covers the exact command and working directory,
-  including future edits to scripts it runs.
+  processes and future edits to scripts it runs. Choose **Allow once**, **Deny**,
+  or one of three session scopes:
+  - **Allow this command outside the sandbox for this session**: only the exact
+    command text and canonical working directory.
+  - **Allow any command outside the sandbox from this working directory for this
+    session**: any command starting in that exact canonical directory, not its
+    descendants.
+  - **Allow any command outside the sandbox for this session**: any command,
+    regardless of its working directory.
+  A working-directory scope controls which executions qualify, not what they can
+  access: commands can still change directories, access other files, spawn child
+  processes, and use the network. These grants do not change the access mode or
+  move normally sandboxed commands outside the sandbox.
 - On macOS, Unix-socket approval grants access to the named socket paths, which
   may expose local services. It does not grant file writes or network access.
   Path-scoped socket grants are unavailable on Linux.

@@ -22,6 +22,10 @@ local function reset_conversation(ctx, keep_transcript, keep_pending_messages, s
 	state.todo_status = nil
 	state.todo_tool_output_id = nil
 	state.tree_leaf_id = nil
+	state.tree_search_query = ""
+	state.tree_match_rows = {}
+	state.tree_clone_pending = false
+	state.tree_clone_result = nil
 	-- Startup status can arrive before get_state. Keep only the snapshot
 	-- explicitly owned by the incoming session; never carry the old session.
 	if not session_file or state.spawn_runs_session_file ~= session_file then
