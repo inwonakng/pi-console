@@ -1,8 +1,7 @@
 -- tmux captures the client at the key binding, while the reserved PTY trigger
 -- delays selection until all terminal input preceding Enter has been consumed.
 local M = {}
-local callbacks, queue, actions = {}, {}, {}
-local next_action = 0
+local callbacks, queue = {}, {}
 local current_client
 local awaiting_context = false
 local installed = false
@@ -38,33 +37,30 @@ local function sync_registration()
 end
 
 local function trigger()
-	-- The PTY trigger must arrive before RPC: a pending normal-mode count
-	-- can defer non-fast RPC until another key arrives. Waiting here processes
-	-- that RPC without reordering the movement keys ahead of this trigger.
-	awaiting_context = true
-	vim.wait(2000, function() return #queue > 0 end, 10)
-	awaiting_context = false
-	local context = table.remove(queue, 1)
-	if not context then return "<Ignore>" end
-	local buf = vim.api.nvim_get_current_buf()
-	if callbacks[buf] and vim.fn.mode(1) == "n" then
-		next_action = next_action + 1
-		actions[next_action] = { context = context, buffer = buf }
-		return "<Cmd>lua require('pi-integration.backends.tmux-input').dispatch(" .. next_action .. ")<CR>"
+	if callbacks[vim.api.nvim_get_current_buf()] and vim.fn.mode(1) == "n" then
+		return "<Cmd>lua require('pi-integration.backends.tmux-input').dispatch()<CR>"
 	end
-	-- An expression mapping expands to Enter in place: unlike feedkeys from
-	-- a callback, it preserves pending counts and operators (3<CR>, d<CR>).
+	-- No waiting or other side effects under an expression mapping's textlock.
+	-- Returning Enter directly also preserves pending counts/operators elsewhere.
 	return "<CR>"
 end
 
-function M.dispatch(id)
-	local action = actions[id]
-	actions[id] = nil
-	if not action then return end
+function M.dispatch()
+	local buf = vim.api.nvim_get_current_buf()
+	if not callbacks[buf] or vim.fn.mode(1) ~= "n" then return end
+	-- The PTY trigger consumes earlier movement/counts before accepting RPC.
+	-- Wait in <Cmd>, not the expression mapping: vim.wait runs scheduled UI
+	-- refreshes, which must be allowed to change buffers and windows.
+	awaiting_context = true
+	local ok, err = pcall(vim.wait, 2000, function() return #queue > 0 end, 10)
+	awaiting_context = false
+	local context = table.remove(queue, 1)
+	if not ok then error(err) end
+	if not context then return end
 	local callback = callbacks[vim.api.nvim_get_current_buf()]
-	if callback and action.buffer == vim.api.nvim_get_current_buf() and vim.fn.mode(1) == "n" then
+	if callback and buf == vim.api.nvim_get_current_buf() and vim.fn.mode(1) == "n" then
 		local previous = current_client
-		current_client = action.context
+		current_client = context
 		local ok, err = xpcall(callback, debug.traceback)
 		current_client = previous
 		if not ok then vim.notify(err, vim.log.levels.ERROR, { title = "Pi Enter" }) end

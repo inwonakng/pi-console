@@ -62,14 +62,22 @@ function enter() {
     let result;
     try {
         tmux(["send-keys", "-t", pane, "C-S-F12"]);
-        result = spawnSync(registration.program, ["--server", registration.server, "--remote-expr", expression], { encoding: "utf8" });
+        // Only this short-lived RPC client is killed on timeout, never the editor.
+        // Keep the deadline longer than the editor's two-second context wait.
+        result = spawnSync(registration.program, ["--server", registration.server, "--remote-expr", expression], {
+            encoding: "utf8", timeout: 3000, killSignal: "SIGKILL",
+        });
     } finally {
         tmux(["wait-for", "-U", lock]);
     }
     if (result.error || result.status !== 0 || result.stdout.trim() !== "1") {
-        // Do not guess a client or execute a selection if RPC delivery failed.
-        tmux(["display-message", "-c", name, "pi-console: could not deliver Enter to the overview"]);
-        throw result.error || new Error(result.stderr.trim() || "Neovim rejected Enter context");
+        // Do not guess a client or replay Enter if RPC delivery failed. Report
+        // through the status line: a nonzero run-shell exit opens a tmux output
+        // view that captures subsequent keys, even after the RPC has timed out.
+        const message = result.error?.code === "ETIMEDOUT"
+            ? "pi-console: Enter timed out; the editor did not respond"
+            : "pi-console: could not deliver Enter to the overview";
+        tmux(["display-message", "-c", name, message]);
     }
 }
 
