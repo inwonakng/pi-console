@@ -1270,12 +1270,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
     return run;
   };
 
-  const startRun = (run: SpawnRun, params: { model?: string; timeoutSeconds?: number }) => {
+  const startRun = (run: SpawnRun, params: { model: string; provider?: string; timeoutSeconds?: number }) => {
     const binary = process.env.PI_BINARY || "pi";
-    const argv = [binary, "--mode", "rpc", "-e", resolve(dirname(fileURLToPath(import.meta.url)), ".."), "--session-dir", join(run.runDir, "sessions")];
-    const model = params.model ?? (run.profile?.model && run.profile.model !== "inherit" ? run.profile.model : undefined);
-    if (model) {
-      argv.push("--model", model);
+    const argv = [binary, "--mode", "rpc", "-e", resolve(dirname(fileURLToPath(import.meta.url)), ".."), "--session-dir", join(run.runDir, "sessions"), "--model", params.model];
+    if (params.provider) {
+      argv.push("--provider", params.provider);
     }
     if (run.profile?.tools && run.profile.tools.length > 0) {
       argv.push("--tools", run.profile.tools.join(","));
@@ -1549,7 +1548,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         Type.Literal("none"),
         Type.Literal("worktree"),
       ], { description: "Isolation mode. Defaults to worktree for edit access and none otherwise." })),
-      model: Type.Optional(Type.String({ description: "Optional pi --model value for the subagent. Defaults to the profile model, otherwise inherits the parent invocation default." })),
+      model: Type.Optional(Type.String({ description: "Optional pi --model value for the subagent. Defaults to the profile model; an omitted or inherit profile model uses the parent's current provider and model." })),
       timeoutSeconds: Type.Optional(Type.Number({ description: "Optional timeout in seconds. Defaults to 1800." })),
     }),
     executionMode: "sequential",
@@ -1602,6 +1601,13 @@ export default function spawnExtension(pi: ExtensionAPI) {
         }
       }
 
+      const modelOverride = params.model ?? (subagent?.model && subagent.model !== "inherit" ? subagent.model : undefined);
+      const model = modelOverride ?? ctx.model?.id;
+      const provider = modelOverride ? undefined : ctx.model?.provider;
+      if (!model) {
+        throw new Error("Cannot inherit a subagent model: the parent has no selected model.");
+      }
+
       const run = createRun({
         prompt: params.prompt,
         role: params.role,
@@ -1615,7 +1621,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         signal,
       });
 
-      startRun(run, { model: params.model, timeoutSeconds: params.timeoutSeconds });
+      startRun(run, { model, provider, timeoutSeconds: params.timeoutSeconds });
 
       if (mode === "background") {
         onUpdate?.({ content: [{ type: "text", text: `${runLabel(run)} ${run.id} started (${accessMode}).` }], details: artifactDetails(run) });
