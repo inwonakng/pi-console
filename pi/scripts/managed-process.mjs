@@ -50,7 +50,10 @@ export function ownerLease(root) {
   const path = join(root, 'owner-lease.sqlite');
   privateFile(path);
   const db = database(path);
-  try { db.exec('PRAGMA busy_timeout=0; BEGIN EXCLUSIVE'); }
+  // Simultaneous EXCLUSIVE attempts can both encounter transient read locks,
+  // leaving no winner with a zero busy timeout. Wait briefly at this boundary;
+  // exhaustion still refuses ownership, without touching claims or recovery.
+  try { db.exec('PRAGMA busy_timeout=50; BEGIN EXCLUSIVE'); }
   catch (e) { db.close(); throw new Error('Service owner is still alive or its lifetime lease is unavailable', { cause: e }); }
   return { close() { db.close(); } };
 }

@@ -1,4 +1,6 @@
 import { open } from "node:fs/promises";
+import { hostCommand, hostFingerprint, type HostReceipt } from "./host-commands.js";
+import { inspectEpoch } from "../../pi/scripts/managed-process.mjs";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import type { RpcCommand, RpcExtensionUIResponse, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
@@ -65,6 +67,8 @@ export class HostOwner {
   private readonly sessions = new Map<string, OwnedSession>();
   private creating = 0;
   private closing = false;
+  private hostAdmission: Promise<void> = Promise.resolve();
+  private hostAdmitting = 0;
 
   private constructor(private readonly catalog: SessionCatalog, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, private readonly resources: HostResources) {
     void catalog.whenFailed.then((error) => {
@@ -94,6 +98,7 @@ export class HostOwner {
   /** Explicit recovery only; callers then reopen and explicitly resume a saved session. */
   static reconcile(options: { root: string; channel: Channel }): Promise<void> { return SessionCatalog.reconcile(options); }
 
+  get shutdownStarted(): boolean { return this.closing; }
   get buildId(): string { return this.resources.buildId; }
   get hostId(): string { return this.catalog.hostId; }
   get serviceEpoch(): string { return this.catalog.epoch; }
@@ -122,6 +127,79 @@ export class HostOwner {
     const session = new OwnedSession(this.catalog, record, this.options, this.resources, previousState?.runtimeRevision ?? 0, previousState?.sequence ?? 0);
     this.sessions.set(id, session);
     return session;
+  }
+
+  hostStatus(epoch: string, id: string): HostReceipt | { status: "unknown" } {
+    const receipt = this.catalog.hostRecord(epoch, id)?.receipt;
+    return receipt?.operation === "host.create" || receipt?.operation === "host.resume" ? receipt : { status: "unknown" };
+  }
+
+  /** Host IDs are disk identities, not connection IDs. Duplicate lookups never
+   * resume a now-stopped worker or repeat initialization. */
+  command(input: unknown): Promise<HostReceipt> {
+    const command = hostCommand(input);
+    if (command.serviceEpoch !== this.serviceEpoch) throw new CommandError("stale_epoch", "Host command belongs to another service epoch");
+    this.assertOpen();
+    if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");
+    this.hostAdmitting++;
+    const task = this.hostAdmission.then(async () => {
+      this.assertOpen();
+      this.catalog.assertExecutionAllowed();
+      const fingerprint = hostFingerprint(command);
+      const previous = this.catalog.hostRecord(command.serviceEpoch, command.id);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) throw new CommandError("command_conflict", "Command ID was used for another mutation");
+        return previous.receipt;
+      }
+      const receipt: HostReceipt = { id: command.id, serviceEpoch: this.serviceEpoch, operation: command.operation, status: "accepted" };
+      let sessionId: string;
+      if (command.operation === "host.create") {
+        const record = await this.catalog.create(command.payload.cwd, { fingerprint, receipt });
+        sessionId = record.id;
+        // The allocation receipt is already committed before any worker launch.
+        this.resume(sessionId);
+        return this.catalog.hostRecord(command.serviceEpoch, command.id)!.receipt;
+      }
+      this.catalog.get(command.payload.sessionId);
+      await this.catalog.reserveHost(fingerprint, receipt);
+      try {
+        sessionId = this.resume(command.payload.sessionId).id;
+        receipt.status = "completed";
+        receipt.result = { sessionId };
+      } catch (error) {
+        receipt.status = "failed";
+        receipt.error = { code: "session_unavailable", message: asError(error).message };
+      }
+      await this.catalog.finishHost(receipt);
+      return receipt;
+    });
+    this.hostAdmission = task.then(() => undefined, () => undefined);
+    return task.finally(() => { this.hostAdmitting--; });
+  }
+
+  /** Administrative local shutdown. Fence all admissions synchronously after
+   * preflight, before awaiting any child. No frontend disconnect calls this. */
+  async shutdown(force = false): Promise<void> {
+    this.assertOpen();
+    if (this.creating || this.hostAdmitting) throw new CommandError("session_busy", "Host lifecycle admission is in progress; inspect and retry explicitly");
+    if (!force) {
+      for (const session of this.sessions.values()) {
+        const reason = session.stopBlockReason();
+        if (reason) throw new CommandError("session_busy", reason);
+      }
+      if (this.catalog.list().some((session) => session.acceptedQueue?.some((item) => item.status !== "failed"))) {
+        throw new CommandError("session_busy", "Accepted queued work would be interrupted");
+      }
+      if (inspectEpoch(this.catalog.processRegistry, this.serviceEpoch).some((job) => job.parent !== null && !["done", "cancelled"].includes(job.status))) {
+        throw new CommandError("session_busy", "Known managed child work remains; use an intentional force stop to interrupt it");
+      }
+    }
+    this.closing = true;
+    // stop() revokes runtime execution before its first await.
+    const results = await Promise.allSettled([...this.sessions.values()].map((session) => session.stop()));
+    const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+    if (errors.length) throw new AggregateError(errors, "Owned cleanup failed; retain service claim for recovery");
+    await this.catalog.close();
   }
 
   /** Closing a view must not call this or OwnedSession.stop(). */
@@ -722,6 +800,15 @@ export class OwnedSession {
     this.reservations.clear(false);
     // Cleanup failure remains on this session; observers may still await stop().
     void this.stop().catch(() => undefined);
+  }
+
+  stopBlockReason(): string | undefined {
+    if (this.done) return;
+    if (this.phase !== "ready" || this.stopRequested || !this.usableWorkspace() || !this.conversation.settled
+      || this.admitting || this.commands.size || this.aborting || this.rename || this.queueFlight || this.queueRunPending
+      || this.worker?.interactionSnapshot().pending.length || this.catalog.queue(this.id).some((item) => item.status !== "failed")) {
+      return `Session ${this.id} has active work, approval, accepted queue or transition; stop refused`;
+    }
   }
 
   /** Explicit owner shutdown, not frontend detach or a guarded service-stop API. */

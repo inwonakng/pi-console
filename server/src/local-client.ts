@@ -1,0 +1,60 @@
+import { connect, type Socket } from "node:net";
+import { lstat } from "node:fs/promises";
+import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { endpoint } from "./local-service.js";
+import { MAX_RESPONSE, PROTOCOL, records, RecordWriter } from "./local-protocol.js";
+import type { Channel } from "./session-catalog.js";
+import { object } from "./pi-records.js";
+
+export class LocalClient {
+  private readonly pending = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
+  private readonly writer: RecordWriter;
+  private disconnected = false;
+  private constructor(private readonly socket: Socket, private readonly event: (record: Record<string, unknown>) => void) {
+    this.writer = new RecordWriter(socket);
+    socket.on("error", () => undefined);
+    void this.read().catch((error) => this.failed(error)).finally(() => this.failed(new Error("Service disconnected; accepted mutations were not replayed. Reconnect and inspect command status.")));
+  }
+  static async open(root: string, channel: Channel, event: (record: Record<string, unknown>) => void = () => undefined): Promise<{ client: LocalClient; hello: Record<string, unknown> }> {
+    const path = endpoint(root);
+    const directory = await lstat(dirname(path));
+    const socketStat = await lstat(path);
+    if (!directory.isDirectory() || directory.uid !== process.getuid?.() || (directory.mode & 0o077)
+      || !socketStat.isSocket() || socketStat.uid !== process.getuid?.() || (socketStat.mode & 0o077)) throw new Error("Endpoint must be a private same-user Unix socket in a 0700 directory");
+    const socket = connect(path);
+    await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+    const client = new LocalClient(socket, event);
+    try {
+      const hello = await client.request("hello", { version: PROTOCOL, channel });
+      if (!object(hello) || hello.version !== PROTOCOL || hello.channel !== channel || !Array.isArray(hello.capabilities)) throw new Error("Incompatible service handshake");
+      return { client, hello };
+    } catch (error) { client.close(); throw error; }
+  }
+  request(method: string, payload: unknown = {}, id: string = randomUUID()): Promise<unknown> {
+    if (this.socket.destroyed || this.pending.size >= 32 || this.pending.has(id)) return Promise.reject(Object.assign(
+      new Error("Connection closed or request limit/conflict"), { code: "request_not_sent", delivery: "not_sent" }));
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      void this.writer.send({ id, method, payload }).catch((error) => this.failed(error));
+    });
+  }
+  close(): void { this.disconnected = true; this.socket.destroy(); }
+  private async read(): Promise<void> {
+    for await (const record of records(this.socket, MAX_RESPONSE)) {
+      if (record.type !== "response") { this.event(record); continue; }
+      const request = typeof record.id === "string" && this.pending.get(record.id);
+      if (!request) throw new Error("Uncorrelated service response");
+      this.pending.delete(record.id as string);
+      if (record.success === true) request.resolve(record.result);
+      else request.reject(Object.assign(new Error(object(record.error) ? String(record.error.message) : "Service request failed"),
+        { code: object(record.error) ? record.error.code : "service_error" }));
+    }
+  }
+  private failed(error: Error): void {
+    for (const request of this.pending.values()) request.reject(error);
+    this.pending.clear();
+    if (!this.socket.destroyed) this.socket.destroy();
+    if (!this.disconnected) { this.disconnected = true; this.event({ type: "disconnected", message: error.message }); }
+  }
+}

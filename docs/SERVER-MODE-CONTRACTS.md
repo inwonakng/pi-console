@@ -1,13 +1,266 @@
 # Server-mode compatibility gate
 
-Status: **Migration foundations implemented; end-to-end service mode is not ready.**
-Pi remains unchanged. The private host owner, adapter and catalog are implemented,
-but there is no daemon, client listener or frontend attachment transport yet. Successful
-component probes are not server-mode acceptance.
+Status: **B3 opt-in local implementation verified on macOS; stop for user review (2026-10-21).**
+Pi remains unchanged. Startup coordination is corrected; fresh local service/IPC/bridge/
+Neovim checks passed with Node 26.12.0 and actual Node 22.19.0. Linux remains unexecuted.
+This is not a default-workflow replacement, full installer or authorization for C–F.
 
 [`plans/server-mode.md`](../plans/server-mode.md) is the migration specification.
 See [`plans/server-mode-handoff.md`](../plans/server-mode-handoff.md) for the current
 stopping point and next implementation slice.
+
+## B3 completion — startup coordination and operational attachment (2026-10-21)
+
+### Diagnosis and bounded correction
+
+The earlier B3 report below overstated the zero-owner race as an architectural B2
+blocker. It is a startup-coordination availability bug. No duplicate owner, data loss,
+or need for an ownership redesign was established.
+
+Two independent processes were barrier-released into real `HostOwner.open()` calls;
+the winner, if any, stayed alive until both outcomes were collected. Before the fix,
+round 11 produced two SQLite error-5 chains from `ownerLease()` and only a zero-byte
+`owner-lease.sqlite`. No `owner.lock`, registry, catalog, worker or socket existed.
+This reproduces the original symptom independently of launcher readiness polling.
+
+A separate read-only investigator reduced it to two barrier-released calls to the
+unchanged lease helper, keeping the winner held throughout the competing attempt:
+
+| Initial lease file | Rounds | One owner | Both BUSY |
+| --- | ---: | ---: | ---: |
+| Absent | 400 | 399 | 1 |
+| Precreated empty | 400 | 254 | 146 |
+| Initialized SQLite | 400 | 223 | 177 |
+
+A scratch comparison on precreated empty files gave 247/400 one-owner outcomes with
+zero wait, versus **400/400 with a 50-ms SQLite busy wait**. No double success was
+observed. Transient contention during read-to-exclusive acquisition is the supported
+explanation, not a directly traced SQLite lock interleaving. Empty-file initialization
+alone does not explain failures on initialized files. Failed transactions reported
+`isTransaction === false`.
+
+The production change is confined to `ownerLease()`: `busy_timeout=50`, retaining
+`BEGIN EXCLUSIVE`, close-on-failure and refusal on exhaustion. This applies to ordinary
+open and explicit reconciliation; it never clears a claim, grants recovery, retries
+initialization after claim publication, or replays a mutation. The catalog's zero
+transaction timeout is unchanged. A busy-handler budget is not a hard wall-clock
+latency promise (scratch losing calls reached about 63 ms).
+
+Patched production `HostOwner.open()` passed **30/30 fresh-profile races**, exactly one
+held owner each. The actual CLI passed **eight fresh + eight reopened-profile start
+races on each of Node 26.12.0 and Node 22.19.0**. Both callers exited 0 with the same
+host/epoch; a fresh process-table observation showed one live `cli.js run` owner.
+Another pair of starts during every live service preserved that epoch. Services were
+stopped through their endpoint, never through stale PID files.
+
+### Candidate review corrections
+
+The existing candidate was retained, including the earlier overlap/failed-shutdown/
+dev-management fixes. Independent review found three additional gaps:
+
+- Service tool actions called the legacy output viewer, which could read owner
+  `fullOutputPath` locally or open spawn artifacts/tmux workspace review. They now
+  open only recorded tool text; owner resource actions remain unavailable.
+- Delayed takeover confirmation could use a new attachment/session. It now captures
+  generation/attachment/session/runtime and refuses a changed context.
+- Lost-ack prompt text looked unsent and could be sent under a new ID. Unresolved
+  submissions now display their ID/status in the transcript, retain text and block
+  identical-text submission until explicit `:PiSubmissions` review. Reconnect only
+  queries original IDs; it does not replay. Controlled restart retains protection.
+- Final review found recovery under release-specific `stdpath("state")`. Draft storage
+  now uses channel-stable XDG frontend state, independent of `NVIM_APPNAME`. Fresh
+  headless write/read checks across two app names retained input and original command
+  IDs; stable/dev remained separate and files were 0600.
+
+### Fresh operational matrix
+
+All groups below passed on **macOS arm64 / unchanged Pi 1.3.0 / Neovim 0.12.6**, with
+**Node 26.12.0 and actual official Darwin-arm64 Node 22.19.0**. Isolated HOME/agent,
+project, service and frontend state were used. Streaming came from a scratch offline
+provider; an input hook used the production bundled `serviceUi` confirmation wrapper.
+No external-provider success or new third-party dialog guarantee is claimed.
+
+- Real bundled startup, disk-backed host create/resume lookup, payload conflict,
+  same-ID retry and one worker; prompt status preserves accepted text.
+- Explicitly discarded create/resume/prompt response frames followed by disconnect,
+  original-ID lookup and retry: one allocation/turn, no worker relaunch/replay.
+- Two actual headless Neovims, shipped UI/renderers and individual Node bridges:
+  viewer draft retained, streaming late attachment, confirmed takeover, old token
+  rejected through the original frontend transport, actual shared queue editor save
+  and owner abort. Reattached snapshots include current partial text.
+- Controlled frontend restart writes/consumes its recovery payload, preserves main
+  and auxiliary queue/answer draft text, and does not reacquire another frontend's
+  control. Recovery files live under
+  `${XDG_STATE_HOME:-$HOME/.local/state}/pi-console/frontend/<channel>/service-drafts`,
+  not a release-specific Neovim directory. Reconnect similarly stays a viewer. Restored auxiliary drafts are inspect-only.
+- Every frontend/bridge/observer closed during streaming: same runtime continued and
+  later attachment saw longer partial text with no controller. An unanswered approval
+  likewise remained after zero frontends; late actual Neovim rendered its full preview
+  and answered explicitly. Normal service stop refused the pending approval.
+- Actual-UI dropped-response-callback regression: retained input and visible original
+  receipt status, no fresh prompt when identical text was submitted again. Delayed
+  takeover after reconnect refused. A trapped legacy viewer/local-read API was not
+  invoked by the service's recorded-tool action.
+- Sixteen overlapping attaches on one connection retained a usable current view.
+  Malformed JSON, invalid UTF-8, arrays and >2-MiB unterminated frames dropped their
+  peers. A paused client flooded with bounded snapshots was evicted while another
+  client and real Pi partial output kept advancing. Profile/socket modes were 0700/0600.
+- Foreign dev checkout start/stop/restart/reconcile refused with the owning checkout
+  identified and the epoch unchanged; explicit compatible viewing remained allowed.
+- Real owner SIGKILL during streaming with accepted queued text: live reconciliation
+  refused; ordinary `run` refused the retained crash claim; explicit CLI `reconcile`
+  then `start` then `resume` preserved host/session identity, old receipts and failed
+  queue text, rejected old-epoch envelopes, reacquired no control and replayed no work.
+- Scratch-injected real `OwnedSession.stop()` rejection exercised failed shutdown:
+  diagnostic response, owner exit 1, no healthy listener, exact claim retained,
+  ordinary startup refusal, then explicit known-managed-work reconciliation.
+
+Commands/groups were temporary `pi-b3-{race,start,accept,wire-loss,ui,ui-regress,
+recovery,peers}.mjs` probes outside the repository. No tests ship. Strict
+`npm run check --prefix server` and `npm run build --prefix server` passed under both
+Node versions; `node --check pi/scripts/managed-process.mjs`, `bash -n bin/pi-console`,
+watchdog-first Neovim Lua loading/runtime checks and `git diff --check` passed.
+Dependencies installed with `npm ci --offline --ignore-scripts --prefix server` and
+`--prefix pi`; installed Pi was not changed.
+
+Fixture corrections, not product failures: initial acquisition was attempted before
+runtime startup; a turn-count assertion included auto-title's separate provider call;
+UI reconnect/control assertions initially observed cached state before attachment/
+controller refresh; remote evaluation of immediate editor exit loses its own reply.
+Corrected probes wait for authoritative attachment/grant state and schedule exit after
+the diagnostic response. A later regression fixture reused several MiB of failed queue
+text from the slow-peer probe and evicted its observer under documented viewer limits;
+it was rerun on isolated small state. Successful complete groups above ran afterward.
+
+**Limits:** Linux is unavailable and unexecuted. Actual Node 22.19 B3 execution above is
+fresh, not a claim that every historical B1/B2 fault/nested/sandbox probe was rerun.
+Repeat this matrix and the existing B2 Linux sandbox/monitor checklist on Linux/22.19.
+Physical power loss, whole-filesystem exhaustion, external providers and complete
+third-party dialog lifetime behavior remain unverified. The approved unknown-escape
+limitation stands; known live/unresolved managed work still refuses replacement.
+C–F, broader commands, HTTPS/overview and full installer remain out of scope.
+
+Independent follow-up review approved the corrected B3 slice with no Critical/Important
+findings. Review inspected the final source/docs, actual Node-floor check and parent-run
+runtime logs; the broad runtime matrix was not independently rerun. Final draft-path
+correction was followed by fresh cross-app-name recovery and actual frontend regressions.
+
+## Historical B3 candidate and superseded integration stop (2026-10-21)
+
+The evidence below is retained for diagnosis. Its architectural-blocker/retry prohibition,
+unfinished-gate list and Node-floor status are superseded by the completion section above.
+
+### Historical stop condition: lifetime-lease contention
+
+The B3 assignment required reporting concrete B2 blockers rather than bypassing
+ownership. Work stopped at this gate; no lease/registry/reconciliation implementation
+was changed. The approved best-effort contract remains: known live/unresolved managed
+work blocks replacement; possible unknown escaped work does not block explicit resume.
+
+Fresh macOS arm64 / Node **26.12.0** probes against the unchanged B2 helper observed:
+
+- Two independent `server start` calls on a fresh private profile both exited 1 after
+  readiness polling; both candidate `server run` processes failed in
+  `ownerLease()` → `PRAGMA busy_timeout=0; BEGIN EXCLUSIVE` with
+  `ERR_SQLITE_ERROR`, SQLite error code **5**, `database is locked`. No endpoint or
+  owner was left. This happened in two separate fresh-profile operational runs.
+- An independent component-only probe removed the listener, bridge and frontend:
+  launch two Node processes concurrently, each calling
+  `HostOwner.open({root: freshPrivateRoot, channel: "dev", appRoot: checkout,
+  binary: "/opt/homebrew/bin/pi"})`; a winner holds for 500 ms, then closes.
+  Rounds 1–3 each produced one owner; round 4 produced **zero owners**, both with
+  the same lease error. The failed profile held only a private zero-byte
+  `owner-lease.sqlite`, with no `owner.lock` or catalog. There was no claim removal,
+  stale-PID signalling, reconciliation, worker launch or replay in this probe.
+- Separate direct `run` races (ordinary and detached children) and another pair of
+  `start` calls did produce one owner; both successful start callers reported the
+  same host ID and service epoch. Those positive runs do **not** close the
+  intermittently failing gate. A tiny direct-lease-only five-round probe produced
+  one winner each time; that narrower result does not invalidate the owner probe.
+
+This is an availability blocker at the B2 admission/lease boundary, not evidence of
+unsafe duplicate execution, a SQLite ledger-loss bug, or a reason to restore the
+withdrawn exhaustive-containment requirement. The original report treated this as a stop before further acceptance. That was too
+restrictive: bounded startup coordination is allowed and now verified above. Claim
+removal and ownership-contract weakening remain forbidden.
+
+### Candidate code and positive evidence (not B3 acceptance)
+
+New `server/src/{cli,local-service,local-client,local-protocol,service-paths,bridge,
+host-commands}.ts` compose independent foreground/detached startup, a same-user 0700
+profile/0600 Unix socket, protocol-v1/channel/capability/build handshake, connection-bound
+attachments, typed command dispatch, bounded framing/client output, and guarded
+administrative stop/restart. Host allocation/resume receipts use the existing SQLite
+commands table (nullable host session FK); creation allocation and receipt commit
+atomically. No schema migration, dependency, installer delivery, HTTPS or raw-RPC tunnel
+was added. Explicit `server reconcile` invokes B2 recovery without resuming work.
+Dev-management commands compare the serving checkout; explicit compatible views may
+attach without acquiring control.
+
+`pi-console --service` selects a separate UI composition that reuses existing layout,
+message/tool/thinking rendering and keymaps without loading legacy RPC ownership/event
+handlers. It renders coalesced pure owner snapshots after ordered update notifications;
+100-ms read coalescing is not a latency guarantee. Actions cover non-slash text,
+control, approvals, shared queues, rename and abort. Owner-path actions/links, shell,
+slash/settings/history/workspace/side/spawn controls are explicitly unavailable.
+Effects are inspect-only recovered-draft buffers, never editor/navigation application.
+Reconnect does not acquire a grant or replay a mutation. Local main/queue/answer drafts
+have private frontend recovery files; controlled restart uses the launcher's private
+handoff. These new draft/restart paths still need full acceptance below.
+
+Fresh checks used **Neovim 0.12.6**, unchanged installed **Pi 1.3.0**, its actual bundled
+extensions, an isolated agent/home/project and a scratch offline slow-stream provider.
+No external-provider success is claimed.
+
+- `npm ci --offline --ignore-scripts --prefix server` and `--prefix pi` passed.
+  Final stopping checks after the lifecycle/source corrections passed:
+  `npm run check --prefix server`, `npm run build --prefix server`,
+  `bash -n bin/pi-console`, `git diff --check`, and watchdog-protected headless
+  Neovim `loadfile` syntax validation of all seven changed/new Lua files.
+  Syntax/build checks do not accept the unexecuted runtime paths below.
+- Two actual headless Neovim processes loaded the shipped attachment composition,
+  layout/message rendering and installed UI dependencies, each with its own Node bridge.
+  They attached as viewers, UI1 acquired control, UI2's rejected submission retained
+  its draft, UI2 reattached during streaming and rendered the current partial output,
+  then confirmed takeover. A raw typed request sent from UI1's actual old transport
+  with its captured stale token received `control_revoked`; UI1's nonempty draft
+  survived. Both saw the same accepted queue. UI2 opened the actual local queue-editor
+  buffer, saved an edited item through the service, and aborted through the owner.
+- A second probe submitted slow work, then closed **both actual Neovims/bridges and
+  the observer attachment**. After 1.8 seconds with no attachments, a new attachment
+  saw a longer partial assistant message in the **same runtime ID**, with no controller.
+- Initial probe failures exposed a missing empty-transcript rendering context and
+  Lua empty tables encoded as JSON arrays; the context and wire-object normalization
+  were corrected, then both complete actual-frontend probe groups passed. A fixture
+  configuration used invalid `notifications.enabled`; it was corrected to the existing
+  `notifications.default: disabled` setting before the positive real-Pi runs.
+- Independent review identified overlapping-attach pumping, failed-shutdown listener
+  state, and cross-checkout dev management gaps. Source corrections capture each
+  subscription, terminate failed owners while retaining claims, and refuse foreign
+  checkout administration. **These latest lifecycle corrections were typechecked,
+  built and inspected, not runtime-accepted before the B2 stop condition.**
+
+### Historical incomplete verification (superseded above)
+
+At that stopping point, B3 was **not accepted**. Late unanswered-approval rendering/answering after all frontend
+exits; lost create/resume/prompt acknowledgments; malformed/oversized/slow peers;
+controlled frontend relaunch and private draft recovery; forced/failed cleanup and
+cross-checkout management regression probes; and owner-crash reconciliation plus
+explicit resume **through the new service entrypoint** remain unexecuted. Earlier B2
+component recovery evidence is not a substitute for that entrypoint check.
+
+**Minimum Node:** B3 ran only on Node 26.12.0. Actual Node **22.19.0** B3 checks are
+unexecuted; older B1 floor evidence below is historical, not B3 validation.
+
+**Linux:** unavailable and unexecuted. After repairing/reviewing the lease blocker,
+repeat fresh-profile racing `start`/`run`, socket permissions/framing, detached lifetime,
+two actual frontends/takeover, streaming/approval late attach, lost-ack deduplication,
+normal/forced lifecycle and explicit `reconcile`→`start`→`resume` on Linux and Node 22.19.
+Also retain the B2 Linux sandbox/monitor/namespace checklist below. Do not mark the
+platform accepted from macOS evidence or from possible unknown-escape limitations.
+
+Temporary probes lived outside the repository; none ship as tests. The active handoff
+contains the candidate boundary and stop condition, not superseded B1/B2 assignments.
 
 ## B2 retry — revised best-effort contract and fresh evidence (2026-10-21)
 
@@ -1257,3 +1510,36 @@ service commands today:
    isolation and installing an update during an active turn.
 8. Verify user-systemd enable/disable, logout/reboot and lingering behavior.
    Installation itself must not enable startup or interrupt work.
+
+
+## Archived withdrawn-candidate evidence from the pre-B3 handoff
+
+Historical only. The approved best-effort ownership contract supersedes the old exhaustive-containment gate; unknown escapes do not block explicit resume. The active handoff contains no implementation instructions from this withdrawn candidate.
+
+## Historical B1 review / withdrawn B2 design (2026-10-21)
+
+The requested B1 review inspected the specification, recorded repair evidence, SQLite activation/import, receipt/recovery retention, atomic admission/outcomes, claim preservation and actual-write execution guards. An independent read-only review found **no Critical/Important B1 blocker**. Fresh `npm ci --offline --ignore-scripts --prefix server`, strict typecheck and build passed on macOS arm64 / Node 26.12.0. After withdrawing the candidate, the original B1 code again passed strict check/build, a fresh SQLite identity/header/text-retention and uncertain-queue/stale-epoch recovery probe, and unchanged Pi 1.3.0 startup, correlated rename, direct bash and clean shutdown. Earlier B1 migration, Node-floor and storage-fault evidence above was inspected, not rerun in full.
+
+**At withdrawal, this candidate was not shipped. This is historical, not the current B2/B3 direction.** A temporary B2 candidate used a separate SQLite lifetime lease, durable prelaunch registrations, an IPC-lifeline group anchor, explicit reconciliation, resource snapshots and inspect/offer-only recipient-fenced effects. Independent review exposed a material containment gap. The candidate was removed rather than integrating an unsafe recovery policy; only this handoff was changed.
+
+### Reproduced blocking failure
+
+A real Node workload launched a detached grandchild with `stdio: "ignore"`, unreferenced it, then exited. The grandchild changed process group and wrote a marker after a delay. The candidate awaited its anchor, reported `descendantsUnresolved: false`, and returned an empty managed-group inspection **before that later write occurred**. A final fresh-directory reproduction separately asserted child/pipe closure, `ESRCH` for the original group, and **no marker yet**, then verified the later marker write. Thus direct-child completion, closed pipes and absence of every registered original group still did not prove descendant quiescence. A kernel lifetime lease proved that the old owner was absent, not that its escaped work was absent. No stale PID was signalled in the probe; the escaped fixture exited on its own.
+
+This is a blocker in the proposed B2 strategy, **not a newly discovered B1 SQLite defect**. The current B1 code intentionally retains crash-claim refusal and does not ship this reconciliation strategy. Its documented direct-child cleanup remains unfinished B2 work.
+
+The installed Linux sandbox runtime 0.0.77 also constructs `--new-session --die-with-parent` and `--unshare-pid` boundaries (`dist/sandbox/linux-sandbox-utils.js`). Its monitor/workload lifetimes require separate proof; do not dismiss that bundled path as deliberate user daemonization. Linux execution was unavailable here.
+
+Historical requirement at withdrawal: establish complete containment or a conservative refusal policy before retrying. **Superseded by the explicitly approved best-effort contract above**: unknown escaped work no longer blocks resume, but known live/unresolved managed work still does. Do not silently narrow shell/subagent capabilities, add stale-PID killing, clear claims from a process-table snapshot, or treat an empty group as sufficient recovery authority.
+
+### Other candidate-review findings to preserve
+
+- Two empty scans are not a stable registration boundary: scan A can miss a newly appended B while A exits, and scan B can miss C while B exits. Reconciliation and final artifact capture must first fence every old launcher and establish an unchanged registry boundary, not merely repeat liveness queries.
+- Claim-evidence archives must publish through synchronized temporary files and atomic installation. An interrupted exclusive-create/write otherwise leaves an empty archive that prevents later reconciliation even while the original claim remains intact.
+- Await spawned descendants' quiescence **before** capturing final worktree patches/status. Capturing a patch before child disposal can omit writes during shutdown escalation. Preserving workspaces alone does not make that patch complete.
+
+### Candidate-only evidence and limits
+
+Temporary scratch probes on **macOS 27.0.1 arm64 / Node 26.12.0**, using unchanged installed **Pi 1.3.0**, exercised clean/EOF shutdown, TERM-ignoring escalation, ordinary same-group background children, live kernel-lease refusal, owner SIGKILL, survivor refusal, and explicit reconciliation after registered groups disappeared. SQLite identity, accepted text, uncertain receipts and failed queue diagnostics survived that fixture recovery without replay.
+
+An isolated real-Pi fixture exercised bundled startup, correlated rename, direct bash, live side/spawn groups and a TERM-ignoring shell during shutdown (about 5.2 seconds in the measured run). A two-view check rejected wrong-recipient and takeover-stale offers; editing a scratch dev source after staging did not change that staged run. These positive component checks **do not overcome the reproduced escaped-descendant failure, establish a complete B2 design, or verify frontend application behavior**. Several initial probe fixtures failed because of fixture setup (undrained updates, missing provider metadata/tools); only the corrected runs supported these observations. No successful external-provider, Linux, Node-22, power-loss, full-filesystem or operational attachment acceptance was rerun. All candidate code and temporary probes were removed; none of these are shipped commands or tests.

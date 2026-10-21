@@ -23,6 +23,7 @@ local actions = {
 }
 
 function M.dispatch(request)
+	if integration().service_mode then return { ok = false, error = "Legacy editor remote actions are unavailable in service mode" } end
 	if type(request) ~= "table" or type(request.action) ~= "string" then
 		return { ok = false, error = "Invalid remote action" }
 	end

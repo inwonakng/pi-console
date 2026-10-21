@@ -72,7 +72,7 @@ end, { desc = "Restart Pi" })
 
 vim.api.nvim_create_user_command("PiConsoleRestart", function()
 	require("pi-integration").restart_console()
-end, { desc = "Restart pi-console and Pi" })
+end, { desc = "Restart frontend (legacy mode also restarts Pi)" })
 
 vim.api.nvim_create_user_command("PiSteer", function(opts)
 	local text

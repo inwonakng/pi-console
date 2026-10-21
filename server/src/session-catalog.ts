@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { HostReceipt } from "./host-commands.js";
 import { lstat, open, realpath, statfs, unlink, type FileHandle } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { setImmediate } from "node:timers/promises";
@@ -175,7 +176,38 @@ export class SessionCatalog {
     return join(this.root, "sessions", `${id}.jsonl`);
   }
 
-  async create(cwd: string): Promise<CatalogSession> {
+  hostRecord(epoch: string, id: string): { fingerprint: string; receipt: HostReceipt } | undefined {
+    return this.read(() => {
+      const row = this.db.prepare("SELECT fingerprint, receipt FROM commands WHERE epoch=? AND id=?").get(epoch, id);
+      return row ? { fingerprint: String(row.fingerprint), receipt: JSON.parse(String(row.receipt)) as HostReceipt } : undefined;
+    });
+  }
+
+  /** Host receipts use the existing nullable session FK. Allocation and receipt
+   * publication commit together; a lost create ack cannot allocate twice. */
+  private insertHost(fingerprint: string, receipt: HostReceipt): void {
+    this.db.prepare("INSERT INTO commands(epoch,id,session_id,fingerprint,status,operation,reserved_bytes,receipt) VALUES(?,?,NULL,?,?,?,?,?)")
+      .run(receipt.serviceEpoch, receipt.id, fingerprint, receipt.status, receipt.operation, 4096, JSON.stringify(receipt));
+    this.transactionBytes += 4096;
+  }
+
+  async reserveHost(fingerprint: string, receipt: HostReceipt): Promise<void> {
+    await this.serial(async () => {
+      await this.storageCapacity(4096, false);
+      this.transaction(() => { this.insertHost(fingerprint, receipt); });
+    });
+  }
+
+  async finishHost(receipt: HostReceipt): Promise<void> {
+    await this.change(() => {
+      const changed = this.db.prepare("UPDATE commands SET status=?, receipt=? WHERE epoch=? AND id=? AND status='accepted'")
+        .run(receipt.status, JSON.stringify(receipt), receipt.serviceEpoch, receipt.id);
+      if (changed.changes !== 1) throw new Error("Host receipt is not pending");
+      this.transactionBytes += 4096;
+    });
+  }
+
+  async create(cwd: string, host?: { fingerprint: string; receipt: HostReceipt }): Promise<CatalogSession> {
     if (!isAbsolute(cwd)) throw new Error("Session cwd must be an absolute host directory");
     return this.serial(async () => {
       await this.storageCapacity(4096, false);
@@ -190,7 +222,11 @@ export class SessionCatalog {
       } finally { await file.close(); }
       await syncDirectory(join(this.root, "sessions"));
       // Failed registration can leave an unregistered empty file; never adopt/delete it.
-      return this.transaction(() => { insertSession(this.db, session); return session; });
+      return this.transaction(() => {
+        insertSession(this.db, session);
+        if (host) this.insertHost(host.fingerprint, { ...host.receipt, status: "completed", result: { sessionId: id } });
+        return session;
+      });
     });
   }
 

@@ -1,3 +1,8 @@
+-- Service mode never loads legacy process ownership or mutation handlers.
+if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
+	return require("pi-integration.service-frontend")
+end
+
 local M = {}
 
 local EMPTY_SESSION_NOTICE = "Send a message to begin. This session will be saved after the first response."

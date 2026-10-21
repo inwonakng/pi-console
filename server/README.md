@@ -1,8 +1,10 @@
 # Host-side Pi owner (in development)
 
-This package currently contains the **private host owner, subprocess adapter and catalog**,
-not a running service, network API, or replacement frontend. Existing launches still use their
-current transport. Pi itself is not modified.
+This package contains the owner components and **opt-in B3 local-service/Neovim
+attachment, verified on macOS and awaiting user review**. Simultaneous-start lease
+contention is corrected with a bounded busy wait; ownership/recovery checks are
+unchanged. See `plans/server-mode-handoff.md` and `docs/SERVER-MODE-CONTRACTS.md` for
+evidence and Linux limits. Ordinary launches keep their current transport. Pi is unchanged.
 
 ## Build
 
@@ -20,7 +22,121 @@ Dependencies are locked. Pi is a development dependency for its exported RPC
 built-ins and the repository's shared `pi/scripts/managed-process.mjs`; actual execution uses the explicitly selected installed Pi CLI.
 Installers do not build/launch this package yet.
 
-## Current boundary
+## B3 opt-in usage
+
+This is a development slice, not full installer/default-workflow delivery. Build manually above;
+installers do not build/start the service. Keep the service profile on private local
+storage. Never delete `owner.lock`, adopt old editor state or auto-replay a mutation.
+The default root is `HOME/.local/state/pi-console/service/<channel>`.
+
+```sh
+# Independent execution host: no Neovim/tmux required. Use an absolute Pi binary.
+bin/pi-console server run --binary /absolute/path/to/pi
+bin/pi-console server start --binary /absolute/path/to/pi
+bin/pi-console server status
+bin/pi-console server list
+bin/pi-console server create --cwd /absolute/project --id explicit-request-id
+# Client: create a new conversation, attach live, or explicitly resume saved.
+bin/pi-console --service
+bin/pi-console --service --attach SERVICE_SESSION_ID
+bin/pi-console --service --resume SERVICE_SESSION_ID
+```
+
+Use `--root /short/private/path` on both service and frontend for an isolated profile;
+Unix socket paths over 100 bytes refuse. Service CLI also accepts `--channel stable|dev`;
+the launcher selects its existing channel. The frontend displays the target channel,
+host/build and controller separately from Pi tool permissions. Another dev checkout
+cannot administer the same dev profile. Explicit compatible attachment remains allowed.
+Missing service/build/version/channel errors do not start local Pi as a fallback.
+
+Normal `server stop` / `restart --binary ...` saves/stops idle sessions but refuses active
+work, accepted queues, approvals, startup/transitions or known managed nested work.
+An intentional `--force` interrupts owned work, retains history/workspaces and waits
+for managed cleanup. Cleanup failure exits the owner with its claim retained; it does
+not leave a falsely healthy listener or authorize replacement. SIGTERM/SIGINT are
+explicit forced administrative shutdown, not frontend detach. Boot/login supervisor
+setup, headless installer mode and broader session lifecycle commands are not delivered.
+
+After owner death, `server reconcile` invokes the existing B2 managed recovery gate;
+then explicitly `server start` and `server resume --session ID`. Neither ordinary
+start nor resume performs reconciliation. Known unresolved managed work blocks it;
+possible unknown escaped descendants do not. No command/queue/approval replay is
+allowed. The operational recovery path passed macOS B3 checks on Node 26.12 and actual
+22.19; Linux remains unexecuted.
+
+### Attachment UI
+
+- `:PiControl`, confirmed `:PiTakeover`, `:PiRelease`; reconnect starts as viewer.
+- `<C-CR>` non-slash text, `<Esc><Esc>` abort; shared queue via `:PiQueue` / `<leader>pq`.
+  Queue editors are local drafts until `:write`; their 30-second pause may expire.
+  A stale revision or dispatched item refuses saving and retains local text.
+- `:PiPending` inspects full retained payloads/previews; only the current controller
+  gets answer/cancel options. Closing a dialog is not cancellation. Answer draft
+  `:write` is explicit submission; stale callbacks are fenced by transport/grant/runtime.
+- `:PiOffers` retrieves inspect-only offers into separate draft buffers, never the
+  input buffer or navigation handlers. Snapshots contain no offers.
+- `:PiDetach`, `:PiReconnect`, `:PiConsoleRestart` affect only the frontend/bridge.
+  Accepted work remains owned by the service. Restart retains local input/draft
+  buffers and unresolved command IDs without replay or grant reacquisition.
+- `:PiSubmissions` inspects unresolved prompt IDs and authoritative receipt status.
+  Lost-ack input is visibly protected, not an unsent draft; identical text cannot be
+  submitted as new work until explicit review permits it. Status lookup never replays
+  work. A completed prompt receipt means queue acceptance, not a finished turn.
+- `:PiDrafts` explicitly offers frontend-local recovery files for inspection/copy.
+  Files under `${XDG_STATE_HOME:-$HOME/.local/state}/pi-console/frontend/<channel>/service-drafts/`
+  are private recovery, never execution authority. Recovery survives `NVIM_APPNAME`/
+  stable-release changes and remains isolated between stable and dev.
+- Unsupported slash/shell/settings/history/workspace/side/spawn/navigation actions
+  report unavailable. Tool inspection shows recorded text only; it never reads owner
+  full-output paths, spawn artifacts or workspace review data from the local filesystem.
+  No raw Pi RPC tunnel, local owner-path lookup, automatic editor
+  effect or implicit local Pi fallback exists. Zotero completion stays frontend-local;
+  the host still needs its own resource/provider configuration.
+
+### Local protocol v1
+
+The same-user security boundary is the 0700 profile and 0600 Unix socket. This is not
+remote authentication or isolation from other processes running as that user. Each
+connection must handshake `{id,method:"hello",payload:{version:1,channel}}` before other
+requests. Responses are `{type:"response",id,success,result|error}`; updates are
+`{type:"update",update}` with the owner's epoch/session/runtime/sequence. The handshake
+reports capabilities, host/channel, service epoch, resolved application path, running
+service build and separate runtime-resource fingerprint. CLI status compares the
+selected service build; it never silently restarts a different running build.
+
+Methods: `health`, `sessions`, `host.command`, `host.status`, `attach`, `detach`,
+`snapshot`, `command`, `grant`, `heartbeat`, `command.status`, `effect.inspect`,
+`service.stop`. All have typed allowlisted fields; raw RPC is rejected. A connection
+owns at most one subscription. `command` accepts the existing version-1 session
+command **without** `attachmentId`; the service stamps its own transport attachment
+and rejects caller-supplied attachment IDs or other targets. Tokens are returned only
+by `grant`, never in snapshots/receipts. `attach` returns a copied watermark snapshot
+before strictly newer updates. Detach or slow-view eviction revokes that attachment,
+not accepted work. UI snapshot replacement is a pure render coalesced after updates.
+
+Host `host.create` / `host.resume` commands contain `{id,serviceEpoch,operation,payload}`.
+Their receipt means allocation/scheduling, **not ready() or completed agent work**.
+Same ID/payload resolves disk state without launching twice; changed payload conflicts.
+Use status lookups for lost acknowledgments. New epochs never reauthorize old envelopes.
+No client automatically retries a mutation. Administrative stop is separately guarded
+by the current service epoch and an explicit boolean `force`; it is not a Pi RPC call.
+
+Input is strict UTF-8/LF JSONL, limited to 2 MiB/request; output frames to 80 MiB for
+bounded materialized snapshots/recovery. There are 64 connections, 32 in-flight requests
+per connection and bounded output/subscription buffers. A slow attachment may be dropped
+and must reconnect for a fresh snapshot; it cannot backpressure the owner's Pi reducer.
+The stdio Node bridge relays requests/events only and retains no execution authority.
+
+**Fresh local verification:** macOS/unchanged Pi 1.3.0/Neovim 0.12.6 passed startup
+races, two actual frontends, streaming/approval late attach with zero frontends,
+lost-ack lookup/deduplication, restart/draft protection, explicit CLI crash recovery,
+overlap/failed-shutdown/dev-management regressions and malformed/oversized/slow peers,
+on both Node 26.12.0 and actual 22.19.0. A 50-ms lease busy wait coordinates concurrent
+starts; exhaustion still refuses ownership. The separate catalog timeout remains zero.
+Linux is unexecuted; offline provider/approval fixtures are not external-provider or
+complete third-party-dialog acceptance. See the contracts report for scoped evidence.
+
+## Component boundary
 
 - `src/host-owner.ts` opens one catalog per host/profile. Create/resume registers
   an initializing handle before startup; concurrent resume returns that handle.
@@ -58,11 +174,13 @@ not perform the owner's trust/workspace initialization or authorize prompts.
 
 The adapter callbacks receive records for the host, not remote viewer streams.
 The owner now provides bounded conversation snapshots/subscriptions internally;
-IPC, a validated application protocol and independent service startup remain unfinished.
+B3 wraps these components with local IPC/independent startup; its bounded protocol
+and platform-scoped verification are described above.
 
 ### Best-effort execution ownership and effects (B2)
 
-This is a private component API, not B3 service startup/IPC. The revised contract
+This section describes the underlying private B2 component API. B3 candidate startup/IPC
+composes it without changing its ownership contract. The revised contract
 in `plans/server-mode.md` intentionally accepts unknown escaped descendants.
 
 - `HostOwner.open()` defaults to `HOME/.local/state/pi-console/service/<channel>`
@@ -135,7 +253,7 @@ Fresh evidence and remaining platform gaps are in `docs/SERVER-MODE-CONTRACTS.md
 Indexed tables hold profile identity, session metadata/ownership, ordered queue
 items, epoch-wide unique command IDs/fingerprints/outcomes and separate recovery
 payloads. A nullable command session reference permits future host-scoped receipts;
-there is no host create/resume admission API yet. Queue-plus-admission and
+B3 host create/resume admission uses that nullable reference without a schema change. Queue-plus-admission and
 rename-plus-outcome are single `BEGIN IMMEDIATE` transactions. No transaction
 awaits Pi, filesystem work or a client. Pi JSONL remains Pi's history source.
 
@@ -212,7 +330,8 @@ a new reliable service-stop API.
 
 `HostOwner.open()` takes explicit private root/channel, absolute Pi/application
 paths and host launch environment. It pins resolved paths and copies the environment;
-there is no default-profile discovery or dev runtime snapshot yet. `create(cwd)`
+default per-channel roots and resource-change refusal are described above. This is
+not an atomic dev runtime snapshot. `create(cwd)`
 returns after catalog creation, not after trust setup. `resume(id)` returns the
 same initializing/live handle for concurrent callers. Observe `snapshot()` and
 answer its pending interactions **before** awaiting `ready()` when setup needs a
@@ -367,8 +486,8 @@ above replaces the former 1,024-record / 32-MiB historical ceiling. Old-epoch
 envelopes always fail and unknown IDs are never an instruction to resend. On a permitted clean catalog reopen, unresolved
 acceptances become uncertain without replay. Existing crash claims/open entries
 still require ownership recovery; receipts do not authorize reclaiming them or
-establish exactly-once execution across a crash. Create/resume deduplication and
-network delivery remain separate unfinished work.
+establish exactly-once execution across a crash. B3 host create/resume deduplication
+and private local delivery wrap this core; remote delivery remains later work.
 
 Abort preserves the existing main-dialog and queue boundaries: idle abort explicitly
 cancels main dialogs but sends no native `clear_queue`/`abort`; side dialogs retain
@@ -556,7 +675,7 @@ approval, two queued/edited turns, rename, stop/reopen and explicit resume on bo
 Node versions. Strict typecheck/build passed; compiled imports remain Node built-ins
 and local modules. See the **B1 SQLite evidence** section in
 `../docs/SERVER-MODE-CONTRACTS.md` for measurements, commands and remaining limits.
-Those B1 probes did not verify B2/B3. Fresh B2 evidence is recorded above/in the contracts document; B3, Linux, actual full-host disk exhaustion and physical power loss remain unverified.
+Those B1 probes did not verify B2/B3. Fresh B2/B3 evidence is recorded above/in the contracts document; Linux, actual full-host disk exhaustion and physical power loss remain unverified.
 
 The following are historical pre-SQLite component reports. Their JSON capacity and
 Node-floor gaps are superseded above; they are not fresh reruns of every behavior.

@@ -57,6 +57,7 @@ cmp.setup({
 	sources = {
 		default = function()
 			if vim.api.nvim_buf_get_name(0) == "pi://input" then
+				if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return { "pi_zotero", "buffer" } end
 				local col = vim.api.nvim_win_get_cursor(0)[2]
 				if require("pi-integration.zotero-completion").owns(vim.api.nvim_get_current_line(), col) then
 					return { "pi_zotero" }

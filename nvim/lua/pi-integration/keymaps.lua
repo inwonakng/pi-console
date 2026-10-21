@@ -48,6 +48,7 @@ M.specs = {
 
 local function action_fn(ctx, action)
 	if action == "open_transcript_item" then
+		if ctx.service_mode then return ctx.actions.open_transcript_item end
 		return function()
 			if not require("pi-integration.utils.markdown-links").follow((ctx.state.workspace or {}).cwd) then
 				ctx.transcript.open_item_under_cursor()
