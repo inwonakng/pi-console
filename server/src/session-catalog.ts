@@ -191,10 +191,10 @@ export class SessionCatalog {
     this.transactionBytes += 4096;
   }
 
-  async reserveHost(fingerprint: string, receipt: HostReceipt): Promise<void> {
+  async reserveHost(fingerprint: string, receipt: HostReceipt, admission?: () => void): Promise<void> {
     await this.serial(async () => {
       await this.storageCapacity(4096, false);
-      this.transaction(() => { this.insertHost(fingerprint, receipt); });
+      this.transaction(() => { admission?.(); this.insertHost(fingerprint, receipt); });
     });
   }
 
@@ -207,7 +207,7 @@ export class SessionCatalog {
     });
   }
 
-  async create(cwd: string, host?: { fingerprint: string; receipt: HostReceipt }): Promise<CatalogSession> {
+  async create(cwd: string, host?: { fingerprint: string; receipt: HostReceipt }, admission?: () => void): Promise<CatalogSession> {
     if (!isAbsolute(cwd)) throw new Error("Session cwd must be an absolute host directory");
     return this.serial(async () => {
       await this.storageCapacity(4096, false);
@@ -223,6 +223,7 @@ export class SessionCatalog {
       await syncDirectory(join(this.root, "sessions"));
       // Failed registration can leave an unregistered empty file; never adopt/delete it.
       return this.transaction(() => {
+        admission?.();
         insertSession(this.db, session);
         if (host) this.insertHost(host.fingerprint, { ...host.receipt, status: "completed", result: { sessionId: id } });
         return session;
@@ -319,7 +320,7 @@ export class SessionCatalog {
     await this.change(() => this.setQueue(sessionId, copy));
   }
 
-  async reserveCommand(command: StoredCommand, queue?: AcceptedQueueItem[]): Promise<CommandReceipt> {
+  async reserveCommand(command: StoredCommand, queue?: AcceptedQueueItem[], admission?: () => void): Promise<CommandReceipt> {
     const copy = structuredClone(command);
     const items = queue && structuredClone(queue);
     return this.serial(async () => {
@@ -328,6 +329,7 @@ export class SessionCatalog {
       if (Buffer.byteLength(JSON.stringify(copy)) > commandBytes(copy)) throw new Error("Command receipt exceeds its reserved slot");
       await this.storageCapacity(commandBytes(copy), essential.has(copy.receipt.operation));
       return this.transaction(() => {
+        admission?.();
         if (items) this.setQueue(copy.receipt.sessionId, items);
         insertCommand(this.db, copy);
         this.transactionBytes += commandBytes(copy);

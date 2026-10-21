@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { open, realpath } from "node:fs/promises";
-import { resolve, join, isAbsolute } from "node:path";
+import { open, realpath, unlink } from "node:fs/promises";
+import { resolve, join, isAbsolute, dirname } from "node:path";
+import { tlsListenerOptions } from "./remote-transport.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -17,12 +18,13 @@ async function main(): Promise<void> {
   requireNode();
   const args = process.argv.slice(2);
   const action = args.shift();
+  const credentialAction = action === "credentials" ? args.shift() : undefined;
   const flags = new Map<string, string>();
   let force = false;
   while (args.length) {
     const key = args.shift()!;
     if (key === "--force") { force = true; continue; }
-    if (!["--channel", "--root", "--binary", "--app-root", "--cwd", "--session", "--id", "--provider", "--model"].includes(key) || !args.length || flags.has(key)) throw new Error(`Invalid service argument: ${key}`);
+    if (!["--channel", "--root", "--binary", "--app-root", "--cwd", "--session", "--id", "--provider", "--model", "--tls-config", "--label", "--output", "--device"].includes(key) || !args.length || flags.has(key)) throw new Error(`Invalid service argument: ${key}`);
     flags.set(key, args.shift()!);
   }
   const channel = flags.get("--channel") ?? process.env.PI_CONSOLE_CHANNEL ?? "stable";
@@ -45,7 +47,8 @@ async function main(): Promise<void> {
   }
   if (action === "run") {
     if (!binary || !isAbsolute(binary)) throw new Error("server run/start requires an explicit absolute --binary Pi path (or PI_BINARY)");
-    await runService(options); return;
+    const tls = flags.has("--tls-config") ? await tlsListenerOptions(resolve(flags.get("--tls-config")!)) : undefined;
+    await runService({ ...options, tls }); return;
   }
   if (action === "start" || action === "restart") {
     if (!binary || !isAbsolute(binary)) throw new Error("server start/restart requires an explicit absolute --binary Pi path (or PI_BINARY)");
@@ -64,6 +67,7 @@ async function main(): Promise<void> {
     const log = await open(join(root, "service.log"), "a", 0o600);
     const argv = [fileURLToPath(import.meta.url), "run", "--channel", channel, "--root", root, "--binary", binary,
       "--app-root", options.appRoot];
+    if (flags.has("--tls-config")) argv.push("--tls-config", resolve(flags.get("--tls-config")!));
     if (options.provider) argv.push("--provider", options.provider);
     if (options.model) argv.push("--model", options.model);
     const child = spawn(process.execPath, argv, { detached: true, cwd: options.appRoot, stdio: ["ignore", log.fd, log.fd], env: process.env });
@@ -82,7 +86,31 @@ async function main(): Promise<void> {
     }
     throw new Error(`Service did not become ready; inspect ${join(root, "service.log")}. Existing claims require explicit reconcile, never automatic removal.`);
   }
-  if (!["status", "stop", "create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|reconcile|list|create|resume} [--channel stable|dev] [--root PATH] [--binary ABSOLUTE_PI] [--force] [--cwd PATH|--session ID] [--id COMMAND_ID]");
+  if (action === "credentials") {
+    const { client, hello } = await LocalClient.open(root, channel);
+    try {
+      assertManagementOwner(hello);
+      if (credentialAction === "list") console.log(JSON.stringify(await client.request("credentials.list")));
+      else if (credentialAction === "revoke") {
+        if (!flags.has("--device")) throw new Error("Credential revocation requires --device ID");
+        await client.request("credentials.revoke", { deviceId: flags.get("--device") });
+        console.log("Device revoked; its connections and grants are closed. Accepted work continues.");
+      } else if (credentialAction === "issue") {
+        if (!flags.has("--label") || !flags.has("--output")) throw new Error("Credential issuance requires --label NAME --output PRIVATE_FILE");
+        const output = resolve(flags.get("--output")!);
+        await privateDirectory(dirname(output));
+        const file = await open(output, "wx", 0o600);
+        let issued = false;
+        try {
+          const result = await client.request("credentials.issue", { label: flags.get("--label") });
+          await file.writeFile(JSON.stringify(result) + "\n"); await file.sync(); issued = true;
+        } finally { await file.close(); if (!issued) await unlink(output); }
+        console.log("Device credential saved privately. Transfer it out of band; never paste it into arguments or transcripts.");
+      } else throw new Error("Usage: server credentials {issue --label NAME --output PRIVATE_FILE|list|revoke --device ID}");
+    } finally { client.close(); }
+    return;
+  }
+  if (!["status", "stop", "create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|reconcile|list|create|resume|credentials} [--channel stable|dev] [--root PATH] [--binary ABSOLUTE_PI] [--tls-config PRIVATE_FILE] [--force] [--cwd PATH|--session ID] [--id COMMAND_ID]");
   const { client, hello } = await LocalClient.open(root, channel);
   try {
     let result: unknown;

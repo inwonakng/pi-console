@@ -131,6 +131,7 @@ local function local_snapshot()
 	local saved_drafts = {}
 	for buf, name in pairs(drafts) do if valid(buf) then table.insert(saved_drafts, { name = name, text = text(buf) }) end end
 	return { cwd = vim.fn.getcwd(), service_session = session_id, service_root = M.config.service_root,
+		service_remote = M.config.service_remote, credential_file = M.config.credential_file, ca_file = M.config.ca_file,
 		host = hello and hello.hostId, channel = hello and hello.channel, saved_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
 		input_lines = valid(state.input_buf) and vim.api.nvim_buf_get_lines(state.input_buf, 0, -1, false) or { "" },
 		unresolved = unresolved, submission_status = submission_status, pending_host = pending_host, pending_host_select = pending_host_select,
@@ -170,7 +171,8 @@ local function metadata()
 			table.insert(submissions, id .. " (" .. (submission_status[id] or "outcome unknown") .. ")")
 		end
 	end
-	return { "# Pi — local service", "", "Channel: " .. tostring(hello and hello.channel or vim.env.PI_CONSOLE_CHANNEL or "stable")
+	return { "# Pi — " .. (M.config.service_remote and "remote TLS service" or "local service"),
+		"Endpoint: " .. tostring(hello and hello.remoteEndpoint or M.config.service_remote or M.config.service_root or "local IPC"), "", "Channel: " .. tostring(hello and hello.channel or vim.env.PI_CONSOLE_CHANNEL or "stable")
 		.. " | " .. (job and "connected" or "disconnected") .. " | " .. (control_current() and "CONTROLLER" or "VIEWER"),
 		"Host: " .. tostring(hello and hello.hostId or "—"), "Service build: " .. tostring(hello and hello.buildId or "—"),
 		"Session: " .. tostring(session_id or "—") .. " | " .. tostring(snapshot and snapshot.phase or "unattached") .. " | " .. tostring(pi_state.sessionName or ""),
@@ -364,18 +366,31 @@ connect = function()
 	generation = generation + 1
 	local gen = generation
 	local args = { "node", vim.fs.joinpath(vim.g.pi_console_root, "server", "dist", "bridge.js"), "--channel", vim.env.PI_CONSOLE_CHANNEL or "stable" }
-	if M.config.service_root and M.config.service_root ~= "" then vim.list_extend(args, { "--root", M.config.service_root }) end
+	if M.config.service_remote then
+		vim.list_extend(args, { "--remote", M.config.service_remote, "--credential-file", M.config.credential_file })
+		if M.config.ca_file then vim.list_extend(args, { "--ca-file", M.config.ca_file }) end
+	elseif M.config.service_root and M.config.service_root ~= "" then vim.list_extend(args, { "--root", M.config.service_root }) end
 	local partial = ""
 	local function record(value)
 		if gen ~= generation then return end
 		if value.type == "hello" then
-			hello = value.result
+			local result = value.result
+			if type(result) ~= "table" or result.version ~= 1 or result.channel ~= (vim.env.PI_CONSOLE_CHANNEL or "stable")
+				or type(result.hostId) ~= "string" or type(result.capabilities) ~= "table"
+				or not vim.tbl_contains(result.capabilities, "snapshot") or not vim.tbl_contains(result.capabilities, "updates")
+				or (M.config.service_remote and result.transport ~= "wss") then
+				notify("Incompatible service handshake; no fallback.", vim.log.levels.ERROR); M.detach(); return
+			end
+			hello = result
+			render()
 			if recover_host() then return end
 			if session_id then
 				if resume_requested then resume_requested = false; host_operation("host.resume", { sessionId = session_id })
 				else attach(session_id) end
 			elseif not initial_attempted then
-				initial_attempted = true; host_operation("host.create", { cwd = vim.fn.getcwd() })
+				initial_attempted = true
+				if M.config.service_remote then M.pick_session()
+				else host_operation("host.create", { cwd = vim.fn.getcwd() }) end
 			end
 		elseif value.type == "response" then
 			local callback = callbacks[value.id]; callbacks[value.id] = nil
@@ -860,11 +875,18 @@ function M.get_commands(callback) callback({}) end
 function M.on_transcript_rendered() end
 function M.maybe_prompt_session_archive() end
 function M.setup(config)
-	M.config = vim.tbl_extend("force", config or {}, { service_root = vim.env.PI_CONSOLE_SERVICE_ROOT })
+	M.config = vim.tbl_extend("force", config or {}, { service_root = vim.env.PI_CONSOLE_SERVICE_ROOT,
+		service_remote = vim.env.PI_CONSOLE_SERVICE_REMOTE, credential_file = vim.env.PI_CONSOLE_SERVICE_CREDENTIAL_FILE,
+		ca_file = vim.env.PI_CONSOLE_SERVICE_CA_FILE })
+	assert(not M.config.service_remote or (M.config.credential_file and not M.config.service_root), "Remote attachment requires a credential file and no local root")
+	assert(not M.config.service_remote or (M.config.service_remote:match("^https://[^/?#@%s]+/?$")
+		and not M.config.service_remote:find("[%c]")), "Remote endpoint must be an HTTPS origin without credentials, path, query or fragment")
 	ctx.config = M.config
 end
 function M.open(_, restore)
 	if restore then
+		assert(restore.service_remote == M.config.service_remote and restore.credential_file == M.config.credential_file
+			and restore.ca_file == M.config.ca_file, "Restart target differs from explicit attachment; refusing to restore execution identities")
 		session_id, pending_host = restore.service_session, restore.pending_host
 		pending_host_select = restore.pending_host_select == true
 		unresolved, initial_attempted = restore.unresolved or {}, restore.initial_attempted

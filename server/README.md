@@ -1,7 +1,8 @@
 # Host-side Pi owner (in development)
 
 This package contains the owner components and **opt-in local-service/Neovim
-attachment with C typed single-session operations**, stopping for orchestrator review.
+attachment with C typed single-session operations and D1 opt-in HTTPS/WSS**.
+D1 stops for security/protocol review; it does not complete D or authorize D2/E/F.
 See [`../docs/SERVER-MODE-C.md`](../docs/SERVER-MODE-C.md) for the mutation inventory,
 protocol/outcome rules, fresh macOS evidence and remaining boundaries. The plans and
 active B3 handoff are unchanged. B1–B3 evidence in the contracts report remains
@@ -21,7 +22,7 @@ npm run build
 
 Dependencies are locked. Pi is a development dependency for its exported RPC
 **types**, not an embedded SDK execution engine. Built JavaScript uses Node
-built-ins and the repository's shared `pi/scripts/managed-process.mjs`; actual execution uses the explicitly selected installed Pi CLI.
+built-ins, the locked `ws` transport dependency and the repository's shared `pi/scripts/managed-process.mjs`; actual execution uses the explicitly selected installed Pi CLI.
 Installers do not build/launch this package yet.
 
 ## B3 opt-in usage
@@ -66,6 +67,44 @@ start nor resume performs reconciliation. Known unresolved managed work blocks i
 possible unknown escaped descendants do not. No command/queue/approval replay is
 allowed. The operational recovery path passed macOS B3 checks on Node 26.12 and actual
 22.19; Linux remains unexecuted.
+
+### D1 explicit remote attachment
+
+The owner still starts with local IPC only unless `server run/start/restart` receives
+`--tls-config /private/listener.json`. That owner-only JSON file contains
+`{"bind":"0.0.0.0","port":8443,"certFile":"/absolute/fullchain.pem","keyFile":"/absolute/key.pem"}`.
+The operator supplies a currently valid certificate/key pair and network reachability.
+Clients validate the certificate chain, validity and hostname; there is no plaintext,
+proxy, redirect or insecure fallback. Restart is explicit when configuration changes.
+
+Issue credentials through the running owner's private local IPC, one per device:
+
+```sh
+bin/pi-console server credentials issue --label laptop --output /private/device/laptop.json
+bin/pi-console server credentials list
+bin/pi-console server credentials revoke --device DEVICE_ID
+bin/pi-console --service --remote https://host.example:8443 \
+  --credential-file /private/device/laptop.json --attach SESSION_ID
+```
+
+Transfer the credential file out of band into an owner-only 0700 directory/0600 file.
+Issuance exclusively creates the output file; it never prints the secret. The owner
+stores only SHA-256 verification hashes. `--ca-file /path/to/operator-ca.pem` explicitly
+selects a private CA trust bundle when the certificate is not publicly trusted.
+Only file paths, never bearer secrets, belong in arguments. A credential pins the
+host identity and channel; another identity requires explicitly issued credentials.
+Use the matching launcher channel. A remote launch without an attachment opens the
+existing session selector rather than creating work using the frontend's local cwd.
+
+The bridge uses the authenticated WSS `/v1/stream` endpoint on that HTTPS listener;
+HTTP routes expose no session/admin data. Every operation rechecks device validity,
+including inside asynchronous durable admission. Local-only credential administration
+and service shutdown are absent from the remote allowlist. Browser origins are refused.
+Revocation closes all streams and grants for that device; accepted work remains owned
+by the service. Reconnect starts as viewer and never replays mutations. Remote capacity
+is separate from local IPC; frames, output and subscriptions remain bounded, and a
+dropped subscription destroys its transport even when its writer is backpressured.
+Neovim displays the endpoint, host/channel identity and control role.
 
 ### Attachment UI
 
@@ -119,7 +158,7 @@ selected service build; it never silently restarts a different running build.
 
 Methods: `health`, `sessions`, `host.command`, `host.status`, `attach`, `detach`,
 `snapshot`, typed `session.read`, `command`, `grant`, `heartbeat`, `command.status`, `effect.inspect`,
-`service.stop`. All have typed allowlisted fields; raw RPC is rejected. A connection
+`service.stop`; local administration also has `credentials.issue/list/revoke`. All have typed allowlisted fields; raw RPC is rejected. A connection
 owns at most one subscription. `command` accepts the existing version-1 session
 command **without** `attachmentId`; the service stamps its own transport attachment
 and rejects caller-supplied attachment IDs or other targets. Tokens are returned only

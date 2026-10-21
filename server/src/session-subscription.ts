@@ -6,6 +6,9 @@ export class SessionSubscription {
   private bytes = 0;
   private waiting?: { resolve: (update: OwnedSessionUpdate) => void; reject: (error: Error) => void };
   private failure?: Error;
+  private resolveClosed!: () => void;
+  /** Independent of next()/socket writes, so a dropped backpressured view can be evicted. */
+  readonly closed = new Promise<void>((resolve) => { this.resolveClosed = resolve; });
 
   constructor(readonly attachmentId: string, readonly snapshot: OwnedSessionSnapshot, private readonly detached: () => void,
     private readonly filter: (update: OwnedSessionUpdate) => OwnedSessionUpdate = (update) => update) {}
@@ -44,6 +47,7 @@ export class SessionSubscription {
   private drop(error: Error): void {
     if (this.failure) return;
     this.failure = error;
+    this.resolveClosed();
     this.queue = [];
     this.bytes = 0;
     const waiting = this.waiting;

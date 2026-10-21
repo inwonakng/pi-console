@@ -142,13 +142,14 @@ export class HostOwner {
 
   /** Host IDs are disk identities, not connection IDs. Duplicate lookups never
    * resume a now-stopped worker or repeat initialization. */
-  command(input: unknown): Promise<HostReceipt> {
+  command(input: unknown, admission?: () => void): Promise<HostReceipt> {
     const command = hostCommand(input);
     if (command.serviceEpoch !== this.serviceEpoch) throw new CommandError("stale_epoch", "Host command belongs to another service epoch");
     this.assertOpen();
     if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");
     this.hostAdmitting++;
     const task = this.hostAdmission.then(async () => {
+      admission?.();
       this.assertOpen();
       this.catalog.assertExecutionAllowed();
       const fingerprint = hostFingerprint(command);
@@ -160,14 +161,14 @@ export class HostOwner {
       const receipt: HostReceipt = { id: command.id, serviceEpoch: this.serviceEpoch, operation: command.operation, status: "accepted" };
       let sessionId: string;
       if (command.operation === "host.create") {
-        const record = await this.catalog.create(command.payload.cwd, { fingerprint, receipt });
+        const record = await this.catalog.create(command.payload.cwd, { fingerprint, receipt }, admission);
         sessionId = record.id;
         // The allocation receipt is already committed before any worker launch.
         this.resume(sessionId);
         return this.catalog.hostRecord(command.serviceEpoch, command.id)!.receipt;
       }
       this.catalog.get(command.payload.sessionId);
-      await this.catalog.reserveHost(fingerprint, receipt);
+      await this.catalog.reserveHost(fingerprint, receipt, admission);
       try {
         sessionId = this.resume(command.payload.sessionId).id;
         receipt.status = "completed";
@@ -376,13 +377,14 @@ export class OwnedSession {
   /** Resolve acceptance independently from eventual outcome. The short admission
    * lane serializes authorization/reservation, not a blocking abort or dialog.
    */
-  async command(input: SessionCommand): Promise<CommandReceipt> {
+  async command(input: SessionCommand, admission?: () => void): Promise<CommandReceipt> {
     const command = sessionCommand(input);
     if (command.sessionId !== this.id) return Promise.reject(new CommandError("invalid_command", "Command targets another session"));
     if (command.serviceEpoch !== this.catalog.epoch) return Promise.reject(new CommandError("stale_epoch", "Command belongs to another service epoch"));
     if (this.admitting >= 128) return Promise.reject(new CommandError("command_limit", "Owner command admission limit exceeded"));
     this.admitting++;
     const task = this.admission.then(async () => {
+      admission?.();
       this.control.attached(command.attachmentId);
       const fingerprint = commandFingerprint(command);
       const existing = this.catalog.commandRecord(command.serviceEpoch, command.id);
@@ -406,7 +408,7 @@ export class OwnedSession {
       }
       if (command.operation === "side.prompt") receipt.result = { submittedText: command.payload.text };
       const queue = this.prepareQueueCommand(command, receipt);
-      try { await this.catalog.reserveCommand({ fingerprint, receipt }, queue); }
+      try { await this.catalog.reserveCommand({ fingerprint, receipt }, queue, admission); }
       catch (error) {
         if (!(error instanceof CommandError)) this.commandFailure(error);
         throw error;

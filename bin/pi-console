@@ -5,8 +5,8 @@ set -eu
 usage() {
     printf 'Usage: %s [--overview | --sidebar | --session PATH]\n' "${0##*/}" >&2
     printf '       %s tmux {setup|toggle|new|overview|sidebar} [ARGS...]\n' "${0##*/}" >&2
-    printf '       %s --service [--attach ID | --resume ID] [--root PATH]\n' "${0##*/}" >&2
-    printf '       %s server {run|start|status|stop|restart|reconcile|list|create|resume} [OPTIONS]\n' "${0##*/}" >&2
+    printf '       %s --service [--attach ID | --resume ID] [--root PATH | --remote HTTPS_ORIGIN --credential-file PATH [--ca-file PATH]]\n' "${0##*/}" >&2
+    printf '       %s server {run|start|status|stop|restart|reconcile|list|create|resume|credentials} [OPTIONS]\n' "${0##*/}" >&2
     printf '       %s --version\n' "${0##*/}" >&2
     exit 2
 }
@@ -25,7 +25,7 @@ fi
 # B3 is opt-in. No failure may fall back to an editor-owned Pi process.
 if [ "${1-}" = --service ]; then
     export PI_CONSOLE_SERVICE_FRONTEND=1
-    unset PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT
+    unset PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CREDENTIAL_FILE PI_CONSOLE_SERVICE_CA_FILE
     shift
     while [ "$#" -gt 0 ]; do
         [ "$#" -ge 2 ] || usage
@@ -33,13 +33,21 @@ if [ "${1-}" = --service ]; then
             --attach) export PI_CONSOLE_SERVICE_SESSION=$2 ;;
             --resume) export PI_CONSOLE_SERVICE_SESSION=$2 PI_CONSOLE_SERVICE_RESUME=1 ;;
             --root) export PI_CONSOLE_SERVICE_ROOT=$2 ;;
+            --remote) export PI_CONSOLE_SERVICE_REMOTE=$2 ;;
+            --credential-file) export PI_CONSOLE_SERVICE_CREDENTIAL_FILE=$2 ;;
+            --ca-file) export PI_CONSOLE_SERVICE_CA_FILE=$2 ;;
             *) usage ;;
         esac
         shift 2
     done
+    if [ -n "${PI_CONSOLE_SERVICE_REMOTE-}" ]; then
+        [ -n "${PI_CONSOLE_SERVICE_CREDENTIAL_FILE-}" ] && [ -z "${PI_CONSOLE_SERVICE_ROOT-}" ] || usage
+    else
+        [ -z "${PI_CONSOLE_SERVICE_CREDENTIAL_FILE-}${PI_CONSOLE_SERVICE_CA_FILE-}" ] || usage
+    fi
     [ -f "$app_root/server/dist/bridge.js" ] || { printf 'Build server/ before using --service.\n' >&2; exit 1; }
 else
-    unset PI_CONSOLE_SERVICE_FRONTEND PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT
+    unset PI_CONSOLE_SERVICE_FRONTEND PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CREDENTIAL_FILE PI_CONSOLE_SERVICE_CA_FILE
 fi
 if [ "$#" -eq 1 ] && [ "$1" = --version ]; then
     pi_console_build_snapshot

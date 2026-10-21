@@ -1,4 +1,7 @@
 import { createServer, type Socket } from "node:net";
+import type { Duplex } from "node:stream";
+import { DeviceCredentials } from "./device-credentials.js";
+import { RemoteListener, type TlsListenerOptions } from "./remote-transport.js";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { HostOwner, type HostOwnerOptions, type OwnedSession, type OwnedSessionUpdate } from "./host-owner.js";
@@ -16,12 +19,19 @@ function exact(value: Record<string, unknown>, keys: string[]): void {
 
 /** Same-user local IPC. Filesystem ownership/modes are the authentication boundary.
  * A transport has at most one attachment; caller-supplied attachment IDs are refused. */
-export async function runService(options: HostOwnerOptions & { root: string }): Promise<void> {
+export async function runService(options: HostOwnerOptions & { root: string; tls?: TlsListenerOptions }): Promise<void> {
   const path = endpoint(options.root);
   if (Buffer.byteLength(path) > 100) throw new Error("Unix endpoint path is too long; select a shorter private --root");
   const buildId = await serviceBuild();
   const owner = await HostOwner.open(options);
   const clients = new Set<Socket>();
+  let remote: RemoteListener | undefined;
+  let credentials: DeviceCredentials;
+  try { credentials = await DeviceCredentials.open(options.root, owner.hostId, options.channel, (id) => remote?.revoke(id)); }
+  catch (error) { await owner.close(); throw error; }
+  let startReady!: () => void, startFailed!: (error: unknown) => void;
+  const ready = new Promise<void>((resolve, reject) => { startReady = resolve; startFailed = reject; });
+  void ready.catch(() => undefined);
   let stopping = false;
   let shutdownFailure: unknown;
   const server = createServer((socket) => {
@@ -46,13 +56,19 @@ export async function runService(options: HostOwnerOptions & { root: string }): 
       throw error;
     }
   };
-  async function connection(socket: Socket): Promise<void> {
+  async function connection(socket: Duplex, deviceId?: string, onDetach?: (detach: () => void) => void): Promise<void> {
     const writer = new RecordWriter(socket);
     let handshaken = false;
     let subscription: SessionSubscription | undefined;
     let session: OwnedSession | undefined;
     let pending = 0;
     const detach = () => { subscription?.close(); subscription = undefined; session = undefined; };
+    onDetach?.(detach);
+    const remoteAdmission = deviceId ? () => {
+      if (socket.destroyed || !credentials.active(deviceId)) throw new CommandError("attachment_closed", "Remote authentication is no longer valid");
+    } : undefined;
+    const handshakeDeadline = setTimeout(() => socket.destroy(), 10000);
+    socket.once("close", () => clearTimeout(handshakeDeadline));
     socket.on("error", () => undefined);
     socket.once("close", detach);
     const send = (value: unknown) => writer.send(value).catch((error) => { socket.destroy(); throw error; });
@@ -73,6 +89,12 @@ export async function runService(options: HostOwnerOptions & { root: string }): 
         exact(record, ["id", "method", "payload"]);
         if (!identifier(record.id) || typeof record.method !== "string" || !object(record.payload)) throw new CommandError("invalid_command", "Invalid IPC request");
         const p = record.payload;
+        // Authentication remains current for every operation, including buffered
+        // records after revocation. Accepted owner work is never cancelled here.
+        if (socket.destroyed || deviceId && !credentials.active(deviceId)) throw new CommandError("attachment_closed", "Remote authentication is no longer valid");
+        if (deviceId && !["hello", "health", "sessions", "host.command", "host.status", "attach", "detach", "snapshot", "session.read", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
+          throw new CommandError("unsupported_command", "Method is not available on remote transport");
+        }
         let result: unknown;
         if (!handshaken && record.method !== "hello") throw new CommandError("unsupported_command", "Handshake is required");
         switch (record.method) {
@@ -80,15 +102,18 @@ export async function runService(options: HostOwnerOptions & { root: string }): 
             exact(p, ["version", "channel"]);
             if (handshaken || p.version !== PROTOCOL || p.channel !== options.channel) throw new CommandError("unsupported_command", "Incompatible protocol/channel; select a compatible endpoint explicitly (no fallback)");
             handshaken = true;
-            result = { version: PROTOCOL, capabilities: CAPABILITIES, hostId: owner.hostId, channel: options.channel,
-              buildId, runtimeBuildId: owner.buildId, appRoot: options.appRoot, serviceEpoch: owner.serviceEpoch, endpoint: path };
+            clearTimeout(handshakeDeadline);
+            result = { version: PROTOCOL, capabilities: deviceId ? CAPABILITIES.filter((c) => c !== "service.stop") : CAPABILITIES,
+              transport: deviceId ? "wss" : "local", ...(deviceId ? { deviceId } : {}), hostId: owner.hostId, channel: options.channel,
+              buildId, runtimeBuildId: owner.buildId, appRoot: options.appRoot, serviceEpoch: owner.serviceEpoch,
+              ...(!deviceId ? { endpoint: path } : {}) };
             break;
           case "health":
           case "sessions":
             exact(p, []);
             result = { sessions: owner.list(), serviceEpoch: owner.serviceEpoch, buildId, runtimeBuildId: owner.buildId, channel: options.channel };
             break;
-          case "host.command": result = await owner.command(p); break;
+          case "host.command": result = await owner.command(p, remoteAdmission); break;
           case "host.status":
             exact(p, ["serviceEpoch", "commandId"]);
             if (!identifier(p.serviceEpoch) || !identifier(p.commandId)) throw new CommandError("invalid_command", "Invalid command lookup");
@@ -102,12 +127,16 @@ export async function runService(options: HostOwnerOptions & { root: string }): 
             session = target;
             const view = target.subscribe(p.label);
             subscription = view;
+            void view.closed.then(() => { if (subscription === view) socket.destroy(); });
             await send({ type: "response", id: record.id, success: true,
               result: { attachmentId: view.attachmentId, snapshot: view.snapshot } });
             void pump(view);
             return;
           }
           case "detach": exact(p, []); detach(); result = {}; break;
+          case "credentials.list": exact(p, []); result = credentials.list(); break;
+          case "credentials.issue": exact(p, ["label"]); result = await credentials.issue(p.label); break;
+          case "credentials.revoke": exact(p, ["deviceId"]); await credentials.revoke(p.deviceId); result = { revoked: true }; break;
           case "service.stop":
             exact(p, ["serviceEpoch", "force"]);
             if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Service epoch changed");
@@ -123,7 +152,7 @@ export async function runService(options: HostOwnerOptions & { root: string }): 
               case "command":
                 exact(p, ["version", "id", "sessionId", "serviceEpoch", "runtimeRevision", "controlToken", "operation", "payload"]);
                 if (p.sessionId !== target.id) throw new CommandError("invalid_command", "Command targets another attachment");
-                result = await target.command({ ...p, attachmentId: view.attachmentId } as Parameters<OwnedSession["command"]>[0]);
+                result = await target.command({ ...p, attachmentId: view.attachmentId } as Parameters<OwnedSession["command"]>[0], remoteAdmission);
                 break;
               case "grant": exact(p, []); result = target.controlGrant(view.attachmentId) ?? null; break;
               case "heartbeat":
@@ -152,13 +181,16 @@ export async function runService(options: HostOwnerOptions & { root: string }): 
       }
     }
     try {
+      await ready;
+      if (socket.destroyed) return;
       for await (const record of records(socket, MAX_REQUEST)) {
         if (++pending > 32) throw new Error("Too many concurrent IPC requests");
         void request(record).catch(() => socket.destroy()).finally(() => { pending--; });
       }
-    } finally { detach(); socket.destroy(); }
+    } finally { clearTimeout(handshakeDeadline); detach(); socket.destroy(); }
   }
   function finish(): void {
+    remote?.close();
     server.close();
     for (const socket of clients) socket.destroy();
     resolveStopped();
@@ -175,7 +207,12 @@ export async function runService(options: HostOwnerOptions & { root: string }): 
       server.listen(path, () => { server.off("error", reject); resolve(); });
     });
     await chmod(path, 0o600);
-  } catch (error) { server.close(); await owner.close(); throw error; }
+    if (options.tls) {
+      remote = new RemoteListener(options.tls, credentials, (stream, deviceId, onDetach) => connection(stream, deviceId, onDetach));
+      await remote.listen();
+    }
+    startReady();
+  } catch (error) { startFailed(error); remote?.close(); server.close(); for (const socket of clients) socket.destroy(); await owner.close(); throw error; }
   const signal = () => { void shutdown(true).then(finish, (error) => { shutdownFailure = error; console.error(error); finish(); }); };
   process.once("SIGTERM", signal); process.once("SIGINT", signal);
   try { await stopped; }
