@@ -1,3 +1,4 @@
+if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-pins") end
 local json = require("pi-integration.utils.json")
 local runtime = require("pi-integration.runtime")
 

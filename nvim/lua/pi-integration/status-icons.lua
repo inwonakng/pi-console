@@ -21,6 +21,8 @@ local styles = {
 	Idle = { icon = "󰽥", color = colors.muted },
 	Error = { icon = "", color = colors.red },
 	["Not Open"] = { icon = "", color = colors.muted },
+	Disconnected = { icon = "", color = colors.muted },
+	Stopping = { icon = "", color = colors.muted },
 }
 styles.Retrying = styles.Working
 styles.Starting = styles.Loading

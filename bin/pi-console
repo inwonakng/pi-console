@@ -5,7 +5,7 @@ set -eu
 usage() {
     printf 'Usage: %s [--overview | --sidebar | --session PATH]\n' "${0##*/}" >&2
     printf '       %s tmux {setup|toggle|new|overview|sidebar} [ARGS...]\n' "${0##*/}" >&2
-    printf '       %s --service [--attach ID | --resume ID] [--root PATH | --remote HTTPS_ORIGIN --credential-file PATH [--ca-file PATH]]\n' "${0##*/}" >&2
+    printf '       %s --service [--overview | --sidebar | --new | --attach ID | --resume ID] [--root PATH | --remote HTTPS_ORIGIN --credential-file PATH [--ca-file PATH]]\n' "${0##*/}" >&2
     printf '       %s server {run|start|status|stop|restart|reconcile|list|create|resume|credentials} [OPTIONS]\n' "${0##*/}" >&2
     printf '       %s --version\n' "${0##*/}" >&2
     exit 2
@@ -22,12 +22,17 @@ if [ "${1-}" = server ]; then
     exec node "$app_root/server/dist/cli.js" "$@"
 fi
 
-# B3 is opt-in. No failure may fall back to an editor-owned Pi process.
+# Service mode is opt-in. No failure may fall back to an editor-owned Pi process.
 if [ "${1-}" = --service ]; then
     export PI_CONSOLE_SERVICE_FRONTEND=1
-    unset PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CREDENTIAL_FILE PI_CONSOLE_SERVICE_CA_FILE
+    unset PI_CONSOLE_SERVICE_NEW PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CREDENTIAL_FILE PI_CONSOLE_SERVICE_CA_FILE
     shift
     while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --overview) export PI_CONSOLE_OVERVIEW=1; shift; continue ;;
+            --sidebar) export PI_CONSOLE_SIDEBAR=1; shift; continue ;;
+            --new) export PI_CONSOLE_SERVICE_NEW=1; shift; continue ;;
+        esac
         [ "$#" -ge 2 ] || usage
         case "$1" in
             --attach) export PI_CONSOLE_SERVICE_SESSION=$2 ;;
@@ -47,7 +52,7 @@ if [ "${1-}" = --service ]; then
     fi
     [ -f "$app_root/server/dist/bridge.js" ] || { printf 'Build server/ before using --service.\n' >&2; exit 1; }
 else
-    unset PI_CONSOLE_SERVICE_FRONTEND PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CREDENTIAL_FILE PI_CONSOLE_SERVICE_CA_FILE
+    unset PI_CONSOLE_SERVICE_NEW PI_CONSOLE_SERVICE_FRONTEND PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CREDENTIAL_FILE PI_CONSOLE_SERVICE_CA_FILE
 fi
 if [ "$#" -eq 1 ] && [ "$1" = --version ]; then
     pi_console_build_snapshot
@@ -88,7 +93,8 @@ if [ "${1-}" = "tmux" ]; then
     esac
 fi
 
-unset PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR PI_CONSOLE_SESSION
+if [ "${PI_CONSOLE_SERVICE_FRONTEND-}" != 1 ]; then unset PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR; fi
+unset PI_CONSOLE_SESSION
 
 case "$#" in
     0)

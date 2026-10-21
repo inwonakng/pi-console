@@ -10,13 +10,14 @@ async function main(): Promise<void> {
   requireNode();
   const args = process.argv.slice(2);
   let channel = "stable";
-  let root: string | undefined;
+  let root: string | undefined, expectedHost: string | undefined;
   let remote: string | undefined, credentialFile: string | undefined, caFile: string | undefined;
   while (args.length) {
     const flag = args.shift(); const value = args.shift();
     if (!value) throw new Error("Missing bridge argument");
     if (flag === "--channel") channel = value;
     else if (flag === "--root") root = resolve(value);
+    else if (flag === "--expected-host") expectedHost = value;
     else if (flag === "--remote") remote = value;
     else if (flag === "--credential-file") credentialFile = resolve(value);
     else if (flag === "--ca-file") caFile = resolve(value);
@@ -39,6 +40,10 @@ async function main(): Promise<void> {
     ? await LocalClient.openRemote(remote, credentialFile!, channel, caFile, event)
     : await LocalClient.open(root ?? defaultRoot(channel), channel, event);
   client = opened.client;
+  if (expectedHost && opened.hello.hostId !== expectedHost) {
+    client.close();
+    throw new Error("Endpoint service identity changed; confirm the replacement in Hosts before attaching. No mutation was sent.");
+  }
   await output({ type: "hello", result: opened.hello });
   const pending = new Set<Promise<void>>();
   try {

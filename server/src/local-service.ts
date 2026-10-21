@@ -4,7 +4,7 @@ import { DeviceCredentials } from "./device-credentials.js";
 import { RemoteListener, type TlsListenerOptions } from "./remote-transport.js";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { HostOwner, type HostOwnerOptions, type OwnedSession, type OwnedSessionUpdate } from "./host-owner.js";
+import { HostOwner, type HostOwnerOptions, type HostSummaries, type OwnedSession, type OwnedSessionUpdate } from "./host-owner.js";
 import type { SessionSubscription } from "./session-subscription.js";
 import { CommandError } from "./session-commands.js";
 import { identifier } from "./host-commands.js";
@@ -25,6 +25,7 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
   const buildId = await serviceBuild();
   const owner = await HostOwner.open(options);
   const clients = new Set<Socket>();
+  const summaryStops = new Set<() => void>();
   let remote: RemoteListener | undefined;
   let credentials: DeviceCredentials;
   try { credentials = await DeviceCredentials.open(options.root, owner.hostId, options.channel, (id) => remote?.revoke(id)); }
@@ -46,6 +47,7 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
     // HostOwner fences admissions in the same turn as the preflight.
     const task = owner.shutdown(force);
     stopping = true;
+    if (owner.shutdownStarted) for (const stop of summaryStops) stop();
     try { await task; }
     catch (error) {
       // A preflight refusal leaves the owner usable. A cleanup failure retains
@@ -63,15 +65,37 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
     let session: OwnedSession | undefined;
     let pending = 0;
     const detach = () => { subscription?.close(); subscription = undefined; session = undefined; };
-    onDetach?.(detach);
+    let summaryFeed: { previous: string; timer?: NodeJS.Timeout } | undefined;
+    const stopSummaries = () => {
+      if (summaryFeed?.timer) clearTimeout(summaryFeed.timer);
+      summaryFeed = undefined;
+      summaryStops.delete(stopSummaries);
+    };
+    const closeViews = () => { stopSummaries(); detach(); };
+    onDetach?.(closeViews);
     const remoteAdmission = deviceId ? () => {
       if (socket.destroyed || !credentials.active(deviceId)) throw new CommandError("attachment_closed", "Remote authentication is no longer valid");
     } : undefined;
     const handshakeDeadline = setTimeout(() => socket.destroy(), 10000);
     socket.once("close", () => clearTimeout(handshakeDeadline));
     socket.on("error", () => undefined);
-    socket.once("close", detach);
+    socket.once("close", closeViews);
     const send = (value: unknown) => writer.send(value).catch((error) => { socket.destroy(); throw error; });
+    async function pumpSummaries(feed: NonNullable<typeof summaryFeed>, initial?: HostSummaries): Promise<void> {
+      if (summaryFeed !== feed) return;
+      if (socket.destroyed || owner.shutdownStarted || deviceId && !credentials.active(deviceId)) { stopSummaries(); return; }
+      try {
+        const result = initial ?? owner.summaries();
+        const serialized = JSON.stringify(result);
+        if (serialized !== feed.previous) {
+          await send({ type: "summaries", result });
+          feed.previous = serialized;
+        }
+        // Schedule only after the previous write drains. Slow peers retain at
+        // most one summary write, and intermediate changes coalesce naturally.
+        if (summaryFeed === feed) feed.timer = setTimeout(() => { void pumpSummaries(feed); }, 750);
+      } catch { stopSummaries(); socket.destroy(); }
+    }
     async function pump(view: SessionSubscription): Promise<void> {
       try {
         while (!socket.destroyed && subscription === view) {
@@ -92,7 +116,7 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
         // Authentication remains current for every operation, including buffered
         // records after revocation. Accepted owner work is never cancelled here.
         if (socket.destroyed || deviceId && !credentials.active(deviceId)) throw new CommandError("attachment_closed", "Remote authentication is no longer valid");
-        if (deviceId && !["hello", "health", "sessions", "host.command", "host.status", "attach", "detach", "snapshot", "session.read", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
+        if (deviceId && !["hello", "health", "sessions", "sessions.subscribe", "host.command", "host.status", "attach", "detach", "snapshot", "session.read", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
           throw new CommandError("unsupported_command", "Method is not available on remote transport");
         }
         let result: unknown;
@@ -113,6 +137,17 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
             exact(p, []);
             result = { sessions: owner.list(), serviceEpoch: owner.serviceEpoch, buildId, runtimeBuildId: owner.buildId, channel: options.channel };
             break;
+          case "sessions.subscribe": {
+            exact(p, []);
+            if (owner.shutdownStarted) throw new CommandError("session_unavailable", "Service is stopping");
+            const summaries = owner.summaries();
+            const initial = !summaryFeed;
+            const feed = summaryFeed ??= { previous: "" };
+            summaryStops.add(stopSummaries);
+            await send({ type: "response", id: record.id, success: true, result: summaries });
+            if (initial) void pumpSummaries(feed, summaries);
+            return;
+          }
           case "host.command": result = await owner.command(p, remoteAdmission); break;
           case "host.status":
             exact(p, ["serviceEpoch", "commandId"]);
@@ -187,9 +222,10 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
         if (++pending > 32) throw new Error("Too many concurrent IPC requests");
         void request(record).catch(() => socket.destroy()).finally(() => { pending--; });
       }
-    } finally { clearTimeout(handshakeDeadline); detach(); socket.destroy(); }
+    } finally { clearTimeout(handshakeDeadline); closeViews(); socket.destroy(); }
   }
   function finish(): void {
+    for (const stop of summaryStops) stop();
     remote?.close();
     server.close();
     for (const socket of clients) socket.destroy();

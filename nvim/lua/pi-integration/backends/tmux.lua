@@ -266,9 +266,17 @@ function M.start_overview()
 	return true
 end
 
+function M.mark_service_frontend()
+	owner_pane = owner_pane or vim.env.TMUX_PANE
+	return command({ "set-option", "-p", "-t", owner_pane, "@pi_service_frontend", "1", ";",
+		"set-option", "-p", "-t", owner_pane, "@pi_service_frontend_pid", tostring(vim.uv.os_getpid()) })
+end
+
 local function publish_tab(snapshot, run)
 	local installed, install_err = tabs.install_hooks(run)
 	if not installed then return nil, install_err end
+	local marker, marker_error = run({ "set-option", "-p", "-t", owner_pane, "@pi_service_frontend", snapshot.frontend_attachment and "1" or "0" })
+	if not marker then return nil, marker_error end
 	local window, err = run({
 		"set-option", "-p", "-t", owner_pane, option, json.encode(snapshot),
 		";", "display-message", "-p", "-t", owner_pane, "#{window_id}",
@@ -335,6 +343,11 @@ function M.clear()
 		local entry = payload and json.decode_object(payload)
 		if entry and entry.pid == vim.uv.os_getpid() then
 			command({ "set-option", "-pu", "-t", owner_pane, option })
+		end
+		local marker_pid = command({ "show-options", "-pqv", "-t", owner_pane, "@pi_service_frontend_pid" })
+		if marker_pid == tostring(vim.uv.os_getpid()) then
+			command({ "set-option", "-pu", "-t", owner_pane, "@pi_service_frontend", ";",
+				"set-option", "-pu", "-t", owner_pane, "@pi_service_frontend_pid" })
 		end
 		if owner_window and (not entry or entry.pid == vim.uv.os_getpid()) then
 			tabs.refresh(owner_window, command)

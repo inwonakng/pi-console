@@ -5,6 +5,7 @@
 -- Session controls use each Neovim instance's RPC server, independent of its backend.
 -- Operations return a non-nil value on success, or nil and an error message.
 -- publish() accepts a background refresh; a refresh already in flight may be skipped.
+if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-runtime") end
 local icons = require("pi-integration.status-icons")
 local build_info = require("pi-integration.build-info")
 local M = {}

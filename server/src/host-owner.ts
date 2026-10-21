@@ -42,6 +42,17 @@ export type OwnedSessionState = {
   exit?: PiExit;
 };
 export type OwnedSessionSnapshot = OwnedSessionState & { sequence: number; conversation: ConversationSnapshot; commands: CommandReceipt[]; acceptedQueue: AcceptedQueueSnapshot };
+export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevision" | "controller"> & {
+  status: "Starting" | "Stopping" | "Error" | "Waiting" | "Compacting" | "Working" | "Idle";
+  piState?: Pick<RpcSessionState, "isStreaming" | "isCompacting" | "pendingMessageCount">;
+  pendingInteractions: number;
+};
+export type HostSummaries = {
+  sessions: (Pick<CatalogSession, "id" | "cwd" | "name" | "state"> & { live?: OwnedSessionSummary })[];
+  hostId: string;
+  channel: Channel;
+  serviceEpoch: string;
+};
 export type EffectOffer = {
   id: string; policy: "inspect_only"; source: "owned_pi_stream";
   recipient: { attachmentId: string; grantId: string };
@@ -109,6 +120,14 @@ export class HostOwner {
   get hostId(): string { return this.catalog.hostId; }
   get serviceEpoch(): string { return this.catalog.epoch; }
   list(): CatalogSession[] { return this.catalog.list(); }
+
+  /** Owner-local display projection only; never subscribes to workers or other hosts. */
+  summaries(): HostSummaries {
+    return { sessions: this.catalog.list().map(({ id, cwd, name, state }) => {
+      const session = this.sessions.get(id);
+      return { id, cwd, name, state, ...(session && !session.finished ? { live: session.summary() } : {}) };
+    }), hostId: this.hostId, channel: this.options.channel, serviceEpoch: this.serviceEpoch };
+  }
 
   /** Lookup never starts a worker or repeats trust/workspace initialization. */
   lookup(id: string): OwnedSession | undefined { return this.sessions.get(id); }
@@ -297,6 +316,20 @@ export class OwnedSession {
 
   snapshot(): OwnedSessionSnapshot {
     return { ...this.ownerState(), sequence: this.sequence, conversation: this.conversation.snapshot(), commands: this.catalog.recentCommands(this.id), acceptedQueue: this.queueSnapshot() };
+  }
+
+  /** No conversation, queued text, interaction contents or control secrets. */
+  summary(): OwnedSessionSummary {
+    const state = this.conversation.sessionState;
+    const pendingInteractions = this.worker?.interactionSnapshot().pending.filter((item) => !item.submitted).length ?? 0;
+    const status = this.error || this.phase === "failed" ? "Error"
+      : this.phase === "initializing" ? "Starting"
+      : this.phase === "stopping" || this.phase === "stopped" ? "Stopping"
+      : pendingInteractions ? "Waiting"
+      : state?.isCompacting ? "Compacting"
+      : this.queueRunPending || !this.conversation.executionSettled ? "Working" : "Idle";
+    return { phase: this.phase, runtimeRevision: this.runtimeRevision, controller: this.control.snapshot(), status, pendingInteractions,
+      ...(state ? { piState: { isStreaming: state.isStreaming, isCompacting: state.isCompacting, pendingMessageCount: state.pendingMessageCount } } : {}) };
   }
 
   /** Capture and registration run in one synchronous turn with event reduction.

@@ -4,6 +4,7 @@ local runtime = require("pi-integration.runtime")
 local M = {}
 
 local function organization_path()
+	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.frontend-store").path("organization") end
 	return vim.fs.joinpath(vim.fn.stdpath("state"), "pi-console", "session-organization.json")
 end
 
@@ -23,12 +24,19 @@ local function entry_key(entry)
 	if type(entry) ~= "table" then
 		return nil
 	end
+	if entry.host_id and entry.session_id then return "service:" .. json.encode({ entry.host_id, entry.session_id }) end
 	return runtime.canonical_path(entry.path) or live_key(entry)
 end
 
 local function valid_key(key)
 	if type(key) ~= "string" then
 		return false
+	end
+	if key:sub(1, 8) == "service:" then
+		local tuple = json.decode(key:sub(9))
+		return type(tuple) == "table" and vim.islist(tuple) and #tuple == 2
+			and type(tuple[1]) == "string" and tuple[1] ~= "" and type(tuple[2]) == "string" and tuple[2] ~= ""
+			and "service:" .. json.encode(tuple) == key
 	end
 	if key:sub(1, 5) == "live:" then
 		local tuple = json.decode(key:sub(6))
@@ -77,6 +85,11 @@ local function valid_state(state)
 end
 
 local function load()
+	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
+		local ok, state = pcall(require("pi-integration.frontend-store").load, "organization", { version = 1, groups = {}, ungrouped = {} })
+		if not ok or not valid_state(state) then return nil, "Invalid service organization: " .. tostring(state) end
+		return state
+	end
 	local file = organization_path()
 	local stat, stat_error, code = vim.uv.fs_stat(file)
 	if not stat then
@@ -116,6 +129,12 @@ local function save(state)
 end
 
 local function with_state(callback)
+	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
+		return require("pi-integration.frontend-store").update("organization", { version = 1, groups = {}, ungrouped = {} }, function(state)
+			if not valid_state(state) then return nil, "Invalid service organization" end
+			return callback(state)
+		end)
+	end
 	local lock = organization_path() .. ".lock"
 	local made, mkdir_error = pcall(vim.fn.mkdir, vim.fs.dirname(lock), "p")
 	if not made then

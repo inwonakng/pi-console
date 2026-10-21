@@ -170,6 +170,10 @@ function M.open(config)
 			if workspace_hash(entry) ~= "—" then
 				table.insert(lines, " Working:   " .. text(entry.cwd))
 			end
+			if entry.host_id then
+				table.insert(lines, " Host:      " .. text(entry.host_name) .. " [" .. entry.host_id .. "]")
+				table.insert(lines, " Control:   " .. (type(entry.controller) == "table" and text(entry.controller.label) or "Unclaimed"))
+			end
 			table.insert(lines, " Location:  " .. text(entry.location))
 			table.insert(lines, " Model:     " .. (text(entry.model) ~= "" and text(entry.model) or "—"))
 			table.insert(lines, " Subagents: " .. tostring(tonumber(entry.subagents) or 0))
@@ -213,7 +217,7 @@ function M.open(config)
 			" Pi sessions · " .. #instances .. " open · " .. pinned_count .. " pinned",
 			query == "" and "" or (" Filter: " .. query),
 			"",
-			"     " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. "  Title",
+			"     " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. (vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" and "  " .. column("Host", 18) or "") .. "  Title",
 		}
 		local function highlight(row, first, last, group)
 			table.insert(highlights, { row = row - 1, first = first, last = last, group = group })
@@ -235,7 +239,7 @@ function M.open(config)
 				local indicators, spans = indicator_columns(entry)
 				local prefix = " " .. session_list.session_prefix(node)
 				local indicator_start = #prefix + #column(entry.status, 13) + 2
-				local row_prefix = prefix .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. "  "
+				local row_prefix = prefix .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. (entry.host_id and "  " .. column(entry.host_name .. " [" .. entry.host_id:sub(1, 8) .. "]", 18) or "") .. "  "
 				local badge = build_info.is_dev(entry) and "DEV " or ""
 				local suffix = session_list.session_suffix(node)
 				local title = badge .. text(entry.title) .. suffix
@@ -376,9 +380,11 @@ function M.open(config)
 		control_selected("toggle_notifications")
 	end, "Toggle selected conversation notifications")
 	map("<leader>s", function()
+		if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-frontend").pick_session() end
 		sessions.pick(history_ctx)
 	end, "Pick session")
 	map("<leader>pn", function()
+		if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-hosts").new_conversation() end
 		require("pi-integration.directory-history").input(
 			{ prompt = "New conversation project: ", default = vim.fn.getcwd(), completion = "dir" },
 			function(cwd)
@@ -389,6 +395,7 @@ function M.open(config)
 		)
 	end, "New conversation with chosen project")
 	map("<leader>pN", function()
+		if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-hosts").new_conversation() end
 		local entry = require_selected()
 		if entry then
 			report(runtime.launch(config.launcher, project(entry)))

@@ -110,6 +110,14 @@ end
 function M.setup(ctx)
 	local input_specs = M.merged("input")
 	local transcript_specs = M.merged("transcript")
+	if ctx.service_mode then
+		local specs = {
+			{ lhs = "<leader>ph", action = "pick_hosts", desc = "Hosts" },
+			{ lhs = "<leader>po", action = "show_overview", desc = "Combined overview" },
+		}
+		vim.list_extend(input_specs, specs)
+		vim.list_extend(transcript_specs, specs)
+	end
 
 	set_keymaps(ctx, ctx.state.input_buf, input_specs)
 	set_keymaps(ctx, ctx.state.transcript_buf, transcript_specs)

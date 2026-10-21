@@ -57,6 +57,7 @@ function M.open(config)
 	local timer = vim.uv.new_timer()
 	local closed = false
 	local refreshing = false
+	local query = ""
 	local function selected()
 		return vim.api.nvim_win_is_valid(win) and rows[vim.api.nvim_win_get_cursor(win)[1]] or nil
 	end
@@ -73,7 +74,7 @@ function M.open(config)
 		local latest = instances and runtime.last_focused(instances) or nil
 		local reveal = latest and latest.last_focused_at > last_focused_at and latest or nil
 		local nodes, entries
-		if instances then nodes, entries = list.build(instances, "", reveal) end
+		if instances then nodes, entries = list.build(instances, query, reveal) end
 		if not nodes then
 			vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, {
 				id = 1, virt_lines = { { { "  " .. truncate(entries or err, vim.api.nvim_win_get_width(win) - 4), "DiagnosticError" } } },
@@ -123,6 +124,7 @@ function M.open(config)
 				local entry = node.entry
 				local icon = icons.get(entry.status).icon
 				local prefix = " " .. session_list.session_prefix(node) .. icon .. " "
+				if entry.host_id then prefix = prefix .. "[" .. entry.host_id:sub(1, 8) .. "] " end
 				highlight(row, 1 + #session_list.session_prefix(node), #prefix - 1, icons.highlight(entry.status))
 				if build_info.is_dev(entry) then
 					highlight(row, #prefix, #prefix + 3, "PiBuildDev")
@@ -131,7 +133,7 @@ function M.open(config)
 				table.insert(lines, prefix .. truncate(entry.title, width - vim.fn.strdisplaywidth(prefix)))
 				local project = text(entry.project)
 				if project == "" then project = text(entry.directory) ~= "" and entry.directory or entry.cwd end
-				local detail = vim.fn.fnamemodify(text(project), ":t")
+				local detail = (entry.host_id and text(entry.host_name) .. " · " or "") .. vim.fn.fnamemodify(text(project), ":t")
 				if text(entry.activity) ~= "" then detail = detail .. " · " .. text(entry.activity) end
 				local suffix = session_list.session_suffix(node)
 				-- Reserve space for the running count even when activity is long.
@@ -210,6 +212,13 @@ function M.open(config)
 	map("o", function() tmux_action("overview") end, "Open full overview")
 	map("q", function() tmux_action("sidebar") end, "Close sidebar")
 	map("r", refresh, "Refresh summary")
+	map("/", function()
+		vim.ui.input({ prompt = "Filter sessions/hosts: ", default = query }, function(value) if value then query = value; refresh() end end)
+	end, "Search sessions/hosts")
+	map("c", function() query = ""; refresh() end, "Clear search")
+	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
+		map("<leader>pn", function() require("pi-integration.service-hosts").new_conversation() end, "New conversation on chosen owner")
+	end
 	map("<leader>?", function()
 		local lines = { "# 󰕮 Sidebar", "", "## Keys", "" }
 		for _, spec in ipairs(mapping_specs) do

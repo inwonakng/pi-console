@@ -72,10 +72,12 @@ local function run(mode, target)
 	-- Check all subtree minimums before creating a process or modifying panes.
 	layout.add(vim.deepcopy(root), 0, width)
 	local cwd = tmux({ "display-message", "-p", "-t", target, "#{pane_current_path}" })
-	local created = tmux({
-		"split-window", "-fhbd", "-l", tostring(width), "-P", "-F", "#{pane_id}",
-		"-t", target, "-c", cwd, "bash", app_root .. "/bin/pi-console", "--sidebar",
-	})
+	local launch = { "split-window", "-fhbd", "-l", tostring(width), "-P", "-F", "#{pane_id}",
+		"-t", target, "-c", cwd, "bash", app_root .. "/bin/pi-console" }
+	local service = vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" or tmux({ "display-message", "-p", "-t", target, "#{@pi_service_frontend}" }) == "1"
+	if service then table.insert(launch, "--service") end
+	table.insert(launch, "--sidebar")
+	local created = tmux(launch)
 	assert(created:match("^%%%d+$"), "tmux did not return the sidebar pane ID")
 	local ok, err = pcall(function()
 		tmux({ "set-option", "-p", "-t", created, "@pi_sidebar", "1" })

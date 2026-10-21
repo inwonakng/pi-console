@@ -69,14 +69,17 @@ local config = vim.tbl_deep_extend("force", integration.config, {
 	restart_file = restart_file,
 })
 
-if not overview and not sidebar then
+if integration.service_mode then config.start_view = sidebar and "sidebar" or overview and "overview" or nil end
+if integration.service_mode or not overview and not sidebar then
 	integration.setup(config)
 end
 
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,
 	callback = function()
-		if sidebar then
+		if integration.service_mode then
+			integration.open(session_file, restart_state)
+		elseif sidebar then
 			require("pi-integration.sidebar").open(config)
 		elseif overview then
 			require("pi-integration.overview").open(config)

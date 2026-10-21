@@ -126,7 +126,10 @@ end
 
 function M.open(ctx)
 	local state = ctx.state
-	if ctx.buffer.valid(state.transcript_buf) and ctx.buffer.valid(state.input_buf) then
+	if buffer.window_matches(state.transcript_win, state.transcript_buf)
+		and buffer.window_matches(state.input_win, state.input_buf)
+		and vim.api.nvim_win_get_tabpage(state.transcript_win) == vim.api.nvim_get_current_tabpage()
+		and vim.api.nvim_win_get_tabpage(state.input_win) == vim.api.nvim_get_current_tabpage() then
 		return false
 	end
 

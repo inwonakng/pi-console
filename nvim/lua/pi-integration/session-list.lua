@@ -14,12 +14,13 @@ function M.same(left, right)
 	if left.key == right.key then return true end
 	if left.kind == "session" and right.kind == "session" then
 		local a, b = left.entry, right.entry
+		if a.host_id or b.host_id then return a.host_id == b.host_id and a.session_id == b.session_id end
 		return a.id == b.id or a.path ~= nil and runtime.canonical_path(a.path) == runtime.canonical_path(b.path)
 	end
 	return false
 end
 
-local summary_order = { "Working", "Waiting", "Idle", "Done", "Loading", "Compacting", "Error", "Not Open" }
+local summary_order = { "Working", "Waiting", "Idle", "Done", "Loading", "Compacting", "Error", "Not Open", "Disconnected" }
 local summary_status = { Retrying = "Working", Starting = "Loading", Stopped = "Error", Unresponsive = "Error" }
 
 function M.group_summary(node)
@@ -64,6 +65,7 @@ end
 function M.new()
 	local list = {}
 	local collapsed, expanded = {}, {}
+	local host_filter
 
 	function list.build(instances, query, reveal)
 		local entries, err = pins.merge(instances)
@@ -78,9 +80,9 @@ function M.new()
 			for _, entry in ipairs(section.entries) do
 				local searchable = table.concat({
 					M.text(entry.title), M.text(entry.project), M.text(entry.directory),
-					M.text(entry.cwd), M.text(entry.workspace_id), M.text(entry.status), section.name,
+					M.text(entry.cwd), M.text(entry.workspace_id), M.text(entry.status), M.text(entry.host_name), M.text(entry.host_id), section.name,
 				}, " "):lower()
-				if query == "" or searchable:find(query, 1, true) then table.insert(matching, entry) end
+				if (not host_filter or host_filter == entry.host_id) and (query == "" or searchable:find(query, 1, true)) then table.insert(matching, entry) end
 				if reveal and (entry.id == reveal.id or reveal.path and runtime.canonical_path(entry.path) == runtime.canonical_path(reveal.path)) then
 					collapsed[section.id] = false
 				end
@@ -130,6 +132,23 @@ function M.new()
 			end
 			refresh()
 		end
+		if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
+			map("<leader>ph", function() require("pi-integration.service-hosts").picker() end, "Hosts: add/connect/disconnect/edit/forget")
+			map("H", function()
+				local choices, seen = { { name = "All hosts" } }, {}
+				local entries, err = pins.merge(runtime.list())
+				if not entries then return report(nil, err) end
+				for _, entry in ipairs(entries) do
+					if not seen[entry.host_id] then
+						seen[entry.host_id] = true
+						table.insert(choices, { id = entry.host_id, name = entry.host_name .. " [" .. entry.host_id .. "]" })
+					end
+				end
+				vim.ui.select(choices, { prompt = "Filter host", format_item = function(choice) return choice.name end }, function(choice)
+					if choice then host_filter = choice.id; refresh() end
+				end)
+			end, "Filter host within groups")
+		end
 		map("j", function() navigation.move(vim.v.count1) end, "Next group or session")
 		map("k", function() navigation.move(-vim.v.count1) end, "Previous group or session")
 		map("<Down>", function() navigation.move(vim.v.count1) end, "Next group or session")
@@ -140,6 +159,7 @@ function M.new()
 			if node and node.kind == "group" then return toggle() end
 			local entry = session()
 			if not entry then return end
+			if entry.host_id then return report(runtime.open(entry)) end
 			if entry.status == "Not Open" then
 				report(runtime.launch(config.launcher, entry.cwd, entry.path))
 			else
@@ -196,6 +216,7 @@ function M.new()
 			end
 			local entry = session()
 			if not entry then return end
+			if entry.host_id then return report(runtime.kill(entry)) end
 			local entries, err = runtime.list()
 			if not entries then return report(nil, err) end
 			local current
