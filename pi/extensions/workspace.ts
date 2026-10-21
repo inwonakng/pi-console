@@ -576,7 +576,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
 
   type WorkspaceParams = { action: WorkspaceAction; id?: string; ignoredFiles?: string[]; approved?: boolean };
   type Move = (action: "enter" | "return", id: string) => Promise<void>;
-  let executeWorkspace: (callId: string, params: WorkspaceParams, signal: AbortSignal | undefined, update: unknown, ctx: ExtensionContext, move?: Move) => Promise<{ content: { type: "text"; text: string }[]; details: unknown; terminate?: boolean }>;
+  let executeWorkspace: (callId: string, params: WorkspaceParams, signal: AbortSignal | undefined, update: unknown, ctx: ExtensionContext, move?: Move) => Promise<{ content: { type: "text"; text: string }[]; details: unknown; terminate?: boolean; cleanupAttempted?: boolean }>;
   const registerWorkspaceTool = (available: boolean, guidance: string[]) => pi.registerTool({
     name: "workspace",
     defaultActive: false,
@@ -801,9 +801,10 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       const discarded = await removeWorkspace(prepared.id, "discarded");
       return {
         content: [{ type: "text", text: discarded.lifecycle === "cleanup_failed"
-          ? `Discard cleanup failed; workspace retained: ${discarded.integrationReason ?? discarded.worktreePath}`
+          ? `Discard cleanup incomplete (${discarded.retained ? "worktree retained" : "worktree removed"}): ${discarded.integrationReason ?? discarded.worktreePath}. Recovery patch: ${discarded.resultPatchPath}`
           : `Discarded ${discarded.label}. Recovery patch: ${discarded.resultPatchPath}` }],
         details: discarded,
+        cleanupAttempted: true,
       };
     },
   });
@@ -845,7 +846,11 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       });
       const record = result.details as WorkspaceRecord;
       const current = record?.id ? loadWorkspace(record.id) : undefined;
-      const changed = moved || current?.lifecycle === "discarded";
+      const cleanupIncomplete = current?.lifecycle === "cleanup_failed" && (moved || result.cleanupAttempted === true);
+      const changed = moved || current?.lifecycle === "discarded" || cleanupIncomplete && !current.retained;
+      if (cleanupIncomplete) {
+        return { changed, workspaceId: current.id, lifecycle: current.lifecycle, integration: current.integration, status: "cleanup_incomplete" };
+      }
       if (!changed && !(action === "enter" && current?.lifecycle === "active")) {
         if (current?.integrationReview?.applied) throw new Error("Workspace integration may be partially applied; inspect retained review data");
         return;

@@ -97,11 +97,13 @@ export class PiConversation {
 
   /** Unlike isStreaming/get_state, only agent_settled closes an observed run.
    * Native pending messages stay distinct from the owner's editable queue. */
-  get settled(): boolean {
+  get executionSettled(): boolean {
     return this.idle && !this.unsettled && !this.state.piState?.isStreaming && !this.state.piState?.isCompacting
       && this.state.execution.compaction?.type !== "compaction_start"
-      && this.state.execution.retry?.type !== "auto_retry_start" && !this.state.execution.summarization
-      && !this.state.queue.steering.length && !this.state.queue.followUp.length && !this.state.piState?.pendingMessageCount;
+      && this.state.execution.retry?.type !== "auto_retry_start" && !this.state.execution.summarization;
+  }
+  get settled(): boolean {
+    return this.executionSettled && !this.state.queue.steering.length && !this.state.queue.followUp.length && !this.state.piState?.pendingMessageCount;
   }
 
   /** Separate effects before retention. Closure is consumed by PiInteractions. */

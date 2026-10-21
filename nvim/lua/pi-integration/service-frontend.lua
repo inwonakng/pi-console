@@ -9,7 +9,7 @@ local authority
 local callbacks, unresolved, offers, drafts = {}, {}, {}, {}
 local outcomes = {}
 local submission_status = {}
-local pending_host, initial_attempted, resume_requested
+local pending_host, pending_host_select, initial_attempted, resume_requested
 local generation, counter, refresh_scheduled, refreshing, dirty = 0, 0, false, false, false
 local selection = 0
 local approval_win, approval_buf, approval_request, heartbeat
@@ -57,20 +57,22 @@ local function control_current()
 end
 local function stamp()
 	return { generation = generation, attachment = attachment, token = grant and grant.token,
-		controller = current_controller() and current_controller().grantId, revision = current_revision(), session = session_id }
+		controller = current_controller() and current_controller().grantId, revision = current_revision(), session = session_id, selection = selection }
+end
+local function same_selection(s)
+	return s.generation == generation and s.selection == selection and s.attachment == attachment and s.session == session_id
 end
 local function same_context(s)
-	return snapshot and s.generation == generation and s.attachment == attachment
-		and s.revision == current_revision() and s.session == session_id
+	return snapshot and same_selection(s) and s.revision == current_revision()
 end
 local function current(s)
 	return control_current() and same_context(s) and s.token == grant.token
 end
-local function outcome_current(outcome)
+local function outcome_current(outcome, receipt)
 	if outcome.lifecycle or outcome.transition then
 		local s = outcome.captured
-		local attached = s.generation == generation and s.attachment == attachment and s.session == session_id
-		return attached and (outcome.lifecycle or control_current() and s.token == grant.token)
+		return same_selection(s) and (outcome.lifecycle or control_current() and s.token == grant.token
+			and receipt.result and receipt.result.contextRevision == current_revision())
 	end
 	return current(outcome.captured)
 end
@@ -105,7 +107,7 @@ local function command(operation, payload, callback, captured, terminal)
 		if not ok and result.delivery == "not_sent" then outcomes[envelope.id] = nil end
 		if ok and result.status ~= "accepted" and outcomes[envelope.id] then
 			local outcome = outcomes[envelope.id]; outcomes[envelope.id] = nil
-			if outcome_current(outcome) then outcome.callback(result) end
+			if outcome_current(outcome, result) then outcome.callback(result) end
 		end
 		refresh()
 	end)
@@ -131,7 +133,8 @@ local function local_snapshot()
 	return { cwd = vim.fn.getcwd(), service_session = session_id, service_root = M.config.service_root,
 		host = hello and hello.hostId, channel = hello and hello.channel, saved_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
 		input_lines = valid(state.input_buf) and vim.api.nvim_buf_get_lines(state.input_buf, 0, -1, false) or { "" },
-		unresolved = unresolved, submission_status = submission_status, pending_host = pending_host, initial_attempted = initial_attempted, drafts = saved_drafts }
+		unresolved = unresolved, submission_status = submission_status, pending_host = pending_host, pending_host_select = pending_host_select,
+		initial_attempted = initial_attempted, drafts = saved_drafts }
 end
 local function backup()
 	if not valid(state.input_buf) and next(drafts) == nil then return true end
@@ -290,6 +293,7 @@ local function disconnected()
 end
 attach = function(id)
 	if not job then return end
+	if pending_host then pending_host_select = false end
 	selection = selection + 1
 	local gen, selected = generation, selection
 	request("attach", { sessionId = id, label = "Neovim " .. vim.fn.getpid() }, function(ok, value)
@@ -328,12 +332,12 @@ local function host_operation(operation, payload)
 	if pending_host then notify("Host request " .. pending_host.id .. " is unresolved. Inspect :PiHostRequest; it was not replayed."); return end
 	local captured = stamp()
 	local envelope = { id = uid(), serviceEpoch = hello.serviceEpoch, operation = operation, payload = payload }
-	pending_host = envelope
+	pending_host, pending_host_select = envelope, true
 	request("host.command", envelope, function(ok, receipt)
 		if ok and pending_host == envelope then
-			pending_host = nil
+			pending_host, pending_host_select = nil, nil
 			if receipt.result then
-				if captured.generation == generation and captured.attachment == attachment and captured.session == session_id then attach(receipt.result.sessionId)
+				if same_selection(captured) then attach(receipt.result.sessionId)
 				else notify("Host request completed for " .. receipt.result.sessionId .. "; current view was not changed.") end
 			end
 		end
@@ -344,10 +348,14 @@ local function recover_host()
 	local envelope, captured = pending_host, stamp()
 	request("host.status", { serviceEpoch = envelope.serviceEpoch, commandId = envelope.id }, function(ok, receipt)
 		if pending_host ~= envelope then return end
+		local select_result = pending_host_select == true
 		if ok and receipt.result then
-			pending_host = nil
-			if captured.generation == generation and captured.attachment == attachment and captured.session == session_id then attach(receipt.result.sessionId) end
+			pending_host, pending_host_select = nil, nil
+			if select_result and same_selection(captured) then attach(receipt.result.sessionId) end
 		else notify("Host request outcome unresolved. Inspect its ID before explicitly creating/resuming; no replay occurred.", vim.log.levels.WARN) end
+		-- Recovery can resolve an ID after another selection, never revive its
+		-- original right to select. Reattach the user's selected view instead.
+		if not select_result and same_selection(captured) and not attachment and session_id then attach(session_id) end
 	end)
 	return true
 end
@@ -382,7 +390,7 @@ connect = function()
 			if receipt and unresolved[receipt.id] then submission_status[receipt.id] = receipt.status end
 			if receipt and receipt.status ~= "accepted" and outcomes[receipt.id] then
 				local outcome = outcomes[receipt.id]; outcomes[receipt.id] = nil
-				if outcome_current(outcome) then outcome.callback(receipt) end
+				if outcome_current(outcome, receipt) then outcome.callback(receipt) end
 			end
 			if value.update.owner then
 				-- Revoke local callbacks immediately, not after the coalesced read.
@@ -468,7 +476,7 @@ function M.show_host_request()
 	request("host.status", { serviceEpoch = envelope.serviceEpoch, commandId = envelope.id }, function(ok, receipt)
 		draft_buffer("pi://host-request/" .. uid(), vim.inspect({ command = envelope, outcome = receipt }))
 		vim.ui.select({ "Keep protected", "Allow a new host request" }, { prompt = "Existing request may already have created/resumed a session; review its identity first." }, function(choice)
-			if choice == "Allow a new host request" and pending_host == envelope then pending_host = nil end
+			if choice == "Allow a new host request" and pending_host == envelope then pending_host, pending_host_select = nil, nil end
 		end)
 	end)
 end
@@ -611,11 +619,11 @@ end
 function M.pick_session()
 	local captured = stamp()
 	request("sessions", {}, function(ok, result)
-		if not ok or not same_context(captured) then return end
+		if not ok or not same_selection(captured) then return end
 		vim.ui.select(result.sessions, { prompt = "Service sessions", format_item = function(item) return item.id .. " " .. (item.name or item.cwd) .. " (" .. item.state .. ")" end }, function(item)
-			if not item or not same_context(captured) then return end
+			if not item or not same_selection(captured) then return end
 			if item.state == "open" then attach(item.id)
-			else vim.ui.select({ "Cancel", "Resume" }, { prompt = "Explicitly resume saved conversation? No queued work is replayed." }, function(choice) if choice == "Resume" and same_context(captured) then host_operation("host.resume", { sessionId = item.id }) end end) end
+			else vim.ui.select({ "Cancel", "Resume" }, { prompt = "Explicitly resume saved conversation? No queued work is replayed." }, function(choice) if choice == "Resume" and same_selection(captured) then host_operation("host.resume", { sessionId = item.id }) end end) end
 		end)
 	end)
 end
@@ -697,11 +705,18 @@ local function native_draft(operation)
 		end, captured)
 	end)
 end
-function M.steer() native_draft("steering.submit") end
+function M.steer()
+	if not snapshot or not snapshot.conversation.execution.running then notify("Steering requires an active turn."); return end
+	native_draft("steering.submit")
+end
 function M.follow_up() native_draft("followUp.submit") end
 function M.side_prompt() native_draft("side.prompt") end
 function M.toggle_side()
-	if not valid(side_buf) then side_buf = draft_buffer("pi://side-owner/" .. uid(), "") end
+	if not valid(side_buf) then side_buf = draft_buffer("pi://side-owner/" .. uid(), "")
+	elseif vim.fn.bufwinid(side_buf) == -1 then
+		vim.cmd("botright split")
+		vim.api.nvim_win_set_buf(0, side_buf)
+	else vim.api.nvim_set_current_win(vim.fn.bufwinid(side_buf)) end
 	vim.bo[side_buf].buftype = "nofile"
 	render()
 end
@@ -851,6 +866,7 @@ end
 function M.open(_, restore)
 	if restore then
 		session_id, pending_host = restore.service_session, restore.pending_host
+		pending_host_select = restore.pending_host_select == true
 		unresolved, initial_attempted = restore.unresolved or {}, restore.initial_attempted
 		submission_status = restore.submission_status or {}
 		M.config.service_root = restore.service_root or M.config.service_root

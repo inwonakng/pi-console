@@ -43,7 +43,7 @@ export type CommandReceipt = {
   /** Completion describes command handling, NOT completion of agent work. */
   result?: { delivery?: "flushed"; cleared?: { steering: string[]; followUp: string[] }; idle?: boolean;
     queueItemId?: string; queueItemRevision?: number; queueItemText?: string; reservationId?: string; title?: string;
-    submittedText?: string; editorText?: string; disposition?: "queued" | "handled" | "accepted"; exitCode?: number; cancelled?: boolean;
+    submittedText?: string; editorText?: string; contextRevision?: number; disposition?: "queued" | "handled" | "accepted"; exitCode?: number; cancelled?: boolean;
     mode?: string; changed?: boolean; sessionId?: string; workspaceId?: string; lifecycle?: string; integration?: string; status?: string; enabled?: boolean };
   error?: { code: string; message: string };
 };

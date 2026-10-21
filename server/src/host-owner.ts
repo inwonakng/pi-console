@@ -22,7 +22,7 @@ type TrustStatus = { state: "pending" | "ready" | "restart" | "error"; cwd: stri
 type WorkspaceStatus = { cwd: string; sessionFile: string; transitionPending: boolean; [key: string]: unknown };
 type BundledFlight = {
   worker: PiProcess; revision: number; runtimeId: string; invocationId: string; operation: BundledOperation["operation"];
-  message: string; dispatched: boolean; requestId?: string; result?: OperationResult; recipient?: Controller;
+  message: string; dispatched: boolean; requestId?: string; result?: OperationResult; resultRevision?: number; recipient?: Controller;
 };
 type RenameFlight = {
   worker: PiProcess; revision: number; runtimeId: string; invocationId: string;
@@ -240,6 +240,7 @@ export class OwnedSession {
   private queueRunPending = false;
   private rename?: RenameFlight;
   private nativePending = 0;
+  private nativeQueueCommands = new Set<Promise<void>>();
   private bundled?: BundledFlight;
   private bundledInterrupt?: BundledFlight;
   private queueFlight?: {
@@ -452,7 +453,9 @@ export class OwnedSession {
       } else if (bundled) this.trackCommand(this.executeBundled(receipt, bundled));
       else if (isNative(command)) {
         this.nativePending++;
-        this.trackCommand(this.executeNative(command, receipt));
+        const task = this.executeNative(command, receipt);
+        if (command.operation === "steering.submit" || command.operation === "followUp.submit") this.nativeQueueCommands.add(task);
+        this.trackCommand(task.finally(() => this.nativeQueueCommands.delete(task)));
       } else if (rename) this.trackCommand(this.executeRename(receipt, rename));
       else this.trackCommand(this.executeCommand(command, receipt));
       return structuredClone(receipt);
@@ -518,7 +521,7 @@ export class OwnedSession {
 
   private queueCanDispatch(): boolean {
     return !this.stopRequested && !this.error && !this.exit && this.phase === "ready" && this.usableWorkspace()
-      && !this.aborting && !this.rename && !this.nativePending && !this.bundled && !this.bundledInterrupt && !this.queueRunPending && this.conversation.settled;
+      && !this.aborting && !this.rename && !this.nativePending && !this.bundled && !this.bundledInterrupt && !this.queueRunPending && this.conversation.executionSettled;
   }
 
   private async pumpQueue(): Promise<void> {
@@ -732,7 +735,8 @@ export class OwnedSession {
             outcome.result = { sessionId: clone.id, ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
           } else if (flight.operation === "history.navigate" || flight.operation === "history.delete") {
             if (result.data?.changed !== true || flight.operation === "history.delete" && !["applied", "cleanup_incomplete"].includes(result.data.status ?? "")) throw new Error("Missing history completion");
-            outcome.result = { changed: true, ...(result.data.status !== undefined ? { status: result.data.status } : {}),
+            outcome.result = { changed: true, ...(flight.operation === "history.navigate" ? { contextRevision: flight.resultRevision } : {}),
+              ...(result.data.status !== undefined ? { status: result.data.status } : {}),
               ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
           } else if (flight.operation === "access.set" || flight.operation === "integration.set" || flight.operation === "access.cycle" || flight.operation === "integration.cycle") {
             if (typeof result.data?.mode !== "string") throw new Error("Missing mode completion");
@@ -798,10 +802,17 @@ export class OwnedSession {
     return { runtimeRevision: this.runtimeRevision, data: "data" in response ? response.data : null };
   }
 
+  private assertSteeringActive(): void {
+    if (!this.queueRunPending && !this.conversation.awaitingSettlement && !this.conversation.snapshot().execution.running) {
+      throw new CommandError("session_busy", "Steering requires an active turn; retain the draft or use the main input");
+    }
+  }
+
   private assertNativeReady(command: NativeOperation): void {
     if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
     if (command.operation === "retry.abort" || command.operation === "shell.abort") return;
     if (this.rename || this.bundled || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another owner operation is pending");
+    if (command.operation === "steering.submit") this.assertSteeringActive();
     if (command.operation === "compaction.run" && (!this.conversation.settled || this.queueFlight || this.queueRunPending)) {
       throw new CommandError("session_busy", "Manual compaction requires settled execution");
     }
@@ -814,6 +825,10 @@ export class OwnedSession {
       const response = await worker.request(nativeCommand(command), () => {
         this.commandRuntime(command.runtimeRevision, worker);
         this.assertReady(command.runtimeRevision);
+        if (command.operation === "steering.submit" || command.operation === "followUp.submit") {
+          if (this.aborting) throw new CommandError("session_busy", "Abort is clearing native queues; text retained in this command receipt");
+          if (command.operation === "steering.submit") this.assertSteeringActive();
+        }
       });
       this.commandRuntime(command.runtimeRevision, worker);
       if (command.operation === "steering.submit" || command.operation === "followUp.submit") {
@@ -965,7 +980,9 @@ export class OwnedSession {
       // Idle Escape still explicitly cancels main dialogs. Side operations keep
       // their own lifetimes; detach/takeover never comes through this path.
       await this.cancelMainInteractions(revision, worker);
-      if (!active) { receipt.result = { idle: true }; return; }
+      // Pi input hooks may finish enqueueing after settlement or clear_queue.
+      // Drain only accepted native submissions before clearing, never replay them.
+      await Promise.all(this.nativeQueueCommands);
       const guard = () => { this.commandRuntime(revision, worker); };
       let clearingError: unknown;
       try {
@@ -975,7 +992,7 @@ export class OwnedSession {
           || ![...cleared.data.steering, ...cleared.data.followUp].every((text) => typeof text === "string")) {
           throw new Error("Invalid native queue clearing response");
         }
-        receipt.result = { cleared: { steering: cleared.data.steering, followUp: cleared.data.followUp } };
+        receipt.result = { ...(!active ? { idle: true } : {}), cleared: { steering: cleared.data.steering, followUp: cleared.data.followUp } };
         // Preserve returned text before abort. No automatic editor effect/replay.
         await this.catalog.updateCommand(receipt);
         this.publish({ command: structuredClone(receipt) });
@@ -984,7 +1001,7 @@ export class OwnedSession {
         clearingError = error;
       }
       // Existing behavior attempts abort even after native clear_queue rejection.
-      await worker.request({ type: "abort" }, guard);
+      if (active) await worker.request({ type: "abort" }, guard);
       if (clearingError) throw clearingError;
     } finally { this.aborting--; this.scheduleQueue(); }
   }
@@ -1243,6 +1260,7 @@ export class OwnedSession {
       if (!flight?.dispatched || flight.result || result.invocationId !== flight.invocationId || result.runtimeId !== flight.runtimeId
         || result.sessionId !== this.record.piSessionId || result.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Unmatched managed operation result");
       flight.result = result;
+      flight.resultRevision = this.runtimeRevision;
       return;
     }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === RENAME_RESULT) {
