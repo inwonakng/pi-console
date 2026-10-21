@@ -1,5 +1,6 @@
 import type { ExtensionCommandContext, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
+import { assertManagedResources } from "../../scripts/managed-process.mjs";
 import { getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, workspaceDisplayState, type WorkspaceRecord } from "./workspace";
 import { hasRunningSubagents } from "./subagent-state";
 import { prepareProjectTrust, projectTrustReady } from "./project-trust";
@@ -55,6 +56,7 @@ export async function moveToLocation(
   leafId: string | null,
   options: { workspaceId?: string; workspaceLabel?: string; markLocation?: boolean; navigateTo?: string; reload?: boolean; saveCursor?: boolean; continueWith?: string; beforeSwitch?: () => void | Promise<void>; onArrival?: (ctx: ExtensionCommandContext) => void | Promise<void> } = {},
 ): Promise<boolean> {
+  if (ctx.cwd !== cwd || options.reload) assertManagedResources();
   if (leafId !== null && !options.reload && !ctx.sessionManager.getEntry(leafId)) throw new Error(`Unknown session entry: ${leafId}`);
   const file = ctx.sessionManager.getSessionFile();
   if (!file) throw new Error("Workspace switching requires a persisted session.");
@@ -116,6 +118,7 @@ export async function moveToLocation(
   let arrived = false;
   try {
     await options.beforeSwitch?.();
+    assertManagedResources();
     const result = await switchWithCwd(file, {
       cwdOverride: cwd,
       withSession: async (nextCtx) => {

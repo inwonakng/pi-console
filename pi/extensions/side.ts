@@ -1,3 +1,4 @@
+import { SERVICE_DIALOG_STATUS, serviceDialogTag, serviceUi } from "./shared/service-ui";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   SessionManager,
@@ -58,6 +59,7 @@ type Generation = {
   cancelled: boolean;
   dialogs: AbortController;
   dialogIds: Set<string>;
+  dialogControllers: Map<string, AbortController>;
   child?: SideRpc;
   ready?: Promise<SideRpc>;
   initialized?: boolean;
@@ -212,12 +214,19 @@ export default function sideExtension(pi: ExtensionAPI) {
   async function relay(g: Generation, child: SideRpc, request: RpcExtensionUIRequest): Promise<void> {
     if (request.method !== "select" && request.method !== "confirm"
       && request.method !== "input" && request.method !== "editor") return;
-    const signal = g.dialogs.signal;
+    const tag = serviceDialogTag(request.title);
+    const controller = new AbortController();
+    if (tag) g.dialogControllers.set(tag.id, controller);
+    const signal = AbortSignal.any([g.dialogs.signal, controller.signal]);
     const valid = () => current === g && g.child === child && !g.cancelled && !signal.aborted && !shuttingDown;
     const respond = (data: { cancelled: true } | { confirmed: boolean } | { value: string }) => child.respond({
       type: "extension_ui_response", id: request.id, ...data,
     } as RpcExtensionUIResponse);
-    if (!valid()) { respond({ cancelled: true }); return; }
+    if (!valid()) {
+      if (tag) g.dialogControllers.delete(tag.id);
+      respond({ cancelled: true });
+      return;
+    }
     const dialogId = randomUUID();
     let title: Record<string, unknown>;
     try { title = JSON.parse(request.title); }
@@ -232,13 +241,14 @@ export default function sideExtension(pi: ExtensionAPI) {
     publish(g);
     try {
       let value: string | boolean | undefined;
-      const opts = { signal, timeout: "timeout" in request ? request.timeout : undefined };
+      // Managed children publish closure themselves; do not restart their timer
+      // in the parent relay. Legacy children keep their existing timeout behavior.
+      const opts = { signal, timeout: !tag && "timeout" in request ? request.timeout : undefined };
       switch (request.method) {
-        case "select": value = await g.ctx.ui.select(taggedTitle, request.options, opts); break;
-        case "confirm": value = await g.ctx.ui.confirm(taggedTitle, request.message, opts); break;
-        case "input": value = await g.ctx.ui.input(taggedTitle, request.placeholder, opts); break;
-        // Pi's editor API has no signal option; the response still belongs only to this lifetime.
-        case "editor": value = await g.ctx.ui.editor(taggedTitle, request.prefill); break;
+        case "select": value = await serviceUi(g.ctx).select(taggedTitle, request.options, opts); break;
+        case "confirm": value = await serviceUi(g.ctx).confirm(taggedTitle, request.message, opts); break;
+        case "input": value = await serviceUi(g.ctx).input(taggedTitle, request.placeholder, opts); break;
+        case "editor": value = await serviceUi(g.ctx, signal).editor(taggedTitle, request.prefill); break;
       }
       if (!valid() || value === undefined) respond({ cancelled: true });
       else if (request.method === "confirm") respond({ confirmed: value === true });
@@ -247,6 +257,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       respond({ cancelled: true });
       if (valid()) failure(g, `Side dialog failed: ${String(error)}`);
     } finally {
+      if (tag) g.dialogControllers.delete(tag.id);
       g.dialogIds.delete(dialogId);
       publish(g);
     }
@@ -255,6 +266,14 @@ export default function sideExtension(pi: ExtensionAPI) {
   function event(g: Generation, child: SideRpc, data: SideRpcEvent): void {
     if (g.child !== child) return;
     if (data.type === "extension_ui_request") {
+      if (data.method === "setStatus" && data.statusKey === SERVICE_DIALOG_STATUS && typeof data.statusText === "string") {
+        try {
+          const status: unknown = JSON.parse(data.statusText);
+          if (status && typeof status === "object" && "state" in status && status.state === "closed"
+            && "id" in status && typeof status.id === "string") g.dialogControllers.get(status.id)?.abort();
+        } catch { /* A malformed status cannot authorize a reply. */ }
+        return;
+      }
       void relay(g, child, data as unknown as RpcExtensionUIRequest);
       return;
     }
@@ -321,6 +340,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       writeFileSync(promptFile, `${g.seed.source.systemPrompt}\n\nYou are answering an independent side conversation. The earlier conversation is a fixed snapshot for reference. Do not resume its task or assume its tools are available: use only your currently declared tools. Act only on requests in this side conversation. Your access mode is fixed to ask; request approval for writes and additional shell capabilities. Side answers are not sent to the main agent.\n`, { mode: 0o600 });
       const args = ["--mode", "rpc", "--session", g.file, "--no-approve", "--no-context-files", "--system-prompt", promptFile,
         "-e", join(dirname(fileURLToPath(import.meta.url)), "access-mode.ts"),
+        "-e", join(dirname(fileURLToPath(import.meta.url)), "service.ts"),
         "-e", "builtin:codemode", "-e", "builtin:tool-search", "--tools", "read,bash,edit,write,grep,find,ls,codemode,tool_search"];
       if (g.seed.source.model) args.push("--provider", g.seed.source.model.provider, "--model", g.seed.source.model.id);
       args.push("--thinking", g.seed.source.thinkingLevel);
@@ -391,7 +411,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       parentSessionId: ctx.sessionManager.getSessionId(),
       seed, entries: seed ? [...seed.entries] : [], leafId: seed?.boundary ?? null,
       messages: [], draft: "", running: false, journaled: false,
-      cancelled: false, dialogs: new AbortController(), dialogIds: new Set(), drain: Promise.resolve(),
+      cancelled: false, dialogs: new AbortController(), dialogIds: new Set(), dialogControllers: new Map(), drain: Promise.resolve(),
     };
   }
 
@@ -439,7 +459,12 @@ export default function sideExtension(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    // Start bounded child shutdown before an in-flight abort/transition can
+    // wait indefinitely for an RPC response from that same child.
+    const stopping = current?.child?.stop();
+    void stopping?.catch(() => undefined);
     await transition;
+    await stopping;
     if (current) await retire(current);
     current = undefined;
   });

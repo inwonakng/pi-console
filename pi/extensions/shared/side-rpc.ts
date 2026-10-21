@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { managedSpawn, managedResult, stopManaged } from "../../scripts/managed-process.mjs";
 import type { RpcCommand, RpcExtensionUIResponse } from "@earendil-works/pi-coding-agent";
 
 export type SideRpcEvent = Record<string, unknown>;
@@ -14,7 +15,7 @@ export class SideRpc {
   private readonly closed: Promise<void>;
 
   constructor(args: string[], cwd: string, onEvent: (event: SideRpcEvent) => void, onExit: (error: Error) => void) {
-    this.process = spawn(process.env.PI_BINARY || "pi", args, {
+    this.process = managedSpawn(process.env.PI_BINARY || "pi", args, {
       cwd,
       env: {
         ...process.env,
@@ -50,13 +51,13 @@ export class SideRpc {
         } catch (error) {
           this.fail(error instanceof Error ? error : new Error(String(error)));
           onExit(new Error(`Side RPC protocol failure: ${String(error)}`));
-          this.process.kill("SIGTERM");
+          void this.stop().catch(() => undefined);
         }
       }
     });
     this.process.stderr.on("data", (text: string) => { this.stderr = (this.stderr + text).slice(-4000); });
     this.process.stdin.on("error", (error) => this.fail(error));
-    this.closed = new Promise((resolve) => {
+    this.closed = new Promise((resolve, reject) => {
       this.process.once("error", (error) => {
         this.ended = true;
         this.fail(error);
@@ -68,9 +69,13 @@ export class SideRpc {
         const error = new Error(`Side Pi exited (code=${code}, signal=${signal}).${this.stderr ? `\n${this.stderr}` : ""}`);
         this.fail(error);
         if (!this.stopping) onExit(error);
-        resolve();
+        try {
+          if (managedResult(this.process)?.managedUnresolved) reject(new Error("Side managed work remains unresolved"));
+          else resolve();
+        } catch (failure) { reject(failure); }
       });
     });
+    void this.closed.catch(() => undefined);
   }
 
   get stopped(): boolean {
@@ -102,6 +107,7 @@ export class SideRpc {
     if (this.stopping || this.ended) return this.closed;
     this.stopping = true;
     this.process.stdin.end();
+    if (stopManaged(this.process)) return this.closed;
     // These are shutdown escalation timers, never generation deadlines.
     const terminate = setTimeout(() => this.process.kill("SIGTERM"), 2000);
     const kill = setTimeout(() => this.process.kill("SIGKILL"), 5000);

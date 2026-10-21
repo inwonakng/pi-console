@@ -1,3 +1,4 @@
+import { serviceUi } from "./service-ui";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -188,7 +189,7 @@ export function requestPermission(
         { ...permission, scopeType: "session" });
     }
     const choices = remember ? ["Allow once", ...sessionChoices.keys(), "Deny"] : ["Allow once", "Deny"];
-    const choice = await ctx.ui.select(title, choices, { signal });
+    const choice = await serviceUi(ctx).select(title, choices, { signal });
     assertCurrent();
     if (getAccessMode() === "readonly") throw new Error("Permission request cancelled because access mode changed to readonly.");
     const grant = remember && choice ? sessionChoices.get(choice) : undefined;

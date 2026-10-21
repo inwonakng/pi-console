@@ -29,7 +29,7 @@ integration supports **tmux 3.4+**.
 
 Install these before starting:
 
-- Git, Bash, curl, Node.js 20.11+, npm, `realpath`, `ripgrep`, and `fzf`.
+- Git, Bash, curl, Node.js 22.19+, npm, `realpath`, `ripgrep`, and `fzf`.
 - Rust/Cargo, a C compiler, and the Tree-sitter parser toolchain for Neovim plugins.
 - On Linux, `bubblewrap` and `socat` for command sandboxing.
 

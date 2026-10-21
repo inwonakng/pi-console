@@ -1,3 +1,4 @@
+import { serviceUi } from "./service-ui";
 import { CURRENT_SESSION_VERSION, SessionManager, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
@@ -67,7 +68,7 @@ export async function cloneThroughEntry(
   const scope = trustScope(cwd, sourceFile);
   if (decision !== undefined) {
     if (!ctx.hasUI) return undefined;
-    const approved = await ctx.ui.confirm(
+    const approved = await serviceUi(ctx).confirm(
       JSON.stringify({ kind: "pi_confirmation", prompt: "Copy conversation-only project trust to the clone?", notify: false }),
       `The new conversation will start ${decision ? "trusted" : "untrusted"} for this project and its managed workspaces.`);
     if (!approved) return undefined;

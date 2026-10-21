@@ -1,3 +1,4 @@
+import { serviceRuntimeId, serviceUi } from "./shared/service-ui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadExtensionSettings } from "./shared/extension-settings";
 
@@ -313,6 +314,50 @@ export default function autoTitleExtension(pi: ExtensionAPI) {
 		return undefined;
 	});
 
+	// A fixed, managed-only capability. Legacy slash commands retain their UI and
+	// normalization behavior; only this path promises a correlated terminal result.
+	if (process.env.PI_CONSOLE_SERVICE === "1") pi.registerCommand("pi-console-rename", {
+		description: "Internal managed session rename",
+		handler: async (args, ctx) => {
+			const request: unknown = JSON.parse(args);
+			if (ctx.mode !== "rpc" || !request || typeof request !== "object" || Array.isArray(request)) {
+				throw new Error("Invalid managed rename request");
+			}
+			const value = request as Record<string, unknown>;
+			if (value.version !== 1 || ![value.invocationId, value.runtimeId, value.sessionId, value.sessionFile]
+				.every((part) => typeof part === "string" && !!part)
+				|| !Object.keys(value).every((key) => ["version", "invocationId", "runtimeId", "sessionId", "sessionFile", "title"].includes(key))) {
+				throw new Error("Invalid managed rename identity");
+			}
+			const ui = ctx.ui;
+			const identity = { version: 1, invocationId: value.invocationId, runtimeId: value.runtimeId,
+				sessionId: value.sessionId, sessionFile: value.sessionFile };
+			const reply = (outcome: { status: "completed"; title: string }
+				| { status: "failed"; code: "invalid_title" | "context_unavailable" }
+				| { status: "uncertain"; code: "mutation_failed" }) => {
+				ui.setStatus("pi-console-rename-result", JSON.stringify({ ...identity, ...outcome }));
+			};
+			// Keep these input bounds in step with server/src/session-rename.ts.
+			if (typeof value.title !== "string" || !value.title.trim() || Buffer.byteLength(value.title) > 4096
+				|| /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value.title)) {
+				reply({ status: "failed", code: "invalid_title" });
+				return;
+			}
+			const title = cleanTitle(value.title);
+			if (!title) { reply({ status: "failed", code: "invalid_title" }); return; }
+			if (serviceRuntimeId(ctx) !== value.runtimeId || ctx.sessionManager.getSessionId() !== value.sessionId
+				|| ctx.sessionManager.getSessionFile() !== value.sessionFile || !ctx.isIdle()) {
+				reply({ status: "failed", code: "context_unavailable" });
+				return;
+			}
+			// No await between the last context check and the synchronous writes.
+			// setTitle writes more than one entry: a thrown error may be partial.
+			try { setTitle(pi, ctx, title); }
+			catch { reply({ status: "uncertain", code: "mutation_failed" }); return; }
+			reply({ status: "completed", title });
+		},
+	});
+
 	pi.registerCommand("pi-title", {
 		description: "Set the current session title: /pi-title <title>",
 		handler: async (args, ctx) => {
@@ -353,7 +398,7 @@ export default function autoTitleExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			let title = cleanTitle(args);
 			if (!title) {
-				const value = await ctx.ui.input(
+				const value = await serviceUi(ctx).input(
 					JSON.stringify({ kind: "pi_input", prompt: "Rename Session: ", notify: false }),
 					pi.getSessionName() || "",
 				);

@@ -1,9 +1,10 @@
 import { SandboxManager, getDefaultWritePaths, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import { createLocalBashOperations, type BashOperations, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type BashOperations, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { managedBash } from "./managed-bash";
 import { getAccessMode, getScratchDirectory, setScratchDirectory } from "./access-state";
 import { loadExtensionSettings } from "./extension-settings";
 import { baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, hasPermission, pathInside, requestPermission, resolveToolPath } from "./permissions";
@@ -29,7 +30,7 @@ const sandboxEnvironment = [
 ].map((name) => `export ${name}="\${${name}//localhost:/127.0.0.1:}";`).join(" ")
   + " export CLOUDSDK_PROXY_ADDRESS=127.0.0.1 NO_PROXY= no_proxy=;";
 
-const localBash = createLocalBashOperations();
+const localBash = managedBash;
 let sandboxConfig: SandboxRuntimeConfig | undefined;
 let sandboxError: string | undefined;
 let macosDenialMonitor = false;

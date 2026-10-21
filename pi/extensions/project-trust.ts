@@ -1,3 +1,4 @@
+import { serviceUi } from "./shared/service-ui";
 import { hasTrustRequiringProjectResources, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   canonical, chooseProjectTrust, conversationTrust, frontendTrust, resolveProjectTrust,
@@ -112,7 +113,7 @@ export default function projectTrustExtension(pi: ExtensionAPI) {
       if (decision === undefined) return;
       // Pi caches trust by cwd across forks. Authorize carrying a temporary
       // choice before the new runtime can load any project resources.
-      const approved = await ctx.ui.confirm(
+      const approved = await serviceUi(ctx).confirm(
         JSON.stringify({ kind: "pi_confirmation", prompt: "Copy conversation-only project trust to the fork?", notify: false }),
         `The new conversation will start ${decision ? "trusted" : "untrusted"} for this project and its managed workspaces.`);
       if (!approved) return { cancel: true };

@@ -152,6 +152,9 @@ export function sendAlerterNotification(
 	ctx: ExtensionContext,
 	options: AlerterNotificationOptions,
 ): boolean {
+	// A service runtime publishes session/interaction events; desktop delivery
+	// belongs to attached clients, never a detached notifier on the host.
+	if (process.env.PI_CONSOLE_SERVICE === "1") return false;
 	const alerter = alerterPath();
 	if (!alerter) {
 		return false;
@@ -183,6 +186,7 @@ export function sendAlerterNotification(
 }
 
 function reportNotificationResult(ctx: ExtensionContext, notified: boolean): boolean {
+	if (process.env.PI_CONSOLE_SERVICE === "1") return notified;
 	if (!notified && !notificationState.missingAlerterWarned) {
 		notificationState.missingAlerterWarned = true;
 		ctx.ui.notify("Pi notifications are on, but alerter was not found.", "warning");

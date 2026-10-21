@@ -1,3 +1,4 @@
+import { serviceUi } from "./shared/service-ui";
 import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { revertSubtree } from "./history";
@@ -220,7 +221,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 			}
 
 			if (!yes) {
-				const confirmed = await ctx.ui.confirm(
+				const confirmed = await serviceUi(ctx).confirm(
 					JSON.stringify({
 						kind: "pi_confirmation",
 						prompt: removedWorkspaces.length > 0 ? "Delete session history and workspaces?" : "Delete session history?",

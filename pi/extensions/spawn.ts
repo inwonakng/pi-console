@@ -1,6 +1,8 @@
+import { serviceUi } from "./shared/service-ui";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { spawn as spawnProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { managedSpawn, managedResult, stopManaged } from "../scripts/managed-process.mjs";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -116,6 +118,7 @@ type SpawnRun = {
   parentSessionFile?: string;
   worktree?: RunWorkspace;
   integrationBlock?: IntegrationBlock;
+  cleanupError?: string;
   timeout?: NodeJS.Timeout;
   abortListener?: () => void;
   abortSignal?: AbortSignal;
@@ -138,16 +141,29 @@ class PiRpcChild {
   private agentEndRejecter: ((error: Error) => void) | undefined;
   private lastAgentEnd: RpcEvent | undefined;
   private killTimer: NodeJS.Timeout | undefined;
+  private readonly closed: Promise<void>;
+  private closing?: Promise<void>;
 
   constructor(
     argv: string[],
     options: { cwd: string; env: NodeJS.ProcessEnv; onEvent: (event: RpcEvent) => void },
   ) {
-    this.proc = spawnProcess(argv[0], argv.slice(1), {
+    this.proc = managedSpawn(argv[0], argv.slice(1), {
       cwd: options.cwd,
       env: options.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
+
+    this.closed = new Promise((resolve, reject) => {
+      this.proc.once("error", reject);
+      this.proc.once("close", () => {
+        try {
+          if (managedResult(this.proc)?.managedUnresolved) reject(new Error("Spawned managed work remains unresolved"));
+          else resolve();
+        } catch (error) { reject(error); }
+      });
+    });
+    void this.closed.catch(() => undefined);
 
     this.proc.stdout.on("data", (chunk) => {
       this.stdoutBuffer += chunk.toString("utf8");
@@ -183,21 +199,22 @@ class PiRpcChild {
     });
   }
 
-  abort(): void {
-    if (!this.ended) {
-      this.proc.kill("SIGTERM");
-      if (!this.killTimer) {
-        this.killTimer = setTimeout(() => {
-          if (!this.ended) {
-            this.proc.kill("SIGKILL");
-          }
-        }, 5000);
-      }
-    }
-  }
+  abort(): void { void this.dispose().catch(() => undefined); }
 
-  dispose(): void {
-    this.abort();
+  dispose(): Promise<void> {
+    if (this.closing) return this.closing;
+    this.closing = (async () => {
+      if (!this.ended) {
+        this.proc.stdin.end();
+        if (!stopManaged(this.proc)) {
+          this.proc.kill("SIGTERM");
+          this.killTimer = setTimeout(() => { if (!this.ended) this.proc.kill("SIGKILL"); }, 5000);
+        }
+      }
+      try { await this.closed; }
+      finally { if (this.killTimer) clearTimeout(this.killTimer); }
+    })();
+    return this.closing;
   }
 
   send(command: RpcEvent): Promise<RpcEvent> {
@@ -677,6 +694,7 @@ function statusJson(run: SpawnRun): Record<string, unknown> {
     joined: run.joined,
     joinRequested: run.joinRequested ?? false,
     integrationBlock: run.integrationBlock,
+    cleanupError: run.cleanupError,
     briefPath: run.briefPath,
     resultPath: run.resultPath,
     transcriptPath: run.transcriptPath,
@@ -747,6 +765,7 @@ async function prepareWorktreePatch(run: SpawnRun): Promise<void> {
 }
 
 async function applyWorktreeChanges(run: SpawnRun, signal?: AbortSignal): Promise<void> {
+  if (run.cleanupError) throw new Error(`Managed child cleanup unresolved: ${run.cleanupError}`);
   if (!run.worktree) return;
   const record = loadWorkspace(run.worktree.workspaceId);
   if (record && isWorkspaceFinalized(record)) {
@@ -861,6 +880,7 @@ function restoredRun(statusPath: string, parentSessionFile: string | undefined):
     parentSessionFile,
     worktree,
     integrationBlock,
+    cleanupError: typeof data.cleanupError === "string" ? data.cleanupError : undefined,
     notified: data.notified === true,
     joined: data.joined === true,
     // No join operation survives a runtime restart.
@@ -1009,7 +1029,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     // Explicit joins continue to suppress completion delivery on other branches.
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
     // Child cleanup is asynchronous; drop the old UI before triggering it.
     ui = undefined;
     retired = true;
@@ -1030,6 +1050,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         }
       }
     }
+    await Promise.all([...runs.values()].map((run) => run.finished));
     if (failures.length) throw new Error(`Could not save subagent shutdown state: ${failures.join("; ")}`);
   });
 
@@ -1154,7 +1175,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     if (!running.length) return;
     const action = event.reason === "new" ? "starting a new session" : "switching sessions";
     try {
-      const choice = await ctx.ui.select(
+      const choice = await serviceUi(ctx).select(
         JSON.stringify({
           kind: "pi_compact_select",
           prompt: `There are running subagents. Continuing will stop them. Continue ${action}?`,
@@ -1270,7 +1291,8 @@ export default function spawnExtension(pi: ExtensionAPI) {
     return run;
   };
 
-  const startRun = (run: SpawnRun, params: { model: string; provider?: string; timeoutSeconds?: number }) => {
+  const startRun = async (run: SpawnRun, params: { model: string; provider?: string; timeoutSeconds?: number }) => {
+    if (retired) throw new Error("Cannot launch subagent from a retired runtime");
     const binary = process.env.PI_BINARY || "pi";
     const argv = [binary, "--mode", "rpc", "-e", resolve(dirname(fileURLToPath(import.meta.url)), ".."), "--session-dir", join(run.runDir, "sessions"), "--model", params.model];
     if (params.provider) {
@@ -1358,7 +1380,8 @@ export default function spawnExtension(pi: ExtensionAPI) {
       childEnv.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
     }
 
-    const child = new PiRpcChild(argv, {
+    let child: PiRpcChild;
+    try { child = new PiRpcChild(argv, {
       cwd: run.childCwd,
       env: childEnv,
       onEvent: (event) => {
@@ -1370,7 +1393,17 @@ export default function spawnExtension(pi: ExtensionAPI) {
           publishProgress();
         }
       },
-    });
+    }); } catch (error) {
+      run.status = "failed";
+      run.error = `Subagent was not launched: ${error instanceof Error ? error.message : String(error)}`;
+      run.completedAt = new Date().toISOString();
+      try {
+        if (run.worktree) await updateWorkspace(run.worktree.workspaceId, (record) => { delete record.managedCleanupPending; });
+        writeFileSync(run.resultPath, run.error + "\n", "utf8");
+        writeStatus(run);
+      } finally { run.resolveFinished(run); }
+      return;
+    }
     run.child = child;
 
     const timeoutMs = Math.max(1, params.timeoutSeconds ?? 1800) * 1000;
@@ -1442,10 +1475,15 @@ export default function spawnExtension(pi: ExtensionAPI) {
           }
         }
         try {
+          // Final patches must include shutdown writes from tracked writers.
+          // Unknown escaped processes remain outside the best-effort guarantee.
+          try { await child.dispose(); }
+          catch (error) { run.cleanupError = error instanceof Error ? error.message : String(error); throw error; }
+          if (run.worktree) await updateWorkspace(run.worktree.workspaceId, (record) => { delete record.managedCleanupPending; });
           await prepareWorktreePatch(run);
         } catch (error) {
           if (run.worktree) {
-            run.integrationBlock = { integration: "failed", reason: `failed to create patch: ${error instanceof Error ? error.message : String(error)}` };
+            run.integrationBlock = { integration: "failed", reason: `managed cleanup/patch failed: ${error instanceof Error ? error.message : String(error)}` };
           }
         }
         if (run.worktree && !run.integrationBlock && run.status !== "completed") {
@@ -1455,7 +1493,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
           clearTimeout(progressPublishTimer);
           progressPublishTimer = undefined;
         }
-        child.dispose();
+        // dispose was awaited before capture; failed cleanup remains persisted
+        // and blocks every later join and shared workspace mutation.
+        if (run.cleanupError) writeStatus(run);
         // Retired callbacks may finish artifacts but must not overwrite status
         // already restored by a replacement runtime or publish to its UI.
         if (!retired) {
@@ -1465,8 +1505,10 @@ export default function spawnExtension(pi: ExtensionAPI) {
         }
         run.resolveFinished(run);
       }
-    })().catch((error: unknown) => {
-      child.dispose();
+    })().catch(async (error: unknown) => {
+      try { await child.dispose(); }
+      catch (cleanup) { run.cleanupError = cleanup instanceof Error ? cleanup.message : String(cleanup); }
+      try { writeStatus(run); } catch { /* Preserve original failure; workspace marker remains. */ }
       const failure = error instanceof Error ? error : new Error(String(error));
       // A failed status write/send is reported, but must not strand all later
       // joins. Their own writes can retry durable finalization.
@@ -1553,6 +1595,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     }),
     executionMode: "sequential",
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      if (retired) throw new Error("Cannot launch subagent from a retired runtime");
       ui = ctx.ui;
       const mode = parseSpawnMode(params.mode);
       if (mode === "background") {
@@ -1621,7 +1664,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         signal,
       });
 
-      startRun(run, { model, provider, timeoutSeconds: params.timeoutSeconds });
+      await startRun(run, { model, provider, timeoutSeconds: params.timeoutSeconds });
 
       if (mode === "background") {
         onUpdate?.({ content: [{ type: "text", text: `${runLabel(run)} ${run.id} started (${accessMode}).` }], details: artifactDetails(run) });

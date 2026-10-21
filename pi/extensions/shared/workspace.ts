@@ -62,6 +62,8 @@ export type WorkspaceRecord = {
   targetSessionFile?: string;
   parentWorkspaceId?: string;
   runId?: string;
+  /** Service-owned child work must finish cleanup before capture/application/removal. */
+  managedCleanupPending?: string;
   integration: WorkspaceIntegration;
   integrationReason?: string;
   integrationReview?: WorkspaceIntegrationReview;
@@ -162,6 +164,8 @@ function gitResult(cwd: string, args: string[], options: { env?: NodeJS.ProcessE
     input: options.input,
     encoding: null,
     maxBuffer: 128 * 1024 * 1024,
+    // Bounded service cleanup; ordinary interactive workspace behavior is unchanged.
+    ...(process.env.PI_CONSOLE_SERVICE === "1" ? { timeout: 10000, killSignal: "SIGKILL" as const } : {}),
   });
   return {
     status: result.status ?? -1,
@@ -492,6 +496,7 @@ export function createWorkspace(input: {
     sourceSessionFile: canonicalSessionFile(input.sourceSessionFile),
     parentWorkspaceId: input.parentWorkspaceId,
     runId: input.runId,
+    managedCleanupPending: process.env.PI_CONSOLE_SERVICE === "1" && input.kind === "child" ? input.runId : undefined,
     integration: "pending",
     changedFiles: [],
     includedIgnoredFiles,
@@ -591,8 +596,13 @@ export function workspaceDiscardWarning(records: WorkspaceRecord[]): string {
   return lines.join("\n");
 }
 
+function assertManagedCleanup(record: WorkspaceRecord): void {
+  if (record.managedCleanupPending) throw new Error(`Workspace ${record.id} has known unresolved managed writers (${record.managedCleanupPending}); capture/integration/removal blocked`);
+}
+
 export async function prepareWorkspaceDiscard(id: string): Promise<WorkspaceRecord> {
   return withWorkspaceLock(id, async (record) => {
+    assertManagedCleanup(record);
     if (isWorkspaceFinalized(record)) return record;
     assertWorkspaceAvailable(record);
     return snapshotWorkspaceResult(record);
@@ -795,6 +805,7 @@ function prepareIntegration(record: WorkspaceRecord): {
 /** Prepare the same destination-relative comparison as integration, without applying it. */
 export async function previewWorkspaceIntegration(id: string, signal?: AbortSignal): Promise<string> {
   return withWorkspaceLock(id, async (record) => {
+    assertManagedCleanup(record);
     if (isWorkspaceFinalized(record)) return formatIntegrationSummary(record);
     assertWorkspaceAvailable(record);
     const { destination, merge, ignoredChanges } = prepareIntegration(record);
@@ -817,6 +828,7 @@ export async function previewWorkspaceIntegration(id: string, signal?: AbortSign
 
 export async function integrateWorkspace(id: string, signal?: AbortSignal): Promise<WorkspaceRecord> {
   return withWorkspaceLock(id, async (record) => {
+    assertManagedCleanup(record);
     let applicationStarted = false;
     let destinationRef: string | undefined;
     try {
@@ -961,6 +973,7 @@ function cleanupGitDirectory(record: WorkspaceRecord): string {
 
 export async function removeWorkspace(id: string, finalLifecycle: "integrated" | "discarded"): Promise<WorkspaceRecord> {
   return withWorkspaceLock(id, async (record) => {
+    assertManagedCleanup(record);
     if (!record.retained && record.lifecycle !== "cleanup_failed") return record;
     // Integration may have won while a discard was waiting for the lock.
     // Cleanup must not relabel an already applied contribution as discarded.

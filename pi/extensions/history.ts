@@ -1,3 +1,4 @@
+import { serviceUi } from "./shared/service-ui";
 import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { spawnSync } from "child_process";
@@ -472,7 +473,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	validateFiles();
 	const patches = await Promise.all(discarded.map((record) => prepareWorkspaceDiscard(record.id)));
 	const fileCount = rollback.reduce((count, item) => count + item.files.length, 0);
-	const approved = await ctx.ui.confirm(
+	const approved = await serviceUi(ctx).confirm(
 		JSON.stringify({ kind: "pi_confirmation", prompt: "Permanently revert history?", notify: false }),
 		`Delete ${deletedIds.size} history entries${selected ? ", including the selected message and every branch beneath it" : " after the selected point"}? This cannot be undone through the tree.\n`
 		+ `Restore ${fileCount} recorded file change(s) on the active path.\n`

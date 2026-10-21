@@ -1,3 +1,4 @@
+import { serviceUi } from "./shared/service-ui";
 import {
   type ExtensionAPI,
   type ExtensionContext,
@@ -291,7 +292,7 @@ async function confirmDestructive(
     const dialogTitle = ctx.mode === "rpc"
       ? JSON.stringify({ kind: "pi_confirmation", prompt: title, resumable: true })
       : title;
-    return ctx.ui.confirm(dialogTitle, message, { signal: ctx.signal });
+    return serviceUi(ctx).confirm(dialogTitle, message, { signal: ctx.signal });
   }
   return approved === true;
 }
@@ -690,7 +691,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
               firstPrompt = false;
             }
             const prompt = `Apply ${selected.label} to ${selected.destinationRoot}?${ignoredReviewNote(selected)}`;
-            decision = await ctx.ui.select(
+            decision = await serviceUi(ctx).select(
               JSON.stringify({
                 kind: "pi_compact_select", prompt, notify: false, resumable: true,
                 preview, preview_kind: "workspace_summary",

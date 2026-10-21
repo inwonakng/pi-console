@@ -63,6 +63,8 @@ for command in $required_commands; do
     if ! command -v "$command" >/dev/null 2>&1; then missing="$missing $command"; fi
 done
 [ -z "$missing" ] || fail "Missing required commands:$missing"
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' \
+    || fail 'Node.js 22.19.0 or newer is required by Pi. Update Node.js and retry.'
 
 legacy=no
 marker="$install_root/.pi-console-install"

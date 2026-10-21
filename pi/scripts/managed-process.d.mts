@@ -1,0 +1,13 @@
+import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
+import type { DatabaseSync } from "node:sqlite";
+export type ManagedExit = { code: number | null; signal: NodeJS.Signals | null; error?: string; managedUnresolved: boolean; survivors?: number[]; nested?: {id: string; status: string}[] };
+export type ManagedJob = { id: string; parent: string | null; label: string; status: "intent" | "running" | "cancelled" | "done" | "unresolved"; launch_open: number; result?: ManagedExit };
+export function assertManagedResources(environment?: NodeJS.ProcessEnv): void;
+export function ownerLease(root: string): { close(): void };
+export function registry(path: string): DatabaseSync;
+export function beginEpoch(path: string, epoch: string): void;
+export function sealEpoch(path: string, epoch: string): void;
+export function inspectEpoch(path: string, epoch: string): ManagedJob[];
+export function managedSpawn(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"] }): ChildProcessWithoutNullStreams;
+export function managedResult(child: ChildProcess): ManagedExit | undefined;
+export function stopManaged(child: ChildProcess): boolean;

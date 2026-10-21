@@ -1,3 +1,4 @@
+import { serviceUi } from "./service-ui";
 import {
   getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SettingsManager,
   type ExtensionContext,
@@ -116,7 +117,7 @@ export async function chooseProjectTrust(ctx: ExtensionContext, cwd: string, ses
   const choices = ["Trust"];
   if (parent !== scope.cwd) choices.push(`Trust parent folder (${parent})`);
   choices.push("Trust (this conversation only)", "Do not trust", "Do not trust (this conversation only)");
-  const selected = await ctx.ui.select(
+  const selected = await serviceUi(ctx).select(
     `Trust project folder?\n${scope.cwd}${canonical(cwd) !== scope.cwd ? `\nWorkspace: ${cwd}` : ""}`
       + "\n\nThis allows Pi to load project settings and resources, install missing project packages, and execute project extensions."
       + "\nManaged workspaces inherit this project's decision. Conversation-only decisions survive restarts in pi-console.",
