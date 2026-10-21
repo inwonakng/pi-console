@@ -1,3 +1,4 @@
+import { registerServiceOperation } from "./shared/service-operation";
 import { SERVICE_DIALOG_STATUS, serviceDialogTag, serviceUi } from "./shared/service-ui";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
@@ -469,9 +470,7 @@ export default function sideExtension(pi: ExtensionAPI) {
     current = undefined;
   });
 
-  pi.registerCommand("pi-side", {
-    description: "Control the independent ask-mode side conversation (JSON: open, prompt, reset, abort, draft).",
-    handler: async (args, ctx) => {
+  const sideAction = async (args: string, ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext) => {
       if (ctx.mode !== "rpc") {
         ctx.ui.notify("Side conversations are controlled through the pi-console frontend.", "warning");
         return;
@@ -484,10 +483,13 @@ export default function sideExtension(pi: ExtensionAPI) {
         ctx.ui.notify('Usage: /pi-side {"action":"open|prompt|reset|abort|draft","message":"...","draft":"..."}', "warning");
         return;
       }
-      const reply = (success: boolean, error?: string) => ctx.ui.setStatus("pi-side-response", JSON.stringify({
-        parentSessionFile: ctx.sessionManager.getSessionFile() ?? "",
-        requestId: request.requestId, success, error,
-      }));
+      const reply = (success: boolean, error?: string) => {
+        ctx.ui.setStatus("pi-side-response", JSON.stringify({
+          parentSessionFile: ctx.sessionManager.getSessionFile() ?? "",
+          requestId: request.requestId, success, error,
+        }));
+        return success ? { disposition: "accepted" as const } : undefined;
+      };
       const reject = (error: string) => { reply(false, error); };
       if (shuttingDown) { reject("Pi is shutting down."); return; }
       if (request.parentSessionFile !== undefined && request.parentSessionFile !== ctx.sessionManager.getSessionFile()) {
@@ -496,7 +498,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       }
       const g = current ??= restore(ctx);
       g.ctx = ctx;
-      if (request.action === "open") { publish(g); reply(true); return; }
+      if (request.action === "open") { publish(g); return reply(true); }
       if (transition) { reject("Side conversation is stopping or starting a new chat."); return; }
       if (request.action === "draft") {
         if (typeof request.draft !== "string") { reject("Side draft must be a string."); return; }
@@ -523,15 +525,13 @@ export default function sideExtension(pi: ExtensionAPI) {
           startJournal(next);
           publish(next);
         }).catch((error) => failure(g, error)).finally(() => { transition = undefined; });
-        reply(true);
-        return;
+        return reply(true);
       }
       if (request.action === "abort") {
         g.activity = "Stopping side conversation";
         publish(g);
         transition = abort(g).catch((error) => failure(g, error)).finally(() => { transition = undefined; });
-        reply(true);
-        return;
+        return reply(true);
       }
       if (g.running) { reject("Side conversation is busy; the prompt was not queued."); return; }
       if (g.pendingPrompt || g.child?.stopped) {
@@ -576,6 +576,14 @@ export default function sideExtension(pi: ExtensionAPI) {
           state(g);
         }
       })();
-    },
-  });
+      return { disposition: "accepted" as const };
+  };
+  pi.registerCommand("pi-side", { description: "Control the independent ask-mode side conversation (JSON: open, prompt, reset, abort, draft).",
+    handler: async (args, ctx) => { await sideAction(args, ctx); } });
+  for (const operation of ["side.open", "side.prompt", "side.reset", "side.abort"] as const) {
+    registerServiceOperation(pi, operation, (payload, ctx) => sideAction(JSON.stringify({
+      action: operation.slice(5), message: "text" in payload ? payload.text : undefined,
+      parentSessionFile: ctx.sessionManager.getSessionFile(),
+    }), ctx));
+  }
 }

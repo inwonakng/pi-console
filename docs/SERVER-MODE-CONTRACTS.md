@@ -1,15 +1,28 @@
 # Server-mode compatibility gate
 
-Status: **B3 opt-in local implementation verified on macOS; stop for user review (2026-10-21).**
-Pi remains unchanged. Startup coordination is corrected; fresh local service/IPC/bridge/
-Neovim checks passed with Node 26.12.0 and actual Node 22.19.0. Linux remains unexecuted.
-This is not a default-workflow replacement, full installer or authorization for C–F.
+Status: **C typed local single-session implementation; stop for orchestrator review (2026-10-21).**
+See [`SERVER-MODE-C.md`](SERVER-MODE-C.md) for the mutation inventory, current contracts
+and fresh macOS/Node 26.12/actual two-Neovim evidence. Installed Pi remains unchanged.
+The B3 and earlier reports below are historical unless explicitly rerun in that C report.
+C on actual Node 22.19 and Linux remain unexecuted; this is not remote resource parity,
+a default-workflow replacement, full installer or authorization for D–F.
 
 [`plans/server-mode.md`](../plans/server-mode.md) is the migration specification.
 See [`plans/server-mode-handoff.md`](../plans/server-mode-handoff.md) for the current
 stopping point and next implementation slice.
 
-## B3 completion — startup coordination and operational attachment (2026-10-21)
+## C local single-session evidence (2026-10-21)
+
+The [C report](SERVER-MODE-C.md) records the typed allowlist, positive bundled-result
+protocol, detached fork/clone identity registration, context/queue fencing, native
+queue separation, lifecycle and frontend authority changes. Fresh checks exercise
+the real service and two actual Neovims, not only owner components. B3 reconnect
+pressure, consecutive queue saves, frontend-independent output and lost-ack input
+protection were rerun. Prior storage/crash/Node-floor evidence is not relabeled as C.
+No permanent tests, plan/TODO edits, installed-Pi changes or excluded transport/resource/
+installer expansion were introduced.
+
+## Historical B3 completion — startup coordination and operational attachment (2026-10-21)
 
 ### Diagnosis and bounded correction
 

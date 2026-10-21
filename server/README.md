@@ -1,10 +1,12 @@
 # Host-side Pi owner (in development)
 
-This package contains the owner components and **opt-in B3 local-service/Neovim
-attachment, verified on macOS and awaiting user review**. Simultaneous-start lease
-contention is corrected with a bounded busy wait; ownership/recovery checks are
-unchanged. See `plans/server-mode-handoff.md` and `docs/SERVER-MODE-CONTRACTS.md` for
-evidence and Linux limits. Ordinary launches keep their current transport. Pi is unchanged.
+This package contains the owner components and **opt-in local-service/Neovim
+attachment with C typed single-session operations**, stopping for orchestrator review.
+See [`../docs/SERVER-MODE-C.md`](../docs/SERVER-MODE-C.md) for the mutation inventory,
+protocol/outcome rules, fresh macOS evidence and remaining boundaries. The plans and
+active B3 handoff are unchanged. B1–B3 evidence in the contracts report remains
+historical unless explicitly rerun for C. Ordinary launches keep their current
+transport; installed Pi is unchanged.
 
 ## Build
 
@@ -55,7 +57,8 @@ An intentional `--force` interrupts owned work, retains history/workspaces and w
 for managed cleanup. Cleanup failure exits the owner with its claim retained; it does
 not leave a falsely healthy listener or authorize replacement. SIGTERM/SIGINT are
 explicit forced administrative shutdown, not frontend detach. Boot/login supervisor
-setup, headless installer mode and broader session lifecycle commands are not delivered.
+setup and headless installer mode remain excluded. C's confirmed session restart/kill
+are attachment-bound commands, separate from these service administration actions.
 
 After owner death, `server reconcile` invokes the existing B2 managed recovery gate;
 then explicitly `server start` and `server resume --session ID`. Neither ordinary
@@ -66,8 +69,17 @@ allowed. The operational recovery path passed macOS B3 checks on Node 26.12 and 
 
 ### Attachment UI
 
+C adds typed model/thinking/mode pickers and cycles, owner `!` / `!!` shell,
+native steering / `:PiFollowUp`, retry/compaction settings through the command picker,
+history navigation/fork/clone/delete, `:PiWorkspace` enter/integrate/discard,
+side/spawn controls, retitle/notifications/usage and confirmed owner-session restart.
+`:PiKill` kills the session and closes only this frontend after preserving drafts.
+`:PiOperations` inspects outcomes/recovered history text; `:PiHostRequest` reviews an
+unresolved create/resume ID. These do not replay work. See the C report for exact
+arguments, confirmations and what completion means.
+
 - `:PiControl`, confirmed `:PiTakeover`, `:PiRelease`; reconnect starts as viewer.
-- `<C-CR>` non-slash text, `<Esc><Esc>` abort; shared queue via `:PiQueue` / `<leader>pq`.
+- `<C-CR>` non-slash text or explicit owner `!` / `!!` shell, `<Esc><Esc>` abort; shared queue via `:PiQueue` / `<leader>pq`.
   Queue editors are local drafts until `:write`; their 30-second pause may expire.
   A stale revision or dispatched item refuses saving and retains local text.
 - `:PiPending` inspects full retained payloads/previews; only the current controller
@@ -86,12 +98,13 @@ allowed. The operational recovery path passed macOS B3 checks on Node 26.12 and 
   Files under `${XDG_STATE_HOME:-$HOME/.local/state}/pi-console/frontend/<channel>/service-drafts/`
   are private recovery, never execution authority. Recovery survives `NVIM_APPNAME`/
   stable-release changes and remains isolated between stable and dev.
-- Unsupported slash/shell/settings/history/workspace/side/spawn/navigation actions
-  report unavailable. Tool inspection shows recorded text only; it never reads owner
-  full-output paths, spawn artifacts or workspace review data from the local filesystem.
-  No raw Pi RPC tunnel, local owner-path lookup, automatic editor
-  effect or implicit local Pi fallback exists. Zotero completion stays frontend-local;
-  the host still needs its own resource/provider configuration.
+- Freeform slash commands and excluded overview/resource actions report unavailable.
+  Tool inspection shows recorded text only; it never reads owner full-output paths,
+  spawn artifacts or workspace review data from the local filesystem. History text
+  may be offered in a separate live, initiating-grant-bound draft, never input replacement
+  or snapshot/reconnect replay. No raw RPC tunnel, local owner-path lookup or implicit
+  local Pi fallback exists. Zotero completion stays frontend-local; the host still
+  needs its own resource/provider configuration.
 
 ### Local protocol v1
 
@@ -105,7 +118,7 @@ service build and separate runtime-resource fingerprint. CLI status compares the
 selected service build; it never silently restarts a different running build.
 
 Methods: `health`, `sessions`, `host.command`, `host.status`, `attach`, `detach`,
-`snapshot`, `command`, `grant`, `heartbeat`, `command.status`, `effect.inspect`,
+`snapshot`, typed `session.read`, `command`, `grant`, `heartbeat`, `command.status`, `effect.inspect`,
 `service.stop`. All have typed allowlisted fields; raw RPC is rejected. A connection
 owns at most one subscription. `command` accepts the existing version-1 session
 command **without** `attachmentId`; the service stamps its own transport attachment
@@ -308,8 +321,8 @@ outcome reservations plus the new slot, leaving 64 MiB for ordinary admission or
 16 MiB for control/approval/abort/removal/release. `storage_pressure` refuses before
 dispatch and does not fence otherwise healthy storage. These are logical headroom
 checks, not preallocated space or a guarantee against other disk writers. Pending
-abort slots reserve 17 MiB; text slots charge escaped text + 4 KiB; other slots
-reserve 4 KiB. Outcome growth cannot exceed its admitted slot. Actual SQLite-full,
+abort and history navigation/fork slots reserve 17 MiB; text slots charge escaped
+recovery text + 4 KiB; other slots reserve 4 KiB. Outcome growth cannot exceed its admitted slot. Actual SQLite-full,
 I/O, rollback/commit ambiguity or checkpoint errors fence mutation and retain the
 claim; acknowledged Pi execution is not rolled back. No control operation bypasses
 journaling. The latched catalog failure synchronously fences create/resume, startup
@@ -357,8 +370,8 @@ check later availability, not that already-resolved promise.
 
 Snapshots contain copied startup/interactions and materialized conversation state.
 `lookup()` and `subscribe()` never start or restore anything.
-`OwnedSession.stop()` is explicit low-level owner shutdown, not detach and not the
-future guarded service-stop command. `HostOwner.close()` refuses active/initializing
+`OwnedSession.stop()` is explicit low-level owner shutdown, not detach and not an
+unrestricted frontend stop endpoint. `HostOwner.close()` refuses active/initializing
 sessions or in-flight creation; it never silently stops them.
 
 The catalog's exclusive claim is not proof that all worker descendants have died.
@@ -418,7 +431,9 @@ exposed as `acceptedQueue`; no raw RPC endpoint exists.
 ### Private command/control core
 
 `subscribe(label)` creates an opaque attachment ID without granting control or
-rerunning startup. `command()` accepts only these operations:
+rerunning startup. The original B3 operations below remain supported; C extends
+this allowlist with the explicit families in [`SERVER-MODE-C.md`](../docs/SERVER-MODE-C.md).
+There is still no arbitrary command endpoint.
 
 - `control.acquire` (only if unclaimed), `control.takeover` (requires
   `{ confirmed: true }`), and `control.release`.
@@ -431,9 +446,10 @@ rerunning startup. `command()` accepts only these operations:
   and `queue.release` with `{ reservationId }`.
 
 Only nonempty, non-slash text up to 1 MiB UTF-8 is accepted (trimmed on save).
-Leading-whitespace slash text is rejected too. No shell, freeform slash-command,
-settings, navigation, lifecycle mutation or raw RPC forwarding is allowed. Explicit
-`session.rename` uses a private fixed bundled command, not accepted prompt text.
+Leading-whitespace slash text is rejected too. `prompt.submit` never forwards shell,
+freeform slash commands or raw RPC. C provides shell/settings/history/workspace/lifecycle
+through separate typed operations. Explicit `session.rename` remains a private fixed
+bundled command, not accepted prompt text.
 
 Every envelope carries `version: 1`, `id`, `sessionId`, `serviceEpoch`,
 `runtimeRevision`, `attachmentId`, `operation`, and `payload`. All but acquisition
@@ -555,9 +571,9 @@ the new context. No automatic replay occurs across owner epochs.
 
 Freeform slash dispatch is deliberately deferred: Pi can execute registered `/commands`
 before ordinary prompt preflight, including broader history/workspace mutations;
-`handled` alone also does not prove extension-command success. This slice does
-not add typed native steer/follow-up submission or broader slash capabilities.
-The explicit managed rename below has its own result policy. Trusted input hooks
+`handled` alone also does not prove extension-command success. C adds typed native
+steering/follow-up and fixed bundled capabilities with positive correlated outcomes,
+not broader slash dispatch. The explicit managed rename below retains its result policy. Trusted input hooks
 still execute inside unchanged Pi; the
 owner fences observed context changes, not arbitrary unpublished extension work.
 
@@ -601,11 +617,10 @@ are not a cross-file transaction or a power-loss guarantee.
 
 Managed envelopes/results are absent from conversation work/status/effect streams;
 only normal title/label/name data and application receipts are published. No editor
-text or navigation action is introduced. Rename is not a generic command dispatcher:
-retitle/model calls, blank-title dialogs, permission/integration modes, history/tree,
-workspace, side/spawn and notification commands remain excluded. Commands producing
-editor/navigation actions require future provenance/recipient fencing and must never
-broadcast to viewers or replay from receipts/snapshots/reconnect. Runtime/history/
+text or navigation action is introduced by rename. Rename is not a generic dispatcher;
+C's separately typed operations handle supported retitle/model/modes/history/workspace/
+side/spawn/notification controls. History completion text is initiating-grant-bound
+recovery, not a broadcast editor action or receipt/snapshot/reconnect replay. Runtime/history/
 workspace replacements still fence old-context accepted text for explicit review;
 `queueItemText` recovery receipts remain intact and uncertain work is never replayed.
 
@@ -652,6 +667,9 @@ identified by their absent lifecycle tag; do not present them as having verified
 retained timeout/signal support.
 
 ## Verification
+
+Fresh C local-service and actual two-Neovim evidence and its platform limits are in
+[`SERVER-MODE-C.md`](../docs/SERVER-MODE-C.md). The reports below are historical.
 
 The B1 shared-storage fence repair was separately verified on macOS 27.0.1 arm64 /
 Node **26.12.0**. Actual-child deferred prompts/replies/rename, isolated pipe and

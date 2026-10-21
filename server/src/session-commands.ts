@@ -2,6 +2,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { object } from "./pi-records.js";
 import { validRenameTitle } from "./session-rename.js";
+import { validNative, type NativeOperation } from "./session-operations.js";
+import { validBundled, type BundledOperation } from "./session-bundled.js";
 
 export type CommandErrorCode = "invalid_command" | "stale_epoch" | "stale_runtime" | "session_unavailable"
   | "attachment_closed" | "control_required" | "control_revoked" | "control_claimed"
@@ -19,6 +21,9 @@ export type SessionCommand = Envelope & (
   | { operation: "control.acquire"; payload: Record<string, never> }
   | { operation: "control.takeover"; payload: { confirmed: true } }
   | (Authorized & (
+    | NativeOperation
+    | BundledOperation
+    | { operation: "session.restart" | "session.kill"; payload: { confirmed: true } }
     | { operation: "control.release" | "turn.abort"; payload: Record<string, never> }
     | { operation: "interaction.respond"; payload: { requestId: string; answer: { value: string } | { confirmed: boolean } } }
     | { operation: "interaction.cancel"; payload: { requestId: string } }
@@ -37,7 +42,9 @@ export type CommandReceipt = {
   recoveryAvailable?: true;
   /** Completion describes command handling, NOT completion of agent work. */
   result?: { delivery?: "flushed"; cleared?: { steering: string[]; followUp: string[] }; idle?: boolean;
-    queueItemId?: string; queueItemRevision?: number; queueItemText?: string; reservationId?: string; title?: string };
+    queueItemId?: string; queueItemRevision?: number; queueItemText?: string; reservationId?: string; title?: string;
+    submittedText?: string; editorText?: string; disposition?: "queued" | "handled" | "accepted"; exitCode?: number; cancelled?: boolean;
+    mode?: string; changed?: boolean; sessionId?: string; workspaceId?: string; lifecycle?: string; integration?: string; status?: string; enabled?: boolean };
   error?: { code: string; message: string };
 };
 export type StoredCommand = { fingerprint: string; receipt: CommandReceipt };
@@ -65,6 +72,7 @@ export function sessionCommand(value: unknown): SessionCommand {
     case "control.acquire": if (!exact(payload, []) || value.controlToken !== undefined) invalid(); break;
     case "control.takeover": if (!exact(payload, ["confirmed"]) || payload.confirmed !== true || value.controlToken !== undefined) invalid(); break;
     case "control.release": case "turn.abort": if (!exact(payload, [])) invalid(); break;
+    case "session.restart": case "session.kill": if (!exact(payload, ["confirmed"]) || payload.confirmed !== true) invalid(); break;
     case "interaction.cancel": if (!exact(payload, ["requestId"]) || !identifier(payload.requestId)) invalid(); break;
     case "prompt.submit": if (!exact(payload, ["text"]) || !validPromptText(payload.text)) invalid(); break;
     case "session.rename": if (!exact(payload, ["title"]) || !validRenameTitle(payload.title)) invalid(); break;
@@ -80,7 +88,7 @@ export function sessionCommand(value: unknown): SessionCommand {
         && !(exact(payload.answer, ["confirmed"]) && typeof payload.answer.confirmed === "boolean")) invalid();
       if (typeof payload.answer.value === "string" && Buffer.byteLength(payload.answer.value) > 1024 * 1024) invalid();
       break;
-    default: invalid();
+    default: if (!validNative(value.operation, payload) && !validBundled(value.operation, payload)) invalid();
   }
   if (value.operation !== "control.acquire" && value.operation !== "control.takeover"
     && (typeof value.controlToken !== "string" || value.controlToken.length > 128 || !value.controlToken.length)) invalid();
@@ -95,7 +103,8 @@ export function commandFingerprint(command: SessionCommand): string {
       ? { value: command.payload.answer.value } : { confirmed: command.payload.answer.confirmed } }
     : command.operation === "queue.edit" ? { itemId: command.payload.itemId, expectedRevision: command.payload.expectedRevision, text: command.payload.text }
     : command.operation === "queue.remove" || command.operation === "queue.reserve"
-      ? { itemId: command.payload.itemId, expectedRevision: command.payload.expectedRevision } : command.payload;
+      ? { itemId: command.payload.itemId, expectedRevision: command.payload.expectedRevision }
+      : Object.fromEntries(Object.entries(command.payload).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
   return createHash("sha256").update(JSON.stringify([command.sessionId, command.serviceEpoch,
     command.runtimeRevision, command.operation, payload])).digest("hex");
 }

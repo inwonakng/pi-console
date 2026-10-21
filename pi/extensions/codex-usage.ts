@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Buffer } from "node:buffer";
+import { registerServiceOperation } from "./shared/service-operation";
 
 const PROVIDER = "openai-codex";
 const STATUS_KEY = "pi-codex-usage";
@@ -181,6 +182,13 @@ export default function codexUsageExtension(pi: ExtensionAPI) {
 		if (interval) clearInterval(interval);
 		interval = undefined;
 		sessionContext = undefined;
+	});
+
+	registerServiceOperation(pi, "usage.refresh", async (_payload, ctx) => {
+		if (activeProvider !== PROVIDER) return { changed: false, status: "not_applicable" };
+		await refresh(ctx);
+		if (latest?.stale) return;
+		return { changed: true, status: "refreshed" };
 	});
 
 	pi.registerCommand("pi-codex-usage-refresh", {

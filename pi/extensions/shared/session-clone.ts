@@ -1,6 +1,6 @@
 import { serviceUi } from "./service-ui";
 import { CURRENT_SESSION_VERSION, SessionManager, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, renameSync, chmodSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { conversationTrust, projectTrustReady, saveConversationTrust, trustScope } from "./project-trust";
 import { readSessionRecords, writeJsonlFile } from "./session-deletion";
@@ -57,8 +57,11 @@ export async function cloneThroughEntry(
   ctx: ExtensionCommandContext,
   entryId: string,
   isRuntimeActive: () => boolean,
+  options: { canonicalManagedFile?: boolean; beforeUserMessage?: boolean } = {},
 ): Promise<{ sessionFile: string; cwd: string } | undefined> {
   const sourceFile = assertCloneAllowed(ctx, entryId, isRuntimeActive);
+  const selected = ctx.sessionManager.getEntry(entryId);
+  if (options.beforeUserMessage && (selected?.type !== "message" || selected.message.role !== "user")) return;
   const sourceLeaf = ctx.sessionManager.getLeafId();
   const { cwd } = locationForEntry(ctx, null);
   if (workspaceForContext(cwd, sourceFile)) {
@@ -96,10 +99,16 @@ export async function cloneThroughEntry(
   const sessionDir = resolve(ctx.sessionManager.getSessionDir());
   const existingFiles = new Set(readdirSync(sessionDir));
   const detached = SessionManager.open(sourceFile, sessionDir, cwd);
-  if (!detached.getEntry(entryId)) throw new Error(`Selected entry is not persisted: ${entryId}`);
+  const persisted = detached.getEntry(entryId);
+  if (!persisted) throw new Error(`Selected entry is not persisted: ${entryId}`);
+  const targetLeaf = options.beforeUserMessage ? persisted.parentId : entryId;
   let createdFile: string | undefined;
   try {
-    createdFile = detached.createBranchedSession(entryId);
+    if (targetLeaf) createdFile = detached.createBranchedSession(targetLeaf);
+    else {
+      detached.newSession({ parentSession: sourceFile });
+      createdFile = detached.getSessionFile();
+    }
     if (!createdFile || resolve(createdFile) === resolve(sourceFile)
       || dirname(resolve(createdFile)) !== sessionDir || existingFiles.has(basename(createdFile))) {
       throw new Error("Could not allocate a new session file for the clone.");
@@ -112,6 +121,15 @@ export async function cloneThroughEntry(
     sanitizeRecords(records);
     writeJsonlFile(createdFile, records);
     if (!existsSync(createdFile)) throw new Error("The cloned session was not persisted.");
+    if (options.canonicalManagedFile) {
+      const id = detached.getSessionId();
+      if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error("Invalid cloned session identity");
+      const canonical = resolve(sessionDir, `${id}.jsonl`);
+      if (existsSync(canonical)) throw new Error("Cloned session identity already exists");
+      renameSync(createdFile, canonical);
+      createdFile = canonical;
+      chmodSync(createdFile, 0o600);
+    }
     if (decision !== undefined) saveConversationTrust(scope.cwd, createdFile, decision);
     return { sessionFile: createdFile, cwd };
   } catch (error) {

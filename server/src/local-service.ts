@@ -119,6 +119,7 @@ export async function runService(options: HostOwnerOptions & { root: string }): 
             if (!target || !view) throw new CommandError("attachment_closed", "Attach before using session operations");
             switch (record.method) {
               case "snapshot": exact(p, []); result = target.snapshot(); break;
+              case "session.read": result = await target.read(p); break;
               case "command":
                 exact(p, ["version", "id", "sessionId", "serviceEpoch", "runtimeRevision", "controlToken", "operation", "payload"]);
                 if (p.sessionId !== target.id) throw new CommandError("invalid_command", "Command targets another attachment");

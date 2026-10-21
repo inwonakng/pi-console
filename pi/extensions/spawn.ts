@@ -1,4 +1,5 @@
 import { serviceUi } from "./shared/service-ui";
+import { registerServiceOperation } from "./shared/service-operation";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
@@ -1516,6 +1517,23 @@ export default function spawnExtension(pi: ExtensionAPI) {
       ui?.notify(`Could not finalize subagent ${run.id}: ${failure.message}`, "error");
     });
   };
+
+  for (const operation of ["spawn.join", "spawn.stop"] as const) {
+    registerServiceOperation(pi, operation, async ({ id }, ctx) => {
+      ui = ctx.ui;
+      const run = runs.get(id);
+      if (!run || retired) return;
+      if (operation === "spawn.join") {
+        await finalizeJoin([run], ctx.signal, () => emitCommandResult(resultSummary(run), artifactDetails(run)));
+      } else {
+        stopRun(run, "stopped_by_parent");
+        await waitForRun(run, ctx.signal, false);
+        publishSpawnStatus();
+        emitCommandResult(`Stopped ${run.id}: ${run.status}`, artifactDetails(run));
+      }
+      return { changed: true, status: run.status, integration: worktreeInfo(run)?.integration };
+    });
+  }
 
   pi.registerCommand("spawn-control", {
     description: "Control spawned subagents: /spawn-control list|status|join|stop <id>",

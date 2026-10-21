@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { registerServiceOperation } from "./shared/service-operation";
 import {
 	alerterPath,
 	notificationsEnabled,
@@ -83,6 +84,14 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 			return;
 		}
 		notifyPiFinished(ctx);
+	});
+
+	registerServiceOperation(pi, "notifications.set", async ({ enabled }, ctx) => {
+		const changed = enabled !== notificationsEnabled();
+		setNotificationsEnabled(enabled);
+		if (changed) saveSessionSetting(pi, NOTIFICATIONS_SETTING, enabled);
+		setStatus(ctx);
+		return { enabled: notificationsEnabled() };
 	});
 
 	pi.registerCommand("pi-notify", {

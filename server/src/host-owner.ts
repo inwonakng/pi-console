@@ -15,9 +15,15 @@ import { SessionCatalog, type CatalogSession, type Channel } from "./session-cat
 import { QueueReservations, editableItem, type AcceptedQueueItem, type AcceptedQueueSnapshot } from "./session-queue.js";
 import { RENAME_COMMAND, RENAME_RESULT, renameResult, type RenameResult } from "./session-rename.js";
 import { prepareHostResources, type HostResources } from "./host-resources.js";
+import { isNative, nativeCommand, readCommand, validRead, type NativeOperation } from "./session-operations.js";
+import { isBundled, BUNDLED_SOURCES, OPERATION_RESULT, operationCommand, operationResult, type BundledOperation, type OperationResult } from "./session-bundled.js";
 
 type TrustStatus = { state: "pending" | "ready" | "restart" | "error"; cwd: string; sessionFile: string; error?: string };
 type WorkspaceStatus = { cwd: string; sessionFile: string; transitionPending: boolean; [key: string]: unknown };
+type BundledFlight = {
+  worker: PiProcess; revision: number; runtimeId: string; invocationId: string; operation: BundledOperation["operation"];
+  message: string; dispatched: boolean; requestId?: string; result?: OperationResult; recipient?: Controller;
+};
 type RenameFlight = {
   worker: PiProcess; revision: number; runtimeId: string; invocationId: string;
   message: string; dispatched: boolean; requestId?: string; result?: RenameResult;
@@ -233,6 +239,9 @@ export class OwnedSession {
   private queueAgain = false;
   private queueRunPending = false;
   private rename?: RenameFlight;
+  private nativePending = 0;
+  private bundled?: BundledFlight;
+  private bundledInterrupt?: BundledFlight;
   private queueFlight?: {
     itemId: string; dispatched: boolean; userObserved: boolean; settled: boolean;
     outcome?: { disposition: "started" | "handled" } | { error: unknown };
@@ -260,6 +269,10 @@ export class OwnedSession {
   private cleanupError?: Error;
   private exit?: PiExit;
   private stopRequested = false;
+  private restartRequested = false;
+  private lifecyclePending = false;
+  private lifecycle?: Promise<void>;
+  private restartReady?: { resolve: () => void; reject: (error: Error) => void };
   private done = false;
   private wake?: () => void;
   private readonly running: Promise<void>;
@@ -277,7 +290,7 @@ export class OwnedSession {
   }
 
   get id(): string { return this.record.id; }
-  get finished(): boolean { return this.done; }
+  get finished(): boolean { return this.done && !this.lifecyclePending; }
   ready(): Promise<void> { return this.initialized; }
 
   snapshot(): OwnedSessionSnapshot {
@@ -327,7 +340,10 @@ export class OwnedSession {
   }
 
   private offerEffect(data: FrontendEffect): void {
-    const recipient = this.control.current();
+    // Delayed operation effects belong to its initiator, not whoever took over
+    // while a confirmation/summary was pending. Never retarget them to a viewer.
+    const active = this.bundled ?? this.bundledInterrupt;
+    const recipient = active ? active.recipient : this.control.current();
     const runtime = this.worker?.interactionSnapshot().runtime;
     if (!recipient || !runtime?.active) return;
     const offer: EffectOffer = { id: randomUUID(), policy: "inspect_only", source: "owned_pi_stream",
@@ -376,9 +392,18 @@ export class OwnedSession {
       this.control.authorize(command);
       const worker = this.commandRuntime(command.runtimeRevision);
       const rename = command.operation === "session.rename" ? this.prepareRename(command, worker) : undefined;
+      if (this.bundled && contextOperation(this.bundled.operation) && ["prompt.submit", "queue.edit"].includes(command.operation)) throw new CommandError("session_busy", "History transition pending; retain text and review after arrival");
+      if (isNative(command)) this.assertNativeReady(command);
+      const bundled = isBundled(command) ? this.prepareBundled(command, worker) : undefined;
+      if ((command.operation === "session.restart" || command.operation === "session.kill") && this.lifecyclePending) throw new CommandError("session_busy", "Session lifecycle operation pending");
       if (command.operation === "interaction.respond" || command.operation === "interaction.cancel") this.interactionResponse(command);
       const receipt: CommandReceipt = { id: command.id, sessionId: this.id, serviceEpoch: this.catalog.epoch,
         runtimeRevision: command.runtimeRevision, operation: command.operation, status: "accepted" };
+      if (isNative(command)) {
+        if ("text" in command.payload) receipt.result = { submittedText: command.payload.text };
+        if ("command" in command.payload) receipt.result = { submittedText: command.payload.command };
+      }
+      if (command.operation === "side.prompt") receipt.result = { submittedText: command.payload.text };
       const queue = this.prepareQueueCommand(command, receipt);
       try { await this.catalog.reserveCommand({ fingerprint, receipt }, queue); }
       catch (error) {
@@ -386,6 +411,10 @@ export class OwnedSession {
         throw error;
       }
       if (rename) this.rename = rename;
+      if (bundled) {
+        if (this.bundled) this.bundledInterrupt = bundled;
+        else this.bundled = bundled;
+      }
       this.publish({ command: receipt });
       // Control effects are ordered before the next admission. A lost takeover
       // acknowledgment can never cause a duplicate to steal control again.
@@ -415,6 +444,15 @@ export class OwnedSession {
           }
         } catch (failure) { error = failure; }
         this.trackCommand(this.finishCommand(receipt, error));
+      } else if (command.operation === "session.kill" || command.operation === "session.restart") {
+        this.lifecyclePending = true;
+        // Not in commands: stop drains that set, so awaiting stop inside it
+        // would wait for itself. The lifecycle receipt is finalized afterward.
+        this.lifecycle = this.executeLifecycle(command, receipt).catch((error: unknown) => this.commandFailure(error));
+      } else if (bundled) this.trackCommand(this.executeBundled(receipt, bundled));
+      else if (isNative(command)) {
+        this.nativePending++;
+        this.trackCommand(this.executeNative(command, receipt));
       } else if (rename) this.trackCommand(this.executeRename(receipt, rename));
       else this.trackCommand(this.executeCommand(command, receipt));
       return structuredClone(receipt);
@@ -480,7 +518,7 @@ export class OwnedSession {
 
   private queueCanDispatch(): boolean {
     return !this.stopRequested && !this.error && !this.exit && this.phase === "ready" && this.usableWorkspace()
-      && !this.aborting && !this.rename && !this.queueRunPending && this.conversation.settled;
+      && !this.aborting && !this.rename && !this.nativePending && !this.bundled && !this.bundledInterrupt && !this.queueRunPending && this.conversation.settled;
   }
 
   private async pumpQueue(): Promise<void> {
@@ -562,7 +600,7 @@ export class OwnedSession {
   }
 
   private prepareRename(command: SessionCommand & { operation: "session.rename" }, worker: PiProcess): RenameFlight {
-    if (this.rename) throw new CommandError("session_busy", "A managed rename is already pending");
+    if (this.rename || this.nativePending || this.bundled || this.bundledInterrupt) throw new CommandError("session_busy", "An owner operation is already pending");
     this.assertRenameReady();
     const runtimeId = worker.interactionSnapshot().runtime!.id;
     const invocationId = randomUUID();
@@ -646,6 +684,155 @@ export class OwnedSession {
     flight.result = result;
   }
 
+  private prepareBundled(command: SessionCommand & BundledOperation, worker: PiProcess): BundledFlight {
+    const interruptingJoin = command.operation === "spawn.stop" && this.bundled?.operation === "spawn.join" && !this.bundledInterrupt;
+    if (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another owner operation is pending");
+    if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
+    if (command.operation.startsWith("history.") || command.operation.startsWith("workspace.") || command.operation === "title.generate") this.assertRenameReady();
+    const runtimeId = worker.interactionSnapshot().runtime!.id;
+    const invocationId = randomUUID();
+    return { worker, revision: command.runtimeRevision, runtimeId, invocationId, operation: command.operation, dispatched: false,
+      recipient: this.control.current(), message: `/${operationCommand(command.operation)} ${JSON.stringify({ version: 1, invocationId,
+        runtimeId, sessionId: this.record.piSessionId, sessionFile: this.catalog.sessionFile(this.id), payload: command.payload })}` };
+  }
+
+  private async executeBundled(receipt: CommandReceipt, flight: BundledFlight): Promise<void> {
+    const outcome = structuredClone(receipt);
+    let clone: CatalogSession | undefined;
+    try {
+      const guard = () => {
+        this.commandRuntime(flight.revision, flight.worker);
+        this.assertReady(flight.revision);
+        if (flight.operation.startsWith("history.") || flight.operation.startsWith("workspace.") || flight.operation === "title.generate") this.assertRenameReady();
+      };
+      try {
+        const discovery = await flight.worker.request({ type: "get_commands" }, guard);
+        guard();
+        const name = operationCommand(flight.operation);
+        if (discovery.command !== "get_commands" || discovery.data.commands.filter((c) => c.name === name && c.source === "extension"
+          && c.sourceInfo?.path === join(this.options.appRoot, "pi", "extensions", BUNDLED_SOURCES[flight.operation])).length !== 1) {
+          throw new CommandError("unsupported_command", "Bundled typed capability is missing or ambiguous");
+        }
+        const response = await flight.worker.request({ type: "prompt", message: flight.message }, () => {
+          guard();
+          flight.dispatched = true;
+          if (contextOperation(flight.operation)) {
+            // Fence the whole async transition window, not only its later status.
+            flight.revision = ++this.runtimeRevision;
+            this.changed();
+          }
+        });
+        const result = flight.result;
+        if (response.command !== "prompt" || response.data.disposition !== "handled" || !result) throw new Error("No correlated terminal operation result");
+        outcome.status = result.status;
+        if (result.status === "completed") {
+          if (flight.operation === "history.clone" || flight.operation === "history.fork") {
+            if (!result.data?.sessionFile || !result.data.cwd) throw new Error("Clone result omitted identity");
+            clone = await this.catalog.cloneRecord(result.data.sessionFile, result.data.cwd);
+            outcome.result = { sessionId: clone.id, ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
+          } else if (flight.operation === "history.navigate" || flight.operation === "history.delete") {
+            if (result.data?.changed !== true || flight.operation === "history.delete" && !["applied", "cleanup_incomplete"].includes(result.data.status ?? "")) throw new Error("Missing history completion");
+            outcome.result = { changed: true, ...(result.data.status !== undefined ? { status: result.data.status } : {}),
+              ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
+          } else if (flight.operation === "access.set" || flight.operation === "integration.set" || flight.operation === "access.cycle" || flight.operation === "integration.cycle") {
+            if (typeof result.data?.mode !== "string") throw new Error("Missing mode completion");
+            outcome.result = { mode: result.data.mode };
+          } else if (flight.operation === "title.generate") {
+            if (typeof result.data?.title !== "string") throw new Error("Missing generated title");
+            outcome.result = { title: result.data.title };
+          } else if (flight.operation === "usage.refresh") {
+            if (typeof result.data?.changed !== "boolean" || !["refreshed", "not_applicable"].includes(result.data.status ?? "")) throw new Error("Missing usage refresh outcome");
+            outcome.result = { changed: result.data.changed, status: result.data.status };
+          } else if (flight.operation === "notifications.set") {
+            if (typeof result.data?.enabled !== "boolean") throw new Error("Missing notification setting");
+            outcome.result = { enabled: result.data.enabled };
+          } else if (flight.operation.startsWith("workspace.")) {
+            if (typeof result.data?.changed !== "boolean") throw new Error("Missing workspace completion");
+            outcome.result = result.data;
+          } else if (flight.operation.startsWith("side.")) {
+            if (result.data?.disposition !== "accepted") throw new Error("Missing side acceptance");
+            outcome.result = { ...outcome.result, disposition: "accepted" };
+          } else {
+            if (result.data?.changed !== true) throw new Error("Missing subagent completion");
+            outcome.result = result.data;
+          }
+          // State may still name the outgoing runtime. Refresh against the same
+          // managed file, then validate identity; never accept a fork on this ID.
+          await flight.worker.request({ type: "get_state" }, () => {
+            this.catalog.assertExecutionAllowed();
+            const runtime = flight.worker.interactionSnapshot().runtime;
+            if (flight.worker !== this.worker || !runtime?.active || runtime.sessionId !== this.record.piSessionId
+              || runtime.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Operation changed managed identity");
+          });
+          this.checkIdentity();
+        } else outcome.error = { code: result.code ?? "operation_failed", message: result.status === "failed"
+          ? "Operation was refused/cancelled before application" : "Operation may be partially applied; inspect before taking further action" };
+      } catch (error) {
+        outcome.status = !flight.dispatched && error instanceof CommandError ? "failed" : "uncertain";
+        outcome.error = { code: outcome.status === "failed" && error instanceof CommandError ? error.code : "operation_uncertain",
+          message: outcome.status === "failed" ? "Operation was not dispatched" : "Operation outcome is uncertain; inspect, never automatically replay" };
+      }
+      if (outcome.status === "uncertain") this.commandFailure(new Error(outcome.error!.message));
+      const completion = this.admission.then(async () => {
+        await this.catalog.updateCommand(outcome, clone);
+        if (this.bundled === flight) this.bundled = undefined;
+        if (this.bundledInterrupt === flight) this.bundledInterrupt = undefined;
+        this.publish({ command: outcome });
+      });
+      this.admission = completion.then(() => undefined, () => undefined);
+      await completion;
+    } finally {
+      if (this.bundled === flight) this.bundled = undefined;
+      if (this.bundledInterrupt === flight) this.bundledInterrupt = undefined;
+      this.scheduleQueue();
+      this.scheduleRefresh();
+    }
+  }
+
+  /** Typed reads are attachment-bound by transport and fenced across async work. */
+  async read(input: unknown): Promise<unknown> {
+    if (!validRead(input)) throw new CommandError("invalid_command", "Invalid session read");
+    const worker = this.commandRuntime(input.runtimeRevision);
+    const response = await worker.request(readCommand(input.kind)!, () => { this.commandRuntime(input.runtimeRevision, worker); });
+    this.commandRuntime(input.runtimeRevision, worker);
+    return { runtimeRevision: this.runtimeRevision, data: "data" in response ? response.data : null };
+  }
+
+  private assertNativeReady(command: NativeOperation): void {
+    if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
+    if (command.operation === "retry.abort" || command.operation === "shell.abort") return;
+    if (this.rename || this.bundled || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another owner operation is pending");
+    if (command.operation === "compaction.run" && (!this.conversation.settled || this.queueFlight || this.queueRunPending)) {
+      throw new CommandError("session_busy", "Manual compaction requires settled execution");
+    }
+  }
+
+  private async executeNative(command: SessionCommand & NativeOperation, receipt: CommandReceipt): Promise<void> {
+    let error: unknown;
+    try {
+      const worker = this.commandRuntime(command.runtimeRevision);
+      const response = await worker.request(nativeCommand(command), () => {
+        this.commandRuntime(command.runtimeRevision, worker);
+        this.assertReady(command.runtimeRevision);
+      });
+      this.commandRuntime(command.runtimeRevision, worker);
+      if (command.operation === "steering.submit" || command.operation === "followUp.submit") {
+        if ((response.command !== "steer" && response.command !== "follow_up") || !["queued", "handled"].includes(response.data.disposition)) throw new Error("Invalid native queue outcome");
+        receipt.result = { ...receipt.result, disposition: response.data.disposition as "queued" | "handled" };
+      } else if (command.operation === "shell.run") {
+        if (response.command !== "bash") throw new Error("Invalid shell outcome");
+        receipt.result = { ...receipt.result, exitCode: response.data.exitCode, cancelled: response.data.cancelled };
+      }
+      // Native responses positively acknowledge the specific command. Refresh
+      // authoritative settings; never optimistically mutate a frontend snapshot.
+      if (command.operation.endsWith(".set") || command.operation.endsWith(".mode") || command.operation.endsWith(".auto")) {
+        await worker.request({ type: "get_state" }, () => { this.commandRuntime(command.runtimeRevision, worker); });
+      }
+    } catch (failure) { error = failure; }
+    try { await this.finishCommand(receipt, error); }
+    finally { this.nativePending--; this.scheduleQueue(); }
+  }
+
   private async interruptQueue(code: string, message: string): Promise<void> {
     this.reservations.clear();
     const items = this.catalog.queue(this.id);
@@ -721,6 +908,35 @@ export class OwnedSession {
       : { code: outcome.status === "failed" ? "pi_rejected" : "delivery_uncertain", message: "Pi command did not produce a confirmed outcome; review command status before taking further action" };
     await this.catalog.updateCommand(outcome);
     this.publish({ command: outcome });
+  }
+
+  private async executeLifecycle(command: SessionCommand & { operation: "session.kill" | "session.restart" }, receipt: CommandReceipt): Promise<void> {
+    let error: unknown;
+    try {
+      // No takeover can cancel an already accepted kill/restart. Context and
+      // storage still fence it; a new runtime must never be killed by an old ID.
+      this.commandRuntime(command.runtimeRevision);
+      if (command.operation === "session.restart") {
+        const ready = new Promise<void>((resolve, reject) => { this.restartReady = { resolve, reject }; });
+        this.restartRequested = true;
+        this.requestStop();
+        await ready;
+      } else {
+        this.requestStop();
+        await this.running;
+        if (this.cleanupError) throw this.cleanupError;
+      }
+    } catch (failure) { error = failure; }
+    try { await this.finishCommand(receipt, error); }
+    finally { this.lifecyclePending = false; }
+  }
+
+  private requestStop(): void {
+    this.stopRequested = true;
+    this.phase = "stopping";
+    if (this.worker) void this.worker.stop();
+    this.control.revoke();
+    this.changed();
   }
 
   private async executeCommand(command: SessionCommand, receipt: CommandReceipt): Promise<void> {
@@ -803,9 +1019,10 @@ export class OwnedSession {
   }
 
   stopBlockReason(): string | undefined {
+    if (this.lifecyclePending) return `Session ${this.id} has a pending lifecycle outcome; stop refused`;
     if (this.done) return;
     if (this.phase !== "ready" || this.stopRequested || !this.usableWorkspace() || !this.conversation.settled
-      || this.admitting || this.commands.size || this.aborting || this.rename || this.queueFlight || this.queueRunPending
+      || this.admitting || this.commands.size || this.lifecyclePending || this.bundled || this.nativePending || this.aborting || this.rename || this.queueFlight || this.queueRunPending
       || this.worker?.interactionSnapshot().pending.length || this.catalog.queue(this.id).some((item) => item.status !== "failed")) {
       return `Session ${this.id} has active work, approval, accepted queue or transition; stop refused`;
     }
@@ -814,17 +1031,34 @@ export class OwnedSession {
   /** Explicit owner shutdown, not frontend detach or a guarded service-stop API. */
   async stop(): Promise<void> {
     if (!this.done) {
-      this.stopRequested = true;
-      this.phase = "stopping";
-      if (this.worker) void this.worker.stop();
-      this.control.revoke();
-      this.changed();
+      // Administrative shutdown supersedes a pending session restart.
+      this.restartRequested = false;
+      this.requestStop();
     }
     await this.running;
+    await this.lifecycle;
     if (this.cleanupError) throw this.cleanupError;
   }
 
   private async run(): Promise<void> {
+    for (;;) {
+      await this.runOnce();
+      if (!this.restartRequested || this.cleanupError) {
+        this.restartReady?.reject(this.cleanupError ?? this.error ?? new Error("Session restart did not reach readiness"));
+        this.restartReady = undefined;
+        return;
+      }
+      this.restartRequested = false;
+      this.stopRequested = false;
+      this.done = false;
+      this.phase = "initializing";
+      this.error = undefined;
+      this.exit = undefined;
+      this.changed();
+    }
+  }
+
+  private async runOnce(): Promise<void> {
     let owned = false;
     try {
       const header = await this.catalog.validateSessionFile(this.id);
@@ -877,6 +1111,8 @@ export class OwnedSession {
       this.phase = "ready";
       this.changed();
       this.resolveReady();
+      this.restartReady?.resolve();
+      this.restartReady = undefined;
       const exit = await this.worker!.waitForExit();
       if (!this.stopRequested) throw new Error(exit.error ?? "Pi exited unexpectedly");
     } catch (error) {
@@ -1001,6 +1237,14 @@ export class OwnedSession {
         }
       }
     }
+    if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === OPERATION_RESULT) {
+      const result = operationResult(event.statusText);
+      const flight = [this.bundled, this.bundledInterrupt].find((flight) => flight?.invocationId === result.invocationId);
+      if (!flight?.dispatched || flight.result || result.invocationId !== flight.invocationId || result.runtimeId !== flight.runtimeId
+        || result.sessionId !== this.record.piSessionId || result.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Unmatched managed operation result");
+      flight.result = result;
+      return;
+    }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === RENAME_RESULT) {
       this.consumeRenameResult(event.statusText);
       return; // Private result: neither snapshot state nor a frontend effect.
@@ -1035,6 +1279,11 @@ export class OwnedSession {
   }
 
   private dispatch(command: RpcCommand & { id: string }): void {
+    const flight = [this.bundled, this.bundledInterrupt].find((flight) => flight?.dispatched && command.type === "prompt" && command.message === flight.message);
+    if (flight) {
+      flight.requestId = command.id;
+      return;
+    }
     if (this.rename?.dispatched && command.type === "prompt" && command.message === this.rename.message) {
       this.rename.requestId = command.id;
       return; // Do not materialize the private command envelope as user work.
@@ -1047,7 +1296,7 @@ export class OwnedSession {
   }
 
   private response(response: RpcResponse, command: RpcCommand & { id: string }): void {
-    if (response.id === this.rename?.requestId) return;
+    if (response.id === this.rename?.requestId || response.id === this.bundled?.requestId || response.id === this.bundledInterrupt?.requestId) return;
     if (response.success && response.command === "get_state") {
       this.retain({ type: "pi_state", state: response.data });
       this.changed();
@@ -1173,6 +1422,10 @@ export class OwnedSession {
     this.wake = undefined;
     wake?.();
   }
+}
+
+function contextOperation(operation: string): boolean {
+  return operation === "history.navigate" || operation === "history.delete" || operation.startsWith("workspace.");
 }
 
 function sideInteraction(title: string): boolean {

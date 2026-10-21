@@ -394,7 +394,8 @@ function validateCurrentState(root: string, files: FileRecord[]) {
 	return conflicts;
 }
 
-async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null, selected: SessionEntry | undefined, isRuntimeActive: () => boolean): Promise<void> {
+type HistoryOutcome = { changed: true; status: "applied" | "cleanup_incomplete" };
+async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null, selected: SessionEntry | undefined, isRuntimeActive: () => boolean): Promise<HistoryOutcome | undefined> {
 	const blocked = subagentHistoryBlockReason();
 	if (blocked) {
 		ctx.ui.notify(blocked, "warning");
@@ -484,6 +485,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 		&& ctx.sessionManager.getLeafId() === sourceLeaf, "Session history changed; select the subtree again.");
 	let historyDeleted = false;
 	let filesRestored = false;
+	let cleanupIncomplete = false;
 	ctx.ui.setStatus("pi-history-revert", "pending");
 	try {
 		const moved = await moveToLocation(ctx, target.cwd, plan.desiredLeafId, {
@@ -538,6 +540,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 						warnings.push(`Could not remove ${record.label}: ${error instanceof Error ? error.message : String(error)}`);
 					}
 				}
+				cleanupIncomplete = warnings.length > 0;
 				nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
 				nextCtx.ui.setStatus("pi-history-revert", "complete");
 				markHistoryChanged(nextCtx);
@@ -573,6 +576,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 			ctx.ui.setStatus("pi-history-revert", undefined);
 			ctx.ui.notify("Revert cancelled. Original history and files were restored; no worktrees were removed.", "warning");
 		}
+		return moved ? { changed: true, status: cleanupIncomplete ? "cleanup_incomplete" : "applied" } : undefined;
 	} catch (error) {
 		// A switch can throw before teardown as well as after it. Only the former
 		// leaves an old runtime able to append beneath deleted entries.
@@ -587,13 +591,13 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	}
 }
 
-export async function revertSubtree(ctx: ExtensionCommandContext, entryId: string, isRuntimeActive: () => boolean): Promise<void> {
+export async function revertSubtree(ctx: ExtensionCommandContext, entryId: string, isRuntimeActive: () => boolean): Promise<HistoryOutcome | undefined> {
 	assertOk(isRuntimeActive(), "Session changed; select the subtree again.");
 	const entry = ctx.sessionManager.getEntry(entryId);
 	assertOk(entry, `Unknown tree entry: ${entryId}`);
 	assertOk(ctx.sessionManager.getBranch().some((item) => item.id === entryId),
 		"Undo work is only available for a subtree on the active conversation path.");
-	await revertAfter(ctx, entry.parentId, entry, isRuntimeActive);
+	return revertAfter(ctx, entry.parentId, entry, isRuntimeActive);
 }
 
 export default function historyExtension(pi: ExtensionAPI) {

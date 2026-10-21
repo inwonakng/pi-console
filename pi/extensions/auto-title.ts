@@ -1,3 +1,4 @@
+import { registerServiceOperation } from "./shared/service-operation";
 import { serviceRuntimeId, serviceUi } from "./shared/service-ui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadExtensionSettings } from "./shared/extension-settings";
@@ -370,6 +371,34 @@ export default function autoTitleExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	const retitle = async (ctx: ExtensionContext): Promise<{ title: string } | undefined> => {
+			const prompt = branchUserMessages(ctx).slice(0, 3).join("\n\n");
+			if (!prompt) {
+				ctx.ui.notify("No user messages to title.", "warning");
+				return;
+			}
+
+			const signal = sessionController.signal;
+			const originalTitle = pi.getSessionName();
+			let label: Awaited<ReturnType<typeof modelTitle>>;
+			try {
+				label = await modelTitle(prompt, ctx, signal);
+			} catch (error) {
+				if (signal.aborted) return;
+				let fallback: string | undefined;
+				if (!pi.getSessionName()) {
+					setTitle(pi, ctx, deterministicTitle(prompt));
+					fallback = pi.getSessionName();
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Could not generate model session title: ${message}`, "warning");
+				return fallback ? { title: fallback } : undefined;
+			}
+			if (signal.aborted || pi.getSessionName() !== originalTitle) return;
+			setTitle(pi, ctx, label.title, label.slug);
+			return { title: pi.getSessionName()! };
+	};
+	registerServiceOperation(pi, "title.generate", (_payload, ctx) => retitle(ctx));
 	pi.registerCommand("pi-retitle", {
 		description: "Regenerate the current session title and short tab slug using the title model",
 		handler: async (_args, ctx) => {

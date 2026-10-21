@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { HostReceipt } from "./host-commands.js";
 import { lstat, open, realpath, statfs, unlink, type FileHandle } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, basename, dirname } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { type DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { object } from "./pi-records.js";
@@ -19,7 +19,7 @@ const MiB = 1024 * 1024;
 const ORDINARY_HEADROOM = 64 * MiB;
 const CONTROL_HEADROOM = 16 * MiB;
 const essential = new Set<CommandReceipt["operation"]>(["control.acquire", "control.takeover", "control.release",
-  "interaction.respond", "interaction.cancel", "turn.abort", "queue.remove", "queue.release"]);
+  "interaction.respond", "interaction.cancel", "turn.abort", "shell.abort", "retry.abort", "side.abort", "spawn.stop", "session.kill", "queue.remove", "queue.release"]);
 
 /** One private profile owner. History stays indexed on disk, never in a ledger cache. */
 export class SessionCatalog {
@@ -336,7 +336,22 @@ export class SessionCatalog {
     });
   }
 
-  async updateCommand(receipt: CommandReceipt): Promise<void> {
+  /** A detached clone keeps the source handle untouched. Registration shares
+   * the terminal receipt transaction; trust stays keyed to its canonical file. */
+  async cloneRecord(file: string, cwd: string): Promise<CatalogSession> {
+    const directory = join(this.root, "sessions");
+    const id = basename(file, ".jsonl");
+    if (dirname(file) !== directory || file !== join(directory, `${id}.jsonl`) || !/^[0-9a-f-]{36}$/.test(id)) throw new Error("Clone is not an owner-managed session file");
+    const record: CatalogSession = { id, piSessionId: id, cwd, createdAt: new Date().toISOString(), state: "saved" };
+    const header = await validateManagedFile(this.root, record);
+    if (header.cwd !== cwd) throw new Error("Clone cwd does not match its header");
+    const handle = await open(file, "r+");
+    try { await handle.sync(); } finally { await handle.close(); }
+    await syncDirectory(directory);
+    return record;
+  }
+
+  async updateCommand(receipt: CommandReceipt, clone?: CatalogSession): Promise<void> {
     const next = structuredClone(receipt);
     await this.change(() => {
       const command = this.commandRecord(next.serviceEpoch, next.id);
@@ -347,11 +362,15 @@ export class SessionCatalog {
       if (commandBytes(updated) > commandBytes(command) || Buffer.byteLength(JSON.stringify(updated)) > commandBytes(command)) {
         throw new Error("Command outcome exceeds its reserved storage budget");
       }
-      if (next.operation === "session.rename" && next.status === "completed") {
+      if ((next.operation === "session.rename" || next.operation === "title.generate") && next.status === "completed") {
         const session = this.get(next.sessionId);
         if (!validEffectiveTitle(next.result?.title)) throw new Error("Invalid completed rename");
         session.name = next.result.title;
         this.updateSession(session);
+      }
+      if (clone) {
+        if (!["history.clone", "history.fork"].includes(next.operation) || next.status !== "completed" || next.result?.sessionId !== clone.id) throw new Error("Invalid clone registration outcome");
+        insertSession(this.db, clone);
       }
       this.transactionBytes += commandBytes(updated);
       const { metadata, recovery } = splitReceipt(next);

@@ -1,4 +1,5 @@
 import { serviceUi } from "./shared/service-ui";
+import { registerServiceOperation } from "./shared/service-operation";
 import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { revertSubtree } from "./history";
@@ -88,6 +89,18 @@ function deletionConfirmation(entryId: string, deleteCount: number, workspaces: 
 export default function treeExtension(pi: ExtensionAPI) {
 	let runtimeActive = true;
 	pi.on("session_shutdown", () => { runtimeActive = false; });
+	registerServiceOperation(pi, "history.clone", async ({ entryId }, ctx) => {
+		return cloneThroughEntry(ctx, entryId, () => runtimeActive, { canonicalManagedFile: true });
+	});
+
+	registerServiceOperation(pi, "history.fork", async ({ entryId }, ctx) => {
+		const selected = ctx.sessionManager.getEntry(entryId);
+		if (selected?.type !== "message" || selected.message.role !== "user") return;
+		const editorText = editorTextForTreeEntry(selected);
+		const result = await cloneThroughEntry(ctx, entryId, () => runtimeActive, { canonicalManagedFile: true, beforeUserMessage: true });
+		return result ? { ...result, editorText } : undefined;
+	});
+
 	pi.registerCommand("pi-tree-clone", {
 		description: "Copy the branch through a turn without replacing this session",
 		handler: async (args, ctx) => {
@@ -105,9 +118,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("pi-tree-jump", {
-		description: "Navigate to an entry in the current session tree",
-		handler: async (args, ctx) => {
+	const jump = async (args: string, ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext) => {
 			const { entryId, summarize } = parseArgs(args);
 			if (!entryId) {
 				ctx.ui.notify("Usage: /pi-tree-jump <entry-id> [--summary]", "error");
@@ -147,12 +158,12 @@ export default function treeExtension(pi: ExtensionAPI) {
 			},
 			});
 			if (!moved) ctx.ui.notify("Tree navigation was cancelled.", "warning");
-		},
-	});
+			return moved ? { changed: true, editorText: editorTextForTreeEntry(entry) } : undefined;
+	};
+	registerServiceOperation(pi, "history.navigate", ({ entryId, summarize }, ctx) => jump(`${entryId}${summarize ? " --summary" : ""}`, ctx));
+	pi.registerCommand("pi-tree-jump", { description: "Navigate to an entry in the current session tree", handler: async (args, ctx) => { await jump(args, ctx); } });
 
-	pi.registerCommand("pi-tree-delete", {
-		description: "Delete an entry and its descendant subtree from the current session",
-		handler: async (args, ctx) => {
+	const deleteTree = async (args: string, ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext) => {
 			const { entryId, yes } = parseArgs(args);
 			if (!entryId) {
 				ctx.ui.notify("Usage: /pi-tree-delete <entry-id> [--yes]", "error");
@@ -186,8 +197,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (mode === undoOption) {
-				await revertSubtree(ctx, entryId, () => runtimeActive);
-				return;
+				return revertSubtree(ctx, entryId, () => runtimeActive);
 			}
 			if (!runtimeActive || !ctx.isIdle() || hasRunningSubagents() || subagentHistoryBlockReason()) {
 				ctx.ui.notify("Session activity changed; select the subtree again.", "warning");
@@ -234,6 +244,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 
 			const plan = planSessionDeletion(records, removedIds, expectedLeaf);
 			let committed = false;
+			let cleanupIncomplete = false;
 			const restoreOriginal = async () => {
 				await withFileMutationQueue(sessionFile, async () => {
 					if (JSON.stringify(readSessionRecords(sessionFile)) !== JSON.stringify(plan.records)) {
@@ -264,9 +275,11 @@ export default function treeExtension(pi: ExtensionAPI) {
 									? "integrated" : "discarded";
 								const cleaned = await removeWorkspace(record.id, lifecycle);
 								if (cleaned.lifecycle === "cleanup_failed") {
+									cleanupIncomplete = true;
 									nextCtx.ui.notify(`Could not remove ${record.label}: ${cleaned.integrationReason ?? cleaned.worktreePath}`, "warning");
 								}
 							} catch (error) {
+								cleanupIncomplete = true;
 								nextCtx.ui.notify(`Could not remove ${record.label}: ${String(error)}`, "warning");
 							}
 						}
@@ -279,6 +292,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 					await restoreOriginal();
 					ctx.ui.notify("Deletion cancelled. Original history was restored; no workspaces were removed.", "warning");
 				}
+				return switched ? { changed: true, status: cleanupIncomplete ? "cleanup_incomplete" : "applied" } : undefined;
 			} catch (error) {
 				// A cancelled/failed switch can leave the old manager alive. Restore
 				// its original tree before allowing another append from that manager.
@@ -294,6 +308,8 @@ export default function treeExtension(pi: ExtensionAPI) {
 					? `History was deleted, but reload could not finish. Restart or resume ${sessionFile}: ${String(error)}`
 					: `Deletion stopped without changing history: ${String(error)}`);
 			}
-		},
-	});
+	};
+	registerServiceOperation(pi, "history.delete", ({ entryId }, ctx) => deleteTree(entryId, ctx));
+	pi.registerCommand("pi-tree-delete", { description: "Delete an entry and its descendant subtree from the current session",
+		handler: async (args, ctx) => { await deleteTree(args, ctx); } });
 }

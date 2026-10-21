@@ -29,10 +29,12 @@ export function commandBytes(command: StoredCommand): number {
   if (command.receipt.operation === "prompt.submit" || command.receipt.operation === "queue.edit") {
     return 4096 + Buffer.byteLength(JSON.stringify(command.receipt.result?.queueItemText ?? ""));
   }
+  if (command.receipt.result?.submittedText !== undefined) return 4096 + Buffer.byteLength(JSON.stringify(command.receipt.result.submittedText));
   // Other non-abort outcomes fit a fixed slot; completing cannot grow charge.
   // Abort reserves its maximum queue response until terminal.
-  if (command.receipt.status === "accepted" && command.receipt.operation === "turn.abort") return ABORT_RESERVATION;
-  return command.receipt.operation === "turn.abort" ? Math.max(4096, Buffer.byteLength(JSON.stringify(command))) : 4096;
+  const largeOutcome = command.receipt.operation === "turn.abort" || command.receipt.operation === "history.navigate" || command.receipt.operation === "history.fork";
+  if (command.receipt.status === "accepted" && largeOutcome) return ABORT_RESERVATION;
+  return largeOutcome ? Math.max(4096, Buffer.byteLength(JSON.stringify(command))) : 4096;
 }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -228,12 +230,12 @@ export function insertCommand(db: DatabaseSync, command: StoredCommand): void {
   if (recovery) db.prepare("INSERT INTO recovery(command_seq, payload) VALUES(?,?)").run(result.lastInsertRowid, JSON.stringify(recovery));
 }
 
-export function splitReceipt(receipt: CommandReceipt): { metadata: CommandReceipt; recovery?: Pick<NonNullable<CommandReceipt["result"]>, "queueItemText" | "cleared"> } {
+export function splitReceipt(receipt: CommandReceipt): { metadata: CommandReceipt; recovery?: Pick<NonNullable<CommandReceipt["result"]>, "queueItemText" | "submittedText" | "editorText" | "cleared"> } {
   const metadata = structuredClone(receipt);
   if (!metadata.result) return { metadata };
-  const { queueItemText, cleared, ...compact } = metadata.result;
+  const { queueItemText, submittedText, editorText, cleared, ...compact } = metadata.result;
   metadata.result = compact;
-  return { metadata, recovery: queueItemText !== undefined || cleared !== undefined ? { queueItemText, cleared } : undefined };
+  return { metadata, recovery: queueItemText !== undefined || submittedText !== undefined || editorText !== undefined || cleared !== undefined ? { queueItemText, submittedText, editorText, cleared } : undefined };
 }
 
 /** Exclusive initialization only. Callers retain the claim on any mutation failure. */

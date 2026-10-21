@@ -9,6 +9,7 @@ import assert from "node:assert";
 import { existsSync, readFileSync } from "node:fs";
 import { Type } from "typebox";
 import { getAccessMode, parseAccessMode, setAccessMode } from "./shared/access-state";
+import { registerServiceOperation } from "./shared/service-operation";
 import {
   createAccessControlledBashOperations,
   initializeBashSandbox,
@@ -326,6 +327,17 @@ export default function accessModeExtension(pi: ExtensionAPI) {
       return { block: true, reason: error instanceof Error ? error.message : String(error) };
     }
   });
+
+  const applyMode = async (mode: ReturnType<typeof getAccessMode>, ctx: ExtensionContext) => {
+    if (process.env.PI_SIDE_AGENT === "1" && mode !== "ask") return;
+    const changed = mode !== getAccessMode();
+    setAccessMode(mode);
+    if (changed) saveAccessState(pi);
+    setStatus(ctx);
+    return { mode: getAccessMode() };
+  };
+  registerServiceOperation(pi, "access.set", ({ mode }, ctx) => applyMode(mode, ctx));
+  registerServiceOperation(pi, "access.cycle", ({ modes }, ctx) => applyMode(modes[(modes.indexOf(getAccessMode()) + 1) % modes.length]!, ctx));
 
   pi.registerCommand("pi-mode", {
     description: "Set access mode: /pi-mode readonly|ask|edit|full",

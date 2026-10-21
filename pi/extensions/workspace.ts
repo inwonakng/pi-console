@@ -1,7 +1,9 @@
 import { serviceUi } from "./shared/service-ui";
+import { registerServiceOperation } from "./shared/service-operation";
 import {
   type ExtensionAPI,
   type ExtensionContext,
+  type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -381,9 +383,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     return reason ? { block: true, reason } : undefined;
   });
 
-  pi.registerCommand("pi-workspace-enter", {
-    description: "Internal command that moves the current session into its task worktree",
-    handler: async (args, ctx) => {
+  const enterWorkspace = async (args: string, ctx: ExtensionCommandContext) => {
       const record = loadWorkspace(args.trim());
       if (!record || record.kind !== "task" || !record.retained || isWorkspaceFinalized(record)
         || !sameSessionFile(record.sourceSessionFile, sessionFile(ctx))) {
@@ -406,6 +406,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           },
         });
         if (!moved) throw new Error("Workspace switch was cancelled.");
+        return moved;
       } catch (error) {
         const transitionPending = getPendingWorkspaceId() !== undefined;
         setPendingWorkspace(undefined);
@@ -416,8 +417,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         });
         throw error;
       }
-    },
-  });
+  };
+  pi.registerCommand("pi-workspace-enter", { description: "Internal command that moves the current session into its task worktree",
+    handler: async (args, ctx) => { await enterWorkspace(args, ctx); } });
 
   pi.registerCommand("pi-workspace-restore", {
     description: "Restore the current branch's execution workspace after resuming Pi",
@@ -447,9 +449,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("pi-workspace-return", {
-    description: "Internal command that returns this session to its origin checkout",
-    handler: async (args, ctx) => {
+  const returnWorkspace = async (args: string, ctx: ExtensionCommandContext) => {
       const id = args.trim();
       try {
         const record = loadWorkspace(id);
@@ -476,6 +476,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           },
         });
         if (!moved) throw new Error("Return to the origin checkout was cancelled; the workspace was retained.");
+        return moved;
       } catch (error) {
         const transitionPending = getPendingWorkspaceId() !== undefined;
         setPendingWorkspace(undefined);
@@ -488,8 +489,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         }
         throw error;
       }
-    },
-  });
+  };
+  pi.registerCommand("pi-workspace-return", { description: "Internal command that returns this session to its origin checkout",
+    handler: async (args, ctx) => { await returnWorkspace(args, ctx); } });
 
   pi.registerCommand("pi-workspace-publish", {
     description: "Publish the current workspace state to the active host",
@@ -523,6 +525,17 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       }
     },
   });
+
+  const applyIntegrationMode = async (mode: IntegrationMode, ctx: ExtensionContext) => {
+    const changed = mode !== getIntegrationMode();
+    setIntegrationMode(mode);
+    if (changed) saveSessionSetting(pi, INTEGRATION_SETTING, mode);
+    refreshWorkspaceTool(ctx);
+    publishIntegrationMode(ctx);
+    return { mode: getIntegrationMode() };
+  };
+  registerServiceOperation(pi, "integration.set", ({ mode }, ctx) => applyIntegrationMode(mode, ctx));
+  registerServiceOperation(pi, "integration.cycle", ({ modes }, ctx) => applyIntegrationMode(modes[(modes.indexOf(getIntegrationMode()) + 1) % modes.length]!, ctx));
 
   pi.registerCommand("pi-integration-mode", {
     description: "Set approval mode for top-level workspace integration and workspace discard: /pi-integration-mode ask|allowed",
@@ -561,6 +574,9 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     },
   });
 
+  type WorkspaceParams = { action: WorkspaceAction; id?: string; ignoredFiles?: string[]; approved?: boolean };
+  type Move = (action: "enter" | "return", id: string) => Promise<void>;
+  let executeWorkspace: (callId: string, params: WorkspaceParams, signal: AbortSignal | undefined, update: unknown, ctx: ExtensionContext, move?: Move) => Promise<{ content: { type: "text"; text: string }[]; details: unknown; terminate?: boolean }>;
   const registerWorkspaceTool = (available: boolean, guidance: string[]) => pi.registerTool({
     name: "workspace",
     defaultActive: false,
@@ -583,7 +599,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       approved: Type.Optional(Type.Boolean({ description: "Required for integration or discard in ask mode when no interactive UI is available; does not bypass interactive confirmation." })),
     }),
     executionMode: "sequential",
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    execute: executeWorkspace = async (_toolCallId, params, signal, _onUpdate, ctx, move: Move | undefined = undefined): ReturnType<typeof executeWorkspace> => {
       const action = params.action as WorkspaceAction;
       if (action === "status") {
         const record = params.id ? loadWorkspace(params.id) : workspaceForContext(ctx.cwd, sessionFile(ctx));
@@ -651,7 +667,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         }
         setPendingWorkspace(record.id);
         publishWorkspaceState(ctx);
-        queueCommand(pi, `/pi-workspace-enter ${record.id}`);
+        if (move) await move("enter", record.id);
+        else queueCommand(pi, `/pi-workspace-enter ${record.id}`);
         return {
           content: [{
             type: "text",
@@ -731,7 +748,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         }
         setPendingWorkspace(integrated.id);
         publishWorkspaceState(ctx);
-        queueCommand(pi, `/pi-workspace-return ${integrated.id}`);
+        if (move) await move("return", integrated.id);
+        else queueCommand(pi, `/pi-workspace-return ${integrated.id}`);
         return {
           content: [{
             type: "text",
@@ -769,7 +787,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         });
         setPendingWorkspace(prepared.id);
         publishWorkspaceState(ctx);
-        queueCommand(pi, `/pi-workspace-return ${prepared.id}`);
+        if (move) await move("return", prepared.id);
+        else queueCommand(pi, `/pi-workspace-return ${prepared.id}`);
         return {
           content: [{
             type: "text",
@@ -811,4 +830,27 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   // Let native defaultTools select it at startup. session_start resolves whether
   // the directory supports workspaces before any model request is made.
   registerWorkspaceTool(true, []);
+  for (const operation of ["workspace.enter", "workspace.integrate", "workspace.discard"] as const) {
+    registerServiceOperation(pi, operation, async (payload, ctx) => {
+      if (!ctx.isIdle() || hasRunningSubagents()) return;
+      const action = operation.slice("workspace.".length) as "enter" | "integrate" | "discard";
+      const selected = payload.id ? loadWorkspace(payload.id) : workspaceForContext(ctx.cwd, sessionFile(ctx));
+      if (payload.id && !selected) return;
+      if (selected && (selected.kind !== "task" || !sameSessionFile(selected.sourceSessionFile, sessionFile(ctx)))) return;
+      let moved = false;
+      const result = await executeWorkspace("service", { ...payload, action }, ctx.signal, undefined, ctx, async (transition, id) => {
+        if (transition === "enter") await enterWorkspace(id, ctx);
+        else await returnWorkspace(id, ctx);
+        moved = true;
+      });
+      const record = result.details as WorkspaceRecord;
+      const current = record?.id ? loadWorkspace(record.id) : undefined;
+      const changed = moved || current?.lifecycle === "discarded";
+      if (!changed && !(action === "enter" && current?.lifecycle === "active")) {
+        if (current?.integrationReview?.applied) throw new Error("Workspace integration may be partially applied; inspect retained review data");
+        return;
+      }
+      return { changed, workspaceId: current?.id, lifecycle: current?.lifecycle, integration: current?.integration };
+    });
+  }
 }
