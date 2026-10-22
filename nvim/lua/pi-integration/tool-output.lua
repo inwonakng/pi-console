@@ -455,9 +455,42 @@ local function call_args_for_id(state, tool_call_id)
 	return call and call.args or nil
 end
 
+local function question_output(output)
+	local details = type(output.details) == "table" and output.details or {}
+	local args = type(output.args) == "table" and output.args or {}
+	local question = type(details.question) == "string" and details.question or args.question
+	local options = type(details.options) == "table" and details.options or args.options
+	local lines = { "Question", "" }
+	vim.list_extend(lines, vim.split(type(question) == "string" and question or "Question unavailable.", "\n", { plain = true }))
+	if type(options) == "table" and #options > 0 then
+		vim.list_extend(lines, { "", "Options", "" })
+		for index, option in ipairs(options) do
+			if type(option) == "table" and type(option.label) == "string" then
+				vim.list_extend(lines, vim.split(index .. ". " .. option.label, "\n", { plain = true }))
+				if type(option.description) == "string" and option.description ~= "" then
+					for _, line in ipairs(vim.split(option.description, "\n", { plain = true })) do
+						table.insert(lines, "   " .. line)
+					end
+				end
+			end
+		end
+	end
+	local response = output.text
+	if type(response) ~= "string" or response == "" then
+		response = type(details.answer) == "string" and details.answer
+			or type(details.error) == "string" and details.error or "No response recorded."
+	end
+	vim.list_extend(lines, { "", "Response", "" })
+	vim.list_extend(lines, vim.split(response, "\n", { plain = true }))
+	return table.concat(lines, "\n"), "text"
+end
+
 local function rendered_output(output)
 	if not output then
 		return "", "text"
+	end
+	if output.name == "question" then
+		return question_output(output)
 	end
 	if output.is_error then
 		return output.text or "", "text"
@@ -1037,7 +1070,7 @@ function M.open_float(ctx, output_id, resolved)
 	vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
 	local rendered_text, rendered_filetype = rendered_output(output)
 	if output.owner_full_text then rendered_text = output.owner_full_text end
-	if pending then
+	if pending and output.name ~= "question" then
 		rendered_text, rendered_filetype = output.text, "text"
 	end
 	local full_output_note
@@ -1108,8 +1141,9 @@ function M.open_float(ctx, output_id, resolved)
 		title_pos = "left",
 	})
 
-	vim.api.nvim_set_option_value("wrap", output.name == "codemode", { win = win })
-	if output.name == "codemode" then
+	local wrap = output.name == "codemode" or output.name == "question"
+	vim.api.nvim_set_option_value("wrap", wrap, { win = win })
+	if wrap then
 		vim.api.nvim_set_option_value("linebreak", true, { win = win })
 		vim.api.nvim_set_option_value("breakindent", true, { win = win })
 	end

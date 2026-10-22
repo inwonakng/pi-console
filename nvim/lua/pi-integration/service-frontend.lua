@@ -1,6 +1,7 @@
 -- Attachments own UI/drafts only. Typed lifecycle requests execute on the owner.
 local M = { config = { access_modes = { "readonly", "ask", "edit", "full" },
 	integration_modes = { "ask", "allowed" } }, service_mode = true }
+local tree = require("pi-integration.tree")
 local layout = require("pi-integration.layout")
 local messages = require("pi-integration.messages")
 local transcript = require("pi-integration.transcript")
@@ -8,6 +9,7 @@ local statusline = require("pi-integration.statusline")
 local buffer = require("pi-integration.utils.buffer")
 local state = require("pi-integration.state").new()
 local resources = require("pi-integration.service-resources")
+local pending_picker = require("pi-integration.pending-picker")
 state.show_nested_tools = true
 local session_id, attachment, snapshot, hello, grant, job
 local authority
@@ -17,9 +19,12 @@ local submission_status = {}
 local pending_host, pending_host_select, initial_attempted, resume_requested
 local generation, counter, refresh_scheduled, refreshing, dirty = 0, 0, false, false, false
 local selection = 0
-local approval_win, approval_buf, approval_request, heartbeat
+local approval_win, approval_request, heartbeat
+local approval_context, pending_context
+local pending_seen, pending_replies = {}, {}
+local ctx, sync_pending
 local recovery_id, backup_scheduled
-local render, refresh, connect, attach
+local render, refresh, connect, attach, tree_ctx
 local side_buf
 local owner_states, create_requested = {}, nil
 local conversation_tab, picker_tab
@@ -67,8 +72,10 @@ local function text_submission(operation)
 	return operation == "prompt.submit" or operation == "shell.run" or operation == "steering.submit" or operation == "followUp.submit" or operation == "side.prompt"
 end
 local function close_approval()
+	approval_request, approval_context = nil, nil
+	if ctx then pending_picker.clear(ctx, false) end
 	if approval_win and vim.api.nvim_win_is_valid(approval_win) then vim.api.nvim_win_close(approval_win, true) end
-	approval_win, approval_request = nil, nil
+	approval_win = nil
 end
 local function current_controller()
 	if authority then return authority.controller end
@@ -81,7 +88,10 @@ local function observe_authority(value, full)
 	local controller = current_controller()
 	if owner then controller = owner.controller end
 	if authority and (authority.controller and authority.controller.grantId) ~= (controller and controller.grantId) then offers = {} end
-	if not authority or authority.epoch ~= value.serviceEpoch or authority.revision ~= value.runtimeRevision then resources.invalidate() end
+	if not authority or authority.epoch ~= value.serviceEpoch or authority.revision ~= value.runtimeRevision then
+		resources.invalidate()
+		if authority then tree.close(tree_ctx) end
+	end
 	authority = { epoch = value.serviceEpoch, sequence = value.sequence, revision = value.runtimeRevision, controller = controller }
 end
 local function control_current()
@@ -103,6 +113,8 @@ local function current(s)
 	return control_current() and same_context(s) and s.token == grant.token
 end
 local function outcome_current(outcome, receipt)
+	-- Delete completion only triggers a fresh read, never a mutation or editor effect.
+	if outcome.history_refresh then return same_selection(outcome.captured) end
 	if outcome.lifecycle or outcome.transition then
 		local s = outcome.captured
 		return same_selection(s) and (outcome.lifecycle or control_current() and s.token == grant.token
@@ -175,7 +187,7 @@ local function command(operation, payload, callback, captured, terminal)
 		runtimeRevision = current_revision(), operation = operation, payload = object_payload(payload) }
 	if operation ~= "control.acquire" and operation ~= "control.takeover" then envelope.controlToken = grant and grant.token end
 	unresolved[envelope.id] = envelope -- Diagnostic identity only, never replayed.
-	if terminal then outcomes[envelope.id] = { callback = terminal, captured = captured or stamp(), lifecycle = operation == "session.kill", transition = operation == "history.navigate" } end
+	if terminal then outcomes[envelope.id] = { callback = terminal, captured = captured or stamp(), lifecycle = operation == "session.kill", transition = operation == "history.navigate", history_refresh = operation == "history.delete" } end
 	request("command", envelope, function(ok, result)
 		-- Only an acknowledgment or proven local non-delivery resolves this send.
 		-- A failed request/status lookup alone never proves non-admission.
@@ -257,7 +269,8 @@ local function status_data(key)
 	local ok, value = pcall(vim.json.decode, raw or "")
 	return ok and value or nil
 end
-local ctx = { state = state, config = M.config, service_mode = true,
+ctx = { state = state, config = M.config, service_mode = true,
+	ui = { notify = notify }, logs = { add = function(_, message, details) notify(message .. ": " .. tostring(details), vim.log.levels.ERROR) end },
 	notices = { empty_session = "Send non-slash text after acquiring control." },
 	buffer = { valid = valid, set_modifiable = function(buf, value) vim.bo[buf].modifiable = value end },
 	session = { setup_keymaps = function() end }, transcript = {} }
@@ -265,7 +278,13 @@ ctx.transcript.win_valid = function()
 	state.transcript_win = buffer.find_window(state.transcript_buf, state.transcript_win)
 	return state.transcript_win ~= nil
 end
-ctx.transcript.refresh_ui = function() statusline.update(ctx) end
+ctx.transcript.refresh_ui = function()
+	if approval_request and not state.pending_ui_requests[approval_request] then
+		approval_request, approval_context = nil, nil
+	end
+	statusline.update(ctx)
+	if sync_pending then vim.schedule(sync_pending) end
+end
 local function update_status_state()
 	local conversation = snapshot and snapshot.conversation
 	local statuses = conversation and conversation.statuses or {}
@@ -295,15 +314,16 @@ local function update_status_state()
 	state.is_retrying = job ~= nil and execution.retry and execution.retry.type == "auto_retry_start" or false
 	state.activity_label = pi_state.isCompacting and "compacting" or "work"
 	state.pending_user_messages = snapshot and snapshot.acceptedQueue.items or {}
+	local previous = state.pending_ui_requests
 	state.pending_ui_requests, state.active_ui_request_id = {}, nil
 	for _, item in ipairs(snapshot and snapshot.interactions.pending or {}) do
-		if not item.submitted then
+		if not item.submitted and not pending_replies[item.request.id] then
 			local id = item.request.id
-			state.pending_ui_requests[id] = { label = item.request.method, hidden = approval_request ~= id }
-			state.active_ui_request_id = id
-			break
+			state.pending_ui_requests[id] = previous[id] or { label = item.request.method, hidden = true }
+			state.active_ui_request_id = state.active_ui_request_id or id
 		end
 	end
+	if approval_request and state.pending_ui_requests[approval_request] then state.active_ui_request_id = approval_request end
 end
 ctx.transcript.metadata_lines = function() return transcript.metadata_lines(ctx) end
 render = function()
@@ -340,13 +360,6 @@ render = function()
 					work.omittedOutputBytes and ("Omitted stream bytes: " .. work.omittedOutputBytes) or "", "", work.output or "" })
 			end
 		end
-		for _, receipt in ipairs(snapshot.commands or {}) do
-			if receipt.operation ~= "prompt.submit" and not receipt.operation:match("^control%.") and not receipt.operation:match("^queue%.") then
-				vim.list_extend(lines, { "", "Command " .. receipt.id .. " " .. receipt.operation .. ": " .. receipt.status,
-					receipt.error and receipt.error.message or "",
-					receipt.result and (receipt.result.status or receipt.result.lifecycle or receipt.result.disposition or receipt.result.mode or "") or "" })
-			end
-		end
 		for _, item in ipairs(snapshot.acceptedQueue.items) do
 			vim.list_extend(lines, { "", "### Queue " .. item.id .. " — " .. item.status .. " r" .. item.revision,
 				item.text, item.error and item.error.message or "" })
@@ -378,6 +391,7 @@ render = function()
 	transcript.apply_collected_transcript_items(ctx, items)
 	require("pi-integration.tool-groups").apply_folds(state, state.transcript_win)
 	statusline.update(ctx)
+	if sync_pending then vim.schedule(sync_pending) end
 end
 local function apply_snapshot(value)
 	if value.sessionId ~= session_id then return end
@@ -402,6 +416,7 @@ local function apply_snapshot(value)
 		end
 	end
 	render()
+	tree.update(tree_ctx)
 end
 refresh = function()
 	dirty = true
@@ -421,6 +436,7 @@ refresh = function()
 	end, 100)
 end
 local function disconnected()
+	tree.close(tree_ctx)
 	offers = {}
 	resources.invalidate()
 	generation = generation + 1
@@ -432,6 +448,7 @@ local function disconnected()
 end
 attach = function(id, acquire_control)
 	if not job then return end
+	tree.close(tree_ctx)
 	offers = {}
 	if pending_host then pending_host_select = false end
 	resources.invalidate()
@@ -877,52 +894,104 @@ local function preview_lines(value, lines, key)
 		end
 	end
 end
+local function dialog_current(captured)
+	return current(captured) and captured.epoch == snapshot.serviceEpoch
+		and (not authority or captured.epoch == authority.epoch)
+end
+local function dialogs_ready()
+	return control_current() and snapshot.runtimeRevision == current_revision()
+		and (not authority or snapshot.serviceEpoch == authority.epoch)
+end
+local function open_pending(item)
+	if not dialogs_ready() or item.submitted or pending_replies[item.request.id] then return end
+	if not pending_context or not dialog_current(pending_context) then
+		pending_context, pending_seen, pending_replies = stamp(), {}, {}
+	end
+	local request_data, captured = item.request, stamp()
+	local id = request_data.id
+	local seconds, micros = vim.uv.gettimeofday()
+	local remaining = item.tag and item.tag.deadline and item.tag.deadline - (seconds * 1000 + micros / 1000)
+	pending_seen[id] = true
+	if remaining and remaining <= 0 then return end
+	local function answer(response)
+		local live = pending(id)
+		if not dialog_current(captured) or not live or pending_replies[id] then notify("Request or controller changed; no reply sent."); return end
+		local now_seconds, now_micros = vim.uv.gettimeofday()
+		if live.tag and live.tag.deadline and now_seconds * 1000 + now_micros / 1000 >= live.tag.deadline then notify("Request deadline expired"); return end
+		local cancel = response.cancelled == true
+		local decoded_ok, description = pcall(vim.json.decode, request_data.title or "")
+		local review_id = not cancel and response.value == "Review / modify"
+			and decoded_ok and type(description) == "table" and description.kind == "pi_compact_select"
+			and description.preview_kind == "workspace_summary" and snapshot.workspace and snapshot.workspace.id
+		pending_replies[id] = true -- Never replay an answer while its outcome is uncertain.
+		local sent = command(cancel and "interaction.cancel" or "interaction.respond", cancel and { requestId = id }
+			or { requestId = id, answer = response }, function(ok, result)
+				if not ok and result.delivery == "not_sent" and dialog_current(captured) then pending_replies[id] = nil end
+				if ok and review_id and dialog_current(captured) then open_workspace_review(review_id) end
+			end, captured)
+		if not sent then pending_replies[id] = nil end
+	end
+	close_approval()
+	approval_request, approval_context = id, captured
+	state.pending_ui_requests[id] = { label = request_data.method, hidden = false, resumable = true,
+		dismiss_on_close = true, on_cancel = function() answer({ cancelled = true }) end,
+		expires = remaining and (vim.uv.now() + remaining) or nil }
+	state.active_ui_request_id = id
+	local input_buf = require("pi-integration.events").open_dialog(ctx, request_data, answer)
+	if valid(input_buf) then
+		local name = "pi://answer-draft/" .. uid()
+		drafts[input_buf] = name
+		vim.api.nvim_create_autocmd("BufWipeout", { buffer = input_buf, once = true, callback = function()
+			-- The editor wipes on close, including timeout/revocation. Preserve
+			-- unsaved text as an inspect-only draft before that happens.
+			local contents = text(input_buf)
+			drafts[input_buf] = nil
+			if contents ~= "" then
+				local saved = layout.create_buffer(nil, name, "markdown", true)
+				vim.api.nvim_buf_set_lines(saved, 0, -1, false, vim.split(contents, "\n", { plain = true }))
+				drafts[saved] = name
+			end
+			backup()
+		end })
+	end
+end
+sync_pending = function()
+	if approval_context and (not dialog_current(approval_context) or not pending(approval_request)) then close_approval() end
+	if not dialogs_ready() then pending_context = nil; return end
+	if not pending_context or not dialog_current(pending_context) then
+		pending_context, pending_seen, pending_replies = stamp(), {}, {}
+	end
+	if approval_request then return end
+	for _, item in ipairs(snapshot.interactions.pending) do
+		if not item.submitted and not pending_seen[item.request.id] and not pending_replies[item.request.id] then
+			open_pending(item)
+			if approval_request then return end
+		end
+	end
+end
 function M.restore_pending_action()
 	if not snapshot then return end
+	if control_current() then
+		if not dialogs_ready() then notify("Waiting for the current owner snapshot."); refresh(); return end
+		if approval_request then
+			pending_picker.restore(ctx)
+			return
+		end
+		for _, item in ipairs(snapshot.interactions.pending) do
+			if not item.submitted and not pending_replies[item.request.id] then open_pending(item); return end
+		end
+		notify("No unanswered owner requests.")
+		return
+	end
 	local choices, captured = snapshot.interactions.pending, stamp()
 	vim.ui.select(choices, { prompt = "Pending owner requests (viewer can inspect)", format_item = function(item) return item.request.method .. " " .. item.request.id end }, function(item)
 		if not item or not same_context(captured) then return end
 		close_approval()
-		local request_data = item.request
-		local lines = { "# Owner request " .. request_data.id, "", "Closing this window does not answer or cancel.", "" }
+		local lines = { "# Owner request " .. item.request.id, "", "VIEWER: :PiControl / :PiTakeover is required to answer.", "" }
 		preview_lines(item, lines)
-		local options = request_data.method == "confirm" and { "Allow", "Deny" } or request_data.options or {}
-		local option_lines = {}
-		if control_current() then
-			if request_data.method == "input" or request_data.method == "editor" then options = { "Edit answer draft" } end
-			for index, option in ipairs(options) do
-				option_lines[#lines + 1] = index; table.insert(lines, "[" .. index .. "] " .. option)
-			end
-			option_lines[#lines + 1] = "cancel"; table.insert(lines, "[cancel] Explicitly cancel request")
-		else table.insert(lines, "VIEWER: :PiControl / :PiTakeover is required to answer.") end
-		approval_request = request_data.id
-		approval_buf = layout.create_buffer(nil, "pi://approval/" .. uid(), "markdown", false)
+		local approval_buf = layout.create_buffer(nil, "pi://approval/" .. uid(), "markdown", false)
 		layout.set_buffer_lines(ctx, approval_buf, lines, false)
 		approval_win = vim.api.nvim_open_win(approval_buf, true, { relative = "editor", style = "minimal", border = "rounded", width = math.max(1, math.min(100, vim.o.columns - 4)), height = math.max(1, math.min(30, vim.o.lines - 4)), row = 1, col = 1 })
-		local function answer(answer_value, cancel)
-			local live = pending(request_data.id)
-			if not current(captured) or not live then notify("Request or controller changed; no reply sent."); return end
-			local seconds, micros = vim.uv.gettimeofday()
-			if live.tag and live.tag.deadline and seconds * 1000 + micros / 1000 >= live.tag.deadline then notify("Request deadline expired"); return end
-			local decoded_ok, description = pcall(vim.json.decode, request_data.title or "")
-			local review_id = not cancel and answer_value and answer_value.value == "Review / modify"
-				and decoded_ok and type(description) == "table" and description.kind == "pi_compact_select"
-				and description.preview_kind == "workspace_summary" and snapshot.workspace and snapshot.workspace.id
-			command(cancel and "interaction.cancel" or "interaction.respond", cancel and { requestId = request_data.id } or { requestId = request_data.id, answer = answer_value }, function(ok)
-				if ok and review_id and same_context(captured) then open_workspace_review(review_id) end
-			end, captured)
-			close_approval()
-		end
-		vim.keymap.set("n", "<CR>", function()
-			local choice = option_lines[vim.api.nvim_win_get_cursor(0)[1]]
-			if not choice then return end
-			if choice == "cancel" then answer(nil, true)
-			elseif request_data.method == "confirm" then answer({ confirmed = choice == 1 })
-			elseif request_data.method == "input" or request_data.method == "editor" then
-				close_approval()
-				draft_buffer("pi://answer-draft/" .. uid(), request_data.prefill or "", function(buf) answer({ value = text(buf) }) end)
-			else answer({ value = options[choice] }) end
-		end, { buffer = approval_buf })
 		vim.keymap.set("n", "q", close_approval, { buffer = approval_buf })
 	end)
 end
@@ -1083,42 +1152,65 @@ function M.show_usage()
 	end) end
 	if control_current() then command("usage.refresh", {}, nil, stamp(), inspect) else inspect() end
 end
-function M.show_tree()
-	local captured = stamp()
-	vim.ui.select({ "Transcript (all branches)", "Tree actions" }, { prompt = "Owner history" }, function(choice)
-		if not same_context(captured) then return end
-		if choice == "Transcript (all branches)" then M.show_owner_transcript()
-		elseif choice == "Tree actions" then M.show_tree_actions() end
+local function history_command(operation, payload, captured, completed)
+	command(operation, payload, function(ok, result)
+		if not ok and same_selection(captured) then notify(result.message or "History operation unavailable", vim.log.levels.WARN) end
+	end, captured, function(receipt)
+		if receipt.status == "completed" then completed(receipt.result or {})
+		else notify(receipt.error and receipt.error.message or "History operation did not complete; inspect :PiOperations.", vim.log.levels.WARN) end
 	end)
 end
-function M.show_tree_actions()
-	owner_read("entries", function(data, captured)
-		vim.ui.select(data.entries, { prompt = "Owner history (all branches)", format_item = function(entry)
-			return entry.id .. " " .. entry.type .. " " .. (entry.message and entry.message.role or entry.customType or "")
-		end }, function(entry)
-			if not entry or not same_context(captured) then return end
-			vim.ui.select({ "Inspect", "Jump", "Jump with summary", "Clone through entry", "Delete subtree", "Fork before user message" }, { prompt = entry.id }, function(action)
-				if not same_context(captured) then return end
-				if action == "Inspect" then
-					require("pi-integration.spawn-transcript").open({ state = state, ui = { notify = notify }, window = { parent = state.transcript_win }, resources = owner_resources() }, nil,
-						"Owner history entry " .. entry.id, { kind = "history" }, vim.json.encode(entry))
-				elseif action == "Jump" or action == "Jump with summary" then
-					command("history.navigate", { entryId = entry.id, summarize = action == "Jump with summary" }, nil, captured, function(receipt)
-						if receipt.status == "completed" and receipt.result and receipt.result.editorText ~= nil then
-							draft_buffer("pi://history-draft/" .. uid(), receipt.result.editorText)
-						end
-					end)
-				elseif action == "Clone through entry" or action == "Fork before user message" then
-					command(action == "Clone through entry" and "history.clone" or "history.fork", { entryId = entry.id }, nil, captured, function(receipt)
-						if receipt.status == "completed" and receipt.result and receipt.result.sessionId then
-							if receipt.result.editorText ~= nil then draft_buffer("pi://fork-draft/" .. uid(), receipt.result.editorText) end
-							host_operation("host.resume", { sessionId = receipt.result.sessionId })
-						end
-					end)
-				elseif action == "Delete subtree" then command("history.delete", { entryId = entry.id }, nil, captured) end
-			end)
+tree_ctx = {
+	state = state, config = M.config, ui = { notify = notify },
+	buffer = { valid = valid, create = function(name, ft, editable) return layout.create_buffer(nil, name, ft, editable) end,
+		set_lines = function(buf, lines, editable) layout.set_buffer_lines(ctx, buf, lines, editable) end },
+	messages = { extract_text = require("pi-integration.utils.message").extract_text },
+}
+tree_ctx.tree = {
+	read = function(done)
+		if not job or not attachment or not snapshot then
+			notify("Connect and attach to a live session to view its history.", vim.log.levels.WARN)
+			done(nil); return
+		end
+		local captured = stamp()
+		request("session.read", { kind = "entries", runtimeRevision = captured.revision }, function(ok, result)
+			if not job or not same_context(captured) then done(nil); return end
+			if not ok then notify(result.message or "Owner history unavailable", vim.log.levels.WARN); done(nil); return end
+			done(result.data, captured)
 		end)
-	end)
+	end,
+	writable = function(captured) return captured and current(captured) end,
+	can_mutate = function(captured, action)
+		if not control_current() then notify("Viewer: use :PiControl or confirmed :PiTakeover first.", vim.log.levels.WARN); return false end
+		if not captured or not current(captured) then notify("History context changed; refresh the tree before changing history.", vim.log.levels.WARN); return false end
+		if not require("pi-integration.utils.guard").if_history_change_allowed(tree_ctx, "changing history") then return false end
+		if action == "clone" and not require("pi-integration.backends.tmux").available() then
+			notify("Opening a clone in a new window requires tmux.", vim.log.levels.WARN); return false
+		end
+		return true
+	end,
+	jump = function(id, summarize, captured)
+		history_command("history.navigate", { entryId = id, summarize = summarize }, captured, function(result)
+			if result.editorText ~= nil and valid(state.input_buf) then
+				layout.set_buffer_lines(ctx, state.input_buf, vim.split(result.editorText, "\n", { plain = true }), true)
+			end
+		end)
+	end,
+	clone = function(id, captured)
+		history_command("history.clone", { entryId = id }, captured, function(result)
+			if not result.sessionId then return end
+			local opened, err = require("pi-integration.backends.tmux").launch_service(M.config.launcher, M.config, result.sessionId)
+			if not opened then notify((err or "Could not open clone") .. "\nClone saved on owner: " .. result.sessionId, vim.log.levels.ERROR) end
+		end)
+	end,
+	delete = function(id, captured, position)
+		history_command("history.delete", { entryId = id }, captured, function()
+			tree.show(tree_ctx, position)
+		end)
+	end,
+}
+function M.show_tree()
+	tree.show(tree_ctx)
 end
 function M.pick_command()
 	local captured = stamp()
@@ -1141,7 +1233,7 @@ function M.refresh_messages() refresh() end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer("pi://service-help/" .. uid(), "# Local service attachment\n\n:PiControl / :PiTakeover / :PiRelease\n:PiPending (inspect; Enter explicitly answers; closing never cancels)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain IDs; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session IDs; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: saved owners, connect/retry/disconnect/edit/forget.\n:PiOverview / <leader>po: combined overview, groups and pins.\n:PiNew: choose owner and browse its directories.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer("pi://service-help/" .. uid(), "# Local service attachment\n\n:PiControl / :PiTakeover / :PiRelease\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain IDs; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session IDs; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: saved owners, connect/retry/disconnect/edit/forget.\n:PiOverview / <leader>po: combined overview, groups and pins.\n:PiNew: choose owner and browse its directories.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()
@@ -1206,7 +1298,7 @@ function M.setup(config)
 	assert(not M.config.service_remote or (M.config.credential_file and not M.config.service_root), "Remote attachment requires a credential file and no local root")
 	assert(not M.config.service_remote or (M.config.service_remote:match("^https://[^/?#@%s]+/?$")
 		and not M.config.service_remote:find("[%c]")), "Remote endpoint must be an HTTPS origin without credentials, path, query or fragment")
-	ctx.config = M.config
+	ctx.config, tree_ctx.config = M.config, M.config
 end
 function M.open(_, restore)
 	invocation_cwd = vim.fn.getcwd()

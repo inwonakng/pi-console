@@ -501,6 +501,8 @@ export class OwnedSession {
     // Delayed operation effects belong to its initiator, not whoever took over
     // while a confirmation/summary was pending. Never retarget them to a viewer.
     const active = this.bundled ?? this.bundledInterrupt;
+    // History restores input through its correlated completion receipt only.
+    if (active?.operation === "history.navigate" && data.type === "editor_text") return;
     let recipient = active ? active.recipient : this.turnRecipient !== undefined ? this.turnRecipient ?? undefined : this.control.current();
     let independent = false;
     if (data.type === "extension_signal" && ["pi-desktop-notification", "pi-spawn-notification"].includes(data.key)) {

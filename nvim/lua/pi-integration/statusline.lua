@@ -640,6 +640,24 @@ function M.setup(ctx)
 
 	local bars = ctx.service_mode and service_bars or footer_bars
 	local footer_group = vim.api.nvim_create_augroup("PiNvimStatusFooter", { clear = true })
+	if ctx.service_mode then
+		local interval_ms = 250 -- Match the stable conversation footer.
+		local timer = vim.uv.new_timer()
+		timer:start(interval_ms, interval_ms, vim.schedule_wrap(function()
+			if not timer then return end
+			local state = ctx.state
+			if not state.is_loading and not state.is_agent_running and not state.is_streaming
+				and not state.is_retrying and not state.awaiting_agent_output then return end
+			if not buffer.window_matches(state.status_win, state.status_buf) then return end
+			state.activity_spinner_tick = math.floor(vim.uv.hrtime() / (interval_ms * 1000000)) % #activity_spinner_frames + 1
+			-- Animate only the native footer row, without rebuilding bars or history.
+			vim.api.nvim_set_option_value("statusline", M.render_secondary(ctx), { win = state.status_win })
+			vim.cmd("redrawstatus")
+		end))
+		vim.api.nvim_create_autocmd("VimLeavePre", { group = footer_group, once = true, callback = function()
+			timer:stop(); timer:close(); timer = nil
+		end })
+	end
 	vim.api.nvim_create_autocmd({ "VimResized", "WinResized", "WinNew", "WinClosed", "TabEnter" }, {
 		group = footer_group,
 		desc = "Keep the pi-console status bars pinned",

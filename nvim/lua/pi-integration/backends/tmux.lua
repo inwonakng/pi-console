@@ -172,11 +172,7 @@ function M.kill(entry)
 	return command({ "kill-window", "-t", window })
 end
 
-function M.launch(launcher, cwd, path)
-	local shell_command = "bash " .. vim.fn.shellescape(launcher)
-	if path then
-		shell_command = shell_command .. " --session " .. vim.fn.shellescape(path)
-	end
+local function launch_window(shell_command, cwd, entry)
 	local session, session_err = command({ "display-message", "-p", "-t", vim.env.TMUX_PANE, "#{session_id}" })
 	if not session then return nil, session_err end
 	local name = "New Session"
@@ -201,21 +197,38 @@ function M.launch(launcher, cwd, path)
 		"-t",
 		pane,
 		option,
-		json.encode({
+		json.encode(vim.tbl_extend("force", {
 			version = 1,
 			build = build_info.snapshot(),
 			pid = tonumber(pid),
 			updated = os.time(),
-			path = path,
-			title = path and vim.fn.fnamemodify(path, ":t") or "New Session",
-			is_new_session = path == nil,
 			cwd = cwd,
 			status = "Starting",
 			is_starting = true,
 			activity = "Starting pi-console",
-		}),
+		}, entry)),
 	})
 	return M.focus(pane)
+end
+
+function M.launch(launcher, cwd, path)
+	local shell_command = "bash " .. vim.fn.shellescape(launcher)
+	if path then shell_command = shell_command .. " --session " .. vim.fn.shellescape(path) end
+	return launch_window(shell_command, cwd, { path = path,
+		title = path and vim.fn.fnamemodify(path, ":t") or "New Session", is_new_session = path == nil })
+end
+
+function M.launch_service(launcher, target, session_id)
+	if not M.available() then return nil, "Opening a service frontend requires tmux" end
+	local args = { "bash", launcher, "--resume", session_id }
+	if target.service_remote then
+		vim.list_extend(args, { "--remote", target.service_remote, "--credential-file", target.credential_file })
+		if target.ca_file then vim.list_extend(args, { "--ca-file", target.ca_file }) end
+	elseif target.service_root then vim.list_extend(args, { "--root", target.service_root }) end
+	local shell_command = table.concat(vim.tbl_map(vim.fn.shellescape, args), " ")
+	-- This is a local frontend window; an owner's cwd is never a local tmux path.
+	return launch_window(shell_command, vim.fn.getcwd(), { frontend_attachment = true,
+		host_id = target.expected_host, session_id = session_id, title = "Cloned conversation" })
 end
 
 function M.review_workspace(root, before, after)

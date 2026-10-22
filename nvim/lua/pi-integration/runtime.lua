@@ -6,7 +6,6 @@
 -- Operations return a non-nil value on success, or nil and an error message.
 -- publish() accepts a background refresh; a refresh already in flight may be skipped.
 if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-runtime") end
-local icons = require("pi-integration.status-icons")
 local build_info = require("pi-integration.build-info")
 local M = {}
 local timer
@@ -362,9 +361,10 @@ function M.start(state)
 	end
 	M.publish()
 	timer = vim.uv.new_timer()
+	-- Metadata heartbeats do not drive tmux's native animation.
 	timer:start(
-		icons.animation_interval_ms,
-		icons.animation_interval_ms,
+		500,
+		500,
 		vim.schedule_wrap(function()
 			if timer then
 				M.publish()

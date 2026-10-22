@@ -56,7 +56,7 @@ local function close(picker)
 	end
 end
 
-local function finish(picker, choice, respond)
+local function finish(picker, choice, respond, explicit_cancel)
 	if active ~= picker then
 		return
 	end
@@ -69,7 +69,11 @@ local function finish(picker, choice, respond)
 	-- must not answer a disposed request or close the next dialog.
 	close(picker)
 	if respond then
-		picker.on_choice(choice)
+		if explicit_cancel and picker.request.on_cancel then
+			picker.request.on_cancel()
+		elseif choice ~= nil or not picker.request.dismiss_on_close then
+			picker.on_choice(choice)
+		end
 	end
 	local state = picker.ctx.state
 	state.pending_ui_requests[picker.id] = nil
@@ -118,7 +122,7 @@ end
 
 function M.hide()
 	local picker = active
-	if not picker or not picker.request.resumable or picker.request.hidden then
+	if not picker or picker.input or not picker.request.resumable or picker.request.hidden then
 		return
 	end
 	picker.request.hidden = true
@@ -208,7 +212,7 @@ function M.select(ctx, id, items, opts, on_choice)
 				vim.keymap.set({ "t", "n" }, key, M.hide, { buffer = event.bufnr, nowait = true, desc = "Hide pending Pi action" })
 			end
 			vim.keymap.set({ "t", "n" }, "<C-q>", function()
-				finish(picker, nil, true)
+				finish(picker, nil, true, true)
 			end, { buffer = event.bufnr, nowait = true, desc = "Cancel pending Pi action" })
 		end
 		if not picker.watching_buffer then
@@ -279,6 +283,7 @@ function M.input(ctx, event, on_input)
 		finish(picker, nil, true)
 	end
 	refresh(picker)
+	return picker.buf
 end
 
 return M

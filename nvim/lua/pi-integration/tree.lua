@@ -97,19 +97,18 @@ local function compact_text(text, max_width)
 end
 
 local function read_session_tree(ctx, path)
-	if not path or vim.fn.filereadable(path) ~= 1 then
-		return {}, nil
-	end
-	local records = {}
-	for _, line in ipairs(vim.fn.readfile(path)) do
-		local record = decode_record(line)
-		if record then
-			table.insert(records, record)
+	local records = ctx.state.tree_records
+	if not ctx.tree then
+		if not path or vim.fn.filereadable(path) ~= 1 then return {}, nil end
+		records = {}
+		for _, line in ipairs(vim.fn.readfile(path)) do
+			local record = decode_record(line)
+			if record then table.insert(records, record) end
 		end
 	end
-	local model = tree_model.build(records)
+	local model = tree_model.build(records or {})
 	local requested_leaf = ctx.state.tree_leaf_id
-	if requested_leaf == nil then requested_leaf = model.last_id end
+	if not ctx.tree and requested_leaf == nil then requested_leaf = model.last_id end
 	local active_ids = {}
 	local raw = model.raw_by_id[requested_leaf]
 	while raw do
@@ -375,13 +374,25 @@ local function focus_input_window(ctx)
 	end
 end
 
-local function close_tree_window(ctx)
+local function close_tree_window(ctx, preserve_data)
 	local state = ctx.state
+	if ctx.tree and not preserve_data then
+		state.tree_request = (state.tree_request or 0) + 1
+		state.tree_records, state.tree_context, state.tree_leaf_id = nil, nil, nil
+	end
 	floats.close_descendants(state.tree_win)
 	floats.close_window(state.tree_win)
 	floats.close_window(state.tree_preview_win)
 	state.tree_win = nil
 	state.tree_preview_win = nil
+	if ctx.tree and not preserve_data then
+		for _, buf in ipairs({ state.tree_buf, state.tree_preview_buf }) do
+			if vim.api.nvim_buf_is_valid(buf) then vim.api.nvim_buf_delete(buf, { force = true }) end
+		end
+		state.tree_buf, state.tree_preview_buf = nil, nil
+		state.tree_nodes_by_line, state.tree_match_rows, state.tree_highlights_by_line = {}, {}, {}
+		state.tree_preview_entry_id, state.tree_preview_query = nil, nil
+	end
 end
 
 local function current_node(ctx)
@@ -553,7 +564,7 @@ local function render_tree_buffer(ctx, opts)
 	opts = opts or {}
 	local state = ctx.state
 	local path = state.session_file or state.pending_session_file
-	if not path or path == "" then
+	if not ctx.tree and (not path or path == "") then
 		ctx.ui.notify("No Pi session selected yet.", vim.log.levels.WARN)
 		return false
 	end
@@ -586,7 +597,11 @@ local function render_tree_buffer(ctx, opts)
 	local filters = { default = "Default", ["user-only"] = "User only", all = "All entries" }
 	local mode = state.tree_filter_mode or "default"
 	hint_line({ { "b", state.tree_scope == "branch" and "Current branch" or "Full tree" }, { "o", filters[mode] or mode } })
-	hint_line({ { "Enter", "Jump" }, { "c", "Clone" }, { "d", "Delete" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
+	if ctx.tree and not ctx.tree.writable(state.tree_context) then
+		hint_line({ { "r", "Refresh (read-only)" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
+	else
+		hint_line({ { "Enter", "Jump" }, { "c", "Clone" }, { "d", "Delete" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
+	end
 	local query = state.tree_search_query or ""
 	local search_row
 	if query ~= "" then
@@ -742,6 +757,13 @@ local function jump_to_node(ctx, summarize)
 	if not node then
 		return
 	end
+	if ctx.tree then
+		local captured = ctx.state.tree_context
+		if not ctx.tree.can_mutate(captured) then return end
+		close_tree_window(ctx)
+		ctx.tree.jump(node.target_id, summarize, captured)
+		return
+	end
 	if not guard.if_history_change_allowed(ctx, "changing history") then
 		return
 	end
@@ -771,6 +793,13 @@ local function clone_node(ctx)
 	local node = current_node(ctx)
 	if not node or (node.kind ~= "user" and node.kind ~= "assistant") then
 		ctx.ui.notify("Select a user or assistant turn to clone.", vim.log.levels.WARN)
+		return
+	end
+	if ctx.tree then
+		local captured = ctx.state.tree_context
+		if not ctx.tree.can_mutate(captured, "clone") then return end
+		close_tree_window(ctx)
+		ctx.tree.clone(node.target_id, captured)
 		return
 	end
 	if not guard.if_history_change_allowed(ctx, "cloning history") or ctx.state.tree_clone_pending then return end
@@ -809,6 +838,15 @@ local function delete_node(ctx)
 	if not node then
 		return
 	end
+	if ctx.tree then
+		local captured = ctx.state.tree_context
+		if not ctx.tree.can_mutate(captured) then return end
+		local position = selected_tree_position(ctx)
+		position.view = save_tree_view(ctx)
+		close_tree_window(ctx)
+		ctx.tree.delete(node.start_id, captured, position)
+		return
+	end
 	if not guard.if_history_change_allowed(ctx, "deleting history") then
 		return
 	end
@@ -839,11 +877,11 @@ local function delete_node(ctx)
 	end)
 end
 
-function M.show(ctx)
+local function show_tree(ctx, position)
 	local state = ctx.state
 	if win_valid(state.tree_win) then
-		local position = selected_tree_position(ctx)
-		position.view = save_tree_view(ctx)
+		position = position or selected_tree_position(ctx)
+		position.view = position.view or save_tree_view(ctx)
 		refresh_tree_in_place(ctx, position)
 		vim.api.nvim_set_current_win(state.tree_win)
 		return
@@ -862,7 +900,7 @@ function M.show(ctx)
 	local row = math.max(1, math.floor((vim.o.lines - outer_height) / 2))
 	local col = math.max(0, math.floor((vim.o.columns - width) / 2))
 
-	close_tree_window(ctx)
+	close_tree_window(ctx, true)
 	state.tree_win = vim.api.nvim_open_win(state.tree_buf, true, {
 		relative = "editor",
 		width = width,
@@ -894,7 +932,7 @@ function M.show(ctx)
 	list_cursor.attach(state.tree_preview_buf)
 	local first_row
 	for row in pairs(state.tree_nodes_by_line) do first_row = math.min(first_row or row, row) end
-	restore_tree_view(ctx, { entry_id = focus_id, row = state.tree_match_rows[1] or first_row or 1 })
+	restore_tree_view(ctx, position or { entry_id = focus_id, row = state.tree_match_rows[1] or first_row or 1 })
 	update_preview(ctx)
 	floats.close_on_win_leave(state.tree_buf, function()
 		close_tree_window(ctx)
@@ -918,6 +956,8 @@ function M.show(ctx)
 				"- `Enter` jump to the selected turn (preserves history).",
 				"- `S` jump with a branch summary.",
 				"- `c` clone through the selected turn into a new window.",
+				ctx.tree and "- Connected viewers can browse; mutations require current control and an idle owner. Refresh after taking control." or "",
+				ctx.tree and "- History is fetched from the owner; disconnecting closes this view. Offline browsing is unavailable." or "",
 				"- `d` delete the turn and all descendants; choose whether to undo recorded work.",
 				"- `b` toggle full tree / current branch.",
 				"- `o` cycle entry filters.",
@@ -966,9 +1006,7 @@ function M.show(ctx)
 		refresh_tree_in_place(ctx, position)
 	end, { buffer = state.tree_buf, desc = "Cycle Pi tree filter" })
 	vim.keymap.set("n", "r", function()
-		local position = selected_tree_position(ctx)
-		position.view = save_tree_view(ctx)
-		refresh_tree_in_place(ctx, position)
+		M.show(ctx)
 	end, { buffer = state.tree_buf, desc = "Refresh Pi tree" })
 	vim.api.nvim_clear_autocmds({ group = tree_preview_augroup, buffer = state.tree_buf })
 	vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
@@ -979,5 +1017,34 @@ function M.show(ctx)
 		end,
 	})
 end
+
+function M.show(ctx, position)
+	if not ctx.tree then show_tree(ctx, position); return end
+	local state = ctx.state
+	if win_valid(state.tree_win) then
+		position = position or selected_tree_position(ctx)
+		position.view = position.view or save_tree_view(ctx)
+	end
+	state.tree_request = (state.tree_request or 0) + 1
+	local request = state.tree_request
+	state.tree_context = nil -- Disable mutations until a fresh owner read completes.
+	ctx.tree.read(function(data, captured)
+		if state.tree_request ~= request then return end
+		if not data then close_tree_window(ctx); return end
+		state.tree_records, state.tree_context = data.entries, captured
+		state.tree_leaf_id = type(data.leafId) == "string" and data.leafId or nil
+		show_tree(ctx, position)
+	end)
+end
+
+function M.update(ctx)
+	if win_valid(ctx.state.tree_win) then
+		local position = selected_tree_position(ctx)
+		position.view = save_tree_view(ctx)
+		refresh_tree_in_place(ctx, position)
+	end
+end
+
+M.close = close_tree_window
 
 return M

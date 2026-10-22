@@ -50,11 +50,12 @@ function M.open(config)
 	vim.o.ruler = false
 	local ns = vim.api.nvim_create_namespace("pi-sidebar")
 	local list = session_list.new()
-	local rows, starts = {}, {}
+	local rows, starts, status_icons = {}, {}, {}
 	local navigation = session_navigation.new(win)
 	local updating = false
 	local last_focused_at = 0
 	local timer = vim.uv.new_timer()
+	local animation_timer = vim.uv.new_timer()
 	local closed = false
 	local refreshing = false
 	local query = ""
@@ -95,7 +96,7 @@ function M.open(config)
 			lines[1] = prefix .. icons.get("Waiting").icon .. " " .. waiting
 			highlight(1, #prefix, #lines[1], icons.highlight("Waiting"))
 		end
-		rows, starts = {}, {}
+		rows, starts, status_icons = {}, {}, {}
 		local cursor, focused_row
 		for _, node in ipairs(nodes) do
 			if node.kind == "group" and #starts > 0 then table.insert(lines, "") end
@@ -123,6 +124,8 @@ function M.open(config)
 			else
 				local entry = node.entry
 				local icon = icons.get(entry.status).icon
+				local icon_col = 1 + #session_list.session_prefix(node)
+				table.insert(status_icons, { row = row - 1, col = icon_col, status = entry.status, icon = icon })
 				local prefix = " " .. session_list.session_prefix(node) .. icon .. " "
 				if entry.host_id then prefix = prefix .. "[" .. entry.host_id:sub(1, 8) .. "] " end
 				highlight(row, 1 + #session_list.session_prefix(node), #prefix - 1, icons.highlight(entry.status))
@@ -232,6 +235,8 @@ function M.open(config)
 			closed = true
 			timer:stop()
 			timer:close()
+			animation_timer:stop()
+			animation_timer:close()
 		end
 	end
 	vim.api.nvim_create_autocmd("CursorMoved", {
@@ -246,7 +251,20 @@ function M.open(config)
 	vim.api.nvim_create_autocmd("VimLeavePre", { once = true, callback = stop })
 	vim.api.nvim_create_autocmd({ "VimResized", "ColorScheme" }, { callback = refresh })
 	refresh()
-	timer:start(icons.animation_interval_ms, icons.animation_interval_ms, vim.schedule_wrap(refresh))
+	-- Keep discovery/list rebuilding at its existing cadence; animate cached rows locally.
+	timer:start(500, 500, vim.schedule_wrap(refresh))
+	animation_timer:start(icons.animation_interval_ms, icons.animation_interval_ms, vim.schedule_wrap(function()
+		if closed or not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_win_is_valid(win) then return end
+		for _, item in ipairs(status_icons) do
+			local icon = icons.get(item.status).icon
+			if icon ~= item.icon then
+				item.mark = vim.api.nvim_buf_set_extmark(buf, ns, item.row, item.col, {
+					id = item.mark, virt_text = { { icon, icons.highlight(item.status) } }, virt_text_pos = "overlay",
+				})
+				item.icon = icon
+			end
+		end
+	end))
 end
 
 return M
