@@ -136,7 +136,7 @@ local function owner_resources()
 end
 local function desktop_notification(intent, captured)
 	local label = "[" .. tostring(hello.hostId):sub(1, 8) .. "] " .. intent.title
-	notify(label .. "\n" .. intent.message)
+	notify(intent.title)
 	-- Executables, icon paths and sound/timeout settings belong to this frontend.
 	local alerter = vim.env.ALERTER or "alerter"
 	local args
@@ -266,11 +266,18 @@ ctx.transcript.win_valid = function()
 	return state.transcript_win ~= nil
 end
 ctx.transcript.refresh_ui = function() statusline.update(ctx) end
-local function update_footer_state()
+local function update_status_state()
 	local conversation = snapshot and snapshot.conversation
 	local statuses = conversation and conversation.statuses or {}
 	local pi_state = snapshot and snapshot.piState or {}
 	local execution = conversation and conversation.execution or {}
+	local host = M.config.expected_host and require("pi-integration.service-hosts").find(M.config.expected_host)
+	state.session_name = pi_state.sessionName ~= "" and pi_state.sessionName or nil
+	state.session_id = session_id
+	state.session_cwd = snapshot and snapshot.interactions.runtime and snapshot.interactions.runtime.cwd
+	state.host_name = host and host.alias or M.config.service_remote or hello and hello.hostId or M.config.expected_host or "local"
+	state.connection_status = job and (attachment and "connected" or "connecting") or "disconnected"
+	state.client_status = control_current() and "active" or "view only"
 	state.access_mode = (statuses["pi-access-mode"] or ""):match("^Mode: (%w+)$")
 	state.integration_mode = (statuses["pi-integration-mode"] or ""):match("^Integration: (%w+)$")
 	state.notification_status = statuses["pi-notifications"]
@@ -298,44 +305,12 @@ local function update_footer_state()
 		end
 	end
 end
-local function metadata()
-	local controller = current_controller()
-	local pi_state = snapshot and snapshot.piState or {}
-	local statuses = snapshot and snapshot.conversation.statuses or {}
-	local model = pi_state.model
-	local submissions = {}
-	for id, envelope in pairs(unresolved) do
-		if text_submission(envelope.operation) and envelope.sessionId == session_id then
-			table.insert(submissions, id .. " (" .. (submission_status[id] or "outcome unknown") .. ")")
-		end
-	end
-	return { "# Pi — " .. (M.config.service_remote and "remote TLS service" or "local service"),
-		"Endpoint: " .. tostring(hello and hello.remoteEndpoint or M.config.service_remote or M.config.service_root or "local IPC"), "", "Channel: " .. tostring(hello and hello.channel or vim.env.PI_CONSOLE_CHANNEL or "stable")
-		.. " | " .. (job and "connected" or "disconnected") .. " | " .. (control_current() and "CONTROLLER" or "VIEWER"),
-		"Host: " .. tostring(hello and hello.hostId or "—"), "Service build: " .. tostring(hello and hello.buildId or "—"),
-		"Session: " .. tostring(session_id or "—") .. " | " .. tostring(snapshot and snapshot.phase or "unattached") .. " | " .. tostring(pi_state.sessionName or ""),
-		"Owner cwd: " .. tostring(snapshot and snapshot.interactions.runtime and snapshot.interactions.runtime.cwd or "—"),
-		"Control: " .. tostring(controller and controller.label or "unclaimed"),
-		"Model: " .. tostring(model and (model.provider .. "/" .. model.id) or "—") .. " | Thinking: " .. tostring(pi_state.thinkingLevel or "—"),
-		tostring(statuses["pi-access-mode"] or "Mode: —") .. " | " .. tostring(statuses["pi-integration-mode"] or "Integration: —") .. " | " .. tostring(statuses["pi-notifications"] or ""),
-		"Pending requests: " .. tostring(snapshot and #snapshot.interactions.pending or 0) .. " (:PiPending)",
-		"Shared queue: " .. tostring(snapshot and #snapshot.acceptedQueue.items or 0) .. " (:PiQueue)",
-		"Protected submissions (:PiSubmissions; not unsent drafts): " .. (#submissions > 0 and table.concat(submissions, ", ") or "none"),
-		"Live effects target this controller/context; editor text opens a separate draft (:PiOffers). Shell ! / !! executes on the owner.",
-		"Execution: " .. tostring(snapshot and vim.inspect(snapshot.conversation.execution) or "—"),
-		"Native queues (not editable application queue): " .. tostring(snapshot and vim.inspect(snapshot.conversation.queue) or "—"),
-		(snapshot and snapshot.error) and ("Error: " .. snapshot.error) or "", "" }
-end
-ctx.transcript.metadata_lines = function()
-	local lines = {}
-	for _, line in ipairs(metadata()) do vim.list_extend(lines, vim.split(line, "\n", { plain = true })) end
-	return lines
-end
+ctx.transcript.metadata_lines = function() return transcript.metadata_lines(ctx) end
 render = function()
 	publish_attachment()
 	if not valid(state.transcript_buf) then return end
 	local conversation = snapshot and snapshot.conversation
-	update_footer_state()
+	update_status_state()
 	layout.update_input_sidebar(ctx)
 	local visible = vim.deepcopy(conversation and conversation.messages or {})
 	if conversation then
@@ -354,6 +329,9 @@ render = function()
 	require("pi-integration.thinking-output").reset(state)
 	require("pi-integration.skills").reset(state)
 	local lines, items = messages.collect_message_lines(ctx, visible)
+	if snapshot and snapshot.error then
+		vim.list_extend(lines, { "", "Error: " .. snapshot.error })
+	end
 	if conversation then
 		for _, work in ipairs(conversation.work or {}) do
 			if work.kind == "bash" then
