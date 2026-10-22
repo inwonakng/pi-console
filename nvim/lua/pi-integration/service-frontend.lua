@@ -4,6 +4,8 @@ local M = { config = { access_modes = { "readonly", "ask", "edit", "full" },
 local layout = require("pi-integration.layout")
 local messages = require("pi-integration.messages")
 local transcript = require("pi-integration.transcript")
+local statusline = require("pi-integration.statusline")
+local buffer = require("pi-integration.utils.buffer")
 local state = require("pi-integration.state").new()
 local resources = require("pi-integration.service-resources")
 state.show_nested_tools = true
@@ -255,9 +257,47 @@ local function status_data(key)
 	local ok, value = pcall(vim.json.decode, raw or "")
 	return ok and value or nil
 end
-local ctx = { state = state, config = M.config, notices = { empty_session = "Send non-slash text after acquiring control." },
+local ctx = { state = state, config = M.config, service_mode = true,
+	notices = { empty_session = "Send non-slash text after acquiring control." },
 	buffer = { valid = valid, set_modifiable = function(buf, value) vim.bo[buf].modifiable = value end },
-	session = { setup_keymaps = function() end }, transcript = { refresh_ui = function() end } }
+	session = { setup_keymaps = function() end }, transcript = {} }
+ctx.transcript.win_valid = function()
+	state.transcript_win = buffer.find_window(state.transcript_buf, state.transcript_win)
+	return state.transcript_win ~= nil
+end
+ctx.transcript.refresh_ui = function() statusline.update(ctx) end
+local function update_footer_state()
+	local conversation = snapshot and snapshot.conversation
+	local statuses = conversation and conversation.statuses or {}
+	local pi_state = snapshot and snapshot.piState or {}
+	local execution = conversation and conversation.execution or {}
+	state.access_mode = (statuses["pi-access-mode"] or ""):match("^Mode: (%w+)$")
+	state.integration_mode = (statuses["pi-integration-mode"] or ""):match("^Integration: (%w+)$")
+	state.notification_status = statuses["pi-notifications"]
+	state.workspace = snapshot and snapshot.workspace
+	state.provider = pi_state.model and pi_state.model.provider
+	state.model_id = pi_state.model and pi_state.model.id
+	state.thinking_level = pi_state.thinkingLevel
+	state.session_stats = conversation and conversation.stats
+	state.codex_usage = status_data("pi-codex-usage")
+	local spawns = status_data("pi-spawn-runs")
+	state.spawn_running_count = spawns and spawns.running or 0
+	state.is_loading = job ~= nil and (not snapshot or snapshot.phase == "initializing")
+	state.is_agent_running = job ~= nil and (execution.running == true or pi_state.isCompacting == true)
+	state.is_streaming = job ~= nil and pi_state.isStreaming == true
+	state.is_retrying = job ~= nil and execution.retry and execution.retry.type == "auto_retry_start" or false
+	state.activity_label = pi_state.isCompacting and "compacting" or "work"
+	state.pending_user_messages = snapshot and snapshot.acceptedQueue.items or {}
+	state.pending_ui_requests, state.active_ui_request_id = {}, nil
+	for _, item in ipairs(snapshot and snapshot.interactions.pending or {}) do
+		if not item.submitted then
+			local id = item.request.id
+			state.pending_ui_requests[id] = { label = item.request.method, hidden = approval_request ~= id }
+			state.active_ui_request_id = id
+			break
+		end
+	end
+end
 local function metadata()
 	local controller = current_controller()
 	local pi_state = snapshot and snapshot.piState or {}
@@ -295,7 +335,7 @@ render = function()
 	publish_attachment()
 	if not valid(state.transcript_buf) then return end
 	local conversation = snapshot and snapshot.conversation
-	state.access_mode = conversation and (conversation.statuses["pi-access-mode"] or ""):match("^Mode: (%w+)$")
+	update_footer_state()
 	layout.update_input_sidebar(ctx)
 	local visible = vim.deepcopy(conversation and conversation.messages or {})
 	if conversation then
@@ -359,9 +399,7 @@ render = function()
 	transcript.preserve_view(ctx, function() layout.set_buffer_lines(ctx, state.transcript_buf, split, false) end)
 	transcript.apply_collected_transcript_items(ctx, items)
 	require("pi-integration.tool-groups").apply_folds(state, state.transcript_win)
-	if state.transcript_win and vim.api.nvim_win_is_valid(state.transcript_win) then
-		vim.wo[state.transcript_win].statusline = " Pi service " .. (control_current() and "CONTROLLER" or "VIEWER") .. " %="
-	end
+	statusline.update(ctx)
 end
 local function apply_snapshot(value)
 	if value.sessionId ~= session_id then return end
@@ -1179,7 +1217,7 @@ function M.follow_markdown_link()
 	return require("pi-integration.utils.markdown-links").follow(nil, resource)
 end
 function M.show_logs() require("pi-integration.logs").show(ctx) end
-function M.restore_status_footer() end
+function M.restore_status_footer() statusline.update(ctx) end
 function M.get_commands(callback) callback({}) end
 function M.on_transcript_rendered() end
 function M.maybe_prompt_session_archive() end
@@ -1215,6 +1253,7 @@ function M.open(_, restore)
 		require("pi-integration.keymaps").setup({ state = state, actions = actions, buffer = ctx.buffer,
 			ui = { notify = notify }, transcript = { open_item_under_cursor = M.open_transcript_item }, service_mode = true })
 	end
+	statusline.setup(ctx)
 	if restore or not M.config.start_view then
 		conversation_tab = vim.api.nvim_get_current_tabpage()
 		layout.open(ctx)

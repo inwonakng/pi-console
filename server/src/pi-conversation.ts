@@ -4,6 +4,9 @@ import { type PiEvent } from "./pi-records.js";
 type Success<C extends string> = Extract<RpcResponse, { command: C; success: true }>;
 export type PiMessage = Success<"get_messages">["data"]["messages"][number];
 type Assistant = Extract<PiMessage, { role: "assistant" }>;
+type SessionStats = Success<"get_session_stats">["data"] & {
+  tokens: { sessionCacheRead?: number; sessionCacheWrite?: number };
+};
 type ToolStart = Extract<JsonAgentSessionEvent, { type: "tool_execution_start" }>;
 type ToolEnd = Extract<JsonAgentSessionEvent, { type: "tool_execution_end" }>;
 export type ToolState = Omit<ToolStart, "type"> & {
@@ -45,6 +48,7 @@ export type ConversationSnapshot = {
   widgets: Record<string, { lines: string[]; placement: "aboveEditor" | "belowEditor" }>;
   title?: string;
   piState?: RpcSessionState;
+  stats?: SessionStats;
 };
 
 export type FrontendEffect =
@@ -57,6 +61,7 @@ export type ConversationChange =
   | { type: "event"; event: JsonAgentSessionEvent }
   | { type: "history"; messages: PiMessage[] }
   | { type: "pi_state"; state: RpcSessionState }
+  | { type: "session_stats"; stats: SessionStats }
   | { type: "status"; key: string; value?: string }
   | { type: "widget"; key: string; value?: ConversationSnapshot["widgets"][string] }
   | { type: "title"; title: string }
@@ -84,7 +89,19 @@ export class PiConversation {
   private readonly liveSizes = new Map<string, number>();
   private liveBytes = 0;
 
-  snapshot(): ConversationSnapshot { return structuredClone(this.state); }
+  private cacheRead = 0;
+  private cacheWrite = 0;
+
+  snapshot(): ConversationSnapshot {
+    const snapshot = structuredClone(this.state);
+    if (snapshot.stats) {
+      // Match the legacy footer: largest single-turn cache footprint, not
+      // cumulative cache tokens. Compute before bounded history drops messages.
+      snapshot.stats.tokens.sessionCacheRead = this.cacheRead;
+      snapshot.stats.tokens.sessionCacheWrite = this.cacheWrite;
+    }
+    return snapshot;
+  }
   /** Exact owner-observed output metadata, without copying a conversation per chunk. */
   outputPaths(): string[] {
     const paths = new Set<string>();
@@ -159,6 +176,8 @@ export class PiConversation {
         this.messageBytes.length = 0;
         this.historyBytes = 0;
         this.state.omittedMessages = 0;
+        this.cacheRead = 0;
+        this.cacheWrite = 0;
         for (const message of change.messages) this.append(message);
         this.state.historyRevision++;
         this.state.hydrated = true;
@@ -172,6 +191,10 @@ export class PiConversation {
         this.reserve("pi_state", change.state);
         this.state.piState = change.state;
         this.state.execution.running = change.state.isStreaming;
+        break;
+      case "session_stats":
+        this.reserve("session_stats", change.stats);
+        this.state.stats = change.stats;
         break;
       case "status": this.reserve(`status:${change.key}`, change.value); setValue(this.state.statuses, change.key, change.value); break;
       case "widget": this.reserve(`widget:${change.key}`, change.value); setValue(this.state.widgets, change.key, change.value); break;
@@ -203,6 +226,10 @@ export class PiConversation {
         this.state.widgets = {};
         this.state.title = undefined;
         this.state.piState = undefined;
+        this.state.stats = undefined;
+        this.cacheRead = 0;
+        this.cacheWrite = 0;
+        this.reserve("session_stats", undefined);
         for (const key of this.liveSizes.keys()) {
           if (key.startsWith("status:") || key.startsWith("widget:") || key === "title" || key === "pi_state" || key === "queue" || key.startsWith("execution:")) this.reserve(key, undefined);
         }
@@ -229,6 +256,10 @@ export class PiConversation {
   }
 
   private append(message: PiMessage): void {
+    if (message.role === "assistant") {
+      this.cacheRead = Math.max(this.cacheRead, message.usage.cacheRead);
+      this.cacheWrite = Math.max(this.cacheWrite, message.usage.cacheWrite);
+    }
     const bytes = size(message);
     if (bytes > HISTORY_BYTES) throw new Error("Pi conversation message exceeds 16 MiB");
     this.state.messages.push(message);

@@ -4,3 +4,5 @@ server/node_modules/
 server/dist/
 *.log
 /TODO.md
+/plans
+/fixes.md

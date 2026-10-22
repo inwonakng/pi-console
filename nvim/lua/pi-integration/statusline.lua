@@ -591,7 +591,9 @@ local function render_footer(ctx, buf, width)
 end
 
 function M.setup(ctx)
-	diff_stats.setup(ctx.state, function() M.update(ctx) end)
+	if not ctx.service_mode then
+		diff_stats.setup(ctx.state, function() M.update(ctx) end)
+	end
 	local update_scheduled = false
 	local function schedule_update()
 		if update_scheduled then
@@ -641,7 +643,9 @@ end
 
 function M.update(ctx)
 	local state = ctx.state
-	diff_stats.refresh(state, function() M.update(ctx) end)
+	if not ctx.service_mode then
+		diff_stats.refresh(state, function() M.update(ctx) end)
+	end
 	if not ctx.transcript.win_valid() then
 		close_footer(state)
 		return

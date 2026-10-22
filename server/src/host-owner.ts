@@ -1610,7 +1610,7 @@ export class OwnedSession {
     }
     const work = this.conversation.dispatch(command);
     if (work) this.retain({ type: "work", work });
-    if (command.type === "get_messages" && this.worker && this.conversation.idle) {
+    if ((command.type === "get_messages" || command.type === "get_session_stats") && this.worker && this.conversation.idle) {
       this.captures.set(command.id, { worker: this.worker, revision: this.runtimeRevision, version: this.conversation.historyVersion });
     }
   }
@@ -1621,12 +1621,13 @@ export class OwnedSession {
       this.retain({ type: "pi_state", state: response.data });
       this.changed();
     }
-    if (command.type === "get_messages") {
+    if (command.type === "get_messages" || command.type === "get_session_stats") {
       const capture = this.captures.get(command.id);
       this.captures.delete(command.id);
-      if (response.success && response.command === "get_messages" && capture && capture.worker === this.worker
+      if (response.success && capture && capture.worker === this.worker
         && capture.revision === this.runtimeRevision && capture.version === this.conversation.historyVersion && this.conversation.idle) {
-        this.retain({ type: "history", messages: response.data.messages });
+        if (response.command === "get_messages") this.retain({ type: "history", messages: response.data.messages });
+        if (response.command === "get_session_stats") this.retain({ type: "session_stats", stats: response.data });
       } else this.refreshAgain = true;
     }
     this.scheduleQueue();
@@ -1652,6 +1653,9 @@ export class OwnedSession {
         await worker.request({ type: "get_state" });
         if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
         if (this.conversation.sessionState?.isStreaming || !this.conversation.idle) return;
+        await worker.request({ type: "get_session_stats" });
+        if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
+        if (!this.conversation.idle) return;
         await worker.request({ type: "get_messages" });
       } while (this.refreshAgain && worker === this.worker && this.conversation.idle && !this.stopRequested && !this.exit);
     })().catch((error: unknown) => { this.refreshAgain = false; throw error; }).finally(() => {
