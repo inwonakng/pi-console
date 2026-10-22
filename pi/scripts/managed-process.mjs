@@ -176,7 +176,8 @@ export function stopManaged(child) {
 
 // Best-effort discovery, never a stable registration boundary or stale-disk PID kill.
 // A supervisor retains observed identities only in memory. Losing it leaves its
-// granted job unresolved. setsid/double-fork between samples can escape discovery.
+// granted job unresolved. Discovery runs only during cleanup; processes that
+// leave the workload group and lose their ancestry before then can escape it.
 function processes() {
   const output = execFileSync('/bin/ps', ['-ww', '-axo', 'pid=,ppid=,pgid=,stat=,lstart=,command='], { encoding: 'utf8', timeout: 1000, maxBuffer: 8 * 1024 * 1024 });
   const rows = new Map();
@@ -195,6 +196,7 @@ async function supervise(path, id) {
   let launched = false;
   let finished = false;
   let directUnresolved = false;
+  let sealed = false;
   const known = new Map();
   const stop = () => { stopAt ??= performance.now(); };
   // Install death handling BEFORE waiting for initialization/launch.
@@ -228,13 +230,17 @@ async function supervise(path, id) {
   });
   try {
     db = registry(path);
+    const currentJob = db.prepare('SELECT * FROM jobs WHERE id=?');
     while (!finished) {
-      const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+      const job = currentJob.get(id);
       if (!job || !job.launch_open || !ancestorsOpen(db, job)) stop();
+      // Registry admission still observes ancestor cancellation/reconciliation,
+      // but running workloads need no process-table discovery.
+      if (stopAt === undefined) { await delay(50); continue; }
       // No launch request can arrive after owner death and a cancelled intent
       // cannot acquire a grant even if its supervisor starts very late.
-      if (stopAt) transaction(db, () => sealTree(db, id));
-      const rows = processes();
+      if (!sealed) { transaction(db, () => sealTree(db, id)); sealed = true; }
+      const rows = anchor?.pid || known.size ? processes() : new Map();
       const delegated = new Set();
       const children = db.prepare(`WITH RECURSIVE tree(id) AS (SELECT id FROM jobs WHERE parent=? UNION ALL SELECT jobs.id FROM jobs JOIN tree ON jobs.parent=tree.id) SELECT id FROM tree`).all(id);
       for (const row of rows.values()) if (children.some(child => row.command.endsWith(`managed-process.mjs supervise ${path} ${child.id}`))) delegated.add(row.pid);
@@ -246,24 +252,34 @@ async function supervise(path, id) {
       // Registered supervisors own their subtrees. Killing those helpers here
       // would destroy the very terminal evidence this ancestor must await.
       for (const pid of delegated) known.delete(pid);
-      if (anchor?.pid && anchor.exitCode === null && anchor.signalCode === null) {
-        let changed;
-        do {
-          changed = false;
-          for (const row of rows.values()) if (!delegated.has(row.pid) && !known.has(row.pid) && (row.pid === anchor.pid || known.has(row.parent))) {
-            known.set(row.pid, row); changed = true;
-          }
-        } while (changed);
-      }
       for (const [pid, row] of known) if (!rows.has(pid) || rows.get(pid).identity !== row.identity || rows.get(pid).zombie) known.delete(pid);
-      if (stopAt) {
+      const anchorAlive = anchor?.pid && anchor.exitCode === null && anchor.signalCode === null;
+      let changed;
+      do {
+        changed = false;
+        for (const row of rows.values()) if (!row.zombie && !delegated.has(row.pid) && !known.has(row.pid)
+          && (anchorAlive && row.group === anchor.pid || known.has(row.parent))) {
+          known.set(row.pid, row); changed = true;
+        }
+      } while (changed);
+      if (stopAt !== undefined) {
         const elapsed = performance.now() - stopAt;
         if (elapsed >= 2000) {
           // Fresh in-memory identity recheck. This is best-effort OS discovery,
           // not pidfd-strength isolation against hostile PID churn.
           const signal = elapsed >= 5000 ? 'SIGKILL' : 'SIGTERM';
+          // The live child anchor pins its process group. Never signal a group
+          // remembered after anchor exit, or one containing delegated helpers.
+          // Keep the anchor alive until it acknowledges the workload's exit.
+          const group = anchorAlive && rows.get(anchor.pid)?.group === anchor.pid
+            && ![...delegated].some(pid => rows.get(pid)?.group === anchor.pid)
+            && (signal === 'SIGTERM' || exit) ? anchor.pid : undefined;
+          if (group !== undefined) {
+            try { process.kill(-group, signal); }
+            catch (e) { if (e.code !== 'ESRCH') throw e; }
+          }
           for (const [pid, row] of known) {
-            if (pid === anchor?.pid && (signal === 'SIGTERM' || !exit)) continue;
+            if (row.group === group || pid === anchor?.pid && (signal === 'SIGTERM' || !exit)) continue;
             if (rows.get(pid)?.identity === row.identity) {
               try { process.kill(pid, signal); }
               catch (e) { if (e.code !== 'ESRCH') throw e; }
@@ -286,7 +302,7 @@ async function supervise(path, id) {
           finished = true;
         }
       }
-      if (!finished) await delay(50);
+      if (!finished) await delay(250);
     }
     const result = JSON.parse(db.prepare('SELECT result FROM jobs WHERE id=?').get(id).result);
     if (process.connected) await new Promise(resolve => process.send({ type: 'managed_exit', exit: result }, () => resolve()));
