@@ -3,22 +3,26 @@
 set -eu
 
 usage() {
-    printf 'Usage: %s [--overview | --sidebar | --session PATH]\n' "${0##*/}" >&2
+    printf 'Usage: %s [--overview | --sidebar | --new | --attach ID | --resume ID]\n' "${0##*/}" >&2
     printf '       %s tmux {setup|toggle|new|overview|sidebar} [ARGS...]\n' "${0##*/}" >&2
-    printf '       %s --service [--overview | --sidebar | --new | --attach ID | --resume ID] [--root PATH | --remote HTTPS_ORIGIN --credential-file PATH [--ca-file PATH]]\n' "${0##*/}" >&2
-    printf '       %s server {run|start|status|stop|restart|reconcile|list|create|resume|credentials} [OPTIONS]\n' "${0##*/}" >&2
+    printf '       [--service] [--root PATH | --remote HTTPS_ORIGIN --credential-file PATH [--ca-file PATH]]\n' >&2
+    printf '       %s server {run|start|status|stop|restart|enable|disable|reconcile|list|create|resume|credentials} [OPTIONS]\n' "${0##*/}" >&2
     printf '       %s --version\n' "${0##*/}" >&2
-    exit 2
+    printf 'Local launches ensure the service and create in the invocation directory; overview/sidebar create nothing.\n' >&2
+    printf 'server enable --binary ABSOLUTE_PI [--path PATH] [--supervisor-dir DIR] enables login startup explicitly.\n' >&2
+    printf 'stop/restart/disable refuse active work unless --force; idle sessions are stopped and saved.\n' >&2
+    exit "${1:-2}"
 }
 
 script_path=$(realpath -- "${BASH_SOURCE[0]}")
 script_dir=$(dirname -- "$script_path")
 app_root=$(dirname -- "$script_dir")
 source "$script_dir/channel-env.sh"
+case "${1-}" in --help|-h) usage 0 ;; esac
 if [ "${1-}" = server ]; then
     shift
     [ -f "$app_root/server/dist/cli.js" ] || { printf 'Service build missing. Rerun the installer, or in a source checkout: npm ci --prefix server && npm run build --prefix server\n' >&2; exit 1; }
-    if [ -z "${PI_BINARY-}" ]; then export PI_BINARY=$(command -v pi); fi
+    if [ -z "${PI_BINARY-}" ] && command -v pi >/dev/null 2>&1; then export PI_BINARY=$(command -v pi); fi
     exec node "$app_root/server/dist/cli.js" "$@"
 fi
 
@@ -28,38 +32,6 @@ if [ "$PI_CONSOLE_INSTALL_MODE" = server-only ] && [ "${1-}" != --version ]; the
     exit 1
 fi
 
-# Service mode is opt-in. No failure may fall back to an editor-owned Pi process.
-if [ "${1-}" = --service ]; then
-    export PI_CONSOLE_SERVICE_FRONTEND=1
-    unset PI_CONSOLE_SERVICE_NEW PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CREDENTIAL_FILE PI_CONSOLE_SERVICE_CA_FILE
-    shift
-    while [ "$#" -gt 0 ]; do
-        case "$1" in
-            --overview) export PI_CONSOLE_OVERVIEW=1; shift; continue ;;
-            --sidebar) export PI_CONSOLE_SIDEBAR=1; shift; continue ;;
-            --new) export PI_CONSOLE_SERVICE_NEW=1; shift; continue ;;
-        esac
-        [ "$#" -ge 2 ] || usage
-        case "$1" in
-            --attach) export PI_CONSOLE_SERVICE_SESSION=$2 ;;
-            --resume) export PI_CONSOLE_SERVICE_SESSION=$2 PI_CONSOLE_SERVICE_RESUME=1 ;;
-            --root) export PI_CONSOLE_SERVICE_ROOT=$2 ;;
-            --remote) export PI_CONSOLE_SERVICE_REMOTE=$2 ;;
-            --credential-file) export PI_CONSOLE_SERVICE_CREDENTIAL_FILE=$2 ;;
-            --ca-file) export PI_CONSOLE_SERVICE_CA_FILE=$2 ;;
-            *) usage ;;
-        esac
-        shift 2
-    done
-    if [ -n "${PI_CONSOLE_SERVICE_REMOTE-}" ]; then
-        [ -n "${PI_CONSOLE_SERVICE_CREDENTIAL_FILE-}" ] && [ -z "${PI_CONSOLE_SERVICE_ROOT-}" ] || usage
-    else
-        [ -z "${PI_CONSOLE_SERVICE_CREDENTIAL_FILE-}${PI_CONSOLE_SERVICE_CA_FILE-}" ] || usage
-    fi
-    [ -f "$app_root/server/dist/bridge.js" ] || { printf 'Build server/ before using --service.\n' >&2; exit 1; }
-else
-    unset PI_CONSOLE_SERVICE_NEW PI_CONSOLE_SERVICE_FRONTEND PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CREDENTIAL_FILE PI_CONSOLE_SERVICE_CA_FILE
-fi
 if [ "$#" -eq 1 ] && [ "$1" = --version ]; then
     pi_console_build_snapshot
     pi_console_version
@@ -99,27 +71,48 @@ if [ "${1-}" = "tmux" ]; then
     esac
 fi
 
-if [ "${PI_CONSOLE_SERVICE_FRONTEND-}" != 1 ]; then unset PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR; fi
-unset PI_CONSOLE_SESSION
-
-case "$#" in
-    0)
-        ;;
-    1)
-        case "$1" in
-            --overview) export PI_CONSOLE_OVERVIEW=1 ;;
-            --sidebar) export PI_CONSOLE_SIDEBAR=1 ;;
-            *) usage ;;
-        esac
-        ;;
-    2)
-        [ "$1" = "--session" ] && [ -n "$2" ] || usage
-        export PI_CONSOLE_SESSION=$2
-        ;;
-    *)
-        usage
-        ;;
-esac
+# Service ownership is the default. Errors never fall back to editor-owned Pi.
+export PI_CONSOLE_SERVICE_FRONTEND=1
+unset PI_CONSOLE_SESSION PI_CONSOLE_SERVICE_NEW PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CREDENTIAL_FILE PI_CONSOLE_SERVICE_CA_FILE
+selection=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --service) shift; continue ;; # retained spelling for existing remote scripts
+        --overview|--sidebar|--new|--attach|--resume)
+            [ -z "$selection" ] || usage
+            selection=$1 ;;
+    esac
+    case "$1" in
+        --overview) export PI_CONSOLE_OVERVIEW=1; shift; continue ;;
+        --sidebar) export PI_CONSOLE_SIDEBAR=1; shift; continue ;;
+        --new) export PI_CONSOLE_SERVICE_NEW=1; shift; continue ;;
+        --session) printf 'Legacy session files are not service identities. Use pi-stable/pi-dev --session PATH, or --resume SERVICE_SESSION_ID. No legacy data was adopted.\n' >&2; exit 2 ;;
+    esac
+    [ "$#" -ge 2 ] && [ -n "$2" ] || usage
+    case "$1" in
+        --attach) export PI_CONSOLE_SERVICE_SESSION=$2 ;;
+        --resume) export PI_CONSOLE_SERVICE_SESSION=$2 PI_CONSOLE_SERVICE_RESUME=1 ;;
+        --root) export PI_CONSOLE_SERVICE_ROOT=$2 ;;
+        --remote) export PI_CONSOLE_SERVICE_REMOTE=$2 ;;
+        --credential-file) export PI_CONSOLE_SERVICE_CREDENTIAL_FILE=$2 ;;
+        --ca-file) export PI_CONSOLE_SERVICE_CA_FILE=$2 ;;
+        *) usage ;;
+    esac
+    shift 2
+done
+if [ -n "${PI_CONSOLE_SERVICE_REMOTE-}" ]; then
+    [ -n "${PI_CONSOLE_SERVICE_CREDENTIAL_FILE-}" ] && [ -z "${PI_CONSOLE_SERVICE_ROOT-}" ] || usage
+else
+    [ -z "${PI_CONSOLE_SERVICE_CREDENTIAL_FILE-}${PI_CONSOLE_SERVICE_CA_FILE-}" ] || usage
+    # Explicit attachment/resume must not create a replacement owner, and may
+    # intentionally view another compatible dev checkout's running service.
+    if [ -z "${PI_CONSOLE_SERVICE_SESSION-}" ]; then
+        start_args=(server start)
+        if [ -n "${PI_CONSOLE_SERVICE_ROOT-}" ]; then start_args+=(--root "$PI_CONSOLE_SERVICE_ROOT"); fi
+        bash "$script_path" "${start_args[@]}" >/dev/null
+    fi
+fi
+[ -f "$app_root/server/dist/bridge.js" ] || { printf 'Service bridge missing. Rerun the installer or build server/.\n' >&2; exit 1; }
 
 # A private handoff file lets Neovim request a relaunch without shell-parsing
 # session paths or prompt text. Each launcher owns its own restart state.

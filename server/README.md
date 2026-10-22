@@ -1,18 +1,18 @@
 # Host-side Pi owner (in development)
 
-This package contains the owner components, **opt-in local-service/Neovim
-attachment, typed single-session operations, HTTPS/WSS hosts, E1 owner resource
-reads/completion, E2 workspace review/guarded text saves, and E3 saved-session
-archival/deletion and recipient-bound frontend effects**, with F1 stable/dev full
-and server-only packaging. F2 supervisor/default-launch delivery and E2's unsupported
-symlink/submodule staging/restoration remain excluded. Cross-host/no-shared-storage,
-Linux and Node 22 verification remain open for the current delivery; F1 does not
-establish full E acceptance.
+This package contains the independent service and default Neovim attachment,
+typed single-session operations, HTTPS/WSS hosts, owner resource reads/completion,
+workspace review/guarded saves, saved-session archival/deletion and live frontend
+effects. Stable/dev full and server-only packaging includes explicit macOS launchd
+and Linux user-systemd startup management. Symlink/submodule staging/restoration
+remains unsupported. Cross-host/no-shared-storage, Linux and Node 22 verification
+remain open for the current delivery; macOS delivery does not establish full
+server-mode acceptance.
 See [`../docs/SERVER-MODE-C.md`](../docs/SERVER-MODE-C.md) for the mutation inventory,
 protocol/outcome rules, fresh macOS evidence and remaining boundaries. The plans and
 active B3 handoff are unchanged. B1–B3 evidence in the contracts report remains
-historical unless explicitly rerun for C. Ordinary launches keep their current
-transport; installed Pi is unchanged.
+historical unless explicitly rerun. Ordinary launches use the local service;
+installed Pi is unchanged.
 
 ## Build
 
@@ -34,15 +34,26 @@ dependencies. `scripts/install.sh [--full|--server-only]` selects stable;
 Mode is preserved when omitted. Old runtime trees remain unchanged across updates,
 including same-commit mode changes. Installation never starts/restarts services.
 The external Pi CLI must be 1.3.0; installers require Node >=22.19.0 and never modify
-those executables. Keep their resources unchanged while work is running.
+those executables. Both installation modes require Git >=2.45.0 and verify
+`merge-tree --write-tree --merge-base` with raw tree operands, as used by workspace
+integration. Full mode additionally checks Neovim >=0.12.0, `vim.pack.add`,
+Tree-sitter runtime ABI >=13 and Tree-sitter CLI >=0.26.1 (`generate`/`build`),
+plus the compiler/download tools listed in the main README. Server-only mode
+performs no Neovim or Tree-sitter checks. Keep executable resources unchanged
+while work is running.
 
-## B3 opt-in usage
+## Service usage
 
-Service attachment is still opt-in; F1 packaging does not change the default launch
-or install a login/boot supervisor. Source-only use can build manually above.
-Keep the service profile on private local
+Ordinary local launches ensure the service, create in the invocation directory and
+attach. Overview/sidebar launches ensure discovery without creating a conversation.
+Explicit attach/resume never starts a replacement owner. `--service` remains an
+optional spelling for existing scripts. No failure falls back to editor-owned Pi.
+Source-only use can build manually above. Keep the service profile on private local
 storage. Never delete `owner.lock`, adopt old editor state or auto-replay a mutation.
-The default root is `HOME/.local/state/pi-console/service/<channel>`.
+The default root is `~/.local/state/pi-console/service/<channel>` on macOS and Linux.
+`XDG_STATE_HOME` does not affect service state. Use explicit `--root` for a different
+profile; no state migration is performed. Frontend organization/drafts have separate
+XDG-aware paths.
 
 ```sh
 # Independent execution host: no Neovim/tmux required. Use an absolute Pi binary.
@@ -51,17 +62,21 @@ bin/pi-console server start --binary /absolute/path/to/pi
 bin/pi-console server status
 bin/pi-console server list
 bin/pi-console server create --cwd /absolute/project --id explicit-request-id
-# Client: create a new conversation, attach live, or explicitly resume saved.
-bin/pi-console --service
-bin/pi-console --service --attach SERVICE_SESSION_ID
-bin/pi-console --service --resume SERVICE_SESSION_ID
+# Full client: new in this directory, discovery only, attach live, or resume saved.
+bin/pi-console
+bin/pi-console --overview
+bin/pi-console --sidebar
+bin/pi-console --attach SERVICE_SESSION_ID
+bin/pi-console --resume SERVICE_SESSION_ID
 ```
 
 Use `--root /short/private/path` on both service and frontend for an isolated profile;
 Unix socket paths over 100 bytes refuse. Service CLI also accepts `--channel stable|dev`;
 the launcher selects its existing channel. The frontend displays the target channel,
 host/build and controller separately from Pi tool permissions. Another dev checkout
-cannot administer the same dev profile. Explicit compatible attachment remains allowed.
+or stable installation cannot administer the same profile. Explicit compatible
+attachment remains allowed. Legacy `--session PATH` files remain untouched; open
+those explicitly through `pi-stable`/`pi-dev --session PATH`, not a service identity.
 Missing service/build/version/channel errors do not start local Pi as a fallback.
 
 Normal `server stop` / `restart --binary ...` saves/stops idle sessions but refuses active
@@ -69,8 +84,8 @@ work, accepted queues, approvals, startup/transitions or known managed nested wo
 An intentional `--force` interrupts owned work, retains history/workspaces and waits
 for managed cleanup. Cleanup failure exits the owner with its claim retained; it does
 not leave a falsely healthy listener or authorize replacement. SIGTERM/SIGINT are
-explicit forced administrative shutdown, not frontend detach. Boot/login supervisor
-setup remains excluded; headless installation is available through `--server-only`. C's confirmed session restart/kill
+explicit forced administrative shutdown, not frontend detach. Headless installation
+is available through `--server-only`. Confirmed session restart/kill
 are attachment-bound commands, separate from these service administration actions.
 
 After owner death, `server reconcile` invokes the existing B2 managed recovery gate;
@@ -79,6 +94,88 @@ start nor resume performs reconciliation. Known unresolved managed work blocks i
 possible unknown escaped descendants do not. No command/queue/approval replay is
 allowed. The operational recovery path passed macOS B3 checks on Node 26.12 and actual
 22.19; Linux remains unexecuted.
+
+### Service environment and startup
+
+Installation never enables startup. On macOS, `server enable` installs a per-user
+LaunchAgent; on Linux it enables a user-systemd unit. Enable also starts/discovers
+the service. `start` uses that supervisor when configured, or a detached process
+otherwise. Neither policy automatically restarts after exit/crash: retained claims
+must be inspected, never automatically reconciled. `stop` leaves startup enabled;
+`disable` performs guarded IPC shutdown before unregistering startup. Normal
+stop/restart/disable refuses work at the owner's execution boundary, not from a
+previous status snapshot. `--force` is intentional authorization to interrupt
+owned work; an in-flight host lifecycle admission can still refuse and require
+an explicit retry. Idle sessions are stopped and saved, not resumed on restart.
+
+```sh
+pi-console server enable --binary /absolute/path/to/pi --path /opt/homebrew/bin:/usr/bin:/bin
+pi-console server status
+pi-console server stop
+pi-console server start
+pi-console server restart
+pi-console server disable                 # --force only to interrupt work
+```
+
+Use the matching `pi-console-dev` commands for dev. `--root` selects a private
+profile for every command. Enable accepts `--supervisor-dir DIR` for isolated
+LaunchAgent/unit definitions; disable/status discover that directory from the
+private profile registration. A launchd definition outside `~/Library/LaunchAgents`
+is for isolated/manual bootstrap and is not discovered automatically at login.
+Enabling while a detached owner is live writes future-startup registration without
+launching a competing owner. Labels include the channel and profile path hash.
+Exact definitions, loaded-definition paths and installation/checkout ownership
+are checked before management. Changed/unrelated definitions refuse rather than
+being overwritten or unloaded. Management commands serialize through
+`<profile>/management.lock`; remove a stale lock only after confirming no manager
+is running. A retained owner claim with no reachable service refuses enable before
+any startup registration, including from the original checkout; inspect/reconcile
+explicitly first. A live owner must belong to the same installation/checkout.
+
+Startup registration is published as complete, synchronized JSON before publishing
+the complete definition. Interrupted setup can leave registration without a
+definition: status reports `definitionPresent: false` and `enabled: false`; retry
+`enable`/`start` to publish it, or `disable` to remove registration.
+Failed writes never publish partial JSON/definitions; temporary `.tmp` files are
+not startup definitions. Disable removes registration last and can be retried after
+interrupted definition removal. Changed/unowned definitions still refuse management.
+A stale management lock still requires the inspection described above.
+
+Startup definitions reference the installation's `current` selection for the next
+process; a running owner resolves and pins its release. Updates change neither
+the registration nor live processes. Status shows `buildId` (running),
+`selectedBuildId`, `restartRequired`, endpoint/channel, sessions and startup
+registration. A stopped profile reports `running: false` and `claimPresent`.
+Restart waits for the departing endpoint and supervisor process before starting
+selected code. Old runtime trees must remain while their processes run.
+
+Supervised processes run without a shell under `env -i`: HOME, PATH and available
+USER/LOGNAME/LANG/LC_ALL/TMPDIR/PI_CODING_AGENT_DIR are captured at enable time.
+`--path` overrides PATH and must include Node (for Pi's shebang) and required tool
+executables; Pi and Node use explicit resolved absolute paths. Provider,
+model and TLS configuration paths supplied at enable are retained. Shell rc files,
+frontend tmux variables, shell-exported API keys, SSH agent sockets and unrelated
+environment variables are not inherited. Store provider credentials/settings on
+the execution host through Pi's normal private agent directory. To change startup
+environment/binary/options, disable then enable again; repeating enable retains the
+registered configuration. Detached startup instead uses its invoking host shell
+environment, with worker frontend/tmux markers filtered by the owner. A frontend
+connecting to an existing service never changes its environment. Keep external Pi
+and Node resources unchanged during live work; installation does not upgrade them.
+
+Default definitions live in `~/Library/LaunchAgents` or
+`${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user`. macOS user LaunchAgents require a
+GUI login and do not promise execution before login or after logout. Linux
+user-systemd requires a working user manager; execution without a login/after
+logout requires administrator-approved lingering (`loginctl enable-linger USER`).
+This command is never run automatically. Laptop sleep suspends execution; a sleeping
+host is unreachable and cannot continue tools until awake. OS shutdown/logout may
+interrupt work independently of guarded CLI commands. No uninterrupted execution
+across restart, reboot or sleep is promised.
+
+Disable/uninstall retains service catalogs, Pi JSONL, workspaces, recovery data,
+credentials and runtime snapshots. There is no automatic data purge. Back up a
+quiescent complete profile before any separately authorized manual removal.
 
 ### D1 explicit remote attachment
 

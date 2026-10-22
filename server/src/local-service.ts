@@ -129,7 +129,7 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
             clearTimeout(handshakeDeadline);
             result = { version: PROTOCOL, capabilities: deviceId ? CAPABILITIES.filter((c) => c !== "service.stop") : CAPABILITIES,
               transport: deviceId ? "wss" : "local", ...(deviceId ? { deviceId } : {}), hostId: owner.hostId, channel: options.channel,
-              buildId, runtimeBuildId: owner.buildId, appRoot: options.appRoot, serviceEpoch: owner.serviceEpoch,
+              buildId, runtimeBuildId: owner.buildId, appRoot: options.appRoot, serviceEpoch: owner.serviceEpoch, stopping: owner.shutdownStarted,
               ...(!deviceId ? { endpoint: path } : {}) };
             break;
           case "health":

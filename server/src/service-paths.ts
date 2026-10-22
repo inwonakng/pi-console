@@ -6,9 +6,10 @@ import { fileURLToPath } from "node:url";
 import type { Channel } from "./session-catalog.js";
 
 export const applicationRoot = (): string => fileURLToPath(new URL("../../", import.meta.url));
+// Service profiles are HOME-based, independent of XDG_STATE_HOME; --root is explicit.
 export const defaultRoot = (channel: Channel): string => join(homedir(), ".local/state/pi-console/service", channel);
-export async function serviceBuild(): Promise<string> {
-  const root = await realpath(dirname(fileURLToPath(import.meta.url)));
+export async function serviceBuild(appRoot = applicationRoot()): Promise<string> {
+  const root = await realpath(join(appRoot, "server/dist"));
   const hash = createHash("sha256").update(root);
   for (const file of (await readdir(root)).filter((file) => file.endsWith(".js")).sort()) hash.update(file).update(await readFile(join(root, file)));
   return `sha256:${hash.digest("hex")}`;
@@ -28,6 +29,27 @@ export async function devCheckout(appRoot: string): Promise<string> {
   const checkout = fields.get("checkout");
   if (fields.get("channel") !== "dev" || !checkout || !isAbsolute(checkout)) return appRoot;
   return checkout;
+}
+/** Installed snapshots use a stable selection path; live owners retain resolved roots. */
+export async function selectedApplication(appRoot: string): Promise<string> {
+  const root = await realpath(appRoot);
+  if (dirname(root).endsWith("/versions")) {
+    const selected = join(dirname(dirname(root)), "current");
+    // Refuse a selection link outside this installation.
+    const target = await realpath(selected);
+    if (dirname(target) !== dirname(root)) throw new Error("Selected runtime is outside its installation");
+    return selected;
+  }
+  return root;
+}
+export async function managementIdentity(appRoot: string, channel: Channel): Promise<string> {
+  const root = await realpath(appRoot);
+  let marker: string | undefined;
+  try { marker = await readFile(join(root, ".pi-console-install"), "utf8"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const markerChannel = marker?.match(/^channel=(.+)$/m)?.[1] ?? "dev";
+  if (markerChannel !== channel) throw new Error(`This ${markerChannel} runtime cannot administer the ${channel} channel`);
+  return channel === "dev" ? `dev:${await devCheckout(root)}` : `stable:${dirname(root).endsWith("/versions") ? dirname(dirname(root)) : root}`;
 }
 export function requireNode(): void {
   const [major, minor] = process.versions.node.split(".").map(Number);

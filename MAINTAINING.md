@@ -32,10 +32,13 @@ pi-console-dev tmux setup
 ```
 
 Switch back with `pi-console tmux setup`. Installing either version does not
-change the selected tmux shortcuts. `scripts/uninstall-dev.sh` removes this
-checkout's development commands and old package registration. It does not stop
-services or remove runtime snapshots, state, credentials or workspaces. Another
-checkout's dev installation is refused; unrelated wrappers are left untouched.
+change the selected tmux shortcuts. `scripts/uninstall-dev.sh` first disables this
+checkout's service startup through guarded IPC shutdown, then removes its development
+commands and old package registration. Active work refuses unless `--force` is
+explicit. `--root PRIVATE_PROFILE` and `--supervisor-dir DIR` support isolated setups.
+Runtime snapshots, state, credentials and workspaces remain. Another checkout's
+installation/service and changed or unrelated definitions refuse teardown;
+unrelated wrappers and stable services are left untouched.
 
 ### Repository layout
 
@@ -127,8 +130,23 @@ changes your normal Neovim configuration. Release launches use the locked
 `nvim-extras` plugin rather than a local development override.
 
 Old stable/dev runtime directories remain so running sessions are not disrupted.
-Neither installer starts/stops services or installs supervisor definitions. Service
-status can compare the running and selected builds; restart is explicit and guarded.
+Neither installer starts/stops services or installs supervisor definitions. Ordinary
+full-client launches ensure an independent local service; overview/sidebar launches
+create no conversation. Startup is separately enabled with
+`pi-console[-dev] server enable --binary /absolute/path/to/pi`. Service status
+compares running `buildId` and `selectedBuildId`, reports `restartRequired`, and
+shows sessions/registration. Restart is explicit and guarded; it saves/stops idle
+sessions and never replays work or automatically resumes them. A selected update
+must not rewrite the running snapshot, its dependencies or external Pi/Node files.
+
+Use isolated installation destinations, `--root` and `--supervisor-dir` for lifecycle
+checks. Never run a fixture's enable/disable against real startup definitions.
+Verify simultaneous discovery, active/queued/approval refusal, forced cleanup,
+frontend detach, update continuity and ownership rejection before release. Linux,
+Node 22 and cross-host/no-shared-storage acceptance require their own execution;
+macOS checks do not establish them. See
+[service environment and startup](server/README.md#service-environment-and-startup)
+for captured PATH/environment, login/logout, lingering and sleep limitations.
 Server-only mode installs both command names but refuses frontend/tmux operations
 with instructions to install `--full`. It still requires Pi 1.3.0, Node >=22.19,
 Bash/Git/ripgrep and the sandbox runtime prerequisites (Linux bubblewrap/socat).

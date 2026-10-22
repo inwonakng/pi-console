@@ -18,7 +18,7 @@ export class LocalClient {
   private constructor(private readonly socket: Duplex, private readonly event: (record: Record<string, unknown>) => void) {
     this.writer = new RecordWriter(socket);
     socket.on("error", () => undefined);
-    void this.read().catch((error) => this.failed(error)).finally(() => this.failed(new Error("Service disconnected; accepted mutations were not replayed. Reconnect and inspect command status.")));
+    void this.read().catch((error) => this.failed(error)).finally(() => this.failed(Object.assign(new Error("Service disconnected; accepted mutations were not replayed. Reconnect and inspect command status."), { code: "service_disconnected" })));
   }
   static async open(root: string, channel: Channel, event: (record: Record<string, unknown>) => void = () => undefined): Promise<{ client: LocalClient; hello: Record<string, unknown> }> {
     const path = endpoint(root);

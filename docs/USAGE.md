@@ -14,6 +14,28 @@ releases, see [Maintaining pi-console](../MAINTAINING.md).
 - [Zotero references](#zotero-references)
 - [LaTeX graphics](#optional-latex-graphics-in-tmux)
 
+## Launch and service controls
+
+`pi-console` ensures the local service and creates in the invocation directory.
+`--overview` and `--sidebar` show discovery without creating a conversation.
+`--attach ID` selects a live service conversation; `--resume ID` explicitly resumes
+saved history. Neither starts a replacement owner when the target is unavailable.
+Legacy file-based history remains available through `pi-stable`/`pi-dev --session PATH`.
+
+Closing Neovim detaches; work, accepted prompts and pending approvals remain owned
+by the service. `:PiHosts` selects local or saved HTTPS hosts. Explicit remote
+launches accept `--remote HTTPS_ORIGIN --credential-file PRIVATE_FILE` (optional
+`--ca-file FILE`); remote creation selects a directory on that host, never this
+machine's cwd. See [service usage](../server/README.md).
+
+`server status` reports running/selected builds and restart needs. `server
+stop|restart|disable` saves/stops idle conversations but refuses active work,
+accepted queues, approvals and transitions. `--force` intentionally interrupts
+owned work while retaining data. Installation never enables startup; use `server
+enable --binary /absolute/path/to/pi` explicitly. Startup PATH is captured without
+shell rc files; login/logout and sleep constrain execution. See
+[environment and startup](../server/README.md#service-environment-and-startup).
+
 ## Conversation controls
 
 The prompt and transcript are Neovim buffers. Use normal editing and search
@@ -67,14 +89,16 @@ parent session has its own side conversation. Stop side work before restarting.
 
 ### Restarting
 
-Use `<leader>pR` or `:PiConsoleRestart` to restart Neovim and Pi in the same
-terminal, keeping the conversation and unsent prompt. Finish or abort active
-work, resolve pending requests, and save or discard modified file buffers first.
-This requires launching through `pi-console`. After installing a new release,
-close and relaunch `pi-console` instead; the restart command keeps the old release.
+Use `<leader>pR` or `:PiConsoleRestart` to restart only the frontend in the same
+terminal, retaining the selection, drafts and unresolved request IDs. Execution
+continues independently; reconnect does not reacquire control or replay mutations.
+This requires launching through `pi-console`. To use a newly installed frontend,
+close and relaunch with `--attach ID`; the restart command keeps the old release.
 
-To restart only Pi, use `<leader>pr` or `:PiRestart`. Check the running build
-with `:PiConsoleVersion`.
+To explicitly restart the selected Pi session, use `<leader>pr` or `:PiRestart`.
+To change the running service release, use `pi-console server restart`; active
+work refuses unless interruption is explicitly authorized. Check frontend identity
+with `:PiConsoleVersion`, and service builds with `pi-console server status`.
 
 ## Sessions and dialogs
 
@@ -88,7 +112,8 @@ an outstanding question or approval still needs a response. Reopened sessions
 start idle; unread status is not saved. The overview and sidebar share named
 groups and manual ordering. Pins (``) stay within their groups: press `p` on a
 saved session to keep it visible after its window closes and across restarts,
-with status `Not Open`. Enter focuses an open session or reopens a closed pin.
+with status `Not Open`. Enter attaches here to an open session or explicitly
+resumes a stopped pin on its owning host.
 Unpinning a closed session hides it, without removing its history or group assignment.
 
 Both lists use the same controls:

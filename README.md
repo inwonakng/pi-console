@@ -27,11 +27,13 @@ setups. Future maintenance and support are not guaranteed.
 Developed with **Neovim 0.12, Pi 1.3.0, and tmux 3.7**. The optional tmux
 integration supports **tmux 3.4+**.
 
-Install these before starting (the installer checks Pi 1.3.0 and Node.js 22.19+):
+Install these before starting (both installers check versions and required capabilities):
 
-- Git, Bash, curl, npm, `realpath`, and `ripgrep`.
-- For a full client: Neovim, tmux, `fzf`, Rust/Cargo, a C compiler, and the
-  Tree-sitter parser toolchain for Neovim plugins.
+- Pi 1.3.0, Node.js >=22.19.0, Git >=2.45.0, Bash, curl, tar, npm, `realpath`, and `ripgrep`.
+  Git must support `merge-tree --write-tree --merge-base` with raw tree operands.
+- For a full client: Neovim >=0.12.0 with `vim.pack.add` and Tree-sitter runtime ABI >=13,
+  tmux, `fzf`, Rust/Cargo, a C compiler, and Tree-sitter CLI >=0.26.1
+  (`tree-sitter generate` and `tree-sitter build`; install through a package manager, not npm).
 - On Linux, `bubblewrap` and `socat` for command sandboxing.
 
 Initial setup downloads packages, plugins, and parsers, so it needs network
@@ -51,11 +53,17 @@ Make sure `~/.local/bin` is on your `PATH`, then run from your project directory
 pi-console
 ```
 
-The installer also adds `pi-stable`, which runs Pi's terminal UI with the same
-bundled extensions. Your regular `pi` command is unchanged.
+A local launch ensures the independent service, creates a conversation in the
+invocation directory and attaches. Closing Neovim leaves execution running.
+`pi-console --overview` and `--sidebar` create no conversation. Use `--attach ID`
+for a live conversation or `--resume ID` for a saved service conversation.
 
-Run the install command again to update. New launches use the selected runtime;
-running services and sessions keep their existing runtime. The installer builds
+The installer also adds `pi-stable`, which runs Pi's terminal UI directly with the
+same bundled extensions. Your regular `pi` command is unchanged.
+
+Run the install command again to update. New frontends/TUIs use the selected
+runtime. A running service, including conversations created after the update,
+keeps its pinned runtime until an explicit guarded restart. The installer builds
 the service/bridge using locked dependencies and never starts or restarts a service.
 For a specific release or a development checkout, see
 [Maintaining pi-console](MAINTAINING.md).
@@ -70,9 +78,28 @@ pi-console server start --binary /absolute/path/to/pi
 Server-only mode needs no Neovim, tmux, fzf, Cargo or Tree-sitter tooling. It includes
 the service, bridge and bundled extensions; `pi-stable` remains a direct Pi TUI.
 Updates without a mode flag preserve the selected mode; use `--full` to switch back.
-Service attachment remains explicit through `pi-console --service` on a full client.
-See [service usage](server/README.md) for private profiles and remote setup.
-Supervisor setup and default service-backed launch are not delivered in F1.
+A full client can attach with `pi-console --attach ID`. See
+[service usage](server/README.md) for private profiles and remote setup.
+
+### Service management
+
+Installation never enables startup. Enable it explicitly with macOS launchd or
+Linux user-systemd:
+
+```sh
+pi-console server enable --binary /absolute/path/to/pi
+pi-console server status
+pi-console server restart
+pi-console server disable
+```
+
+Normal stop/restart/disable refuses active work, queued prompts and approvals;
+`--force` intentionally interrupts owned work. Idle conversations are stopped and
+saved. Disable preserves histories, workspaces and credentials. Updates leave the
+running release pinned; status reports running/selected builds and restart needs.
+Startup captures an explicit PATH and Pi/Node paths, without shell initialization.
+LaunchAgents require login; Linux execution after logout requires user lingering.
+Sleep suspends execution. See [service environment and startup](server/README.md#service-environment-and-startup).
 
 ## Your first conversation
 
