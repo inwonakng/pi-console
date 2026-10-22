@@ -9,9 +9,10 @@ install_root=${install_root%/}
 bin_dir=${bin_dir%/}
 requested_version=
 requested_ref=
+requested_mode=
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: install.sh [--version VERSION | --ref REF]' >&2
+    printf '%s\n' 'Usage: install.sh [--full | --server-only] [--version VERSION | --ref REF]' >&2
     printf '%s\n' 'Defaults to the latest published GitHub Release; --ref explicitly selects a branch or tag.' >&2
     exit "${1:-2}"
 }
@@ -22,6 +23,10 @@ while [ "$#" -gt 0 ]; do
             [ -z "$requested_version$requested_ref" ] || fail 'Use only one version or ref selector.'
             if [ "$1" = --version ]; then requested_version=$2; else requested_ref=$2; fi
             shift 2 ;;
+        --full|--server-only)
+            [ -z "$requested_mode" ] || fail 'Use only one installation mode flag.'
+            if [ "$1" = --full ]; then requested_mode=full; else requested_mode=server-only; fi
+            shift ;;
         -h|--help) usage 0 ;;
         *) usage ;;
     esac
@@ -42,6 +47,10 @@ valid_commit() {
     [ "${#1}" -eq 40 ] || return 1
     case "$1" in *[!0-9a-f]*) return 1 ;; esac
 }
+valid_release() {
+    valid_commit "$1" && return 0
+    [[ "$1" =~ ^[0-9a-f]{40}-(full|server-only)-[a-zA-Z0-9]{6}$ ]]
+}
 remove_registration() {
     local output
     if ! output=$(pi remove "$1" 2>&1); then
@@ -56,16 +65,11 @@ validate_directory "$bin_dir"
 [ "$install_root" != "$bin_dir" ] || fail 'Application and command directories must differ.'
 case "$bin_dir/" in "$install_root/"*) fail 'Command directory must be outside the application directory.' ;; esac
 
-missing=
-required_commands='curl git node npm nvim pi tmux fzf cargo cc realpath rg'
-if [ "$(uname -s)" = Linux ]; then required_commands="$required_commands bwrap socat"; fi
-for command in $required_commands; do
-    if ! command -v "$command" >/dev/null 2>&1; then missing="$missing $command"; fi
-done
-[ -z "$missing" ] || fail "Missing required commands:$missing"
-node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' \
-    || fail 'Node.js 22.19.0 or newer is required by Pi. Update Node.js and retry.'
-
+# Serialize selection/build/activation, including mode discovery. No service is stopped.
+mkdir -p "$(dirname -- "$install_root")"
+install_lock="$install_root.install-lock"
+mkdir -- "$install_lock" 2>/dev/null || fail "Installer already running or stale lock: $install_lock (remove only after confirming no installer is running)."
+trap 'rmdir -- "$install_lock"' EXIT
 legacy=no
 marker="$install_root/.pi-console-install"
 if [ -d "$install_root" ] && [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
@@ -94,7 +98,12 @@ elif [ -d "$install_root" ]; then
         for name in current; do
             if [ -L "$install_root/$name" ]; then
                 link=$(readlink "$install_root/$name")
-                case "$link" in versions/*) valid_commit "${link#versions/}" || fail "Invalid $name link." ;; *) fail "Unmanaged $name link." ;; esac
+                case "$link" in versions/*) valid_release "${link#versions/}" || fail "Invalid $name link." ;; *) fail "Unmanaged $name link." ;; esac
+                selected="$install_root/$link"
+                [ ! -L "$selected" ] && [ -d "$selected" ] \
+                    && [ ! -L "$selected/.pi-console-install" ] && [ -f "$selected/.pi-console-install" ] \
+                    && [ "$(value "$selected/.pi-console-install" source)" = "$repository" ] \
+                    || fail 'Invalid selected stable runtime.'
             elif [ -e "$install_root/$name" ]; then
                 fail "Refusing unmanaged path: $install_root/$name"
             fi
@@ -102,7 +111,31 @@ elif [ -d "$install_root" ]; then
     fi
 fi
 
-mkdir -p "$(dirname -- "$install_root")" "$bin_dir"
+mode=$requested_mode
+if [ -z "$mode" ] && [ "$legacy" = no ] && [ -L "$install_root/current" ]; then
+    selected_marker="$install_root/current/.pi-console-install"
+    [ ! -L "$selected_marker" ] && [ -f "$selected_marker" ] \
+        && [ "$(value "$selected_marker" source)" = "$repository" ] || fail 'Invalid selected release marker.'
+    mode=$(value "$selected_marker" mode)
+fi
+mode=${mode:-full}
+case "$mode" in full|server-only) ;; *) fail "Unknown installation mode: $mode" ;; esac
+missing=
+required_commands='curl git node npm pi realpath rg'
+if [ "$mode" = full ]; then required_commands="$required_commands nvim tmux fzf cargo cc"; fi
+if [ "$(uname -s)" = Linux ]; then required_commands="$required_commands bwrap socat"; fi
+for command in $required_commands; do
+    if ! command -v "$command" >/dev/null 2>&1; then missing="$missing $command"; fi
+done
+[ -z "$missing" ] || fail "Missing required commands:$missing"
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' \
+    || fail 'Node.js 22.19.0 or newer is required. Update Node.js and retry.'
+[ "$(pi --version)" = 1.3.0 ] || fail 'Pi 1.3.0 is required by this build. Select that Pi version and retry; the installer does not modify Pi.'
+if [ -e "$install_root/pi" ] || [ -L "$install_root/pi" ]; then
+    [ "$legacy" = yes ] || { [ -L "$install_root/pi" ] && [ "$(readlink "$install_root/pi")" = current/pi ]; } \
+        || fail 'Unmanaged compatibility package link.'
+fi
+mkdir -p "$bin_dir"
 staging=$(mktemp -d "$(dirname -- "$install_root")/.pi-console-install.XXXXXX")
 migration_started=no
 activation_done=no
@@ -129,6 +162,7 @@ cleanup() {
         fi
     fi
     rm -rf -- "$staging"
+    rmdir -- "$install_lock"
 }
 trap cleanup EXIT
 source_dir="$staging/source"
@@ -195,11 +229,13 @@ commit=$(git -C "$source_dir" rev-parse HEAD)
 valid_commit "$commit" || fail 'Git returned an invalid commit.'
 [ -f "$source_dir/bin/pi-console" ] && [ -f "$source_dir/bin/pi-shell" ] \
     && [ -f "$source_dir/bin/channel-env.sh" ] || fail 'Selected ref does not contain the channel-aware launchers.'
-printf '%s\n' 'Installing release dependencies...'
-(cd "$source_dir/pi" && npm ci --omit=dev)
-[ -d "$source_dir/pi/node_modules" ] || fail 'npm did not create the dependency directory.'
+[ -f "$source_dir/scripts/build-runtime.sh" ] || fail 'Selected ref predates service packaging; select a release with F1 packaging.'
+printf 'Building %s runtime with locked dependencies...\n' "$mode"
+bash "$source_dir/scripts/build-runtime.sh"
 rm -rf -- "$source_dir/.git"
-printf 'ref=%s\ncommit=%s\nsource=%s\n' "$install_ref" "$commit" "$repository" >"$source_dir/.pi-console-install"
+printf 'ref=%s\ncommit=%s\nsource=%s\nchannel=stable\nmode=%s\n' "$install_ref" "$commit" "$repository" "$mode" >"$source_dir/.pi-console-install"
+# Every activation gets a fresh immutable directory, including same-commit mode changes.
+release="$commit-$mode-${staging##*.}"
 
 # Keep legacy registrations intact until filesystem activation succeeds. During
 # migration the compatibility package link keeps ordinary Pi usable as well.
@@ -215,20 +251,11 @@ if [ "$legacy" = yes ]; then
 fi
 printf 'layout=versioned\nsource=%s\n' "$repository" >"$staging/root-marker"
 mv -f -- "$staging/root-marker" "$install_root/.pi-console-install"
-if [ -e "$install_root/versions/$commit" ] || [ -L "$install_root/versions/$commit" ]; then
-    existing="$install_root/versions/$commit"
-    [ ! -L "$existing" ] && [ -d "$existing" ] && [ ! -L "$existing/.pi-console-install" ] \
-        && [ -f "$existing/.pi-console-install" ] && [ "$(value "$existing/.pi-console-install" commit)" = "$commit" ] \
-        && [ "$(value "$existing/.pi-console-install" source)" = "$repository" ] \
-        || fail "Refusing an unowned version directory: $existing"
-    # Reinstalling a tag for this commit updates its displayed identity.
-    cp "$source_dir/.pi-console-install" "$staging/version-marker"
-    mv -f -- "$staging/version-marker" "$existing/.pi-console-install"
-else
-    mv -- "$source_dir" "$install_root/versions/$commit"
-fi
+[ ! -e "$install_root/versions/$release" ] && [ ! -L "$install_root/versions/$release" ] \
+    || fail "Refusing to replace a runtime: $release"
+mv -- "$source_dir" "$install_root/versions/$release"
 # Activate only after downloads and dependency installation have succeeded.
-ln -s "versions/$commit" "$staging/current"
+ln -s "versions/$release" "$staging/current"
 case "$(uname -s)" in
     Darwin) mv -fh -- "$staging/current" "$install_root/current" ;;
     *) mv -fT -- "$staging/current" "$install_root/current" ;;
@@ -248,5 +275,10 @@ fi
 
 printf '\nInstalled stable commands in %s.\nApplication: %s\n' "$bin_dir" "$install_root"
 printf '%s\n' 'To install another release, rerun install.sh --version <TAG>.'
-printf '%s\n' 'Restart running Pi/Neovim processes to use the selected version.'
-printf '\nTmux selection was not changed. To make stable your tmux default,\nsave that choice, and apply the bindings now, run:\n\n  pi-console tmux setup\n'
+printf 'Mode: %s. Existing services/sessions were not restarted; old runtimes are retained.\n' "$mode"
+printf '%s\n' 'New launches use the selected runtime. Service restart remains explicit and guarded.'
+if [ "$mode" = full ]; then
+    printf '\nTmux selection was not changed. To select stable bindings, run: pi-console tmux setup\n'
+else
+    printf '%s\n' 'Headless commands: pi-console server ... and pi-stable. No supervisor was enabled.'
+fi

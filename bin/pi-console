@@ -17,9 +17,15 @@ app_root=$(dirname -- "$script_dir")
 source "$script_dir/channel-env.sh"
 if [ "${1-}" = server ]; then
     shift
-    [ -f "$app_root/server/dist/cli.js" ] || { printf 'Build the B3 service first: npm ci --prefix server && npm run build --prefix server\n' >&2; exit 1; }
+    [ -f "$app_root/server/dist/cli.js" ] || { printf 'Service build missing. Rerun the installer, or in a source checkout: npm ci --prefix server && npm run build --prefix server\n' >&2; exit 1; }
     if [ -z "${PI_BINARY-}" ]; then export PI_BINARY=$(command -v pi); fi
     exec node "$app_root/server/dist/cli.js" "$@"
+fi
+
+# Headless packaging still provides service administration and the direct Pi TUI.
+if [ "$PI_CONSOLE_INSTALL_MODE" = server-only ] && [ "${1-}" != --version ]; then
+    printf 'This is a server-only installation. Use server subcommands or pi-stable/pi-dev; rerun the installer with --full for Neovim/tmux.\n' >&2
+    exit 1
 fi
 
 # Service mode is opt-in. No failure may fall back to an editor-owned Pi process.

@@ -3,8 +3,11 @@
 This package contains the owner components, **opt-in local-service/Neovim
 attachment, typed single-session operations, HTTPS/WSS hosts, E1 owner resource
 reads/completion, E2 workspace review/guarded text saves, and E3 saved-session
-archival/deletion and recipient-bound frontend effects**. F installation/supervision
-and E2's unsupported symlink/submodule staging/restoration remain excluded.
+archival/deletion and recipient-bound frontend effects**, with F1 stable/dev full
+and server-only packaging. F2 supervisor/default-launch delivery and E2's unsupported
+symlink/submodule staging/restoration remain excluded. Cross-host/no-shared-storage,
+Linux and Node 22 verification remain open for the current delivery; F1 does not
+establish full E acceptance.
 See [`../docs/SERVER-MODE-C.md`](../docs/SERVER-MODE-C.md) for the mutation inventory,
 protocol/outcome rules, fresh macOS evidence and remaining boundaries. The plans and
 active B3 handoff are unchanged. B1–B3 evidence in the contracts report remains
@@ -25,12 +28,19 @@ npm run build
 Dependencies are locked. Pi is a development dependency for its exported RPC
 **types**, not an embedded SDK execution engine. Built JavaScript uses Node
 built-ins, the locked `ws` transport dependency and the repository's shared `pi/scripts/managed-process.mjs`; actual execution uses the explicitly selected installed Pi CLI.
-Installers do not build/launch this package yet.
+Both installers build this package in a staged runtime, then prune build-only
+dependencies. `scripts/install.sh [--full|--server-only]` selects stable;
+`scripts/install-dev.sh [--full|--server-only]` selects an immutable dev snapshot.
+Mode is preserved when omitted. Old runtime trees remain unchanged across updates,
+including same-commit mode changes. Installation never starts/restarts services.
+The external Pi CLI must be 1.3.0; installers require Node >=22.19.0 and never modify
+those executables. Keep their resources unchanged while work is running.
 
 ## B3 opt-in usage
 
-This is a development slice, not full installer/default-workflow delivery. Build manually above;
-installers do not build/start the service. Keep the service profile on private local
+Service attachment is still opt-in; F1 packaging does not change the default launch
+or install a login/boot supervisor. Source-only use can build manually above.
+Keep the service profile on private local
 storage. Never delete `owner.lock`, adopt old editor state or auto-replay a mutation.
 The default root is `HOME/.local/state/pi-console/service/<channel>`.
 
@@ -60,7 +70,7 @@ An intentional `--force` interrupts owned work, retains history/workspaces and w
 for managed cleanup. Cleanup failure exits the owner with its claim retained; it does
 not leave a falsely healthy listener or authorize replacement. SIGTERM/SIGINT are
 explicit forced administrative shutdown, not frontend detach. Boot/login supervisor
-setup and headless installer mode remain excluded. C's confirmed session restart/kill
+setup remains excluded; headless installation is available through `--server-only`. C's confirmed session restart/kill
 are attachment-bound commands, separate from these service administration actions.
 
 After owner death, `server reconcile` invokes the existing B2 managed recovery gate;
@@ -407,7 +417,10 @@ in `plans/server-mode.md` intentionally accepts unknown escaped descendants.
   inherited stat/realpath/dependency-resolution checks before nested launches
   refuse changed dev resources. Bundled same-child workspace/session switches are
   checked before reloading. This is restart-required change detection, not an atomic
-  source snapshot, hot reload, or a pin on arbitrary user/project extensions.
+  source snapshot for direct checkout launches, hot reload, or a pin on arbitrary
+  user/project extensions. F1 dev installs instead ship immutable application/dependency
+  snapshots; rerun the dev installer after edits. Management across snapshots checks
+  their source-checkout ownership, without accepting another checkout's dev service.
 - Main/side/spawn and bundled model-facing/RPC Bash use stable-ID detached supervisors and trusted workload anchors.
   `processes.sqlite` stores prelaunch intents, grants, ancestor launch fences and
   terminal cleanup evidence. Owner death disconnects the supervisor lifeline and
@@ -545,7 +558,8 @@ a new reliable service-stop API.
 `HostOwner.open()` takes explicit private root/channel, absolute Pi/application
 paths and host launch environment. It pins resolved paths and copies the environment;
 default per-channel roots and resource-change refusal are described above. This is
-not an atomic dev runtime snapshot. `create(cwd)`
+not itself an atomic dev runtime snapshot; F1 installers supply a staged snapshot.
+`create(cwd)`
 returns after catalog creation, not after trust setup. `resume(id)` returns the
 same initializing/live handle for concurrent callers. Observe `snapshot()` and
 answer its pending interactions **before** awaiting `ready()` when setup needs a

@@ -10,7 +10,7 @@ import { privateDirectory, privateJson } from "./catalog-storage.js";
 import { object } from "./pi-records.js";
 import { LocalClient } from "./local-client.js";
 import { runService } from "./local-service.js";
-import { applicationRoot, defaultRoot, requireNode, serviceBuild } from "./service-paths.js";
+import { applicationRoot, defaultRoot, devCheckout, requireNode, serviceBuild } from "./service-paths.js";
 import type { Channel } from "./session-catalog.js";
 
 process.umask(0o077);
@@ -33,14 +33,17 @@ async function main(): Promise<void> {
   const binary = flags.get("--binary") ?? process.env.PI_BINARY;
   const options = { root, channel: channel as Channel, binary: binary ?? "", appRoot: await realpath(flags.get("--app-root") ?? applicationRoot()),
     provider: flags.get("--provider") ?? process.env.PI_PROVIDER, model: flags.get("--model") ?? process.env.PI_MODEL };
-  const assertManagementOwner = (hello: Record<string, unknown>): void => {
-    if (channel === "dev" && hello.appRoot !== options.appRoot) throw new Error(`Dev profile belongs to another checkout (${String(hello.appRoot)}); refusing management from ${options.appRoot}. Use a separate --root or that checkout. Explicit compatible frontend attachment remains allowed.`);
+  const assertManagementOwner = async (hello: Record<string, unknown>): Promise<void> => {
+    if (channel !== "dev") return;
+    const selectedCheckout = await devCheckout(options.appRoot);
+    const runningCheckout = typeof hello.appRoot === "string" ? await devCheckout(hello.appRoot) : undefined;
+    if (runningCheckout !== selectedCheckout) throw new Error(`Dev profile belongs to another checkout (${runningCheckout ?? String(hello.appRoot)}); refusing management from ${selectedCheckout}. Use a separate --root or that checkout. Explicit compatible frontend attachment remains allowed.`);
   };
   if (action === "reconcile") {
     if (channel === "dev") {
       const claim = await privateJson(join(root, "owner.lock"), 16384);
       if (!object(claim)) throw new Error("Invalid recovery claim");
-      assertManagementOwner(claim);
+      await assertManagementOwner(claim);
     }
     await HostOwner.reconcile({ root, channel });
     console.log("Reconciled known managed work. No worker started or command replayed; start the service, inspect saved data, then explicitly resume."); return;
@@ -54,13 +57,13 @@ async function main(): Promise<void> {
     if (!binary || !isAbsolute(binary)) throw new Error("server start/restart requires an explicit absolute --binary Pi path (or PI_BINARY)");
     if (action === "restart") {
       const { client, hello } = await LocalClient.open(root, channel);
-      try { assertManagementOwner(hello); await client.request("service.stop", { serviceEpoch: hello.serviceEpoch, force }); }
+      try { await assertManagementOwner(hello); await client.request("service.stop", { serviceEpoch: hello.serviceEpoch, force }); }
       finally { client.close(); }
       // Wait for the old endpoint to close; never signal a PID from a file.
     } else {
       try {
         const { client, hello } = await LocalClient.open(root, channel);
-        client.close(); assertManagementOwner(hello); console.log(JSON.stringify({ ...hello, existing: true, selectedBuildId: await serviceBuild() })); return;
+        client.close(); await assertManagementOwner(hello); console.log(JSON.stringify({ ...hello, existing: true, selectedBuildId: await serviceBuild() })); return;
       } catch (error) { if (!(error instanceof Error) || !["ENOENT", "ECONNREFUSED"].includes(String((error as NodeJS.ErrnoException).code))) throw error; }
     }
     await privateDirectory(root);
@@ -80,7 +83,7 @@ async function main(): Promise<void> {
       if (spawnError) throw spawnError;
       try {
         const { client, hello } = await LocalClient.open(root, channel);
-        client.close(); assertManagementOwner(hello); console.log(JSON.stringify(hello)); return;
+        client.close(); await assertManagementOwner(hello); console.log(JSON.stringify(hello)); return;
       } catch (error) { if (!(error instanceof Error) || !["ENOENT", "ECONNREFUSED"].includes(String((error as NodeJS.ErrnoException).code))) throw error; }
       await delay(100);
     }
@@ -89,7 +92,7 @@ async function main(): Promise<void> {
   if (action === "credentials") {
     const { client, hello } = await LocalClient.open(root, channel);
     try {
-      assertManagementOwner(hello);
+      await assertManagementOwner(hello);
       if (credentialAction === "list") console.log(JSON.stringify(await client.request("credentials.list")));
       else if (credentialAction === "revoke") {
         if (!flags.has("--device")) throw new Error("Credential revocation requires --device ID");
@@ -114,7 +117,7 @@ async function main(): Promise<void> {
   const { client, hello } = await LocalClient.open(root, channel);
   try {
     let result: unknown;
-    if (action === "stop") { assertManagementOwner(hello); result = await client.request("service.stop", { serviceEpoch: hello.serviceEpoch, force }); }
+    if (action === "stop") { await assertManagementOwner(hello); result = await client.request("service.stop", { serviceEpoch: hello.serviceEpoch, force }); }
     else if (action === "create" || action === "resume") result = await client.request("host.command", { id: flags.get("--id") ?? randomUUID(),
       serviceEpoch: hello.serviceEpoch, operation: `host.${action}`, payload: action === "create" ? { cwd: resolve(flags.get("--cwd") ?? process.cwd()) } : { sessionId: flags.get("--session") } });
     else {

@@ -10,7 +10,7 @@ source "$script_dir/../../bin/channel-env.sh"
 app_root=$PI_CONSOLE_APP_ROOT
 # Persist the selection path, not the setup-time release. Rollback and updates
 # then affect future bindings without another configuration edit.
-if [ "$PI_CONSOLE_CHANNEL" = stable ] && [ "$(basename -- "$(dirname -- "$app_root")")" = versions ]; then
+if [ -f "$app_root/.pi-console-install" ] && [ "$(basename -- "$(dirname -- "$app_root")")" = versions ]; then
     app_root="$(dirname -- "$(dirname -- "$app_root")")/current"
 fi
 

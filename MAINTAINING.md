@@ -12,16 +12,20 @@ scripts/install-dev.sh
 pi-console-dev
 ```
 
-The installer installs npm dependencies and creates commands that use this
-checkout. It does not update the installed release.
+The installer builds locked Pi/service dependencies in an immutable snapshot of
+this checkout, including current source edits, and selects it through the dev
+`current` link. It does not update stable or alter checkout dependencies. Use
+`scripts/install-dev.sh --server-only` for a headless host; use `--full` to switch
+back. Omitting a mode flag preserves the selected mode (initially full).
 
 | Interface | Installed release | Development checkout |
 |---|---|---|
 | Neovim frontend | `pi-console` | `pi-console-dev` |
 | Pi terminal UI | `pi-stable` | `pi-dev` |
 
-Restart after code changes. Rerun the dev installer when dependencies or
-installer-managed launchers change. To use dev with tmux shortcuts:
+Rerun the dev installer after source or dependency changes, then relaunch the
+frontend/TUI or explicitly restart the service when appropriate. Existing processes
+retain their original snapshot. To use dev with tmux shortcuts:
 
 ```sh
 pi-console-dev tmux setup
@@ -29,7 +33,9 @@ pi-console-dev tmux setup
 
 Switch back with `pi-console tmux setup`. Installing either version does not
 change the selected tmux shortcuts. `scripts/uninstall-dev.sh` removes this
-checkout's development commands and old package registration.
+checkout's development commands and old package registration. It does not stop
+services or remove runtime snapshots, state, credentials or workspaces. Another
+checkout's dev installation is refused; unrelated wrappers are left untouched.
 
 ### Repository layout
 
@@ -101,17 +107,34 @@ dirty when the process started.
 ### Installation paths and shared data
 
 Releases and their npm dependencies are stored in
-`~/.local/share/pi-console/versions/<commit>`. The `current` link selects the
-installed release; launchers go in `~/.local/bin`. Override the paths with
-`XDG_DATA_HOME`, `PI_CONSOLE_INSTALL_DIR`, or `PI_CONSOLE_BIN_DIR`.
+`~/.local/share/pi-console/versions/<commit>-<mode>-<unique>`. Legacy
+`versions/<commit>` directories remain untouched. Each install gets a fresh tree,
+including same-commit mode changes; no existing dependencies/builds/markers are
+rewritten. The `current` link selects the installed runtime atomically after both
+locked dependency installs and the TypeScript build succeed. Production server
+dependencies remain; build-only dependencies are pruned.
+
+Dev snapshots use `~/.local/share/pi-console-dev/versions/` with independent ownership
+by source checkout. Launchers go in `~/.local/bin`. Override paths with
+`XDG_DATA_HOME`, `PI_CONSOLE_INSTALL_DIR`, `PI_CONSOLE_DEV_INSTALL_DIR`, or
+`PI_CONSOLE_BIN_DIR`. Do not point stable and dev roots at the same directory.
+Installation/uninstallation uses a sibling `<root>.install-lock` directory; after
+an interrupted installer, confirm it has exited before manually removing that lock.
 
 Each installed revision has separate Neovim plugin data, state, and cache, using
 `pi-console-release-<commit>`. Development uses `pi-console-dev-nvim`. Neither
 changes your normal Neovim configuration. Release launches use the locked
 `nvim-extras` plugin rather than a local development override.
 
-Old version directories remain so running sessions are not disrupted. Selecting
-an older release does not roll back Pi, Node, Neovim, personal packages, or user
+Old stable/dev runtime directories remain so running sessions are not disrupted.
+Neither installer starts/stops services or installs supervisor definitions. Service
+status can compare the running and selected builds; restart is explicit and guarded.
+Server-only mode installs both command names but refuses frontend/tmux operations
+with instructions to install `--full`. It still requires Pi 1.3.0, Node >=22.19,
+Bash/Git/ripgrep and the sandbox runtime prerequisites (Linux bubblewrap/socat).
+The installer never upgrades the external Pi/Node executables; changing those can
+invalidate live service resource checks, so keep them unchanged during live work.
+Selecting an older release does not roll back Pi, Node, Neovim, personal packages, or user
 data. Credentials, settings, and history remain shared. Back them up before
 incompatible changes, and do not edit one conversation in multiple processes.
 

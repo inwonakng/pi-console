@@ -27,10 +27,11 @@ setups. Future maintenance and support are not guaranteed.
 Developed with **Neovim 0.12, Pi 1.3.0, and tmux 3.7**. The optional tmux
 integration supports **tmux 3.4+**.
 
-Install these before starting:
+Install these before starting (the installer checks Pi 1.3.0 and Node.js 22.19+):
 
-- Git, Bash, curl, Node.js 22.19+, npm, `realpath`, `ripgrep`, and `fzf`.
-- Rust/Cargo, a C compiler, and the Tree-sitter parser toolchain for Neovim plugins.
+- Git, Bash, curl, npm, `realpath`, and `ripgrep`.
+- For a full client: Neovim, tmux, `fzf`, Rust/Cargo, a C compiler, and the
+  Tree-sitter parser toolchain for Neovim plugins.
 - On Linux, `bubblewrap` and `socat` for command sandboxing.
 
 Initial setup downloads packages, plugins, and parsers, so it needs network
@@ -53,9 +54,25 @@ pi-console
 The installer also adds `pi-stable`, which runs Pi's terminal UI with the same
 bundled extensions. Your regular `pi` command is unchanged.
 
-Run the install command again to update, then close and relaunch `pi-console`.
+Run the install command again to update. New launches use the selected runtime;
+running services and sessions keep their existing runtime. The installer builds
+the service/bridge using locked dependencies and never starts or restarts a service.
 For a specific release or a development checkout, see
 [Maintaining pi-console](MAINTAINING.md).
+
+### Headless execution host
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/inwonakng/pi-console/main/scripts/install.sh | bash -s -- --server-only
+pi-console server start --binary /absolute/path/to/pi
+```
+
+Server-only mode needs no Neovim, tmux, fzf, Cargo or Tree-sitter tooling. It includes
+the service, bridge and bundled extensions; `pi-stable` remains a direct Pi TUI.
+Updates without a mode flag preserve the selected mode; use `--full` to switch back.
+Service attachment remains explicit through `pi-console --service` on a full client.
+See [service usage](server/README.md) for private profiles and remote setup.
+Supervisor setup and default service-backed launch are not delivered in F1.
 
 ## Your first conversation
 
