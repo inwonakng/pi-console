@@ -15,6 +15,9 @@ export type CatalogSession = {
   cwd: string;
   createdAt: string;
   name?: string;
+  archived?: boolean;
+  deleted?: boolean;
+  lifecycleRevision?: number;
   state: "saved" | "open" | "interrupted";
   ownerEpoch?: string;
   acceptedQueue?: AcceptedQueueItem[];
@@ -29,6 +32,11 @@ export function commandBytes(command: StoredCommand): number {
   if (command.receipt.operation === "prompt.submit" || command.receipt.operation === "queue.edit") {
     return 4096 + Buffer.byteLength(JSON.stringify(command.receipt.result?.queueItemText ?? ""));
   }
+  // Restoration checkpoints the original bytes before touching the worktree/index.
+  // Base64 of a 1-MiB file plus compact outcome fits this fixed reservation.
+  if (command.receipt.operation === "workspace.review.restore") return 2 * 1024 * 1024;
+  // Compact review outcomes include bounded owner references/paths, never editor text.
+  if (command.receipt.operation.startsWith("workspace.review.")) return 40 * 1024;
   if (command.receipt.result?.submittedText !== undefined) return 4096 + Buffer.byteLength(JSON.stringify(command.receipt.result.submittedText));
   // Other non-abort outcomes fit a fixed slot; completing cannot grow charge.
   // Abort reserves its maximum queue response until terminal.
@@ -194,7 +202,7 @@ async function sourceCopy(root: string, source?: CatalogData): Promise<{ data: C
 }
 
 export async function validateManagedFile(root: string, session: CatalogSession): Promise<{ piSessionId: string; cwd: string }> {
-  const file = await open(join(root, "sessions", session.id + ".jsonl"), constants.O_RDONLY | constants.O_NOFOLLOW);
+  const file = await open(join(root, "sessions", session.id + ".jsonl"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
     if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.()) throw new Error("Invalid managed session file ownership");
@@ -230,12 +238,12 @@ export function insertCommand(db: DatabaseSync, command: StoredCommand): void {
   if (recovery) db.prepare("INSERT INTO recovery(command_seq, payload) VALUES(?,?)").run(result.lastInsertRowid, JSON.stringify(recovery));
 }
 
-export function splitReceipt(receipt: CommandReceipt): { metadata: CommandReceipt; recovery?: Pick<NonNullable<CommandReceipt["result"]>, "queueItemText" | "submittedText" | "editorText" | "cleared"> } {
+export function splitReceipt(receipt: CommandReceipt): { metadata: CommandReceipt; recovery?: Pick<NonNullable<CommandReceipt["result"]>, "queueItemText" | "submittedText" | "editorText" | "cleared" | "reviewRecovery"> } {
   const metadata = structuredClone(receipt);
   if (!metadata.result) return { metadata };
-  const { queueItemText, submittedText, editorText, cleared, ...compact } = metadata.result;
+  const { queueItemText, submittedText, editorText, cleared, reviewRecovery, ...compact } = metadata.result;
   metadata.result = compact;
-  return { metadata, recovery: queueItemText !== undefined || submittedText !== undefined || editorText !== undefined || cleared !== undefined ? { queueItemText, submittedText, editorText, cleared } : undefined };
+  return { metadata, recovery: queueItemText !== undefined || submittedText !== undefined || editorText !== undefined || cleared !== undefined || reviewRecovery !== undefined ? { queueItemText, submittedText, editorText, cleared, reviewRecovery } : undefined };
 }
 
 /** Exclusive initialization only. Callers retain the claim on any mutation failure. */

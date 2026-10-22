@@ -159,18 +159,25 @@ function M.summary_lines(state, output_id)
 	return { "> 󰢱 Using skill: " .. tostring(output.name or "unknown") }
 end
 
-function M.open_float(ctx, output_id)
+function M.open_float(ctx, output_id, resolved)
+	if ctx.resources and not resolved then ctx.resources.select() end
 	local state = ctx.state
-	local output = state.skill_outputs and state.skill_outputs[output_id]
+	local output = resolved or state.skill_outputs and state.skill_outputs[output_id]
 	if not output then
 		ctx.ui.notify("Skill prompt unavailable", vim.log.levels.WARN)
 		return true
 	end
 
-	local text = output.text
-	if not text or text == "" then
-		text = read_file(output.path)
+	if ctx.resources and output.path and (not output.text or output.text == "") and not resolved then
+		local captured = vim.deepcopy(output)
+		ctx.resources.document({ kind = "skill", path = output.path }, function(text)
+			captured.text = text
+			M.open_float(ctx, output_id, captured)
+		end)
+		return true
 	end
+	local text = output.text
+	if (not text or text == "") and not ctx.resources then text = read_file(output.path) end
 	if not text or text == "" then
 		ctx.ui.notify("Skill prompt unavailable", vim.log.levels.WARN)
 		return true
@@ -186,10 +193,11 @@ function M.open_float(ctx, output_id)
 	local buf = buffer_utils.create_scratch({
 		name = "pi://skill/" .. output_id .. "/" .. sanitize_buf_name_part(output.name),
 		filetype = output.filetype or "markdown",
-		lines = vim.split(text, "\n", { plain = true }),
+		lines = vim.split(text .. (ctx.resources and output.path and not resolved and "\n\n[f] Inspect the current owner skill file (above is recorded content)." or ""), "\n", { plain = true }),
 		treesitter = "markdown",
 	})
 
+	if ctx.resources then ctx.resources.qualify(buf, "skill-" .. tostring(output.name), output.path) end
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",
 		width = width,
@@ -198,7 +206,7 @@ function M.open_float(ctx, output_id)
 		col = col,
 		style = "minimal",
 		border = "rounded",
-		title = " Skill: " .. tostring(output.name or "unknown") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "Skill: " .. tostring(output.name or "unknown") .. (ctx.resources and (resolved and " (current owner file)" or " (recorded)") or "") .. " ",
 		title_pos = "left",
 	})
 
@@ -207,12 +215,26 @@ function M.open_float(ctx, output_id)
 	vim.api.nvim_set_option_value("relativenumber", false, { win = win })
 	vim.api.nvim_set_option_value("signcolumn", "no", { win = win })
 
+	if ctx.resources and output.path and not resolved then
+		local captured = vim.deepcopy(output)
+		vim.keymap.set("n", "f", function()
+			ctx.resources.document({ kind = "skill", path = captured.path }, function(contents)
+				captured.text = contents
+				floats.close_window(win)
+				M.open_float(ctx, output_id, captured)
+			end)
+		end, { buffer = buf, silent = true, desc = "Inspect current owner skill file" })
+	end
 	local close_skill_win = function()
 		floats.close_window(win)
 	end
 	floats.close_on_win_leave(buf, close_skill_win, { win = win, parent = ctx.window.parent })
-	vim.keymap.set("n", "q", close_skill_win, { buffer = buf, silent = true, desc = "Close skill prompt" })
-	vim.keymap.set("n", "<Esc>", close_skill_win, { buffer = buf, silent = true, desc = "Close skill prompt" })
+	local dismiss = function()
+		if ctx.resources then ctx.resources.select() end
+		close_skill_win()
+	end
+	vim.keymap.set("n", "q", dismiss, { buffer = buf, silent = true, desc = "Close skill prompt" })
+	vim.keymap.set("n", "<Esc>", dismiss, { buffer = buf, silent = true, desc = "Close skill prompt" })
 	vim.keymap.set("n", "y", function()
 		vim.fn.setreg("+", text)
 		ctx.ui.notify("Yanked skill prompt")

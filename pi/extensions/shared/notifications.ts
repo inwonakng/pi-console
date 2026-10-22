@@ -154,7 +154,10 @@ export function sendAlerterNotification(
 ): boolean {
 	// A service runtime publishes session/interaction events; desktop delivery
 	// belongs to attached clients, never a detached notifier on the host.
-	if (process.env.PI_CONSOLE_SERVICE === "1") return false;
+	if (process.env.PI_CONSOLE_SERVICE === "1") {
+		ctx.ui.setStatus("pi-desktop-notification", JSON.stringify({ title: options.title, message: notificationBody(ctx), group: options.group }));
+		return true;
+	}
 	const alerter = alerterPath();
 	if (!alerter) {
 		return false;

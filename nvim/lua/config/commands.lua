@@ -1,4 +1,5 @@
 local build_info = require("pi-integration.build-info")
+local service_mode = vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1"
 
 vim.api.nvim_create_user_command("PiConsoleVersion", function()
 	local build = build_info.snapshot()
@@ -11,8 +12,28 @@ local function set_clipboard(text)
 	print(text)
 end
 
+local function file_path(relative)
+	if service_mode then
+		local buf = vim.api.nvim_get_current_buf()
+		local resource = require("pi-integration.service-resources").for_buffer(buf)
+		local review_path = vim.b[buf].pi_review_path
+		if resource or review_path or vim.b[buf].pi_review_host or vim.api.nvim_buf_get_name(buf):match("^pi://") then
+			local path = resource and resource.path or review_path
+			if type(path) ~= "string" or path == "" then
+				vim.notify("This owner buffer has no source path to copy.", vim.log.levels.WARN, { title = "pi-console" })
+				return nil
+			end
+			return path
+		end
+	end
+	local path = vim.fn.expand("%:p")
+	if relative then path = vim.fn.fnamemodify(path, ":." .. vim.fn.getcwd() .. ":~:.") end
+	return path
+end
+
 vim.api.nvim_create_user_command("YankFilePath", function()
-	set_clipboard(vim.fn.expand("%:p"))
+	local path = file_path(false)
+	if path then set_clipboard(path) end
 end, {})
 
 vim.api.nvim_create_user_command("PackUpdate", function()
@@ -20,16 +41,13 @@ vim.api.nvim_create_user_command("PackUpdate", function()
 end, {})
 
 vim.api.nvim_create_user_command("YankRelativeFilePath", function()
-	local full_path = vim.fn.expand("%:p")
-	local relative_path = vim.fn.fnamemodify(full_path, ":." .. vim.fn.getcwd() .. ":~:.")
-	set_clipboard(relative_path)
+	local path = file_path(true)
+	if path then set_clipboard(path) end
 end, {})
 
 local function yank_location(opts)
-	local path = vim.fn.expand("%:p")
-	if not opts.absolute then
-		path = vim.fn.fnamemodify(path, ":." .. vim.fn.getcwd() .. ":~:.")
-	end
+	local path = file_path(not opts.absolute)
+	if not path then return end
 
 	local location = path .. ":" .. opts.line1
 	if opts.line2 ~= opts.line1 then
@@ -62,9 +80,15 @@ vim.api.nvim_create_user_command("PiCommand", function()
 	require("pi-integration").pick_command()
 end, { desc = "Pick a Pi slash command/template/skill" })
 
-vim.api.nvim_create_user_command("PiCd", function(opts)
-	require("pi-integration").change_cwd(opts.args)
-end, { nargs = "?", complete = "dir", desc = "Change CWD before the first Pi message" })
+if service_mode then
+	vim.api.nvim_create_user_command("PiCd", function()
+		require("pi-integration.service-hosts").new_conversation()
+	end, { desc = "Start a NEW conversation: choose owner and owner directory" })
+else
+	vim.api.nvim_create_user_command("PiCd", function(opts)
+		require("pi-integration").change_cwd(opts.args)
+	end, { nargs = "?", complete = "dir", desc = "Change CWD before the first Pi message" })
+end
 
 vim.api.nvim_create_user_command("PiRestart", function()
 	require("pi-integration").restart()

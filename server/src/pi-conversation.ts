@@ -67,7 +67,7 @@ export type ConversationChange =
 const HISTORY_BYTES = 16 * 1024 * 1024;
 const LIVE_BYTES = 32 * 1024 * 1024;
 const OUTPUT_BYTES = 1024 * 1024;
-const EFFECT_STATUSES = new Set(["pi-side-response", "pi-tree-clone", "pi-history-changed"]);
+const EFFECT_STATUSES = new Set(["pi-side-response", "pi-tree-clone", "pi-history-changed", "pi-desktop-notification", "pi-spawn-notification"]);
 const LIFECYCLE_STATUSES = new Set(["pi-console-runtime", "pi-console-dialog"]);
 
 /** Always reduced by the owner, even with no subscribers. No frontend actions here. */
@@ -85,6 +85,19 @@ export class PiConversation {
   private liveBytes = 0;
 
   snapshot(): ConversationSnapshot { return structuredClone(this.state); }
+  /** Exact owner-observed output metadata, without copying a conversation per chunk. */
+  outputPaths(): string[] {
+    const paths = new Set<string>();
+    const collect = (value: unknown): void => {
+      if (!value || typeof value !== "object") return;
+      const item = value as { fullOutputPath?: unknown; details?: { fullOutputPath?: unknown } };
+      for (const path of [item.fullOutputPath, item.details?.fullOutputPath]) if (typeof path === "string") paths.add(path);
+    };
+    for (const message of this.state.messages) collect(message);
+    for (const tool of this.state.tools) { collect(tool.result); collect(tool.partialResult); }
+    for (const work of this.state.work) collect(work.result);
+    return [...paths];
+  }
   get historyVersion(): number { return this.version; }
   get awaitingSettlement(): boolean { return this.unsettled; }
   get hydrated(): boolean { return this.state.hydrated; }

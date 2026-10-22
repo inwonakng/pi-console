@@ -5,6 +5,8 @@ local layout = require("pi-integration.layout")
 local messages = require("pi-integration.messages")
 local transcript = require("pi-integration.transcript")
 local state = require("pi-integration.state").new()
+local resources = require("pi-integration.service-resources")
+state.show_nested_tools = true
 local session_id, attachment, snapshot, hello, grant, job
 local authority
 local callbacks, unresolved, offers, drafts = {}, {}, {}, {}
@@ -42,6 +44,10 @@ end
 local function owner_key() return M.config.expected_host or M.config.service_remote or M.config.service_root or "local" end
 
 local function notify(text, level)
+	local lines = vim.split(tostring(text), "\n", { plain = true })
+	local message = table.remove(lines, 1)
+	table.insert(state.logs, { timestamp = os.date("%Y-%m-%d %H:%M:%S"), level = level == vim.log.levels.ERROR and "error" or level == vim.log.levels.WARN and "warn" or "info", message = message, details = table.concat(lines, "\n") })
+	while #state.logs > 1000 do table.remove(state.logs, 1) end
 	vim.notify(text, level or vim.log.levels.INFO, { title = "pi-console service" })
 end
 local function valid(buf) return buf and vim.api.nvim_buf_is_valid(buf) end
@@ -72,6 +78,8 @@ local function observe_authority(value, full)
 	local owner = full and value or value.owner
 	local controller = current_controller()
 	if owner then controller = owner.controller end
+	if authority and (authority.controller and authority.controller.grantId) ~= (controller and controller.grantId) then offers = {} end
+	if not authority or authority.epoch ~= value.serviceEpoch or authority.revision ~= value.runtimeRevision then resources.invalidate() end
 	authority = { epoch = value.serviceEpoch, sequence = value.sequence, revision = value.runtimeRevision, controller = controller }
 end
 local function control_current()
@@ -80,7 +88,7 @@ local function control_current()
 		and controller.attachmentId == attachment and controller.grantId == grant.grantId
 end
 local function stamp()
-	return { generation = generation, attachment = attachment, token = grant and grant.token,
+	return { generation = generation, attachment = attachment, token = grant and grant.token, epoch = snapshot and snapshot.serviceEpoch,
 		controller = current_controller() and current_controller().grantId, revision = current_revision(), session = session_id, selection = selection }
 end
 local function same_selection(s)
@@ -111,6 +119,51 @@ local function request(method, payload, callback)
 	vim.fn.chansend(job, vim.json.encode({ id = id, method = method, payload = object_payload(payload) }) .. "\n")
 	return id
 end
+local function resource_options()
+	return { request = request, stamp = stamp, current = function(s) return job and attachment and same_context(s) end, notify = notify, state = state,
+		label = tostring(hello and hello.hostId or owner_key()) .. "/" .. tostring(hello and hello.channel or ""),
+		key = table.concat({ tostring(hello and hello.hostId or owner_key()), tostring(hello and hello.channel or ""),
+			tostring(snapshot and snapshot.serviceEpoch), tostring(session_id), tostring(current_revision()),
+			tostring(snapshot and snapshot.interactions.runtime and snapshot.interactions.runtime.cwd) }, "/") }
+end
+local open_workspace_review
+local function owner_resources()
+	local resource = resources.new(resource_options())
+	resource.review = function(id, pinned) open_workspace_review(id, pinned) end
+	return resource
+end
+local function desktop_notification(intent, captured)
+	local label = "[" .. tostring(hello.hostId):sub(1, 8) .. "] " .. intent.title
+	notify(label .. "\n" .. intent.message)
+	-- Executables, icon paths and sound/timeout settings belong to this frontend.
+	local alerter = vim.env.ALERTER or "alerter"
+	local args
+	if vim.fn.executable(alerter) == 1 then
+		args = { alerter, "--title", label, "--message", intent.message, "--group", "pi-console-" .. session_id }
+		local completed = intent.title == "Pi finished"
+		local sound = vim.env[completed and "PI_COMPLETION_SOUND" or "PI_PERMISSION_SOUND"] or vim.env.PI_NOTIFICATION_SOUND
+		if sound == nil then sound = completed and "Glass" or "Ping" end
+		sound = vim.trim(sound)
+		if sound ~= "" and not vim.tbl_contains({ "0", "false", "no", "none", "off", "silent" }, sound:lower()) then vim.list_extend(args, { "--sound", sound }) end
+		local timeout = vim.env[completed and "PI_COMPLETION_NOTIFICATION_TIMEOUT" or "PI_PERMISSION_NOTIFICATION_TIMEOUT"] or vim.env.PI_NOTIFICATION_TIMEOUT
+		local seconds
+		if timeout == nil or vim.trim(timeout) == "" then seconds = completed and 8 or 15 else seconds = tonumber(timeout) end
+		if seconds and seconds > 0 and seconds < math.huge then vim.list_extend(args, { "--timeout", tostring(seconds) }) end
+		local icon = vim.env.PI_NOTIFICATION_ICON or vim.g.pi_console_root .. "/pi/assets/pi-logo.png"
+		if vim.fn.filereadable(icon) == 1 then vim.list_extend(args, { "--app-icon", icon }) end
+	elseif vim.fn.executable("notify-send") == 1 then
+		args = { "notify-send", "--app-name=pi-console", "--", label, intent.message }
+	end
+	if not args then return end
+	local ok, err = pcall(vim.system, args, {}, function(result)
+		if result.code ~= 0 then vim.schedule(function() if current(captured) then notify("Frontend desktop notifier failed: " .. tostring(result.stderr), vim.log.levels.WARN) end end) end
+	end)
+	if not ok then notify("Could not launch frontend desktop notifier: " .. tostring(err), vim.log.levels.WARN) end
+end
+function M.complete_files(prefix, callback)
+	if not job or not snapshot or not attachment then callback({ entries = {} }); return end
+	resources.complete(resource_options(), prefix, callback)
+end
 local function command(operation, payload, callback, captured, terminal)
 	if not snapshot or not attachment then notify("Attach to a live session first."); return end
 	if not hello or not vim.tbl_contains(hello.capabilities or {}, operation) then unavailable(operation); return end
@@ -124,7 +177,7 @@ local function command(operation, payload, callback, captured, terminal)
 	request("command", envelope, function(ok, result)
 		-- Only an acknowledgment or proven local non-delivery resolves this send.
 		-- A failed request/status lookup alone never proves non-admission.
-		if ok or result.delivery == "not_sent" then
+		if (ok and (not operation:match("^workspace%.review%.") or result.status == "completed" or result.status == "failed")) or result.delivery == "not_sent" then
 			unresolved[envelope.id], submission_status[envelope.id] = nil, nil
 		end
 		if callback then callback(ok, result) end
@@ -151,9 +204,28 @@ local function draft_buffer(name, contents, on_save, on_hide)
 	vim.api.nvim_win_set_buf(0, buf)
 	return buf
 end
+local function recovered_draft(draft)
+	local buf = draft_buffer(draft.name or ("pi://recovered/" .. uid()), draft.text)
+	if draft.endofline ~= nil then vim.bo[buf].endofline, vim.bo[buf].fixendofline = draft.endofline, false end
+	vim.b[buf].pi_review_command_id, vim.b[buf].pi_review_command_epoch = draft.review_command_id, draft.review_command_epoch
+	vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = draft.review_host, draft.review_session, draft.review_channel
+	if draft.review_command_id and draft.review_command_epoch then
+		vim.keymap.set("n", "gS", function()
+			if not draft.review_host or not draft.review_session or session_id ~= draft.review_session or not hello
+				or hello.hostId ~= draft.review_host or hello.channel ~= draft.review_channel then
+				notify("Attach to review save owner " .. tostring(draft.review_host) .. " / session " .. tostring(draft.review_session) .. " before status lookup."); return
+			end
+			request("command.status", { serviceEpoch = draft.review_command_epoch, commandId = draft.review_command_id }, function(ok, result)
+				if ok then draft_buffer("pi://review-save-receipt/" .. uid(), vim.inspect(result)) else notify(result.message or "Save status unavailable; original identity retained.") end
+			end)
+		end, { buffer = buf, desc = "Inspect recovered original review save" })
+	end
+	return buf
+end
 local function local_snapshot()
 	local saved_drafts = {}
-	for buf, name in pairs(drafts) do if valid(buf) then table.insert(saved_drafts, { name = name, text = text(buf) }) end end
+	for buf, name in pairs(drafts) do if valid(buf) then table.insert(saved_drafts, { name = name, text = text(buf), endofline = vim.bo[buf].endofline, review_command_id = vim.b[buf].pi_review_command_id, review_command_epoch = vim.b[buf].pi_review_command_epoch,
+			review_host = vim.b[buf].pi_review_host, review_session = vim.b[buf].pi_review_session, review_channel = vim.b[buf].pi_review_channel }) end end
 	return { cwd = vim.fn.getcwd(), service_session = session_id, service_root = M.config.service_root,
 		service_remote = M.config.service_remote, credential_file = M.config.credential_file, ca_file = M.config.ca_file,
 		expected_host = M.config.expected_host, owner_states = owner_states,
@@ -209,12 +281,16 @@ local function metadata()
 		"Pending requests: " .. tostring(snapshot and #snapshot.interactions.pending or 0) .. " (:PiPending)",
 		"Shared queue: " .. tostring(snapshot and #snapshot.acceptedQueue.items or 0) .. " (:PiQueue)",
 		"Protected submissions (:PiSubmissions; not unsent drafts): " .. (#submissions > 0 and table.concat(submissions, ", ") or "none"),
-		"Effects: inspect-only (:PiOffers). Shell ! / !! executes on the owner, never frontend cwd.",
+		"Live effects target this controller/context; editor text opens a separate draft (:PiOffers). Shell ! / !! executes on the owner.",
 		"Execution: " .. tostring(snapshot and vim.inspect(snapshot.conversation.execution) or "—"),
 		"Native queues (not editable application queue): " .. tostring(snapshot and vim.inspect(snapshot.conversation.queue) or "—"),
 		(snapshot and snapshot.error) and ("Error: " .. snapshot.error) or "", "" }
 end
-ctx.transcript.metadata_lines = metadata
+ctx.transcript.metadata_lines = function()
+	local lines = {}
+	for _, line in ipairs(metadata()) do vim.list_extend(lines, vim.split(line, "\n", { plain = true })) end
+	return lines
+end
 render = function()
 	publish_attachment()
 	if not valid(state.transcript_buf) then return end
@@ -224,10 +300,13 @@ render = function()
 	local visible = vim.deepcopy(conversation and conversation.messages or {})
 	if conversation then
 		if conversation.partialAssistant then table.insert(visible, conversation.partialAssistant.message) end
+		local represented = {}
+		for _, message in ipairs(visible) do if message.toolCallId then represented[message.toolCallId] = true end end
 		for _, tool in ipairs(conversation.tools or {}) do
-			if tool.state == "running" then
+			if not represented[tool.toolCallId] then
 				table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_start" }))
-				if tool.partialResult then table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_update" })) end
+				if tool.result then table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_end" }))
+				elseif tool.partialResult then table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_update" })) end
 			end
 		end
 	end
@@ -279,6 +358,7 @@ render = function()
 	for _, line in ipairs(lines) do vim.list_extend(split, vim.split(line, "\n", { plain = true })) end
 	transcript.preserve_view(ctx, function() layout.set_buffer_lines(ctx, state.transcript_buf, split, false) end)
 	transcript.apply_collected_transcript_items(ctx, items)
+	require("pi-integration.tool-groups").apply_folds(state, state.transcript_win)
 	if state.transcript_win and vim.api.nvim_win_is_valid(state.transcript_win) then
 		vim.wo[state.transcript_win].statusline = " Pi service " .. (control_current() and "CONTROLLER" or "VIEWER") .. " %="
 	end
@@ -325,6 +405,8 @@ refresh = function()
 	end, 100)
 end
 local function disconnected()
+	offers = {}
+	resources.invalidate()
 	generation = generation + 1
 	job, attachment, grant, authority = nil, nil, nil, nil
 	callbacks, outcomes, selection_ready, new_control_selection = {}, {}, nil, nil
@@ -334,7 +416,9 @@ local function disconnected()
 end
 attach = function(id, acquire_control)
 	if not job then return end
+	offers = {}
 	if pending_host then pending_host_select = false end
+	resources.invalidate()
 	selection = selection + 1
 	local gen, selected = generation, selection
 	request("attach", { sessionId = id, label = "Neovim " .. vim.fn.getpid() }, function(ok, value)
@@ -383,7 +467,7 @@ local function host_operation(operation, payload)
 			if receipt.result then
 				if same_selection(captured) then attach(receipt.result.sessionId, operation == "host.create")
 				else notify("Host request completed for " .. receipt.result.sessionId .. "; current view was not changed.") end
-			end
+			elseif receipt.error then notify("Host request " .. receipt.status .. ": " .. receipt.error.message, vim.log.levels.WARN) end
 		end
 	end)
 end
@@ -459,7 +543,10 @@ connect = function()
 			observe_authority(value.update, false)
 			if old_revision ~= current_revision() then close_approval() end
 			local receipt = value.update.command
-			if receipt and unresolved[receipt.id] then submission_status[receipt.id] = receipt.status end
+			if receipt and unresolved[receipt.id] then
+				submission_status[receipt.id] = receipt.status
+				if receipt.operation:match("^workspace%.review%.") and (receipt.status == "completed" or receipt.status == "failed") then unresolved[receipt.id], submission_status[receipt.id] = nil, nil end
+			end
 			if receipt and receipt.status ~= "accepted" and outcomes[receipt.id] then
 				local outcome = outcomes[receipt.id]; outcomes[receipt.id] = nil
 				if outcome_current(outcome, receipt) then outcome.callback(receipt) end
@@ -469,8 +556,34 @@ connect = function()
 				if grant and (not value.update.owner.controller or value.update.owner.controller.grantId ~= grant.grantId) then grant = nil; close_approval() end
 			end
 			if value.update.effect then
-				table.insert(offers, value.update)
-				if #offers > 128 then table.remove(offers, 1) end
+				local update, captured = value.update, stamp()
+				local recipient = update.effect.recipient
+				if control_current() and update.runtimeRevision == current_revision() and recipient.attachmentId == attachment and recipient.grantId == grant.grantId then
+					table.insert(offers, update)
+					if #offers > 128 then table.remove(offers, 1) end
+					-- Live delivery only. Revalidate on the owner after the async hop,
+					-- then recheck the local selection/grant before any UI effect.
+					request("effect.inspect", { controlToken = grant.token, update = update }, function(ok, effect)
+						if not ok or not current(captured) or effect == vim.NIL then return end
+						if effect.type == "notification" then
+							notify(effect.message, effect.level == "error" and vim.log.levels.ERROR or effect.level == "warning" and vim.log.levels.WARN or vim.log.levels.INFO)
+						elseif effect.type == "editor_text" then
+							-- A separate recoverable draft never replaces unsent local input.
+							local buf = draft_buffer("pi://owner-editor-draft/" .. update.effect.id, effect.text)
+							owner_resources().bind(buf)
+						elseif effect.type == "extension_signal" and effect.key == "pi-desktop-notification" then
+							local decoded, intent = pcall(vim.json.decode, effect.value or "")
+							if not decoded or type(intent) ~= "table" or type(intent.title) ~= "string" or type(intent.message) ~= "string"
+								or #intent.title > 256 or #intent.message > 4096 then return end
+							desktop_notification(intent, captured)
+						elseif effect.type == "extension_signal" and effect.key == "pi-spawn-notification" then
+							local decoded, intent = pcall(vim.json.decode, effect.value or "")
+							if decoded and type(intent) == "table" and type(intent.message) == "string" and #intent.message <= 4096 then
+								notify(intent.message, intent.level == "error" and vim.log.levels.ERROR or intent.level == "warning" and vim.log.levels.WARN or vim.log.levels.INFO)
+							end
+						elseif effect.type == "extension_signal" and effect.key == "pi-history-changed" then refresh() end
+					end)
+				end
 			end
 			refresh()
 		elseif value.type == "disconnected" then disconnected() end
@@ -775,7 +888,13 @@ function M.restore_pending_action()
 			if not current(captured) or not live then notify("Request or controller changed; no reply sent."); return end
 			local seconds, micros = vim.uv.gettimeofday()
 			if live.tag and live.tag.deadline and seconds * 1000 + micros / 1000 >= live.tag.deadline then notify("Request deadline expired"); return end
-			command(cancel and "interaction.cancel" or "interaction.respond", cancel and { requestId = request_data.id } or { requestId = request_data.id, answer = answer_value }, nil, captured)
+			local decoded_ok, description = pcall(vim.json.decode, request_data.title or "")
+			local review_id = not cancel and answer_value and answer_value.value == "Review / modify"
+				and decoded_ok and type(description) == "table" and description.kind == "pi_compact_select"
+				and description.preview_kind == "workspace_summary" and snapshot.workspace and snapshot.workspace.id
+			command(cancel and "interaction.cancel" or "interaction.respond", cancel and { requestId = request_data.id } or { requestId = request_data.id, answer = answer_value }, function(ok)
+				if ok and review_id and same_context(captured) then open_workspace_review(review_id) end
+			end, captured)
 			close_approval()
 		end
 		vim.keymap.set("n", "<CR>", function()
@@ -854,9 +973,9 @@ function M.pick_thinking()
 		end)
 	end)
 end
-local function native_draft(operation)
+local function native_draft(operation, initial)
 	local captured, accepted_text = stamp(), nil
-	draft_buffer("pi://" .. operation .. "/" .. uid(), "", function(buf)
+	local buf = draft_buffer("pi://" .. operation .. "/" .. uid(), initial or "", function(buf)
 		local submitted = text(buf)
 		if submitted == accepted_text then notify("This text was already accepted; edit it explicitly before sending new work."); return end
 		for id, envelope in pairs(unresolved) do
@@ -869,10 +988,11 @@ local function native_draft(operation)
 			if ok and valid(buf) and text(buf) == submitted then vim.bo[buf].modified = false end
 		end, captured)
 	end)
+	owner_resources().bind(buf)
 end
-function M.steer()
+function M.steer(initial)
 	if not snapshot or not snapshot.conversation.execution.running then notify("Steering requires an active turn."); return end
-	native_draft("steering.submit")
+	native_draft("steering.submit", initial)
 end
 function M.follow_up() native_draft("followUp.submit") end
 function M.side_prompt() native_draft("side.prompt") end
@@ -896,8 +1016,10 @@ function M.pick_spawn()
 	local data, captured = status_data("pi-spawn-runs"), stamp()
 	vim.ui.select(data and data.runs or {}, { prompt = "Owner subagents", format_item = function(run) return run.runId .. " " .. run.status end }, function(run)
 		if not run or not same_context(captured) then return end
-		vim.ui.select({ "Inspect", "Join", "Stop" }, { prompt = run.runId }, function(action)
-			if action == "Inspect" then draft_buffer("pi://owner-spawn/" .. uid(), vim.inspect(run))
+		vim.ui.select({ "Artifacts", "Inspect", "Join", "Stop" }, { prompt = run.runId }, function(action)
+			if not same_context(captured) then return end
+			if action == "Artifacts" then require("pi-integration.spawn-artifacts").pick_run({ state = state, ui = { notify = notify }, resources = owner_resources() }, run, function() end)
+			elseif action == "Inspect" then draft_buffer("pi://owner-spawn/" .. uid(), vim.inspect(run))
 			elseif action == "Join" or action == "Stop" then command(action == "Join" and "spawn.join" or "spawn.stop", { id = run.runId }, nil, captured) end
 		end)
 	end)
@@ -922,8 +1044,22 @@ function M.pick_workspace()
 		end
 	end)
 end
-function M.show_workspace_diff()
-	notify("Editable workspace review is the excluded resource-parity slice; no owner path was opened locally.", vim.log.levels.WARN)
+open_workspace_review = function(workspace_id, pinned)
+	require("pi-integration.service-review").open({ resource = owner_resources(), owner = hello and hello.hostId, channel = hello and hello.channel,
+		request = request, stamp = stamp,
+		current = function(s) return job and attachment and same_context(s) end,
+		control_stamp = stamp, command = command, draft = draft_buffer, notify = notify }, workspace_id, pinned)
+end
+function M.show_workspace_diff() open_workspace_review() end
+function M.pick_workspace_reviews()
+	local captured = stamp()
+	request("resource.read", { kind = "workspaceReviews", runtimeRevision = captured.revision }, function(ok, result)
+		if not job or not same_context(captured) then return end
+		if not ok then notify(result.message or "Owner workspace reviews unavailable"); return end
+		vim.ui.select(result.data.entries or {}, { prompt = "Owner workspace reviews", format_item = function(item) return tostring(item.label or item.id) .. " (" .. tostring(item.lifecycle) .. ")" end }, function(item)
+			if item and same_context(captured) then open_workspace_review(item.id) end
+		end)
+	end)
 end
 function M.show_usage()
 	local function inspect() owner_read("stats", function(data)
@@ -932,13 +1068,24 @@ function M.show_usage()
 	if control_current() then command("usage.refresh", {}, nil, stamp(), inspect) else inspect() end
 end
 function M.show_tree()
+	local captured = stamp()
+	vim.ui.select({ "Transcript (all branches)", "Tree actions" }, { prompt = "Owner history" }, function(choice)
+		if not same_context(captured) then return end
+		if choice == "Transcript (all branches)" then M.show_owner_transcript()
+		elseif choice == "Tree actions" then M.show_tree_actions() end
+	end)
+end
+function M.show_tree_actions()
 	owner_read("entries", function(data, captured)
 		vim.ui.select(data.entries, { prompt = "Owner history (all branches)", format_item = function(entry)
 			return entry.id .. " " .. entry.type .. " " .. (entry.message and entry.message.role or entry.customType or "")
 		end }, function(entry)
 			if not entry or not same_context(captured) then return end
 			vim.ui.select({ "Inspect", "Jump", "Jump with summary", "Clone through entry", "Delete subtree", "Fork before user message" }, { prompt = entry.id }, function(action)
-				if action == "Inspect" then draft_buffer("pi://owner-entry/" .. uid(), vim.inspect(entry))
+				if not same_context(captured) then return end
+				if action == "Inspect" then
+					require("pi-integration.spawn-transcript").open({ state = state, ui = { notify = notify }, window = { parent = state.transcript_win }, resources = owner_resources() }, nil,
+						"Owner history entry " .. entry.id, { kind = "history" }, vim.json.encode(entry))
 				elseif action == "Jump" or action == "Jump with summary" then
 					command("history.navigate", { entryId = entry.id, summarize = action == "Jump with summary" }, nil, captured, function(receipt)
 						if receipt.status == "completed" and receipt.result and receipt.result.editorText ~= nil then
@@ -978,20 +1125,23 @@ function M.refresh_messages() refresh() end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer("pi://service-help/" .. uid(), "# Local service attachment\n\n:PiControl / :PiTakeover / :PiRelease\n:PiPending (inspect; Enter explicitly answers; closing never cancels)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain IDs; never replayed)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: saved owners, connect/retry/disconnect/edit/forget.\n:PiOverview / <leader>po: combined overview, groups and pins.\n:PiNew: choose owner and an absolute owner directory.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer("pi://service-help/" .. uid(), "# Local service attachment\n\n:PiControl / :PiTakeover / :PiRelease\n:PiPending (inspect; Enter explicitly answers; closing never cancels)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain IDs; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session IDs; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: saved owners, connect/retry/disconnect/edit/forget.\n:PiOverview / <leader>po: combined overview, groups and pins.\n:PiNew: choose owner and browse its directories.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
+	local resource = owner_resources()
+	if require("pi-integration.utils.markdown-links").follow(nil, resource) then return end
 	local item = transcript.transcript_item_at_line(ctx, vim.api.nvim_win_get_cursor(0)[1])
-	if not item then unavailable("Owner file/navigation links"); return end
+	if not item then return end
+	local inspect_ctx = { state = state, ui = { notify = notify }, window = { parent = state.transcript_win }, resources = resource }
 	if item.kind == "tool_group" then require("pi-integration.tool-groups").toggle(ctx, item); render()
-	elseif item.kind == "tool" then
-		local output = state.tool_outputs[item.output_id]
-		if not output then notify("Recorded tool output unavailable."); return end
-		-- Never use the legacy viewer: fullOutputPath, spawn artifacts and
-		-- workspace review are owner resources, not frontend-local paths.
-		draft_buffer("pi://recorded-tool/" .. uid(), "# Recorded owner tool output\n\nOwner file/artifact/review actions are unavailable in B3.\n\n" .. (output.text or ""))
-	elseif item.kind == "thinking" then require("pi-integration.thinking-output").open_float({ state = state, ui = { notify = notify }, window = { parent = state.transcript_win } }, item.output_id)
+	elseif item.kind == "tool" then require("pi-integration.tool-output").open_float(inspect_ctx, item.output_id)
+	elseif item.kind == "thinking" then require("pi-integration.thinking-output").open_float(inspect_ctx, item.output_id)
+	elseif item.kind == "compaction" then require("pi-integration.compaction-output").open_float(inspect_ctx, item)
+	elseif item.kind == "skill" then require("pi-integration.skills").open_float(inspect_ctx, item.output_id)
 	else unavailable("This transcript action") end
+end
+function M.show_owner_transcript()
+	require("pi-integration.spawn-transcript").open({ state = state, ui = { notify = notify }, window = { parent = state.transcript_win }, resources = owner_resources() }, nil, "Owner history (all branches)", { kind = "history" })
 end
 function M.show_drafts()
 	local ok, values = pcall(require("pi-integration.service-drafts").list)
@@ -1002,7 +1152,10 @@ function M.show_drafts()
 		if item then
 			local value = item.value
 			draft_buffer("pi://recovered/" .. uid(), table.concat(value.input_lines or {}, "\n"))
-			for _, draft in ipairs(value.drafts or {}) do draft_buffer("pi://recovered/" .. uid(), draft.text) end
+			for _, draft in ipairs(value.drafts or {}) do
+				draft = vim.tbl_extend("force", draft, { name = "pi://recovered/" .. uid() })
+				recovered_draft(draft)
+			end
 			if next(value.unresolved or {}) or value.pending_host then draft_buffer("pi://recovery-status/" .. uid(), vim.inspect({ unresolved = value.unresolved, pending_host = value.pending_host })) end
 		end
 	end)
@@ -1019,7 +1172,13 @@ function M.restart_console()
 	end)
 	if not ok then vim.fn.delete(path); notify(tostring(err), vim.log.levels.ERROR) end
 end
-function M.follow_markdown_link() unavailable("Owner file/navigation links"); return true end
+function M.follow_markdown_link()
+	local buf = vim.api.nvim_get_current_buf()
+	local owner = resources.for_buffer(buf)
+	local resource = owner and owner.resource or (buf == state.transcript_buf or buf == state.input_buf or buf == side_buf) and owner_resources() or nil
+	return require("pi-integration.utils.markdown-links").follow(nil, resource)
+end
+function M.show_logs() require("pi-integration.logs").show(ctx) end
 function M.restore_status_footer() end
 function M.get_commands(callback) callback({}) end
 function M.on_transcript_rendered() end
@@ -1062,13 +1221,15 @@ function M.open(_, restore)
 	end
 	if restore then
 		layout.set_buffer_lines(ctx, state.input_buf, restore.input_lines or { "" }, true)
-		for _, draft in ipairs(restore.drafts or {}) do draft_buffer(draft.name, draft.text) end
+		for _, draft in ipairs(restore.drafts or {}) do recovered_draft(draft) end
 	end
 	for name, fn in pairs({ PiControl = function() M.take_control(false) end, PiTakeover = function() M.take_control(true) end,
 		PiRelease = function() command("control.release", {}) end, PiPending = M.restore_pending_action, PiQueue = M.pick_queue,
 		PiOffers = M.show_offers, PiDrafts = M.show_drafts, PiSubmissions = M.show_submissions, PiDetach = M.detach, PiReconnect = M.reconnect,
 		PiFollowUp = M.follow_up, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
-		PiHosts = M.pick_hosts, PiOverview = M.show_overview, PiSessions = M.pick_session, PiNew = M.new_session,
+		PiSavedOperations = require("pi-integration.service-hosts").saved_operations,
+		PiHosts = M.pick_hosts, PiOverview = M.show_overview, PiSessions = M.pick_session, PiNew = M.new_session, PiTranscript = M.show_owner_transcript,
+		PiWorkspaceReview = M.show_workspace_diff, PiWorkspaceReviews = M.pick_workspace_reviews,
 		PiWorkspace = M.pick_workspace, PiKill = M.kill_session, PiRetitle = M.retitle, PiOperations = M.show_operations, PiHostRequest = M.show_host_request }) do
 		vim.api.nvim_create_user_command(name, fn, {})
 	end
@@ -1104,7 +1265,7 @@ function M.open(_, restore)
 		M.new_session()
 	else connect() end
 end
-for _, name in ipairs({ "show_logs", "restore_session_transcript",
+for _, name in ipairs({ "restore_session_transcript",
 	"start", "refresh_session_stats", "fail_pending_prompts", "flush_queued_prompts", "finish_loading_if_ready" }) do
 	M[name] = function() unavailable(name) end
 end

@@ -94,6 +94,7 @@ function M.summary_lines(state, output_id, streaming)
 end
 
 function M.open_float(ctx, output_id)
+	if ctx.resources then ctx.resources.select() end
 	local state = ctx.state
 	local output = state.thinking_outputs[output_id]
 	if not output then
@@ -114,6 +115,7 @@ function M.open_float(ctx, output_id)
 		lines = vim.split(output.text or "", "\n", { plain = true }),
 	})
 
+	if ctx.resources then ctx.resources.qualify(buf, "thinking") end
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",
 		width = width,
@@ -122,7 +124,7 @@ function M.open_float(ctx, output_id)
 		col = col,
 		style = "minimal",
 		border = "rounded",
-		title = " Thinking ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "Thinking ",
 		title_pos = "left",
 	})
 

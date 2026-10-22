@@ -1,7 +1,11 @@
 import { open } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { WorkspaceReviews, type ReviewMutation } from "./workspace-reviews.js";
+import { readResource, completeFiles, completeDirectory, type ResourceContext } from "./resource-reads.js";
 import { hostCommand, hostFingerprint, type HostReceipt } from "./host-commands.js";
 import { inspectEpoch } from "../../pi/scripts/managed-process.mjs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { SavedHelperUnresolved, savedSessionHelper, type SavedPreview, type SavedResult } from "./saved-sessions.js";
 import { isAbsolute, join } from "node:path";
 import type { RpcCommand, RpcExtensionUIResponse, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
 import { PiCommandError, PiProcess, type PiExit, type PiProcessOptions } from "./pi-process.js";
@@ -54,7 +58,7 @@ export type HostSummaries = {
   serviceEpoch: string;
 };
 export type EffectOffer = {
-  id: string; policy: "inspect_only"; source: "owned_pi_stream";
+  id: string; policy: "recipient_bound"; source: "owned_pi_stream";
   recipient: { attachmentId: string; grantId: string };
   runtimeId: string; cwd: string; data: FrontendEffect;
 };
@@ -86,6 +90,8 @@ export class HostOwner {
   private closing = false;
   private hostAdmission: Promise<void> = Promise.resolve();
   private hostAdmitting = 0;
+  private readonly savedMutations = new Set<string>();
+  private helperUnresolved?: Error;
 
   private constructor(private readonly catalog: SessionCatalog, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, private readonly resources: HostResources) {
     void catalog.whenFailed.then((error) => {
@@ -129,8 +135,78 @@ export class HostOwner {
     }), hostId: this.hostId, channel: this.options.channel, serviceEpoch: this.serviceEpoch };
   }
 
+  async directories(input: unknown, check: () => void): Promise<unknown> {
+    this.assertOpen();
+    return completeDirectory(input, () => { this.assertOpen(); check(); });
+  }
+
   /** Lookup never starts a worker or repeats trust/workspace initialization. */
-  lookup(id: string): OwnedSession | undefined { return this.sessions.get(id); }
+  lookup(id: string): OwnedSession | undefined {
+    const session = this.sessions.get(id);
+    return session && !session.finished ? session : undefined;
+  }
+
+  private savedRecord(id: string): CatalogSession {
+    const record = this.catalog.get(id);
+    if (record.deleted) throw new CommandError("session_unavailable", "Session was deleted; receipts and workspace recovery data remain available");
+    if (record.state === "open" || record.ownerEpoch || this.sessions.get(id) && !this.sessions.get(id)!.finished) {
+      throw new CommandError("session_busy", "Open conversations are protected. Use current control to explicitly kill the session before archiving/deleting it.");
+    }
+    return record;
+  }
+
+  private async savedHelper(sessionId: string, payload: { action: "preview" | "delete"; expectedVersion?: string; mode?: string; confirmed?: true }): Promise<SavedResult> {
+    await this.resources.assertUnchanged();
+    this.catalog.assertExecutionAllowed();
+    try {
+      return await savedSessionHelper({ binary: this.options.binary, appRoot: this.options.appRoot,
+        sessionDirectory: join(this.catalog.root, "sessions"), workspaceRoot: join(this.catalog.root, "workspaces"),
+        environment: this.options.environment, assertExecutionAllowed: () => this.catalog.assertExecutionAllowed() }, { ...payload, sessionId });
+    } catch (error) {
+      if (error instanceof SavedHelperUnresolved) {
+        this.helperUnresolved = error;
+        for (const session of this.sessions.values()) session.storageFailed(error);
+      }
+      throw error;
+    }
+  }
+
+  private async savedPreview(id: string): Promise<SavedPreview & { helperVersion: string; archived: boolean }> {
+    const record = this.savedRecord(id);
+    const result = await this.savedHelper(id, { action: "preview" });
+    if (!result.success) throw new CommandError("resource_conflict", result.error);
+    if (!("version" in result)) throw new Error("Missing saved session preview");
+    if (JSON.stringify(record) !== JSON.stringify(this.savedRecord(id))) throw new CommandError("resource_conflict", "Saved session changed during preview");
+    const ids = result.workspaces.map(workspace => workspace.id);
+    for (const session of this.sessions.values()) {
+      if (session.finished) continue;
+      const state = session.snapshot();
+      if (state.phase !== "ready" || session.workspaceTransitionPending || ids.includes(String(state.workspace?.id))
+        || result.workspaces.some(workspace => state.interactions.runtime?.cwd === workspace.worktreePath
+          || state.interactions.runtime?.cwd.startsWith(workspace.worktreePath + "/"))) {
+        throw new CommandError("session_busy", "A linked workspace is in use or another owner context is transitioning; session/workspaces kept");
+      }
+    }
+    return { ...result, helperVersion: result.version, archived: record.archived === true,
+      version: createHash("sha256").update(JSON.stringify([record, result.version])).digest("hex") };
+  }
+
+  /** Read preview shares the lifecycle admission lane; no runtime is resumed. */
+  saved(id: string, check: () => void): Promise<unknown> {
+    if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");
+    this.hostAdmitting++;
+    const task = this.hostAdmission.then(async () => {
+      this.assertOpen(); check();
+      this.savedMutations.add(id);
+      try {
+        const { helperVersion: _helperVersion, ...preview } = await this.savedPreview(id);
+        check(); this.assertOpen();
+        return preview;
+      } finally { this.savedMutations.delete(id); }
+    });
+    this.hostAdmission = task.then(() => undefined, () => undefined);
+    return task.finally(() => { this.hostAdmitting--; });
+  }
 
   async create(cwd: string): Promise<OwnedSession> {
     this.assertOpen();
@@ -144,19 +220,23 @@ export class HostOwner {
   resume(id: string): OwnedSession {
     this.assertOpen();
     this.catalog.assertExecutionAllowed();
+    if (this.savedMutations.has(id)) throw new CommandError("session_busy", "Saved-session operation in progress; resume explicitly after inspecting its outcome");
     const previous = this.sessions.get(id);
     if (previous && !previous.finished) return previous;
     const record = this.catalog.get(id);
+    if (record.archived || record.deleted) throw new CommandError("session_unavailable", "Explicitly unarchive before resuming; deleted sessions cannot resume");
     if (record.state === "open") throw new Error("Session has unresolved ownership; recovery is required");
     const previousState = previous?.snapshot();
-    const session = new OwnedSession(this.catalog, record, this.options, this.resources, previousState?.runtimeRevision ?? 0, previousState?.sequence ?? 0);
+    const session = new OwnedSession(this.catalog, record, this.options, this.resources, previousState?.runtimeRevision ?? 0, previousState?.sequence ?? 0, () => {
+      if (this.savedMutations.size) throw new CommandError("session_busy", "Saved-session lifecycle operation in progress; retry workspace changes explicitly after inspecting its outcome");
+    });
     this.sessions.set(id, session);
     return session;
   }
 
   hostStatus(epoch: string, id: string): HostReceipt | { status: "unknown" } {
     const receipt = this.catalog.hostRecord(epoch, id)?.receipt;
-    return receipt?.operation === "host.create" || receipt?.operation === "host.resume" ? receipt : { status: "unknown" };
+    return receipt && ["host.create", "host.resume", "host.archive", "host.delete"].includes(receipt.operation) ? receipt : { status: "unknown" };
   }
 
   /** Host IDs are disk identities, not connection IDs. Duplicate lookups never
@@ -185,6 +265,38 @@ export class HostOwner {
         // The allocation receipt is already committed before any worker launch.
         this.resume(sessionId);
         return this.catalog.hostRecord(command.serviceEpoch, command.id)!.receipt;
+      }
+      if (command.operation === "host.archive" || command.operation === "host.delete") {
+        const id = command.payload.sessionId;
+        this.savedMutations.add(id);
+        try {
+          const preview = await this.savedPreview(id);
+          if (preview.version !== command.payload.expectedVersion) throw new CommandError("resource_conflict", "Saved session or linked workspaces changed while confirming; select it again");
+          if (command.operation === "host.archive" && preview.archiveBlocked) throw new CommandError("session_busy", "Retained source/child workspace protects this session from archival; finish its workspace lifecycle first");
+          if (command.operation === "host.delete" && preview.mode !== command.payload.mode) throw new CommandError("resource_conflict", "Owner trash availability changed; confirm the new deletion mode");
+          await this.catalog.reserveHost(fingerprint, receipt, admission);
+          if (command.operation === "host.archive") {
+            receipt.status = "completed";
+            receipt.result = { sessionId: id, archived: command.payload.archived };
+            await this.catalog.finishHost(receipt, { sessionId: id, archived: command.payload.archived });
+          } else {
+            try {
+              const result = await this.savedHelper(id, { action: "delete", expectedVersion: preview.helperVersion, mode: command.payload.mode, confirmed: true });
+              if (!result.success) {
+                receipt.status = result.mutated ? "uncertain" : "failed";
+                // Host outcomes retain their existing 4-KiB reservation. Bound
+                // diagnostics only; workspace recovery patches/records stay intact.
+                receipt.error = { code: result.mutated ? "cleanup_incomplete" : "resource_conflict", message: result.error.slice(0, 512) };
+              } else if (!("deleted" in result) || !result.deleted) throw new Error("Missing deletion outcome");
+              else { receipt.status = "completed"; receipt.result = { sessionId: id, deleted: true, mode: result.mode }; }
+            } catch (error) {
+              receipt.status = "uncertain";
+              receipt.error = { code: "outcome_uncertain", message: asError(error).message.slice(0, 512) };
+            }
+            await this.catalog.finishHost(receipt, receipt.result?.deleted ? { sessionId: id, deleted: true } : undefined);
+          }
+          return receipt;
+        } finally { this.savedMutations.delete(id); }
       }
       this.catalog.get(command.payload.sessionId);
       await this.catalog.reserveHost(fingerprint, receipt, admission);
@@ -239,6 +351,7 @@ export class HostOwner {
   }
 
   private assertOpen(): void {
+    if (this.helperUnresolved) throw this.helperUnresolved;
     if (this.closing) throw new Error("Host owner is closing or closed");
   }
 }
@@ -263,12 +376,20 @@ export class OwnedSession {
   private nativeQueueCommands = new Set<Promise<void>>();
   private bundled?: BundledFlight;
   private bundledInterrupt?: BundledFlight;
+  // Delivery provenance is ephemeral, separate from durable accepted work. A
+  // restart never revives a grant; explicit edits capture their own recipient.
+  private readonly queueRecipients = new Map<string, Controller>();
   private queueFlight?: {
-    itemId: string; dispatched: boolean; userObserved: boolean; settled: boolean;
+    itemId: string; recipient?: Controller; dispatched: boolean; userObserved: boolean; settled: boolean;
     outcome?: { disposition: "started" | "handled" } | { error: unknown };
   };
   private readonly offers = new Map<string, { revision: number; offer: EffectOffer; bytes: number }>();
   private offerBytes = 0;
+  private turnRecipient: Controller | null | undefined;
+  private mainEffectsAmbiguous = false;
+  private sideRecipient?: Controller;
+  private sideId?: string;
+  private readonly spawnRecipients = new Map<string, Controller | undefined>();
   private readonly publications: string[] = [];
   private publishing = false;
   private admission: Promise<void> = Promise.resolve();
@@ -301,7 +422,7 @@ export class OwnedSession {
   private resolveReady!: () => void;
   private rejectReady!: (error: Error) => void;
 
-  constructor(private readonly catalog: SessionCatalog, private readonly record: CatalogSession, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, private readonly resources: HostResources, revision: number, sequence = 0) {
+  constructor(private readonly catalog: SessionCatalog, private readonly record: CatalogSession, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, private readonly resources: HostResources, revision: number, sequence = 0, private readonly assertSavedIdle: () => void = () => {}) {
     this.runtimeRevision = revision;
     this.sequence = sequence;
     this.initialized = new Promise<void>((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
@@ -351,8 +472,8 @@ export class OwnedSession {
     return subscription;
   }
 
-  /** Recheck after any async delay. Returns data for inspection/recoverable-draft
-   * offering only, never an editor/navigation action or authority to overwrite. */
+  /** Recheck after any async delay. Returns live recipient-bound data, never
+   * authority to overwrite a draft. The frontend must also recheck local context. */
   inspectEffect(attachmentId: string, token: string, update: OwnedSessionUpdate): FrontendEffect | undefined {
     if (!this.validOffer(attachmentId, update, token)) return;
     return structuredClone(this.offers.get(update.effect!.id)!.offer.data);
@@ -369,8 +490,10 @@ export class OwnedSession {
       this.catalog.assertExecutionAllowed();
       this.checkIdentity();
       const runtime = this.worker?.interactionSnapshot().runtime;
-      return this.phase === "ready" && !this.stopRequested && !this.exit && this.usableWorkspace()
-        && runtime?.active === true && runtime.id === stored.offer.runtimeId && runtime.cwd === stored.offer.cwd;
+      const notification = stored.offer.data.type === "notification" || stored.offer.data.type === "extension_signal"
+        && ["pi-desktop-notification", "pi-spawn-notification"].includes(stored.offer.data.key);
+      return (this.phase === "ready" || notification && this.phase === "initializing") && !this.stopRequested && !this.exit
+        && (notification || this.usableWorkspace()) && runtime?.active === true && runtime.id === stored.offer.runtimeId && runtime.cwd === stored.offer.cwd;
     } catch { return false; }
   }
 
@@ -378,10 +501,32 @@ export class OwnedSession {
     // Delayed operation effects belong to its initiator, not whoever took over
     // while a confirmation/summary was pending. Never retarget them to a viewer.
     const active = this.bundled ?? this.bundledInterrupt;
-    const recipient = active ? active.recipient : this.control.current();
+    let recipient = active ? active.recipient : this.turnRecipient !== undefined ? this.turnRecipient ?? undefined : this.control.current();
+    let independent = false;
+    if (data.type === "extension_signal" && ["pi-desktop-notification", "pi-spawn-notification"].includes(data.key)) {
+      try {
+        const payload: unknown = JSON.parse(data.value ?? "null");
+        if (!object(payload)) return;
+        if (data.key === "pi-spawn-notification") {
+          recipient = typeof payload.runId === "string" ? this.spawnRecipients.get(payload.runId) : undefined;
+          independent = true;
+        } else if (payload.sideConversationId !== undefined) {
+          recipient = payload.sideConversationId === this.sideId ? this.sideRecipient : undefined;
+          independent = true;
+        } else if (payload.group === "pi-coding-agent") recipient = this.turnRecipient ?? undefined;
+        else if (active && this.turnRecipient !== undefined && active.recipient?.grantId !== this.turnRecipient?.grantId
+          && (!this.conversation.executionSettled || this.queueFlight?.dispatched)) return; // Ambiguous overlapping dialog sources are never retargeted.
+      } catch { return; }
+    }
+    // Native input can be transformed/handled or consumed inside Pi's existing
+    // run without an attributed dispatch. Never guess which grant owns its
+    // uncorrelated effects, even while an unrelated bundled operation is active.
+    if (this.mainEffectsAmbiguous && !independent) return;
+    if (active && (data.type === "notification" || data.type === "editor_text") && this.turnRecipient !== undefined
+      && active.recipient?.grantId !== this.turnRecipient?.grantId && (!this.conversation.executionSettled || this.queueFlight?.dispatched)) return;
     const runtime = this.worker?.interactionSnapshot().runtime;
     if (!recipient || !runtime?.active) return;
-    const offer: EffectOffer = { id: randomUUID(), policy: "inspect_only", source: "owned_pi_stream",
+    const offer: EffectOffer = { id: randomUUID(), policy: "recipient_bound", source: "owned_pi_stream",
       recipient: { attachmentId: recipient.attachmentId, grantId: recipient.grantId }, runtimeId: runtime.id, cwd: runtime.cwd, data };
     const bytes = Buffer.byteLength(JSON.stringify(offer));
     if (bytes > 2 * 1024 * 1024) return;
@@ -426,6 +571,7 @@ export class OwnedSession {
         return existing.receipt;
       }
       this.control.authorize(command);
+      const recipient = this.control.snapshot();
       const worker = this.commandRuntime(command.runtimeRevision);
       const rename = command.operation === "session.rename" ? this.prepareRename(command, worker) : undefined;
       if (this.bundled && contextOperation(this.bundled.operation) && ["prompt.submit", "queue.edit"].includes(command.operation)) throw new CommandError("session_busy", "History transition pending; retain text and review after arrival");
@@ -446,6 +592,11 @@ export class OwnedSession {
         if (!(error instanceof CommandError)) this.commandFailure(error);
         throw error;
       }
+      // Install only after the queue mutation committed. Capture authority before
+      // that await: detach/expiry during persistence must not rebind accepted work.
+      const itemId = receipt.result?.queueItemId;
+      if (itemId && (command.operation === "prompt.submit" || command.operation === "queue.edit") && recipient) this.queueRecipients.set(itemId, recipient);
+      if (itemId && command.operation === "queue.remove") this.queueRecipients.delete(itemId);
       if (rename) this.rename = rename;
       if (bundled) {
         if (this.bundled) this.bundledInterrupt = bundled;
@@ -485,7 +636,9 @@ export class OwnedSession {
         // Not in commands: stop drains that set, so awaiting stop inside it
         // would wait for itself. The lifecycle receipt is finalized afterward.
         this.lifecycle = this.executeLifecycle(command, receipt).catch((error: unknown) => this.commandFailure(error));
-      } else if (bundled) this.trackCommand(this.executeBundled(receipt, bundled));
+      } else if (command.operation === "workspace.review.save" || command.operation === "workspace.review.stage"
+        || command.operation === "workspace.review.unstage" || command.operation === "workspace.review.restore") this.trackCommand(this.editReview(command, receipt, admission));
+      else if (bundled) this.trackCommand(this.executeBundled(receipt, bundled));
       else if (isNative(command)) {
         this.nativePending++;
         const task = this.executeNative(command, receipt);
@@ -504,7 +657,11 @@ export class OwnedSession {
   }
 
   private queueChanged(): void {
-    this.publish({ acceptedQueue: this.queueSnapshot() });
+    const snapshot = this.queueSnapshot();
+    const pending = new Set(snapshot.items.filter(item => item.status !== "failed"
+      && item.runtimeRevision === this.runtimeRevision && item.serviceEpoch === this.catalog.epoch).map(item => item.id));
+    for (const id of this.queueRecipients.keys()) if (!pending.has(id)) this.queueRecipients.delete(id);
+    this.publish({ acceptedQueue: snapshot });
     this.scheduleQueue();
   }
 
@@ -602,7 +759,8 @@ export class OwnedSession {
     const worker = this.commandRuntime(item.runtimeRevision);
     item.status = "sending"; item.revision++;
     await this.catalog.replaceQueue(this.id, items);
-    const next: NonNullable<OwnedSession["queueFlight"]> = { itemId: item.id, dispatched: false, userObserved: false, settled: false };
+    const next: NonNullable<OwnedSession["queueFlight"]> = { itemId: item.id, recipient: this.queueRecipients.get(item.id),
+      dispatched: false, userObserved: false, settled: false };
     this.queueFlight = next;
     this.queueChanged();
     this.trackCommand((async () => {
@@ -722,7 +880,10 @@ export class OwnedSession {
     flight.result = result;
   }
 
+  get workspaceTransitionPending(): boolean { return !!this.bundled && contextOperation(this.bundled.operation) || this.lifecyclePending; }
+
   private prepareBundled(command: SessionCommand & BundledOperation, worker: PiProcess): BundledFlight {
+    if (contextOperation(command.operation)) this.assertSavedIdle();
     const interruptingJoin = command.operation === "spawn.stop" && this.bundled?.operation === "spawn.join" && !this.bundledInterrupt;
     if (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another owner operation is pending");
     if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
@@ -739,6 +900,7 @@ export class OwnedSession {
     let clone: CatalogSession | undefined;
     try {
       const guard = () => {
+        if (contextOperation(flight.operation)) this.assertSavedIdle();
         this.commandRuntime(flight.revision, flight.worker);
         this.assertReady(flight.revision);
         if (flight.operation.startsWith("history.") || flight.operation.startsWith("workspace.") || flight.operation === "title.generate") this.assertRenameReady();
@@ -837,6 +999,76 @@ export class OwnedSession {
     return { runtimeRevision: this.runtimeRevision, data: "data" in response ? response.data : null };
   }
 
+  private readonly reviews = new WorkspaceReviews(() => JSON.stringify([this.catalog.epoch, this.id, this.runtimeRevision]));
+  private reviewContext(worker: PiProcess, check: () => void): ResourceContext {
+    const runtime = worker.interactionSnapshot().runtime!;
+    return { sessionFile: this.catalog.sessionFile(this.id), cwd: runtime.cwd,
+      workspaceRoot: typeof this.workspace?.path === "string" ? this.workspace.path : runtime.cwd,
+      workspaceId: typeof this.workspace?.id === "string" ? this.workspace.id : undefined,
+      workspacesRoot: join(this.catalog.root, "workspaces"), tempRoot: this.options.environment?.TMPDIR ?? tmpdir(),
+      skillPaths: [], liveOutputPaths: this.conversation.outputPaths(), check };
+  }
+  private async editReview(command: SessionCommand & ReviewMutation, receipt: CommandReceipt, admission?: () => void): Promise<void> {
+    let error: unknown;
+    try {
+      const worker = this.commandRuntime(command.runtimeRevision);
+      const check = () => {
+        admission?.(); this.control.authorize(command); this.commandRuntime(command.runtimeRevision, worker);
+        if (!this.usableWorkspace()) throw new CommandError("session_unavailable", "Review context is transitioning");
+      };
+      check();
+      await this.catalog.validateSessionFile(this.id);
+      check();
+      const context = this.reviewContext(worker, check);
+      if (command.operation === "workspace.review.save") receipt.result = await this.reviews.save(context, command.payload);
+      else {
+        const operation = command.operation === "workspace.review.stage" ? "stage" : command.operation === "workspace.review.unstage" ? "unstage" : "restore";
+        const result = await this.reviews.mutate(context, operation, command.payload.actionId, async (reviewRecovery) => {
+          receipt.result = { reviewRecovery };
+          await this.catalog.updateCommand(receipt);
+          check();
+        });
+        receipt.result = { ...receipt.result, ...result };
+      }
+    } catch (failure) { error = failure; }
+    await this.finishCommand(receipt, error);
+  }
+  private resourceReaders = 0;
+  async resource(method: "resource.read" | "resource.complete", input: unknown, admission: () => void): Promise<unknown> {
+    if (this.resourceReaders >= 4) throw new CommandError("session_busy", "Too many resource readers");
+    this.resourceReaders++;
+    try { return await this.resourceRead(method, input, admission); }
+    finally { this.resourceReaders--; }
+  }
+  private async resourceRead(method: "resource.read" | "resource.complete", input: unknown, admission: () => void): Promise<unknown> {
+    if (!object(input) || !Number.isSafeInteger(input.runtimeRevision)) throw new CommandError("invalid_command", "Missing resource context");
+    const { runtimeRevision, ...payload } = input;
+    const revision = Number(runtimeRevision), worker = this.commandRuntime(revision);
+    const check = () => {
+      admission(); this.commandRuntime(revision, worker);
+      if (!this.usableWorkspace()) throw new CommandError("session_unavailable", "Resource context is transitioning");
+    };
+    check();
+    await this.catalog.validateSessionFile(this.id);
+    check();
+    const skillPaths: string[] = [];
+    if (payload.kind === "skill") {
+      const response = await worker.request({ type: "get_commands" }, check);
+      check();
+      if (response.success && response.command === "get_commands") {
+        for (const command of response.data.commands) {
+          if (command.source === "skill" && command.sourceInfo?.path) skillPaths.push(command.sourceInfo.path);
+        }
+      }
+    }
+    const context: ResourceContext = { ...this.reviewContext(worker, check), skillPaths };
+    const review = method === "resource.read" && typeof payload.kind === "string" && payload.kind.startsWith("workspaceReview");
+    const data = await (review ? this.reviews.read(context, payload) : method === "resource.read" ? readResource(context, payload) : completeFiles(context, payload));
+    check();
+    if (review && Buffer.byteLength(JSON.stringify(data)) > 4 * 1024 * 1024) throw new CommandError("resource_limit", "Review response exceeds 4 MiB");
+    return { runtimeRevision: revision, data };
+  }
+
   private assertSteeringActive(): void {
     if (!this.queueRunPending && !this.conversation.awaitingSettlement && !this.conversation.snapshot().execution.running) {
       throw new CommandError("session_busy", "Steering requires an active turn; retain the draft or use the main input");
@@ -884,6 +1116,7 @@ export class OwnedSession {
   }
 
   private async interruptQueue(code: string, message: string): Promise<void> {
+    this.queueRecipients.clear();
     this.reservations.clear();
     const items = this.catalog.queue(this.id);
     let changed = false;
@@ -1235,8 +1468,10 @@ export class OwnedSession {
         await new Promise<void>((resolve) => { this.wake = resolve; });
       }
       this.checkRunning();
-      this.checkIdentity();
+      // Restoration replaces the cwd-bound runtime and clears its Pi state.
+      // Hydrate that new context on the next pass before validating identity.
       if (revision !== this.runtimeRevision) continue;
+      this.checkIdentity();
       if (!this.usableWorkspace()) throw new Error("Pi trust/workspace state does not match its active runtime");
       return false;
     }
@@ -1296,11 +1531,32 @@ export class OwnedSession {
         || result.sessionId !== this.record.piSessionId || result.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Unmatched managed operation result");
       flight.result = result;
       flight.resultRevision = this.runtimeRevision;
+      if (result.status === "completed" && result.data?.disposition === "accepted") {
+        if (flight.operation === "side.prompt") this.sideRecipient = flight.recipient;
+        if (flight.operation === "side.reset") this.sideRecipient = undefined;
+      }
       return;
     }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === RENAME_RESULT) {
       this.consumeRenameResult(event.statusText);
       return; // Private result: neither snapshot state nor a frontend effect.
+    }
+    if (event.type === "extension_ui_request" && event.method === "setStatus" && typeof event.statusText === "string") {
+      if (event.statusKey === "pi-side" || event.statusKey === "pi-spawn-runs") {
+        try {
+          const payload: unknown = JSON.parse(event.statusText);
+          if (object(payload) && event.statusKey === "pi-side" && typeof payload.id === "string") this.sideId = payload.id;
+          if (object(payload) && event.statusKey === "pi-spawn-runs" && Array.isArray(payload.runs)) {
+            const ids = new Set<string>();
+            for (const run of payload.runs) if (object(run) && typeof run.runId === "string") {
+              ids.add(run.runId);
+              if (!this.spawnRecipients.has(run.runId)) this.spawnRecipients.set(run.runId,
+                run.status === "running" && !this.conversation.idle && !this.mainEffectsAmbiguous ? this.turnRecipient ?? undefined : undefined);
+            }
+            for (const id of this.spawnRecipients.keys()) if (!ids.has(id)) this.spawnRecipients.delete(id);
+          }
+        } catch { /* Retained state is still data, never an instruction to replay. */ }
+      }
     }
     const change = this.conversation.event(event);
     if (change) {
@@ -1340,6 +1596,17 @@ export class OwnedSession {
     if (this.rename?.dispatched && command.type === "prompt" && command.message === this.rename.message) {
       this.rename.requestId = command.id;
       return; // Do not materialize the private command envelope as user work.
+    }
+    if (command.type === "prompt") {
+      // Only a committed editable-queue flight supplies main-turn provenance.
+      // Missing provenance must not fall back to whoever controls dispatch now.
+      this.turnRecipient = this.queueFlight?.dispatched ? this.queueFlight.recipient ?? null : null;
+      if (this.queueFlight?.dispatched && this.conversation.settled && !this.nativePending && !this.nativeQueueCommands.size) this.mainEffectsAmbiguous = false;
+    } else if (command.type === "steer" || command.type === "follow_up") {
+      // Native messages may continue inside the same Pi run, before public user
+      // events and without another dispatch. Preserve turnRecipient but suppress
+      // ambiguous effects until a fresh, fully settled ordinary prompt boundary.
+      this.mainEffectsAmbiguous = true;
     }
     const work = this.conversation.dispatch(command);
     if (work) this.retain({ type: "work", work });
@@ -1432,7 +1699,15 @@ export class OwnedSession {
 
   private syncRevision(): void {
     const revision = this.worker?.interactionSnapshot().revision ?? 0;
-    if (revision !== this.workerRevision) this.queueRunPending = false;
+    if (revision !== this.workerRevision) {
+      this.queueRunPending = false;
+      this.turnRecipient = undefined;
+      this.mainEffectsAmbiguous = false;
+      this.queueRecipients.clear();
+      this.sideRecipient = undefined;
+      this.sideId = undefined;
+      this.spawnRecipients.clear();
+    }
     this.runtimeRevision += revision - this.workerRevision;
     this.workerRevision = revision;
   }

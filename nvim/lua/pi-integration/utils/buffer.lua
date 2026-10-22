@@ -37,7 +37,15 @@ end
 
 function M.set_modifiable(buf, value)
 	if M.valid(buf) then
+		if value and vim.bo[buf].readonly then
+			vim.b[buf].pi_restore_readonly = true
+			vim.bo[buf].readonly = false
+		end
 		vim.api.nvim_set_option_value("modifiable", value, { buf = buf })
+		if not value and vim.b[buf].pi_restore_readonly then
+			vim.bo[buf].readonly = true
+			vim.b[buf].pi_restore_readonly = nil
+		end
 	end
 end
 

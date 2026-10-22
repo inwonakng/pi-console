@@ -233,7 +233,7 @@ local function update_existing_spawn_output(ctx, lines, items, message, text)
 end
 
 local function render_tool_summary(ctx, lines, items, message, ensure_assistant_block)
-	if pi_tool_output.is_codemode_child(ctx.state, message) then return false end
+	if not ctx.state.show_nested_tools and pi_tool_output.is_codemode_child(ctx.state, message) then return false end
 	local name = message.toolName or "tool"
 	local text = message_utils.extract_text(message) or ""
 	local tool_call_id = message_utils.tool_call_id(message)
@@ -482,6 +482,12 @@ function M.collect_message_lines(ctx, messages)
 				appended = render_tool_summary(ctx, lines, items, message, ensure_assistant_block)
 				rendered_kind = appended and "tool" or nil
 			end
+		elseif role == "bashExecution" then
+			ensure_assistant_block()
+			local output_id = pi_tool_output.store(ctx.state, "bash", message.output or "", "text", { fullOutputPath = message.fullOutputPath })
+			ctx.state.tool_outputs[output_id].display = { kind = "bash", command = message.command }
+			appended = write_tool_output(ctx, lines, items, output_id)
+			rendered_kind = appended and "tool" or nil
 		elseif role == "compactionSummary" then
 			close_assistant_block()
 			appended, rendered_kind = append_compaction_summary(lines, items, message, has_body)

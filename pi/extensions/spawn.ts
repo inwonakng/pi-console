@@ -968,7 +968,10 @@ export default function spawnExtension(pi: ExtensionAPI) {
 
   const announceCompletion = (run: SpawnRun) => {
     if (!ui || !completionEligible(run) || announcedCompletions.has(run.id)) return;
-    ui.notify(`Subagent ${run.id} ${run.status}${run.profile?.name ? ` (${run.profile.name})` : ""}.`, run.status === "completed" ? "info" : run.status === "aborted" ? "warning" : "error");
+    const message = `Subagent ${run.id} ${run.status}${run.profile?.name ? ` (${run.profile.name})` : ""}.`;
+    const level = run.status === "completed" ? "info" : run.status === "aborted" ? "warning" : "error";
+    if (process.env.PI_CONSOLE_SERVICE === "1") ui.setStatus("pi-spawn-notification", JSON.stringify({ runId: run.id, message, level }));
+    else ui.notify(message, level);
     announcedCompletions.add(run.id);
   };
 

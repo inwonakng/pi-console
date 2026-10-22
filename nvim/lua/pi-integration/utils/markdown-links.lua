@@ -87,12 +87,21 @@ local function jump_to_heading(anchor)
 	error("Markdown heading not found: #" .. anchor, 0)
 end
 
-local function follow_link(cwd)
+local function follow_link(cwd, resources)
 	local destination = link_destination()
 	if not destination then
 		return false
 	end
 	destination = destination:gsub("^<", ""):gsub(">$", ""):gsub("\\(%p)", "%1")
+	local bound = require("pi-integration.service-resources").for_buffer()
+	resources = bound and bound.resource or resources
+	if resources then
+		if resources.follow(destination, bound and bound.path) then return true end
+		local anchor = destination:match("^#(.*)$")
+		if anchor then jump_to_heading(percent_decode(anchor)); return true end
+		return true
+	end
+	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" and vim.api.nvim_buf_get_name(0):match("^pi://") then error("Owner link unavailable: no resource context", 0) end
 	if destination:match("^%a[%w+.-]*:") or destination:match("^//") then
 		local _, err = vim.ui.open(destination:match("^//") and "https:" .. destination or destination)
 		if err then
@@ -125,8 +134,9 @@ local function follow_link(cwd)
 end
 
 -- Errors consume Enter too: don't open an unrelated transcript item on failure.
-function M.follow(cwd)
-	local ok, handled = pcall(follow_link, cwd)
+function M.jump_to_heading(anchor) return jump_to_heading(percent_decode(anchor)) end
+function M.follow(cwd, resources)
+	local ok, handled = pcall(follow_link, cwd, resources)
 	if not ok then
 		vim.notify(handled, vim.log.levels.WARN)
 		return true

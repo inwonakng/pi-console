@@ -25,6 +25,8 @@ export type PiProcessOptions = {
   environment: NodeJS.ProcessEnv;
   provider?: string;
   model?: string;
+  /** Fixed, unsaved owner-side workspace cleanup helper; never client-selected. */
+  savedSessionHelper?: boolean;
   /** Shared owner authority, checked before spawn and every actual pipe write. */
   assertExecutionAllowed: () => void;
   onEvent: (event: PiEvent) => void;
@@ -62,9 +64,13 @@ export class PiProcess {
     if (options.provider && !options.model) throw new Error("Selecting a Pi provider also requires a model");
     const binary = realpathSync(options.binary);
     const appRoot = realpathSync(options.appRoot);
-    const args = ["--mode", "rpc", "-e", join(appRoot, "pi"), "--pi-console-trust-ui", "--session-dir", options.sessionDirectory];
-    if ("file" in options.session) args.push("--session", options.session.file);
-    else args.push("--session-id", options.session.id);
+    const args = options.savedSessionHelper
+      ? ["--mode", "rpc", "--no-session", "--no-extensions", "--no-tools", "-e", join(appRoot, "pi", "scripts", "saved-sessions.ts")]
+      : ["--mode", "rpc", "-e", join(appRoot, "pi"), "--pi-console-trust-ui", "--session-dir", options.sessionDirectory];
+    if (!options.savedSessionHelper) {
+      if ("file" in options.session) args.push("--session", options.session.file);
+      else args.push("--session-id", options.session.id);
+    }
     if (options.provider) args.push("--provider", options.provider);
     if (options.model) args.push("--model", options.model);
     const env = { ...options.environment };

@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { object } from "./pi-records.js";
+import { validReviewAction, validReviewSave, type ReviewMutation } from "./workspace-reviews.js";
+import type { ReviewRecovery } from "./workspace-review-actions.js";
 import { validRenameTitle } from "./session-rename.js";
 import { validNative, type NativeOperation } from "./session-operations.js";
 import { validBundled, type BundledOperation } from "./session-bundled.js";
@@ -8,7 +10,8 @@ import { validBundled, type BundledOperation } from "./session-bundled.js";
 export type CommandErrorCode = "invalid_command" | "stale_epoch" | "stale_runtime" | "session_unavailable"
   | "attachment_closed" | "control_required" | "control_revoked" | "control_claimed"
   | "interaction_resolved" | "command_conflict" | "command_limit" | "queue_conflict" | "queue_limit" | "reservation_expired"
-  | "session_busy" | "unsupported_command" | "storage_pressure";
+  | "session_busy" | "unsupported_command" | "storage_pressure"
+  | "resource_denied" | "resource_conflict" | "resource_limit" | "resource_unavailable";
 export class CommandError extends Error {
   constructor(readonly code: CommandErrorCode, message: string) { super(message); }
 }
@@ -22,6 +25,7 @@ export type SessionCommand = Envelope & (
   | { operation: "control.takeover"; payload: { confirmed: true } }
   | (Authorized & (
     | NativeOperation
+    | ReviewMutation
     | BundledOperation
     | { operation: "session.restart" | "session.kill"; payload: { confirmed: true } }
     | { operation: "control.release" | "turn.abort"; payload: Record<string, never> }
@@ -44,6 +48,7 @@ export type CommandReceipt = {
   result?: { delivery?: "flushed"; cleared?: { steering: string[]; followUp: string[] }; idle?: boolean;
     queueItemId?: string; queueItemRevision?: number; queueItemText?: string; reservationId?: string; title?: string;
     submittedText?: string; editorText?: string; contextRevision?: number; disposition?: "queued" | "handled" | "accepted"; exitCode?: number; cancelled?: boolean;
+    resourceVersion?: string; resourceId?: string; resourcePath?: string; reviewRecovery?: ReviewRecovery;
     mode?: string; changed?: boolean; sessionId?: string; workspaceId?: string; lifecycle?: string; integration?: string; status?: string; enabled?: boolean };
   error?: { code: string; message: string };
 };
@@ -75,6 +80,9 @@ export function sessionCommand(value: unknown): SessionCommand {
     case "session.restart": case "session.kill": if (!exact(payload, ["confirmed"]) || payload.confirmed !== true) invalid(); break;
     case "interaction.cancel": if (!exact(payload, ["requestId"]) || !identifier(payload.requestId)) invalid(); break;
     case "prompt.submit": if (!exact(payload, ["text"]) || !validPromptText(payload.text)) invalid(); break;
+    case "workspace.review.save": if (!validReviewSave(payload)) invalid(); break;
+    case "workspace.review.stage": case "workspace.review.unstage": case "workspace.review.restore":
+      if (!validReviewAction(value.operation, payload)) invalid(); break;
     case "session.rename": if (!exact(payload, ["title"]) || !validRenameTitle(payload.title)) invalid(); break;
     case "queue.edit": case "queue.remove": case "queue.reserve":
       if (!exact(payload, value.operation === "queue.edit" ? ["itemId", "expectedRevision", "text"] : ["itemId", "expectedRevision"])

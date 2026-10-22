@@ -155,7 +155,7 @@ export class SessionCatalog {
 
   list(): CatalogSession[] {
     return this.read(() => this.db.prepare("SELECT metadata FROM sessions ORDER BY rowid").all()
-      .map((row) => this.withQueue(JSON.parse(String(row.metadata)) as CatalogSession)));
+      .map((row) => this.withQueue(JSON.parse(String(row.metadata)) as CatalogSession)).filter(session => !session.deleted));
   }
 
   get(id: string): CatalogSession {
@@ -198,8 +198,16 @@ export class SessionCatalog {
     });
   }
 
-  async finishHost(receipt: HostReceipt): Promise<void> {
+  async finishHost(receipt: HostReceipt, saved?: { sessionId: string; archived?: boolean; deleted?: true }): Promise<void> {
     await this.change(() => {
+      if (saved) {
+        const session = this.get(saved.sessionId);
+        if (session.state === "open" || session.ownerEpoch) throw new Error("Saved session became owned before completion");
+        if (saved.archived !== undefined) session.archived = saved.archived;
+        if (saved.deleted) session.deleted = true;
+        session.lifecycleRevision = (session.lifecycleRevision ?? 0) + 1;
+        this.updateSession(session);
+      }
       const changed = this.db.prepare("UPDATE commands SET status=?, receipt=? WHERE epoch=? AND id=? AND status='accepted'")
         .run(receipt.status, JSON.stringify(receipt), receipt.serviceEpoch, receipt.id);
       if (changed.changes !== 1) throw new Error("Host receipt is not pending");
@@ -238,7 +246,8 @@ export class SessionCatalog {
   async markOpen(id: string): Promise<void> {
     await this.change(() => {
       const session = this.get(id);
-      if (session.state === "open" || session.ownerEpoch !== undefined) throw new Error("Session is already owned");
+      if (session.state === "open" || session.ownerEpoch !== undefined || session.archived || session.deleted) throw new Error("Session is owned, archived, or deleted");
+      session.lifecycleRevision = (session.lifecycleRevision ?? 0) + 1;
       session.state = "open";
       session.ownerEpoch = this.epoch;
       this.updateSession(session);

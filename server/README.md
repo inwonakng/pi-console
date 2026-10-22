@@ -1,8 +1,10 @@
 # Host-side Pi owner (in development)
 
-This package contains the owner components and **opt-in local-service/Neovim
-attachment with C typed single-session operations and D1 opt-in HTTPS/WSS**.
-D1 stops for security/protocol review; it does not complete D or authorize D2/E/F.
+This package contains the owner components, **opt-in local-service/Neovim
+attachment, typed single-session operations, HTTPS/WSS hosts, E1 owner resource
+reads/completion, E2 workspace review/guarded text saves, and E3 saved-session
+archival/deletion and recipient-bound frontend effects**. F installation/supervision
+and E2's unsupported symlink/submodule staging/restoration remain excluded.
 See [`../docs/SERVER-MODE-C.md`](../docs/SERVER-MODE-C.md) for the mutation inventory,
 protocol/outcome rules, fresh macOS evidence and remaining boundaries. The plans and
 active B3 handoff are unchanged. B1–B3 evidence in the contracts report remains
@@ -137,13 +139,173 @@ arguments, confirmations and what completion means.
   Files under `${XDG_STATE_HOME:-$HOME/.local/state}/pi-console/frontend/<channel>/service-drafts/`
   are private recovery, never execution authority. Recovery survives `NVIM_APPNAME`/
   stable-release changes and remains isolated between stable and dev.
-- Freeform slash commands and excluded overview/resource actions report unavailable.
-  Tool inspection shows recorded text only; it never reads owner full-output paths,
-  spawn artifacts or workspace review data from the local filesystem. History text
-  may be offered in a separate live, initiating-grant-bound draft, never input replacement
-  or snapshot/reconnect replay. No raw RPC tunnel, local owner-path lookup or implicit
-  local Pi fallback exists. Zotero completion stays frontend-local; the host still
-  needs its own resource/provider configuration.
+- Transcript Enter opens existing thinking/skill/tool inspectors, nested retained
+  tool output, subagent artifacts and execution-relative Markdown/file links through
+  the owner. `:PiTranscript` (also in the history picker) renders managed history,
+  including branches and pre-compaction records, separately from the live tail.
+  Skill `f` inspects the current discovered owner file; ordinary inspection shows
+  recorded skill content. `@` completion uses the execution cwd on the owner.
+  `:PiNew` selects an owner, then browses its directories without changing frontend cwd.
+- E1 resource buffers are host/channel/session/context-qualified, non-writing views.
+  Large text uses 64-KiB pages: `n` next, `p` first, `r` reload. Complete rendered
+  documents are limited to 4 MiB; larger documents explicitly open as paged text.
+  Reads need authentication and a live attachment/context, but no control grant.
+  Context/selection changes, disconnect and revocation fence pending reads; reconnect
+  does not replay mutations or reacquire control. Only the latest completion query
+  is cached, for two seconds, qualified by host/channel/epoch/session/revision/cwd.
+- `:PiWorkspaceReview` / the diff shortcut opens the current owner's workspace review;
+  `:PiWorkspaceReviews` selects current/historical task reviews. Workspace tool output
+  `d` opens its owner review, pinning historical comparisons to the recorded result.
+  The integration preview's explicit "Review / modify" choice also opens the review
+  here without integrating. The frontend renders metadata, ignored-file notices and
+  before/after diffs.
+  Current supported text buffers use `:write`; historical buffers are read-only.
+  In the summary, `S` stages the reviewed working paths and `U` resets the entire
+  owner index to HEAD. Staged-only differences are marked `=` and are not staged by
+  `S`. In a file view, `s` stages, `u` unstages and `X` confirms baseline restoration.
+  Restoration checks for unsaved review edits both before confirmation and immediately
+  before sending the confirmed action.
+  `r` in the summary opens fresh versions without replacing local drafts.
+  `gO` opens current owner content separately, `gD` opens the owner patch, and `gS`
+  looks up the original review command ID. Uncertain/disconnected operations retain
+  that identity; local text and its recovery remain separate and never replay.
+- Freeform slash commands and excluded resource actions report unavailable. No raw RPC tunnel, frontend-local owner-path lookup or implicit
+  Pi fallback exists. Owner `file://` links never reach the OS opener; only HTTP(S)
+  links may open externally. Other received URI schemes refuse. Clipboard/Zotero and
+  explicitly local helpers remain frontend-local; owner provider setup is separate.
+
+### E1 resource scopes
+
+The typed transport exposes `resource.read`, `resource.complete` and host-level
+`host.directories`; these are read operations, never commands or tool execution.
+Session resource payloads include the current `runtimeRevision`; directory requests
+include `serviceEpoch`. The owner checks context/authentication across asynchronous
+work and revalidates before returning data.
+
+| Read | Allowed owner scope |
+| --- | --- |
+| `history` | Exact catalog-managed Pi JSONL, after header/identity/ownership validation. No arbitrary session-file input. |
+| `file`, file completion | Active published workspace/repository root, resolving relative paths against execution cwd. Original/retained checkouts outside that root are not implicitly readable. |
+| `skill` | Exact currently discovered skill files, including configured paths outside the workspace. This does not grant their supporting directories. Recorded content remains inspectable. |
+| `output` | Exact `fullOutputPath` metadata observed in managed history/live results or validated child transcripts. The file must be inside the owner's temporary root, single-linked, regular and service-user-owned. Arbitrary path mentions are not authorization. Missing retained output refuses. |
+| `spawn` | Fixed brief/result/transcript/status/subagent-prompt files for a run whose persisted parent belongs to the managed conversation; bounded validated child ancestry is supported. Patches additionally require the matching child-workspace/recovery relation and fixed artifact path. |
+| Host directories | Directory names on the owner before attachment, including explicit absolute project selection. This grants neither arbitrary host file reads nor frontend cwd changes. |
+
+Paths containing traversal/control characters refuse. Below trusted canonical roots,
+all symlink components (including in-root links) refuse. File descriptors are opened
+nonblocking with `O_NOFOLLOW`; type/ownership and path/stat identity are checked before
+and after reads. Continuations carry a stat-based version; changed files return
+`resource_conflict`, never mixed-version content. UTF-8 chunks are at most 64 KiB;
+binary/invalid UTF-8 content refuses. These checks are not isolation from hostile
+same-user filesystem mutation.
+
+Directory pages contain at most 128 entries, with a 10,000-entry scan limit. Output
+reference discovery limits individual JSONL records to 16 MiB, total history/transcript
+scanning to 256 MiB/128 files, run discovery to 256 runs/16 ancestors, and aggregate
+provenance metadata to 16 MiB. Resource filesystem work has four global slots; session
+preflight also has four slots. Limits refuse explicitly and yield during scans; slow
+resource peers do not hold Pi's reduction lane. Historical nested output not retained
+by Pi remains unavailable; E1 does not fabricate it or alter Pi's JSONL format.
+
+### E3 saved sessions and live effects
+
+`:PiSessions` offers archive/unarchive and deletion on the selected owner. Open
+conversations remain protected; use current control to explicitly kill them first.
+`host.saved {serviceEpoch, sessionId}` returns a versioned preview and the owner's
+trash/permanent mode. Host-scoped `host.archive {sessionId, expectedVersion,
+archived, confirmed: true}` and `host.delete {sessionId, expectedVersion, mode,
+confirmed: true}` use the existing durable IDs/status lookup and serialized lifecycle
+lane. Archival is catalog metadata; session paths and workspace associations stay
+unchanged. Deleted identities retain receipts/queue recovery data but cannot resume.
+
+Deletion confirmation lists linked worktrees, recovery patches and ignored-file loss.
+The owner revalidates the preview before admission and again inside its fixed unsaved
+Pi helper. Linked workspaces in use, retained child workspaces and unresolved managed
+writers block removal. Recovery capture and removal share the workspace lock. A
+finalized retained worktree with newer edits refuses removal rather than overwriting
+its existing integration snapshot. Workspace records/patches and applied destination
+changes remain. Partial/unproven cleanup is uncertain; unresolved helper execution
+fences the owner until shutdown and explicit reconciliation.
+
+`:PiSavedOperations` only looks up original IDs. Uncertain/unknown requests protect
+the selected conversation until explicit review permits a new request; reconnect
+never repeats them. Frontend notifications and editor effects are live-only,
+attachment/grant/runtime/cwd-bound offers revalidated through `effect.inspect`.
+Editor text opens a separate recoverable draft. Main-turn, side-input and background
+subagent notifications retain their initiating recipients; ambiguous overlapping
+sources are dropped. Desktop executables, sounds/timeouts and icons are frontend-local.
+Snapshots and reconnect never deliver these effects. `:PiOffers` remains inspect-only.
+
+### E2 review and save boundary
+
+`resource.read` additionally accepts `workspaceReviews`, `workspaceReview {workspaceId?}`
+and `workspaceReviewFile {reviewId, path, resourceId?}`. These authenticated reads need
+no controller. Review IDs bind the owner/session/runtime and exact workspace metadata;
+file reads return signed resource references plus the E1 stat version and content hash.
+Action snapshots are captured before asynchronous file rendering and rechecked after
+the final await; changed bytes cannot receive a reference for an older displayed diff.
+Historical `before`/`after` inputs must match a workspace result in managed Pi history;
+client-supplied repositories or arbitrary Git revisions never grant access. Historical
+ignored-file bytes were never retained; notices remain available. Partial integration
+comparisons describe the intended merge rather than a post-failure snapshot.
+
+`workspace.review.save {resourceId, expectedVersion, text}` replaces only existing,
+single-linked, service-user-owned regular UTF-8 files originally read in the current
+managed task review. This includes existing untracked files and entry-selected ignored
+files. A text save never creates/deletes/stages files or edits binary/symlink/submodule
+resources. It is separate from the narrow index/restoration operations below.
+
+`workspace.review.stage {actionId}` and `workspace.review.unstage {actionId}` accept
+signed references from a file page or the summary's distinct `stageId`/`unstageId`.
+Stage-all includes only reviewed baseline-to-worktree changes and untracked files;
+it preserves staged-only content whose working bytes equal the baseline. Unstage-all
+resets the full index to HEAD without reading worktree files, including when an
+unrelated worktree resource is too large or unsupported. Individual actions bind
+that file's bytes/mode/parent identity plus the exact index and HEAD.
+
+`workspace.review.restore {actionId, confirmed: true}` requires an individually
+reviewed current file. As in local Diffview, a baseline-existing regular file is
+restored in both worktree and index, including recreation of deleted parents/files
+and baseline executable mode. A baseline-absent working file is removed without
+changing its index entry, even if its addition was staged. Original bytes, existence
+and mode are durably checkpointed before restoration as
+`command.status.result.reviewRecovery` (`encoding: "base64"`, `content`, `path`,
+`existed`, `mode`). Partial outcomes retain this recovery in the original receipt;
+it is data for explicit inspection, never an instruction to restore/replay.
+Regular binary/non-UTF-8 files support index actions and raw baseline restoration,
+although their bytes cannot be edited as text and their patch may be unrenderable.
+Stage/restore of symlink/submodule resources is unsupported, including staging their
+deletions. Full unstage changes only the index and may clear such staged changes.
+Integrate/discard confirmations and the legacy local Diffview workflow are unchanged.
+
+Saving rechecks authentication/current control, epoch/session/runtime/workspace,
+metadata, path components, opened inode/stat version and exact original bytes after
+asynchronous work and immediately before synchronous descriptor writes. A deferred save
+loses authority on takeover, detach, revocation or context replacement, unlike accepted
+prompt work. Conflicts fail without overwriting owner content. Write/I/O uncertainty
+stays uncertain in the original receipt; no automatic new-ID save occurs. These checks,
+like E1, do not isolate the service from hostile same-user filesystem mutation.
+
+Index/restoration references additionally bind the task's Git directory to its
+recorded destination repository's common directory. Preparation uses a private
+alternate index while holding the real `index.lock`; it never changes HEAD or runs
+hooks/clean/process filters. After preparation and the durable recovery checkpoint,
+a synchronous boundary rechecks authority, workspace metadata, paths/parents, HEAD,
+index and current bytes before touching the worktree or publishing the index by
+rename. Any error after worktree/index mutation starts is uncertain. Reads disable
+Git's automatic index refresh as well as optional locks, so viewing a stat-dirty
+file cannot rewrite the index and invalidate its own reference.
+
+Review responses are limited to 4 MiB, text edits/blobs to 1 MiB, changed files and
+ignored-file notices to 512 each. Catalog scans allow 1,024 records with the existing
+aggregate 16-MiB metadata budget. Read-only Git helpers have a 10-second bound and
+4-MiB output budget; configured clean/process filters, external diffs, textconv and
+filesystem monitors are disabled. Index snapshots allow 16 MiB; stage-all permits
+4 MiB of current bytes and 128 KiB of paths. Per-file content/restoration is limited
+to 1 MiB. Full unstage has no worktree byte requirement. Compact review receipts
+reserve 40 KiB; restore reserves 2 MiB for its base64 recovery, stored in SQLite's
+existing recovery table. SQLite schema, receipt retention, queues and Pi JSONL stay
+unchanged.
 
 ### Local protocol v1
 
@@ -157,7 +319,7 @@ service build and separate runtime-resource fingerprint. CLI status compares the
 selected service build; it never silently restarts a different running build.
 
 Methods: `health`, `sessions`, `host.command`, `host.status`, `attach`, `detach`,
-`snapshot`, typed `session.read`, `command`, `grant`, `heartbeat`, `command.status`, `effect.inspect`,
+`snapshot`, typed `session.read`, `resource.read`, `resource.complete`, `host.directories`, `command`, `grant`, `heartbeat`, `command.status`, `effect.inspect`,
 `service.stop`; local administration also has `credentials.issue/list/revoke`. All have typed allowlisted fields; raw RPC is rejected. A connection
 owns at most one subscription. `command` accepts the existing version-1 session
 command **without** `attachmentId`; the service stamps its own transport attachment
@@ -274,8 +436,8 @@ in `plans/server-mode.md` intentionally accepts unknown escaped descendants.
   Cleanup Git commands are awaited and have a 10s service-only bound. Failed artifact
   publication can leave a conservative marker requiring inspection. No finality is
   promised against escaped writers or external modifications.
-- Desktop notifier launch is intentionally disabled in service workers: clients
-  will implement notification policy. Sanitized TMUX prevents host-side reviewer UI;
+- Desktop notifier launch is disabled in service workers. E3 publishes live intents
+  for recipient-bound frontend delivery. Sanitized TMUX prevents host-side reviewer UI;
   existing retained-workspace/manual-review data remains. Existing external tmux,
   HTTP MCP, remote jobs and explicitly handed-off services are not descendants to kill.
 
@@ -287,15 +449,15 @@ alone does not block resume. Known unresolved work does. No VM/cgroup/privileged
 or new production package is required. The registry, recovery evidence and per-epoch
 resource manifests currently have no garbage collection.
 
-Live frontend effects are now **inspection-only offers**, not legacy editor/navigation
-instructions. Offers carry owned-stream provenance, recipient attachment/grant and
+B2 introduced inspection-only offers; E3 adds the bounded live frontend handlers
+above. Offers carry owned-stream provenance, recipient attachment/grant and
 runtime/cwd context. Nonrecipients and stale buffered deliveries receive the sequence
 envelope without an effect. `OwnedSession.inspectEffect(attachmentId, token, update)`
 rechecks current grant/token, epoch, owner runtime revision, cwd/readiness and storage
 before returning copied data. Offers are absent from snapshots, never replayed, limited
 to 128 / 4 MiB (2 MiB each), and may be evicted. There is no promise that an uncorrelated
-effect originated from that attachment. B3 must preserve drafts and recheck local context
-before offering any application; B2 contains no actionable frontend handler.
+effect originated from that attachment. E3 binds recognized execution effects to their
+initiators and drops ambiguous overlapping sources; local drafts remain separate.
 
 Fresh evidence and remaining platform gaps are in `docs/SERVER-MODE-CONTRACTS.md`.
 

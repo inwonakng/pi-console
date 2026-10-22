@@ -971,10 +971,23 @@ function cleanupGitDirectory(record: WorkspaceRecord): string {
   throw new Error(`Could not locate the Git repository for ${record.label}.`);
 }
 
-export async function removeWorkspace(id: string, finalLifecycle: "integrated" | "discarded"): Promise<WorkspaceRecord> {
+export async function removeWorkspace(id: string, finalLifecycle: "integrated" | "discarded", sessionDeletion = false): Promise<WorkspaceRecord> {
   return withWorkspaceLock(id, async (record) => {
     assertManagedCleanup(record);
     if (!record.retained && record.lifecycle !== "cleanup_failed") return record;
+    if (sessionDeletion && record.retained) {
+      assertWorkspaceAvailable(record);
+      if (isWorkspaceFinalized(record)) {
+        // Preserve the recorded integration snapshot and patch. A retained,
+        // finalized worktree may have acquired new edits after failed cleanup.
+        const current = captureSnapshot(record.worktreePath, record.id, "deletion-check-" + randomUUID());
+        try {
+          if (current.tree !== record.resultTree) throw new Error(`Finalized workspace ${record.label} has newer changes; preserve them before deleting its session.`);
+        } finally { deleteRef(record.worktreePath, current.ref); }
+      } else snapshotWorkspaceResult(record);
+      // Capture/check and forced removal share the destination lock and have no
+      // intervening await, so another managed writer cannot change the bytes.
+    }
     // Integration may have won while a discard was waiting for the lock.
     // Cleanup must not relabel an already applied contribution as discarded.
     const lifecycle = isWorkspaceFinalized(record) ? "integrated" : finalLifecycle;

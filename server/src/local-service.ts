@@ -116,7 +116,7 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
         // Authentication remains current for every operation, including buffered
         // records after revocation. Accepted owner work is never cancelled here.
         if (socket.destroyed || deviceId && !credentials.active(deviceId)) throw new CommandError("attachment_closed", "Remote authentication is no longer valid");
-        if (deviceId && !["hello", "health", "sessions", "sessions.subscribe", "host.command", "host.status", "attach", "detach", "snapshot", "session.read", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
+        if (deviceId && !["hello", "health", "sessions", "sessions.subscribe", "host.command", "host.status", "attach", "detach", "snapshot", "session.read", "resource.read", "resource.complete", "host.directories", "host.saved", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
           throw new CommandError("unsupported_command", "Method is not available on remote transport");
         }
         let result: unknown;
@@ -148,6 +148,25 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
             if (initial) void pumpSummaries(feed, summaries);
             return;
           }
+          case "host.directories": {
+            exact(p, ["serviceEpoch", "path", "offset"]);
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Owner directory context changed");
+            const { serviceEpoch: _epoch, ...query } = p;
+            result = await owner.directories(query, () => {
+              if (socket.destroyed) throw new CommandError("attachment_closed", "Directory reader disconnected");
+              remoteAdmission?.();
+            });
+            break;
+          }
+          case "host.saved":
+            exact(p, ["serviceEpoch", "sessionId"]);
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Saved-session owner changed");
+            if (!identifier(p.sessionId)) throw new CommandError("invalid_command", "Invalid saved session identity");
+            result = await owner.saved(p.sessionId, () => {
+              if (socket.destroyed) throw new CommandError("attachment_closed", "Saved-session reader disconnected");
+              remoteAdmission?.();
+            });
+            break;
           case "host.command": result = await owner.command(p, remoteAdmission); break;
           case "host.status":
             exact(p, ["serviceEpoch", "commandId"]);
@@ -184,6 +203,12 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
             switch (record.method) {
               case "snapshot": exact(p, []); result = target.snapshot(); break;
               case "session.read": result = await target.read(p); break;
+              case "resource.read": case "resource.complete":
+                result = await target.resource(record.method, p, () => {
+                  if (socket.destroyed || subscription !== view || session !== target) throw new CommandError("attachment_closed", "Resource attachment changed");
+                  remoteAdmission?.();
+                });
+                break;
               case "command":
                 exact(p, ["version", "id", "sessionId", "serviceEpoch", "runtimeRevision", "controlToken", "operation", "payload"]);
                 if (p.sessionId !== target.id) throw new CommandError("invalid_command", "Command targets another attachment");

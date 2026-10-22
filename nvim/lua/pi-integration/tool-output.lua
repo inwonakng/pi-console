@@ -102,6 +102,7 @@ local function output_path(output)
 end
 
 local function filetype_from_path(path)
+	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-resources").filetype(path) end
 	if type(path) ~= "string" or path == "" then
 		return "text"
 	end
@@ -565,6 +566,10 @@ local function open_edit_diff_float(ctx, output)
 	vim.b[right_buf].pi_edit_diff_line_number_width = number_width
 	set_scratch_buffer(left_buf, "pi://tool/" .. tostring(output.tool_call_id or "edit") .. "/before", filetype, left_lines)
 	set_scratch_buffer(right_buf, "pi://tool/" .. tostring(output.tool_call_id or "edit") .. "/after", filetype, right_lines)
+	if ctx.resources then
+		ctx.resources.qualify(left_buf, "recorded-before", path)
+		ctx.resources.qualify(right_buf, "recorded-after", path)
+	end
 
 	local left_win = vim.api.nvim_open_win(left_buf, true, {
 		relative = "editor",
@@ -574,7 +579,7 @@ local function open_edit_diff_float(ctx, output)
 		col = left_col,
 		style = "minimal",
 		border = "rounded",
-		title = " Before: " .. vim.fn.fnamemodify(path, ":t") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "Before: " .. vim.fn.fnamemodify(path, ":t") .. " ",
 		title_pos = "left",
 	})
 	local right_win = vim.api.nvim_open_win(right_buf, false, {
@@ -585,7 +590,7 @@ local function open_edit_diff_float(ctx, output)
 		col = right_col,
 		style = "minimal",
 		border = "rounded",
-		title = " After: " .. vim.fn.fnamemodify(path, ":t") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "After: " .. vim.fn.fnamemodify(path, ":t") .. " ",
 		title_pos = "left",
 	})
 
@@ -931,8 +936,9 @@ function M.summary_text(state, output_id)
 	return label .. " · " .. (edit_label or line_label) .. artifact_label
 end
 
-local function codemode_output(output)
+local function codemode_output(output, resources)
 	local text = output.text or ""
+	if resources then return output.owner_full_text or text, output.owner_full_text and "Owner-retained full output" or nil end
 	local details = type(output.details) == "table" and output.details or {}
 	local path = details.fullOutputPath
 	if type(path) ~= "string" or path == "" then return text end
@@ -992,11 +998,20 @@ local function historical_workspace_review(output)
 	return review
 end
 
-function M.open_float(ctx, output_id)
+function M.open_float(ctx, output_id, resolved)
+	if ctx.resources and not resolved then ctx.resources.select() end
 	local state = ctx.state
-	local output = state.tool_outputs[output_id]
+	local output = resolved or state.tool_outputs[output_id]
 	if not output then
 		ctx.ui.notify("Tool output unavailable", vim.log.levels.WARN)
+		return true
+	end
+	if ctx.resources and not resolved and type(output.details) == "table" and type(output.details.fullOutputPath) == "string" then
+		local captured = vim.deepcopy(output)
+		ctx.resources.document({ kind = "output", path = output.details.fullOutputPath }, function(text)
+			captured.owner_full_text = text
+			M.open_float(ctx, output_id, captured)
+		end)
 		return true
 	end
 	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
@@ -1021,19 +1036,22 @@ function M.open_float(ctx, output_id)
 	vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
 	vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
 	local rendered_text, rendered_filetype = rendered_output(output)
+	if output.owner_full_text then rendered_text = output.owner_full_text end
 	if pending then
 		rendered_text, rendered_filetype = output.text, "text"
 	end
 	local full_output_note
 	if output.name == "codemode" then
-		rendered_text, full_output_note = codemode_output(output)
+		rendered_text, full_output_note = codemode_output(output, ctx.resources)
 		rendered_filetype = "text"
 	end
 	local workspace_review = not pending and historical_workspace_review(output) or nil
 	vim.api.nvim_set_option_value("filetype", rendered_filetype or output.filetype or "text", { buf = buf })
 	local content_lines = vim.split(rendered_text or "", "\n", { plain = true })
-	if workspace_review then
-		vim.list_extend(content_lines, { "", "[d] Full diff (read-only snapshots)" })
+	local owner_review = ctx.resources and output.name == "workspace" and not pending and not output.is_error
+		and type(output.details) == "table" and type(output.details.id) == "string"
+	if workspace_review or owner_review then
+		vim.list_extend(content_lines, { "", workspace_review and "[d] Full diff (read-only snapshots)" or "[d] Owner workspace review" })
 	end
 	local path = output_path(output)
 	local source_end, output_start
@@ -1073,6 +1091,10 @@ function M.open_float(ctx, output_id)
 	if workspace_review then require("pi-integration.workspace-summary").highlight(buf) end
 	if source_end then highlight_codemode(buf, source_end, output_start, rendered_text) end
 	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+	if ctx.resources then
+		ctx.resources.qualify(buf, "tool-" .. tostring(output.name))
+		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, ctx.resources) end, { buffer = buf, desc = "Follow owner link" })
+	end
 
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",
@@ -1082,7 +1104,7 @@ function M.open_float(ctx, output_id)
 		col = col,
 		style = "minimal",
 		border = "rounded",
-		title = path and " Tool: " .. tostring(output.name or "tool") .. " · " .. vim.fn.fnamemodify(path, ":t") .. " " or " Tool: " .. tostring(output.name or "tool") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "Tool: " .. tostring(output.name or "tool") .. (path and (" · " .. vim.fn.fnamemodify(path, ":t")) or "") .. " ",
 		title_pos = "left",
 	})
 
@@ -1099,8 +1121,13 @@ function M.open_float(ctx, output_id)
 		floats.close_window(win)
 	end
 	floats.close_on_win_leave(buf, close_tool_win, { win = win, parent = ctx.window.parent })
-	if workspace_review then
+	if workspace_review or owner_review then
 		vim.keymap.set("n", "d", function()
+			if ctx.resources then
+				close_tool_win()
+				ctx.resources.review(output.details.id, workspace_review)
+				return
+			end
 			local opened, err = require("pi-integration.backends.tmux").review_workspace(
 				output.details.destinationRoot,
 				workspace_review.before,

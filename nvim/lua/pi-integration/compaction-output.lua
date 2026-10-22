@@ -23,6 +23,8 @@ function M.open_float(ctx, item)
 		lines = vim.split(summary, "\n", { plain = true }),
 	})
 
+	if ctx.resources then ctx.resources.qualify(buf, "compaction-summary") end
+
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",
 		width = width,

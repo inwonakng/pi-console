@@ -185,6 +185,9 @@ end
 function M.open(entry)
 	local host = M.find(entry.host_id)
 	if not host or not host.connected then return nil, "Host disconnected; cached rows cannot be attached or mutated" end
+	for _, row in ipairs(host.rows or {}) do
+		if row.id == entry.session_id and row.archived then notify("Conversation is archived on " .. host.alias .. "; explicitly unarchive it in :PiSessions before resuming."); return true end
+	end
 	local connection = host.connection
 	local function select(resume)
 		if not host.connected or host.connection ~= connection then notify("Owner connection changed; select the session again"); return end
@@ -195,6 +198,94 @@ function M.open(entry)
 	else select(false) end
 	return true
 end
+local function saved_request(host, envelope, callback)
+	local key = host.host_id .. "/" .. envelope.id
+	-- Persist intent before delivery. Recovery only looks up this exact ID.
+	local ok, err = store.update("saved-requests", vim.empty_dict(), function(data)
+		for _, item in pairs(data) do
+			if item.host_id == host.host_id and item.envelope.payload.sessionId == envelope.payload.sessionId
+				and not item.reviewed and (not item.receipt or item.receipt.status == "accepted" or item.receipt.status == "unknown" or item.receipt.status == "uncertain") then
+				return nil, "Original request " .. item.envelope.id .. " may already have run. Inspect :PiSavedOperations before authorizing new work."
+			end
+		end
+		data[key] = { envelope = envelope, host_id = host.host_id, target = M.target(host) }
+		return true
+	end)
+	if not ok then notify("Saved-session request was not sent: " .. tostring(err)); return end
+	local connection = host.connection
+	connection.request("host.command", envelope, function(success, receipt)
+		if success then
+			local saved, failure = store.update("saved-requests", vim.empty_dict(), function(data)
+				if data[key] then data[key].receipt = receipt end
+				return true
+			end)
+			if not saved then notify("Could not save outcome; inspect original ID " .. envelope.id .. ": " .. tostring(failure)) end
+			notify(envelope.operation .. ": " .. receipt.status .. (receipt.error and ("\n" .. receipt.error.message) or ""))
+			if callback and host.connected and host.connection == connection then callback(receipt) end
+		else
+			notify("Saved-session request " .. envelope.id .. " was not replayed. " .. tostring(receipt.message or "Disconnected") .. " Inspect :PiSavedOperations.")
+		end
+	end)
+end
+function M.saved_operations()
+	M.start()
+	local data = store.load("saved-requests", vim.empty_dict())
+	local entries = vim.tbl_values(data)
+	vim.ui.select(entries, { prompt = "Saved-session outcomes (status lookup only; never replay)", format_item = function(item)
+		return item.host_id .. " " .. item.envelope.operation .. " " .. item.envelope.id .. " " .. (item.receipt and item.receipt.status or "unknown")
+	end }, function(item)
+		if not item then return end
+		local host = M.find(item.host_id)
+		if not host or not host.connected then notify("Connect to that owner before looking up its original ID"); return end
+		host.connection.request("host.status", { serviceEpoch = item.envelope.serviceEpoch, commandId = item.envelope.id }, function(ok, receipt)
+			if ok then
+				store.update("saved-requests", vim.empty_dict(), function(records)
+					local key = item.host_id .. "/" .. item.envelope.id
+					if records[key] then records[key].receipt = receipt end
+					return true
+				end)
+				vim.notify(vim.inspect(receipt), vim.log.levels.INFO, { title = "Original saved-session outcome" })
+				if receipt.status == "unknown" or receipt.status == "uncertain" then
+					vim.ui.select({ "Keep protected", "Allow a new saved-session request" }, { prompt = "Original work may have partially or fully run. Inspect owner session/workspace state first. This does not replay it." }, function(choice)
+						if choice ~= "Allow a new saved-session request" then return end
+						local saved, err = store.update("saved-requests", vim.empty_dict(), function(records)
+							local entry = records[item.host_id .. "/" .. item.envelope.id]
+							if entry then entry.reviewed = true end
+							return true
+						end)
+						if not saved then notify(err) end
+					end)
+				end
+			else notify(receipt.message or "Status unavailable; nothing replayed") end
+		end)
+	end)
+end
+local function saved_action(host, row, operation)
+	local connection, epoch = host.connection, host.hello.serviceEpoch
+	local function current() return host.connected and host.connection == connection and host.hello.serviceEpoch == epoch end
+	connection.request("host.saved", { serviceEpoch = epoch, sessionId = row.id }, function(ok, preview)
+		if not current() then return end
+		if not ok then notify(preview.message); return end
+		local verb = operation == "host.archive" and (preview.archived and "Unarchive" or "Archive")
+			or (preview.mode == "trash" and "Move to owner trash" or "Permanently delete")
+		local lines = { verb .. " conversation (1 file) on " .. host.alias .. "?", row.name or row.cwd or row.id, row.id }
+		if operation == "host.delete" and #(preview.workspaces or {}) > 0 then
+			table.insert(lines, "Remaining worktrees will be removed and unintegrated changes discarded; existing destination changes will not be reverted.")
+			for _, workspace in ipairs(preview.workspaces) do
+				table.insert(lines, workspace.label .. ": " .. workspace.worktreePath .. (workspace.retained and "" or " (retry incomplete cleanup)"))
+				table.insert(lines, "Recovery patch: " .. workspace.resultPatchPath)
+			end
+			table.insert(lines, "Recovery patches are prepared after confirmation. Ignored untracked files, including copied ignored files, are NOT in patches and will be removed with worktrees. Patches and workspace records are kept on the owner.")
+		end
+		vim.ui.select({ "Cancel", verb }, { prompt = table.concat(lines, "\n") }, function(choice)
+			if choice ~= verb then return end
+			if not current() then notify("Owner connection changed while confirming; select the conversation again"); return end
+			local payload = { sessionId = row.id, expectedVersion = preview.version, confirmed = true }
+			if operation == "host.archive" then payload.archived = not preview.archived else payload.mode = preview.mode end
+			saved_request(host, { id = uid(), serviceEpoch = epoch, operation = operation, payload = payload })
+		end)
+	end)
+end
 function M.history_picker()
 	M.start()
 	local choices = {}
@@ -204,9 +295,17 @@ function M.history_picker()
 		local connection = host.connection
 		connection.request("sessions", {}, function(ok, result)
 			if not ok or not host.connected or host.connection ~= connection then return end
-			vim.ui.select(result.sessions, { prompt = "History on " .. host.alias, format_item = function(row) return (row.name or row.cwd) .. " [" .. row.id .. "] (" .. row.state .. ")" end }, function(row)
+			vim.ui.select(result.sessions, { prompt = "History on " .. host.alias, format_item = function(row) return (row.name or row.cwd) .. " [" .. row.id .. "] (" .. row.state .. (row.archived and ", archived" or "") .. ")" end }, function(row)
 				if not row or not host.connected or host.connection ~= connection then return end
-				M.open({ host_id = host.host_id, session_id = row.id, status = row.state == "open" and "Idle" or "Not Open" })
+				if row.state == "open" then
+					M.open({ host_id = host.host_id, session_id = row.id, status = "Idle" }); return
+				end
+				local actions = row.archived and { "Unarchive", "Delete" } or { "Resume", "Archive", "Delete" }
+				vim.ui.select(actions, { prompt = "Saved conversation on " .. host.alias .. ": " .. (row.name or row.id) }, function(action)
+					if not action or not host.connected or host.connection ~= connection then return end
+					if action == "Resume" then M.open({ host_id = host.host_id, session_id = row.id, status = "Not Open" })
+					else saved_action(host, row, action == "Delete" and "host.delete" or "host.archive") end
+				end)
 			end)
 		end)
 	end)
@@ -223,10 +322,13 @@ function M.new_conversation()
 		local function choose_directory(ready)
 			if not ready then notify("Owner unavailable; connect/retry in Hosts. Nothing created."); return end
 			local connection = host.connection
-			vim.ui.input({ prompt = "Absolute directory on " .. host.alias .. ": " }, function(cwd)
-				if not cwd or cwd == "" then return end
-				if not host.connected or host.connection ~= connection then notify("Owner connection changed; nothing created"); return end
-				require("pi-integration.service-frontend").select_owner(M.target(host), nil, false, cwd)
+			local epoch = host.hello.serviceEpoch
+			local function current() return host.connected and host.connection == connection and host.hello.serviceEpoch == epoch end
+			require("pi-integration.directory-history").owner_input({ label = host.alias .. " [" .. host.host_id .. "]", key = channel .. "/" .. host.host_id,
+				current = current, request = function(query, callback)
+					connection.request("host.directories", vim.tbl_extend("force", query, { serviceEpoch = epoch }), callback)
+				end }, function(cwd)
+				if current() then require("pi-integration.service-frontend").select_owner(M.target(host), nil, false, cwd) end
 			end)
 		end
 		if host.connecting then host.waiters = host.waiters or {}; table.insert(host.waiters, choose_directory)

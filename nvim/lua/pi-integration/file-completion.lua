@@ -235,7 +235,7 @@ function source:enabled()
 end
 
 function source:get_trigger_characters()
-	return { "@" }
+	return { "@", "/" }
 end
 
 function source:get_completions(ctx, callback)
@@ -250,6 +250,23 @@ function source:get_completions(ctx, callback)
 		return
 	end
 
+	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
+		self.query = (self.query or 0) + 1
+		local query = self.query
+		require("pi-integration.service-frontend").complete_files(reference.typed, function(data)
+			if query ~= self.query then callback({ items = {}, is_incomplete_forward = true, is_incomplete_backward = true }); return end
+			if data.error and data.error ~= self.last_error then vim.notify("Owner completion: " .. data.error, vim.log.levels.WARN) end
+			self.last_error = data.error
+			local items = {}
+			for _, entry in ipairs(data.entries or {}) do
+				local item = path_item(entry, reference.range)
+				item.detail = "owner " .. item.detail
+				table.insert(items, item)
+			end
+			callback({ items = items, is_incomplete_forward = data.incomplete == true, is_incomplete_backward = false })
+		end)
+		return
+	end
 	local cwd = self.opts.get_cwd and self.opts.get_cwd(ctx) or vim.fn.getcwd()
 	local current_time = now_ms()
 	local cache_ttl_ms = self.opts.cache_ttl_ms or CACHE_TTL_MS
