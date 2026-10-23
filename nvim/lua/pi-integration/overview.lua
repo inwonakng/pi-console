@@ -37,10 +37,12 @@ local function workspace_path(entry)
 end
 
 local function workspace_label(entry)
+	local hash = text(entry.workspace_id):match("([%x]+)$")
+	if hash then return hash end
 	local name = vim.fn.fnamemodify(workspace_path(entry), ":t")
-	if name == entry.workspace_id or name:match("^task%-%d%d%d%d%-.*%-%x%x%x%x%x%x%x%x$") then return "Task" end
-	if name:match("^child%-%d%d%d%d%-.*%-%x%x%x%x%x%x%x%x$") then return "Subagent" end
-	return name
+	hash = name:match("^task%-%d%d%d%d%-.*%-(%x%x%x%x%x%x%x%x)$")
+		or name:match("^child%-%d%d%d%d%-.*%-(%x%x%x%x%x%x%x%x)$")
+	return hash or name
 end
 
 local indicator_widths = { 1, 2, 1 }
