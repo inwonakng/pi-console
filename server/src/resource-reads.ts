@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants, type BigIntStats, type Dirent } from "node:fs";
 import { lstat, open, opendir, realpath, type FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
 import { setImmediate as yieldTurn } from "node:timers/promises";
 import { object } from "./pi-records.js";
 import { CommandError } from "./session-commands.js";
@@ -438,14 +439,17 @@ export async function readResource(context: ResourceContext, input: unknown): Pr
   });
 }
 
-/** Host-level completion accepts absolute directories only, never a frontend cwd.
+/** Resolve home paths on this owner, never against the frontend's filesystem.
  * Entries are absolute child directory paths; no file names or contents escape. */
 export async function completeDirectory(input: unknown, check: () => void): Promise<{ path: string; entries: string[]; nextOffset: number | null }> {
   return limited(check, async () => {
-    if (!exact(input, ["path", "offset"]) || !pathString(input.path) || !isAbsolute(input.path) || !offset(input.offset)) {
-      refuse("resource_payload", "Directory completion requires an absolute path and optional offset");
+    if (!exact(input, ["path", "offset"]) || !pathString(input.path) || !offset(input.offset)) {
+      refuse("resource_payload", "Directory completion requires an absolute or ~/ path and optional offset");
     }
-    const { path, entries } = await directoryEntries({ root: sep, path: input.path }, check);
+    const expanded = input.path === "~" ? homedir()
+      : input.path.startsWith("~/") ? join(homedir(), input.path.slice(2)) : input.path;
+    if (!isAbsolute(expanded)) refuse("resource_payload", "Directory must be absolute or start with ~/");
+    const { path, entries } = await directoryEntries({ root: sep, path: expanded }, check);
     const directories = entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink());
     const start = (input.offset as number | undefined) ?? 0;
     if (start > directories.length) refuse("resource_offset", "Completion offset is beyond the directory page");

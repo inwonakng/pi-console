@@ -3,6 +3,7 @@ local M = {}
 -- Track the live RPC dialog for response/timeout/session cleanup. Select and
 -- confirm requests keep ownership when hidden; input uses a Markdown float.
 local active
+local input_sequence = 0
 function M.owns_buffer(buf)
 	return active ~= nil and active.request.resumable and active.buf == buf
 end
@@ -190,8 +191,9 @@ function M.input(ctx, event, on_input)
 	end
 	local title = event.title or "Pi input"
 	local ok, err = pcall(function()
+		input_sequence = input_sequence + 1
 		picker.buf, picker.win = require("pi-integration.utils.markdown-editor").open({
-			name = "pi://input/" .. tostring(event.id),
+			name = "pi://input/" .. input_sequence,
 			title = " " .. title:gsub("[\r\n]+", " ") .. " (:wq to submit) ",
 			footer = event.placeholder,
 			text = event.prefill or "",

@@ -16,14 +16,17 @@ releases, see [Maintaining pi-console](../MAINTAINING.md).
 
 ## Launch and service controls
 
-`pi-console` ensures the local service and creates in the invocation directory.
+`pi-console` ensures the local service and selects the invocation directory.
+The first prompt or shell submission creates a session; an unused frontend creates none.
 `--overview` and `--sidebar` show discovery without creating a conversation.
 `--attach ID` selects a live service conversation; `--resume ID` explicitly resumes
 saved history. Neither starts a replacement owner when the target is unavailable.
 Legacy file-based history remains available through `pi-stable`/`pi-dev --session PATH`.
 
 Closing Neovim detaches; work, accepted prompts and pending approvals remain owned
-by the service. `:PiHosts` selects local or saved HTTPS hosts. Explicit remote
+by the service. `:PiHosts` manages local or saved HTTPS hosts; `:PiHost` /
+`<leader>pH` switches this frontend to a host. `:PiCd` / `<leader>pC` chooses a
+directory on that host. Either selection leaves existing sessions running. Explicit remote
 launches accept `--remote HTTPS_ORIGIN --credential-file PRIVATE_FILE` (optional
 `--ca-file FILE`); remote creation selects a directory on that host, never this
 machine's cwd. See [service usage](../server/README.md).
@@ -279,8 +282,8 @@ sessions, but their overview lists can show conversations from both and from any
 other session on the same tmux server.
 
 For independent terminal windows, create a separate tmux session in each and run
-`pi-console` or `pi-console-dev` there. `<leader>pN` creates a new conversation tab
-in that same tmux session, using the current project directory. `<prefix>G` always
+`pi-console` or `pi-console-dev` there. `<leader>pN` opens an unstarted frontend tab
+in that same tmux session, inheriting the current host and workspace directory. `<prefix>G` always
 creates in the channel's central agents session and opens its popup when invoked
 from another session; `<prefix>g` toggles access to that popup.
 The overview stays global: selecting a running conversation visits its existing

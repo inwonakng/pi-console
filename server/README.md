@@ -227,8 +227,10 @@ unresolved create/resume ID. These do not replay work. See the C report for exac
 arguments, confirmations and what completion means.
 
 - `:PiControl` / `<leader>pc` acquires control, confirming before replacing another
-  controller; reconnect starts as viewer. `<leader>pC` / `:PiCd` starts a new
-  conversation by choosing its owner and directory.
+  controller; reconnect starts as viewer. `<leader>pH` / `:PiHost` switches the
+  frontend host. `<leader>pC` / `:PiCd` selects a directory on that host. These
+  selections and new frontend windows create no session until the first prompt
+  or shell submission. Pre-start settings are applied before that submission.
 - `<C-CR>` non-slash text or explicit owner `!` / `!!` shell, `<Esc><Esc>` abort; shared queue via `:PiQueue` / `<leader>pq`.
   Queue editors are local drafts until `:write`; their 30-second pause may expire.
   A stale revision or dispatched item refuses saving and retains local text.

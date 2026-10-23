@@ -193,11 +193,6 @@ local function tree_window_width(ctx)
 	return state.tree_width or math.min(math.max(72, math.floor(vim.o.columns * 0.82)), vim.o.columns - 4)
 end
 
-local function workspace_hash(workspace)
-	local label = type(workspace) == "table" and workspace.label or nil
-	return type(label) == "string" and label:match("([%x]+)$") or nil
-end
-
 local function workspace_color_seed(workspace)
 	local id = type(workspace.id) == "string" and workspace.id or tostring(workspace.label or "")
 	local suffix = id:match("([%x]+)$")
@@ -252,7 +247,7 @@ local function render_node_line(ctx, node, leaf_id, lines, line_nodes, highlight
 		workspace_data = node.workspace
 		workspace = " [" .. node.workspace.label .. "]"
 	end
-	local label_prefix = string.format("%s%s %s  ", line_prefix, marker, node.target_id)
+	local label_prefix = string.format("%s%s ", line_prefix, marker)
 	local heading = label_prefix .. title .. workspace .. ": "
 	local suffix = current and "  ← current" or ""
 	local max_width = math.max(1, tree_window_width(ctx) - 1)
@@ -275,11 +270,9 @@ local function render_node_line(ctx, node, leaf_id, lines, line_nodes, highlight
 			hl_group = node_title_highlight(node),
 		},
 	}
-	local hash = workspace_hash(workspace_data)
-	local hash_offset = hash and workspace:find(hash, 1, true) or nil
-	if hash_offset then
-		local start_col = #label_prefix + #title + hash_offset - 1
-		local end_col = start_col + #hash
+	if workspace_data then
+		local start_col = #label_prefix + #title
+		local end_col = start_col + #workspace
 		if end_col <= #label then
 			table.insert(highlights, {
 				start_col = start_col,
@@ -387,14 +380,12 @@ local function preview_lines(ctx, node)
 	end
 	local first = node.records[1]
 	local last = node.records[#node.records]
-	local lines = {
-		string.format("%s  %s", node_title(node), node.target_id or ""),
-	}
-	if node.start_id ~= node.target_id then
-		table.insert(lines, "records: " .. node.start_id .. " → " .. node.target_id)
+	local lines = { node_title(node) }
+	if #node.records > 1 then
+		table.insert(lines, "records: " .. #node.records)
 	end
 	if node.parent then
-		table.insert(lines, "parent: " .. node.parent.target_id)
+		table.insert(lines, "parent: " .. node_title(node.parent))
 	end
 	if first.timestamp then
 		local time = time_utils.format_timestamp(first.timestamp)
@@ -404,12 +395,12 @@ local function preview_lines(ctx, node)
 		table.insert(lines, "time: " .. time)
 	end
 	if node.transition then
-		table.insert(lines, "workspace transition: " .. node.transition.label .. (node.transition.id and (" (" .. node.transition.id .. ")") or ""))
+		table.insert(lines, "workspace transition: " .. node.transition.label)
 		if node.transition.cwd then
 			table.insert(lines, "cwd: " .. node.transition.cwd)
 		end
 	elseif node.workspace then
-		table.insert(lines, "workspace: " .. node.workspace.label .. " (" .. node.workspace.id .. ")")
+		table.insert(lines, "workspace: " .. node.workspace.label)
 		if node.workspace.cwd then
 			table.insert(lines, "cwd: " .. node.workspace.cwd)
 		end
@@ -418,7 +409,7 @@ local function preview_lines(ctx, node)
 
 	local text = node_text(ctx, node)
 	if text == "" then
-		text = vim.inspect(node.records)
+		text = "(no display text)"
 	end
 	local text_row = #lines
 	vim.list_extend(lines, vim.split(tostring(text), "\n", { plain = true }))

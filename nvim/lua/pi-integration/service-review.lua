@@ -2,6 +2,10 @@
 local M = {}
 local resources = require("pi-integration.service-resources")
 local sequence = 0
+local function scratch_name(title)
+	sequence = sequence + 1
+	return "pi://owner-review/" .. sequence .. "/" .. title
+end
 local function present(value) return value ~= nil and value ~= vim.NIL end
 local function lines(value)
 	local result = vim.split(value or "", "\n", { plain = true })
@@ -39,7 +43,7 @@ function M.open(options, workspace_id, pinned)
 	local function lookup_action(buf)
 		local action = actions[buf]
 		if not action or not action.pending then return false end
-		if not alive() then options.notify("Old review context; inspect original command " .. action.pending .. " via :PiOperations / :PiDrafts."); return true end
+		if not alive() then options.notify("Old review context; inspect the original review action via :PiOperations / :PiDrafts."); return true end
 		options.request("command.status", { commandId = action.pending, serviceEpoch = captured.epoch }, function(ok, receipt)
 			if ok then action.status(receipt) else options.notify("Review action status unavailable; original ID retained.") end
 		end)
@@ -74,7 +78,7 @@ function M.open(options, workspace_id, pinned)
 					action.used = receipt.status == "completed"
 					options.notify(receipt.status == "completed" and "Owner review action completed. Reopen the review for fresh versions; local drafts are unchanged. Restore recovery is in :PiOperations."
 						or ((receipt.error and receipt.error.message or "Review action refused") .. " Local drafts retained."))
-				else options.notify("Review action " .. tostring(action.pending) .. " is " .. tostring(receipt.status) .. "; inspect the original ID, never resubmit automatically.") end
+				else options.notify("Review action is " .. tostring(receipt.status) .. "; inspect it via :PiOperations, never resubmit automatically.") end
 			end
 			action.pending = options.command("workspace.review." .. operation, { actionId = reference, confirmed = operation == "restore" and true or nil }, function(ok, receipt)
 				if ok then action.status(receipt)
@@ -92,8 +96,7 @@ function M.open(options, workspace_id, pinned)
 	local function show_file(review, path)
 		local payload = { kind = "workspaceReviewFile", reviewId = review.reviewId, path = path }
 		query(payload, function(page)
-			sequence = sequence + 1
-			local prefix = "pi://owner-review/" .. resource.context .. "/" .. sequence .. "/"
+			local prefix = scratch_name(path) .. "/"
 			local editable = present(page.resourceId) and not page.historical and not present(page.unsupported)
 			local save_id, submitted, version, resource_id = nil, nil, page.version, page.resourceId
 			local buf
@@ -107,7 +110,7 @@ function M.open(options, workspace_id, pinned)
 				elseif receipt.status == "failed" then
 					save_id = nil
 					options.notify((receipt.error and receipt.error.message or "Save refused") .. " Local draft retained; gO inspects current owner content.")
-				else options.notify("Save " .. tostring(save_id) .. " is " .. tostring(receipt.status) .. "; draft retained. Use gS / :PiOperations to inspect, never resubmit automatically.") end
+				else options.notify("Save is " .. tostring(receipt.status) .. "; draft retained. Use gS / :PiOperations to inspect, never resubmit automatically.") end
 			end
 			local function lookup()
 				if not save_id or not alive() then return end
@@ -117,7 +120,7 @@ function M.open(options, workspace_id, pinned)
 				end)
 			end
 			local function save(target)
-				if save_id then options.notify("Unresolved save " .. save_id .. "; checking the same ID only."); lookup(); return end
+				if save_id then options.notify("Unresolved save; checking the original request only."); lookup(); return end
 				if lookup_action(target) then return end
 				if not editable then options.notify(page.unsupported or "Historical reviews are read-only"); return end
 				if not alive() then options.notify("Old review context cannot save; draft retained."); return end
@@ -146,7 +149,7 @@ function M.open(options, workspace_id, pinned)
 			vim.keymap.set("n", "gO", function()
 				-- Always open a separate view. Never refresh/replace an unsaved buffer.
 				query(vim.tbl_extend("force", payload, { resourceId = resource_id }), function(latest)
-					readonly(options, prefix .. "current-" .. tostring(vim.uv.hrtime()), latest.after, resources.filetype(path))
+					readonly(options, scratch_name("current/" .. path), latest.after, resources.filetype(path))
 				end)
 			end, { buffer = buf, desc = "Inspect current owner content (preserve draft)" })
 			vim.keymap.set("n", "gS", function() if not lookup_action(buf) then lookup() end end, { buffer = buf, desc = "Look up original review command" })
@@ -158,14 +161,13 @@ function M.open(options, workspace_id, pinned)
 					end, { buffer = buf, desc = "Owner review " .. operation })
 				end
 			end
-			vim.keymap.set("n", "gD", function() readonly(options, prefix .. "patch-" .. tostring(vim.uv.hrtime()), page.diff, "diff") end, { buffer = buf, desc = "Inspect owner diff" })
+			vim.keymap.set("n", "gD", function() readonly(options, scratch_name("patch/" .. path), page.diff, "diff") end, { buffer = buf, desc = "Inspect owner diff" })
 			if present(page.unsupported) then options.notify(page.unsupported) end
 			if present(page.actionUnsupported) then options.notify(page.actionUnsupported) end
 		end)
 	end
 	query({ kind = "workspaceReview", workspaceId = workspace_id, before = pinned and pinned.before, after = pinned and pinned.after }, function(review)
-		sequence = sequence + 1
-		local output = { "# Owner workspace review: " .. review.workspaceId, resource.label,
+		local output = { "# Owner workspace review", resource.label,
 			review.historical and "Historical (read-only)" or "Current (text :write requires control)", "", review.notice,
 			review.partial and "Partial integration: comparison is the intended Git merge, not a captured post-failure tree." or "", "" }
 		local entries = {}
@@ -181,7 +183,7 @@ function M.open(options, workspace_id, pinned)
 		table.insert(output, ":write saves only text. gO inspects owner content; gS looks up the original command; gD shows the patch. = denotes an index-only difference against HEAD.")
 		if present(review.stageUnsupported) then table.insert(output, "Stage all: " .. review.stageUnsupported) end
 		if present(review.unstageUnsupported) then table.insert(output, "Unstage all: " .. review.unstageUnsupported) end
-		local buf = readonly(options, "pi://owner-review/" .. resource.context .. "/" .. sequence .. "/summary", table.concat(output, "\n"), "markdown")
+		local buf = readonly(options, scratch_name("summary"), table.concat(output, "\n"), "markdown")
 		require("pi-integration.workspace-summary").highlight(buf)
 		vim.keymap.set("n", "<CR>", function() local path = entries[vim.api.nvim_win_get_cursor(0)[1]]; if path then show_file(review, path) end end, { buffer = buf, desc = "Open owner review file" })
 		vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel

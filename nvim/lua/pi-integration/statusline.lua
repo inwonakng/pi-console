@@ -152,14 +152,12 @@ local function workspace_statusline_label(state)
 		return "local"
 	end
 
-	local id = type(workspace.id) == "string" and workspace.id ~= "" and workspace.id or nil
-	local hash = id and id:match("([%x]+)$") or nil
-	if hash then
-		return hash
-	end
-
 	local name = type(workspace.name) == "string" and workspace.name ~= "" and workspace.name or "workspace"
+	if name == workspace.id then
+		name = "workspace"
+	end
 	local branch = type(workspace.branch) == "string" and workspace.branch ~= "" and workspace.branch or nil
+	if branch and branch:match("^detached@%x+$") then branch = "detached" end
 	return branch and (name .. "@" .. branch) or name
 end
 

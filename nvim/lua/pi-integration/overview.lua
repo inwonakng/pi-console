@@ -31,9 +31,15 @@ local function project(entry)
 	return type(entry.directory) == "string" and entry.directory ~= "" and entry.directory or entry.cwd
 end
 
-local function workspace_hash(entry)
-	local id = type(entry.workspace_id) == "string" and entry.workspace_id or ""
-	return id:match("([%x]+)$") or "—"
+local function workspace_path(entry)
+	return text(entry.workspace_cwd) ~= "" and text(entry.workspace_cwd) or text(entry.cwd)
+end
+
+local function workspace_label(entry)
+	local name = vim.fn.fnamemodify(workspace_path(entry), ":t")
+	if name == entry.workspace_id or name:match("^task%-%d%d%d%d%-.*%-%x%x%x%x%x%x%x%x$") then return "Task" end
+	if name:match("^child%-%d%d%d%d%-.*%-%x%x%x%x%x%x%x%x$") then return "Subagent" end
+	return name
 end
 
 local indicator_widths = { 1, 2, 1 }
@@ -165,12 +171,9 @@ function M.open(config)
 				end
 			end
 			table.insert(lines, " Project:   " .. text(project(entry)))
-			table.insert(lines, " Workspace: " .. workspace_hash(entry))
-			if workspace_hash(entry) ~= "—" then
-				table.insert(lines, " Working:   " .. text(entry.cwd))
-			end
+			table.insert(lines, " Workspace: " .. workspace_path(entry))
 			if entry.host_id then
-				table.insert(lines, " Host:      " .. text(entry.host_name) .. " [" .. entry.host_id .. "]")
+				table.insert(lines, " Host:      " .. text(entry.host_name))
 				table.insert(lines, " Control:   " .. (type(entry.controller) == "table" and text(entry.controller.label) or "Unclaimed"))
 			end
 			table.insert(lines, " Location:  " .. text(entry.location))
@@ -238,7 +241,7 @@ function M.open(config)
 				local indicators, spans = indicator_columns(entry)
 				local prefix = " " .. session_list.session_prefix(node)
 				local indicator_start = #prefix + #column(entry.status, 13) + 2
-				local row_prefix = prefix .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_hash(entry), 10) .. (entry.host_id and "  " .. column(entry.host_name .. " [" .. entry.host_id:sub(1, 8) .. "]", 18) or "") .. "  "
+				local row_prefix = prefix .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_label(entry), 10) .. "  " .. column(entry.host_name, 18) .. "  "
 				local badge = build_info.is_dev(entry) and "DEV " or ""
 				local suffix = session_list.session_suffix(node)
 				local title = badge .. text(entry.title) .. suffix

@@ -20,6 +20,7 @@ import { SessionCatalog, type CatalogSession, type Channel } from "./session-cat
 import { QueueReservations, editableItem, type AcceptedQueueItem, type AcceptedQueueSnapshot } from "./session-queue.js";
 import { RENAME_COMMAND, RENAME_RESULT, renameResult, type RenameResult } from "./session-rename.js";
 import { prepareHostResources, type HostResources } from "./host-resources.js";
+import { readHostOptions, OptionsHelperUnresolved, type HostOptions } from "./host-options.js";
 import { isNative, nativeCommand, readCommand, validRead, type NativeOperation } from "./session-operations.js";
 import { isBundled, BUNDLED_SOURCES, OPERATION_RESULT, operationCommand, operationResult, type BundledOperation, type OperationResult } from "./session-bundled.js";
 
@@ -140,6 +141,31 @@ export class HostOwner {
   async directories(input: unknown, check: () => void): Promise<unknown> {
     this.assertOpen();
     return completeDirectory(input, () => { this.assertOpen(); check(); });
+  }
+
+  /** Host metadata shares bounded lifecycle admission, without creating a session. */
+  optionsForHost(check: () => void): Promise<HostOptions> {
+    this.assertOpen(); check();
+    if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");
+    this.hostAdmitting++;
+    const task = this.hostAdmission.then(async () => {
+      this.assertOpen(); check();
+      this.catalog.assertLaunchAllowed();
+      try {
+        const result = await readHostOptions(this.resources, this.options.environment);
+        this.assertOpen(); check();
+        this.catalog.assertExecutionAllowed();
+        return result;
+      } catch (error) {
+        if (error instanceof OptionsHelperUnresolved) {
+          this.helperUnresolved = error;
+          for (const session of this.sessions.values()) session.storageFailed(error);
+        }
+        throw error;
+      }
+    });
+    this.hostAdmission = task.then(() => undefined, () => undefined);
+    return task.finally(() => { this.hostAdmitting--; });
   }
 
   /** Lookup never starts a worker or repeats trust/workspace initialization. */

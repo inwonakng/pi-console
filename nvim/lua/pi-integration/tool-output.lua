@@ -232,13 +232,6 @@ local function truncate_spawn_text(text, max_len)
 	return truncated .. (open_ticks or "") .. "…"
 end
 
-local function short_run_id(id)
-	if type(id) ~= "string" or id == "" then
-		return nil
-	end
-	return id:match("([^-]+)$") or id
-end
-
 local function run_id(run)
 	if type(run) ~= "table" then
 		return nil
@@ -898,9 +891,11 @@ function M.summary_text(state, output_id)
 		local details = type(output.details) == "table" and output.details or {}
 		if type(details.runs) == "table" then
 			local labels = {}
-			for _, run in ipairs(details.runs) do
-				local status = type(run) == "table" and run.status or "unknown"
-				table.insert(labels, (short_run_id(run_id(run)) or "unknown") .. " " .. tostring(status or "unknown"))
+			for index, run in ipairs(details.runs) do
+				run = type(run) == "table" and run or {}
+				local name = type(run.agent) == "string" and run.agent ~= "" and run.agent
+					or type(run.role) == "string" and run.role ~= "" and run.role or "Subagent"
+				table.insert(labels, name .. " " .. index .. " · " .. tostring(run.status or "unknown"))
 			end
 			return #labels > 0 and ("Subagents: " .. table.concat(labels, " · "))
 				or ("Subagents: " .. truncate_spawn_text(output.text ~= "" and output.text or "No subagents", 120))
@@ -911,16 +906,11 @@ function M.summary_text(state, output_id)
 			label = label .. ": " .. details.role
 		end
 		local status = type(details.status) == "string" and details.status or nil
-		local run_id = details.runId or details.id
-		local is_spawn_ack = output.name == "spawn"
-			and type(run_id) == "string"
-			and type(output.text) == "string"
-			and output.text:find("Spawned subagent", 1, true) ~= nil
-		local progress_source = type(details.progress) == "string" and details.progress or output.text or ""
-		local progress = truncate_spawn_text(progress_source, is_spawn_ack and 80 or 120)
-		if is_spawn_ack and (type(details.progress) ~= "string" or details.progress == "") then
-			progress = short_run_id(run_id) and ("id: " .. short_run_id(run_id)) or ""
-		elseif status and progress == status then
+		-- Use structured progress for labels; keep raw tool text unchanged.
+		local progress_source = type(details.progress) == "string" and details.progress
+			or (run_id(details) and "" or output.text or "")
+		local progress = truncate_spawn_text(progress_source, 120)
+		if status and progress == status then
 			progress = ""
 		end
 		local parts = { label }

@@ -1,7 +1,11 @@
 local cmp = require("blink.cmp")
 
+local function is_owner_directory_prompt()
+	return require("pi-integration.directory-history").completion_context() ~= nil
+end
+
 local function is_directory_prompt()
-	return vim.fn.getcmdtype() == "@" and vim.fn.getcmdcompltype() == "dir"
+	return is_owner_directory_prompt() or (vim.fn.getcmdtype() == "@" and vim.fn.getcmdcompltype() == "dir")
 end
 
 cmp.build():pwait()
@@ -9,8 +13,13 @@ cmp.setup({
 	term = { enabled = false },
 	cmdline = {
 		enabled = true,
+		keymap = {
+			["<CR>"] = { function(cmp) if is_owner_directory_prompt() then return cmp.accept() end end, "fallback" },
+			["<C-o>"] = { function(cmp) return require("pi-integration.directory-history").browse_input(cmp) end, "fallback" },
+		},
 		sources = {
 			default = function()
+				if is_owner_directory_prompt() then return { "pi_directories" } end
 				if is_directory_prompt() or vim.fn.getcmdtype() == ":" then
 					return { "cmdline" }
 				end
@@ -18,6 +27,10 @@ cmp.setup({
 			end,
 		},
 		completion = {
+			list = { selection = {
+				preselect = function() return not is_owner_directory_prompt() end,
+				auto_insert = function() return not is_owner_directory_prompt() end,
+			} },
 			menu = {
 				auto_show = is_directory_prompt,
 			},
@@ -49,6 +62,10 @@ cmp.setup({
 		nerd_font_variant = "mono",
 	},
 	completion = {
+		list = { selection = {
+			preselect = function() return not is_owner_directory_prompt() end,
+			auto_insert = function() return not is_owner_directory_prompt() end,
+		} },
 		documentation = {
 			auto_show = true,
 			auto_show_delay_ms = 500,
@@ -56,12 +73,19 @@ cmp.setup({
 	},
 	sources = {
 		default = function()
+			if is_owner_directory_prompt() then return { "pi_directories" } end
 			if vim.api.nvim_buf_get_name(0) == "pi://input" then
 				return { "pi_zotero", "pi_files", "buffer" }
 			end
 			return { "pi_zotero", "pi_files", "lsp", "path", "snippets", "buffer" }
 		end,
 		providers = {
+			cmdline = { enabled = function() return not is_owner_directory_prompt() end },
+			pi_directories = {
+				name = "Owner directories",
+				module = "pi-integration.directory-completion",
+				timeout_ms = 5000,
+			},
 			pi_zotero = {
 				name = "Zotero",
 				module = "pi-integration.zotero-completion",

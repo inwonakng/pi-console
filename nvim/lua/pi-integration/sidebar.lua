@@ -127,7 +127,6 @@ function M.open(config)
 				local icon_col = 1 + #session_list.session_prefix(node)
 				table.insert(status_icons, { row = row - 1, col = icon_col, status = entry.status, icon = icon })
 				local prefix = " " .. session_list.session_prefix(node) .. icon .. " "
-				if entry.host_id then prefix = prefix .. "[" .. entry.host_id:sub(1, 8) .. "] " end
 				highlight(row, 1 + #session_list.session_prefix(node), #prefix - 1, icons.highlight(entry.status))
 				if build_info.is_dev(entry) then
 					highlight(row, #prefix, #prefix + 3, "PiBuildDev")

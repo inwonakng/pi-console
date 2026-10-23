@@ -116,7 +116,7 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
         // Authentication remains current for every operation, including buffered
         // records after revocation. Accepted owner work is never cancelled here.
         if (socket.destroyed || deviceId && !credentials.active(deviceId)) throw new CommandError("attachment_closed", "Remote authentication is no longer valid");
-        if (deviceId && !["hello", "health", "sessions", "sessions.subscribe", "host.command", "host.status", "session.manage", "session.manage.status", "attach", "detach", "snapshot", "session.read", "resource.read", "resource.complete", "host.directories", "host.saved", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
+        if (deviceId && !["hello", "health", "sessions", "sessions.subscribe", "host.command", "host.status", "session.manage", "session.manage.status", "attach", "detach", "snapshot", "session.read", "resource.read", "resource.complete", "host.directories", "host.options", "host.saved", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
           throw new CommandError("unsupported_command", "Method is not available on remote transport");
         }
         let result: unknown;
@@ -148,6 +148,14 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
             if (initial) void pumpSummaries(feed, summaries);
             return;
           }
+          case "host.options":
+            exact(p, ["serviceEpoch"]);
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host options owner changed");
+            result = await owner.optionsForHost(() => {
+              if (socket.destroyed) throw new CommandError("attachment_closed", "Host options reader disconnected");
+              remoteAdmission?.();
+            });
+            break;
           case "host.directories": {
             exact(p, ["serviceEpoch", "path", "offset"]);
             if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Owner directory context changed");

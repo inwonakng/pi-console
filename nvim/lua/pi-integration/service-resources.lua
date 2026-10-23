@@ -1,7 +1,7 @@
 -- Bound read adapters for the existing inspectors. Never interpret owner paths locally.
 local M = {}
 local buffers, completion_cache = {}, {}
-local viewer_sequence = 0
+local viewer_sequence, buffer_sequence = 0, 0
 local MAX_VIEW_BYTES = 4 * 1024 * 1024
 
 function M.invalidate()
@@ -31,7 +31,8 @@ function M.new(options)
 		vim.api.nvim_create_autocmd("BufWipeout", { buffer = buf, once = true, callback = function() buffers[buf] = nil end })
 	end
 	function resource.qualify(buf, title, path)
-		vim.api.nvim_buf_set_name(buf, "pi://owner/" .. options.key .. "/" .. buf .. "/" .. (title or "resource"):gsub("[^%w._-]", "-"))
+		buffer_sequence = buffer_sequence + 1
+		vim.api.nvim_buf_set_name(buf, "pi://owner/" .. buffer_sequence .. "/" .. (title or "resource"):gsub("[^%w._-]", "-"))
 		vim.bo[buf].buftype, vim.bo[buf].swapfile, vim.bo[buf].modeline = "nofile", false, false
 		vim.bo[buf].modifiable, vim.bo[buf].readonly = false, true
 		resource.bind(buf, path)

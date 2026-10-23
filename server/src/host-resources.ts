@@ -33,6 +33,8 @@ export type HostResources = ResourceManifest & {
   readonly root: string;
   readonly appRoot: string;
   readonly binary: string;
+  /** Installed SDK belonging to the pinned host launcher, never frontend resolution. */
+  readonly packageRoot: string;
   readonly environment: NodeJS.ProcessEnv;
 };
 
@@ -74,7 +76,7 @@ export async function prepareHostResources(options: HostResourcesOptions): Promi
     buildId: `sha256:${resources.digest()}`, files: Object.freeze(resources.files),
     resolutions: Object.freeze(resources.resolutions), lookup: Object.freeze(resources.lookup),
   });
-  return Object.freeze({ channel, root, appRoot, binary, environment: Object.freeze(environment), ...manifest });
+  return Object.freeze({ channel, root, appRoot, binary, packageRoot, environment: Object.freeze(environment), ...manifest });
 }
 
 function hostEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

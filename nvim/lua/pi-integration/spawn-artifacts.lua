@@ -12,6 +12,12 @@ local artifact_types = {
 	{ key = "patch", label = "patch", filetype = "diff" },
 }
 
+local function run_label(run)
+	local name = type(run.agent) == "string" and run.agent ~= "" and run.agent
+		or type(run.role) == "string" and run.role ~= "" and run.role or "Subagent"
+	return name .. (type(run.status) == "string" and run.status ~= "" and (" · " .. run.status) or "")
+end
+
 function M.paths(run, text)
 	run = type(run) == "table" and run or {}
 	if type(run.runs) == "table" then
@@ -19,7 +25,7 @@ function M.paths(run, text)
 		for _, member in ipairs(run.runs) do
 			local paths = M.paths(member)
 			if paths then
-				table.insert(runs, { runId = member.runId or member.id, artifacts = paths })
+				table.insert(runs, { runId = member.runId or member.id, label = run_label(member), artifacts = paths })
 			end
 		end
 		-- List text can contain matched runs too. Never infer a remaining
@@ -49,11 +55,10 @@ end
 local function artifact_choices(artifacts, transcript_first)
 	local choices = {}
 	if artifacts.runs then
-		for _, run in ipairs(artifacts.runs) do
-			local id = tostring(run.runId or "unknown")
-			id = id:match("([^-]+)$") or id
+		for index, run in ipairs(artifacts.runs) do
+			local label = (run.label or "Subagent") .. " " .. index
 			for _, choice in ipairs(artifact_choices(run.artifacts, transcript_first)) do
-				choice.label = choice.label .. " · " .. id
+				choice.label = choice.label .. " · " .. label
 				table.insert(choices, choice)
 			end
 		end
@@ -193,7 +198,7 @@ function M.pick_run(ctx, run, send_action)
 		ui = ctx.ui,
 		window = { parent = ctx.state.transcript_win },
 	}
-	select_artifact(artifact_ctx, choices, "Subagent " .. tostring(run.runId or ""), false, send_action)
+	select_artifact(artifact_ctx, choices, run_label(run), false, send_action)
 end
 
 function M.open_resource(ctx, query, title, filetype, page, anchor)

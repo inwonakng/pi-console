@@ -4,6 +4,19 @@ local function is_workspace_location(record)
 	return record.type == "custom" and record.customType == "pi-workspace-location"
 end
 
+local function workspace_label(data)
+	local label = type(data.label) == "string" and data.label or ""
+	local suffix = type(data.workspaceId) == "string" and data.workspaceId:match("([%x]+)$") or nil
+	if suffix and label == "task-" .. suffix then
+		return "Task workspace"
+	elseif label:match("^subagent%-%x%x%x%x%x%x%x%x$") or suffix and label == "child-" .. suffix then
+		return "Subagent workspace"
+	elseif label ~= "" and label ~= data.workspaceId then
+		return label
+	end
+	return type(data.workspaceId) == "string" and data.workspaceId ~= "" and "Workspace" or "Origin checkout"
+end
+
 local function workspace_after(record, inherited)
 	if not is_workspace_location(record) then
 		return inherited
@@ -14,7 +27,7 @@ local function workspace_after(record, inherited)
 	end
 	return {
 		id = data.workspaceId,
-		label = data.label or data.workspaceId,
+		label = workspace_label(data),
 		cwd = data.cwd,
 	}
 end
@@ -69,7 +82,7 @@ local function add_display_node(model, parent, kind, raw_records)
 			local data = type(raw.record.data) == "table" and raw.record.data or {}
 			transition = {
 				id = type(data.workspaceId) == "string" and data.workspaceId or nil,
-				label = data.label or data.workspaceId or "Origin checkout",
+				label = workspace_label(data),
 				cwd = data.cwd,
 			}
 		end
@@ -294,7 +307,7 @@ function M.node_text(node, extract_text)
 		return extract_text(record) or record.content or "custom message"
 	elseif is_workspace_location(record) then
 		local data = type(record.data) == "table" and record.data or {}
-		local label = data.label or data.workspaceId or "Origin checkout"
+		local label = workspace_label(data)
 		return label .. (type(data.cwd) == "string" and (" · " .. data.cwd) or "")
 	elseif record.type == "model_change" then
 		return table.concat(vim.tbl_filter(function(part)

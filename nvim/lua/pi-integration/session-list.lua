@@ -141,7 +141,7 @@ function M.new()
 				for _, entry in ipairs(entries) do
 					if not seen[entry.host_id] then
 						seen[entry.host_id] = true
-						table.insert(choices, { id = entry.host_id, name = entry.host_name .. " [" .. entry.host_id .. "]" })
+						table.insert(choices, { id = entry.host_id, name = M.text(entry.host_name) ~= "" and M.text(entry.host_name) or "Host" })
 					end
 				end
 				vim.ui.select(choices, { prompt = "Filter host", format_item = function(choice) return choice.name end }, function(choice)

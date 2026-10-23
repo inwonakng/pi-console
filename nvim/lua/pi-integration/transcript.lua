@@ -26,7 +26,6 @@ function M.metadata_lines(ctx)
 		"thinking: " .. yaml_value(state.thinking_level),
 		"access: " .. yaml_value(state.access_mode),
 		"integration: " .. yaml_value(state.integration_mode),
-		"session: " .. yaml_value(state.session_id),
 		"project: " .. yaml_value(state.workspace and state.workspace.project),
 		"workspace: " .. yaml_value(cwd),
 	}

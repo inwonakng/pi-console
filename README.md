@@ -53,8 +53,9 @@ Make sure `~/.local/bin` is on your `PATH`, then run from your project directory
 pi-console
 ```
 
-A local launch ensures the independent service, creates a conversation in the
-invocation directory and attaches. Closing Neovim leaves execution running.
+A local launch ensures the independent service and opens an unstarted frontend in
+the invocation directory. The first prompt or shell command creates a conversation.
+Closing Neovim leaves started conversations running.
 `pi-console --overview` and `--sidebar` create no conversation. Use `--attach ID`
 for a live conversation or `--resume ID` for a saved service conversation.
 
