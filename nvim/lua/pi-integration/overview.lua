@@ -123,7 +123,6 @@ function M.open(config)
 	vim.wo[detail_win].winfixheight = true
 	vim.api.nvim_set_current_win(list_win)
 	list_cursor.attach(list_buf)
-	list_cursor.attach(detail_buf)
 
 	local list = session_list.new()
 	local rows = {}
