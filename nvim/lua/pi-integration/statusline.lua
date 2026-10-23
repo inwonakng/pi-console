@@ -148,7 +148,7 @@ end
 
 local function workspace_statusline_label(state)
 	local workspace = state.workspace or {}
-	if workspace.localCheckout == true then
+	if workspace.localCheckout ~= false then
 		return "local"
 	end
 
@@ -163,7 +163,7 @@ end
 
 local function workspace_statusline_highlight(state)
 	local workspace = state.workspace or {}
-	if workspace.localCheckout == true then
+	if workspace.localCheckout ~= false then
 		return "%#PiWorkspaceLocal#"
 	end
 	return "%#PiWorkspaceActive#"

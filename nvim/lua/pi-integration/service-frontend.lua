@@ -301,6 +301,7 @@ local function command(operation, payload, callback, captured, terminal, submiss
 			snapshot.serviceEpoch, current_revision())
 		entry.id, entry.sessionId, entry.serviceEpoch, entry.runtimeRevision = envelope.id, session_id, snapshot.serviceEpoch, current_revision()
 		entry.status, entry.sent = "Sending", true
+		entry.messageOffset = (snapshot.conversation.omittedMessages or 0) + #snapshot.conversation.messages
 		if valid(input_buf) then
 			layout.set_buffer_lines(ctx, input_buf, { "" }, true)
 			vim.bo[input_buf].modified = false
@@ -475,15 +476,13 @@ render = function()
 	layout.update_input_sidebar(ctx)
 	local visible = vim.deepcopy(conversation and conversation.messages or {})
 	if conversation and conversation.partialAssistant then table.insert(visible, conversation.partialAssistant.message) end
+	local covered_queue = feedback_ui.append_messages(feedback, session_id, visible)
 	require("pi-integration.tool-output").reset(state)
 	require("pi-integration.thinking-output").reset(state)
 	require("pi-integration.skills").reset(state)
 	local lines, items = messages.collect_message_lines(ctx, visible, conversation and conversation.tools)
 	if snapshot and snapshot.error then
 		vim.list_extend(lines, { "", "Error: " .. snapshot.error })
-	end
-	if not session_id and starting then
-		vim.list_extend(lines, { "", "Starting session..." })
 	end
 	if not attachment and session_error then vim.list_extend(lines, { "", session_error }) end
 	if conversation then
@@ -495,8 +494,10 @@ render = function()
 			end
 		end
 		for _, item in ipairs(snapshot.acceptedQueue.items) do
-			vim.list_extend(lines, { "", "### Queue — " .. item.status .. " r" .. item.revision,
-				item.text, item.error and item.error.message or "" })
+			if not covered_queue[item.id] then
+				vim.list_extend(lines, { "", "### Queue — " .. item.status .. " r" .. item.revision,
+					item.text, item.error and item.error.message or "" })
+			end
 		end
 		for _, queue in ipairs({ { "steering", "Steering" }, { "followUp", "Follow-up" } }) do
 			for _, value in ipairs(conversation.queue[queue[1]] or {}) do
