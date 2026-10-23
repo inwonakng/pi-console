@@ -163,6 +163,19 @@ export class ServiceSupervisor {
     }
     throw new Error("Supervisor still tracks the departing owner; refusing teardown/replacement");
   }
+  /** Change listener arguments only after guarded shutdown, preserving the captured environment. */
+  async configurePort(port?: number): Promise<void> {
+    const args = this.config.args.filter((arg, index, all) => arg !== "--tls-config" && all[index - 1] !== "--tls-config"
+      && (port === undefined || arg !== "--port" && all[index - 1] !== "--port"));
+    if (port !== undefined) args.push("--port", String(port));
+    if (JSON.stringify(args) === JSON.stringify(this.config.args)) return;
+    const enabled = (await this.status()).enabled;
+    await this.disable();
+    this.config.args = args;
+    await publish(configPath(this.config.root), JSON.stringify(this.config) + "\n");
+    await this.ensureDefinition();
+    if (enabled) await this.enable(false);
+  }
   async start(): Promise<void> {
     await this.ensureDefinition();
     const { config } = this;

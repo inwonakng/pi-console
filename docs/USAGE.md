@@ -24,12 +24,15 @@ saved history. Neither starts a replacement owner when the target is unavailable
 Legacy file-based history remains available through `pi-stable`/`pi-dev --session PATH`.
 
 Closing Neovim detaches; work, accepted prompts and pending approvals remain owned
-by the service. `:PiHosts` manages local or saved HTTPS hosts; `:PiHost` /
+by the service. `:PiHosts` manages local or saved HTTP hosts; `:PiHost` /
 `<leader>pH` switches this frontend to a host. `:PiCd` / `<leader>pC` chooses a
 directory on that host. Either selection leaves existing sessions running. Explicit remote
-launches accept `--remote HTTPS_ORIGIN --credential-file PRIVATE_FILE` (optional
-`--ca-file FILE`); remote creation selects a directory on that host, never this
-machine's cwd. See [service usage](../server/README.md).
+launches accept `--remote http://HOST:8443`; remote creation selects a directory on
+that host, never this machine's cwd. Every service listens on all IPv4 interfaces,
+port `8443` by default (`server start/restart/enable --port PORT` overrides it). There
+is no authentication or encryption: restrict access using your trusted network/VPN
+and firewall. `server status` reports candidate connection URLs. Forgetting a host
+only disconnects and removes its saved entry. See [service usage](../server/README.md).
 
 `server status` reports running/selected builds and restart needs. `server
 stop|restart|disable` saves/stops idle conversations but refuses active work,

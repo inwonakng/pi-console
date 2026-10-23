@@ -378,7 +378,7 @@ local function local_snapshot()
 	for buf, name in pairs(drafts) do if valid(buf) then table.insert(saved_drafts, { name = name, text = text(buf), endofline = vim.bo[buf].endofline, review_command_id = vim.b[buf].pi_review_command_id, review_command_epoch = vim.b[buf].pi_review_command_epoch,
 			review_host = vim.b[buf].pi_review_host, review_session = vim.b[buf].pi_review_session, review_channel = vim.b[buf].pi_review_channel }) end end
 	return { cwd = vim.fn.getcwd(), service_session = session_id, service_root = M.config.service_root,
-		service_remote = M.config.service_remote, credential_file = M.config.credential_file, ca_file = M.config.ca_file,
+		service_remote = M.config.service_remote,
 		expected_host = M.config.expected_host, owner_states = owner_states,
 		selected_cwd = selected_cwd, pending_settings = pending_settings, feedback = feedback,
 		role = M.config.role,
@@ -802,8 +802,7 @@ connect = function()
 	local gen = generation
 	local args = { "node", vim.fs.joinpath(vim.g.pi_console_root, "server", "dist", "bridge.js"), "--channel", vim.env.PI_CONSOLE_CHANNEL or "stable" }
 	if M.config.service_remote then
-		vim.list_extend(args, { "--remote", M.config.service_remote, "--credential-file", M.config.credential_file })
-		if M.config.ca_file then vim.list_extend(args, { "--ca-file", M.config.ca_file }) end
+		vim.list_extend(args, { "--remote", M.config.service_remote })
 	elseif M.config.service_root and M.config.service_root ~= "" then vim.list_extend(args, { "--root", M.config.service_root }) end
 	if M.config.expected_host then vim.list_extend(args, { "--expected-host", M.config.expected_host }) end
 	local partial = ""
@@ -814,7 +813,7 @@ connect = function()
 			if type(result) ~= "table" or result.version ~= 1 or result.channel ~= (vim.env.PI_CONSOLE_CHANNEL or "stable")
 				or type(result.hostId) ~= "string" or type(result.capabilities) ~= "table"
 				or not vim.tbl_contains(result.capabilities, "snapshot") or not vim.tbl_contains(result.capabilities, "updates")
-				or (M.config.service_remote and result.transport ~= "wss") then
+				or (M.config.service_remote and result.transport ~= "ws") then
 				notify("Incompatible service handshake; no fallback.", vim.log.levels.ERROR); M.detach(); return
 			end
 			if M.config.expected_host and result.hostId ~= M.config.expected_host then
@@ -923,7 +922,8 @@ end
 function M.reconnect() M.detach(); recovery_requested = true; connect() end
 function M.host_disconnected(identity, target)
 	local source = identity and require("pi-integration.service-hosts").find(identity)
-	local endpoint_match = not identity and target and target.service_remote == M.config.service_remote and target.service_root == M.config.service_root
+	local endpoint_match = target and target.service_remote == M.config.service_remote and target.service_root == M.config.service_root
+		and (not identity or M.config.expected_host == identity)
 	if endpoint_match or identity and M.config.expected_host == identity and not (source and source.connected) then M.detach() end
 end
 function M.select_owner(target, id, resume, cwd)
@@ -933,7 +933,6 @@ function M.select_owner(target, id, resume, cwd)
 	local settings = not host_changed and not session_id and not id and pending_settings or {}
 	local switching = host_changed or id ~= session_id or cwd ~= nil or resume
 		or target.service_root ~= M.config.service_root or target.service_remote ~= M.config.service_remote
-		or target.credential_file ~= M.config.credential_file or target.ca_file ~= M.config.ca_file
 	if switching then
 		if not backup() then return end
 		state.pending_transcript_scroll = nil
@@ -943,7 +942,7 @@ function M.select_owner(target, id, resume, cwd)
 			pending_host = pending_host, pending_host_select = false }
 		M.detach()
 		M.config.service_root, M.config.service_remote = target.service_root, target.service_remote
-		M.config.credential_file, M.config.ca_file, M.config.expected_host = target.credential_file, target.ca_file, target.expected_host
+		M.config.expected_host = target.expected_host
 		local saved = owner_states[owner_key()] or {}
 		unresolved, submission_status, feedback = saved.unresolved or {}, saved.submission_status or {}, saved.feedback or {}
 		pending_host, pending_host_select = saved.pending_host, false
@@ -1746,11 +1745,10 @@ function M.on_transcript_rendered(buf)
 end
 function M.setup(config)
 	M.config = vim.tbl_extend("force", M.config, config or {}, { service_root = vim.env.PI_CONSOLE_SERVICE_ROOT,
-		service_remote = vim.env.PI_CONSOLE_SERVICE_REMOTE, credential_file = vim.env.PI_CONSOLE_SERVICE_CREDENTIAL_FILE,
-		ca_file = vim.env.PI_CONSOLE_SERVICE_CA_FILE, expected_host = vim.env.PI_CONSOLE_SERVICE_EXPECTED_HOST })
-	assert(not M.config.service_remote or (M.config.credential_file and not M.config.service_root), "Remote attachment requires a credential file and no local root")
-	assert(not M.config.service_remote or (M.config.service_remote:match("^https://[^/?#@%s]+/?$")
-		and not M.config.service_remote:find("[%c]")), "Remote endpoint must be an HTTPS origin without credentials, path, query or fragment")
+		service_remote = vim.env.PI_CONSOLE_SERVICE_REMOTE, expected_host = vim.env.PI_CONSOLE_SERVICE_EXPECTED_HOST })
+	assert(not M.config.service_remote or not M.config.service_root, "Remote attachment cannot use a local root")
+	assert(not M.config.service_remote or (M.config.service_remote:match("^http://[^/?#@%s]+/?$")
+		and not M.config.service_remote:find("[%c]")), "Remote endpoint must be an HTTP origin without user info, path, query or fragment")
 	assert(vim.tbl_contains({ "conversation", "overview", "sidebar" }, M.config.role), "Invalid frontend role")
 	ctx.config, tree_ctx.config = M.config, M.config
 end
@@ -1768,11 +1766,9 @@ function M.open(restore)
 		return
 	end
 	if restore then
-		assert(restore.expected_host or (restore.service_remote == M.config.service_remote and restore.credential_file == M.config.credential_file
-			and restore.ca_file == M.config.ca_file), "Restart target differs from explicit attachment; refusing to restore execution identities")
-		if restore.expected_host then
-			M.config.service_remote, M.config.credential_file, M.config.ca_file = restore.service_remote, restore.credential_file, restore.ca_file
-		end
+		assert(restore.expected_host or restore.service_remote == M.config.service_remote,
+			"Restart target differs from explicit attachment; refusing to restore execution identities")
+		if restore.expected_host then M.config.service_remote = restore.service_remote end
 		session_id, pending_host = restore.service_session, restore.pending_host
 		recovery_requested = true
 		pending_host_select = restore.pending_host_select == true

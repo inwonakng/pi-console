@@ -1,9 +1,8 @@
 import { connect } from "node:net";
 import type { Duplex } from "node:stream";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { WebSocket, createWebSocketStream } from "ws";
-import { privateJson } from "./catalog-storage.js";
-import { credential } from "./device-credentials.js";
+
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { endpoint } from "./local-service.js";
@@ -35,17 +34,14 @@ export class LocalClient {
       return { client, hello };
     } catch (error) { client.close(); throw error; }
   }
-  static async openRemote(endpoint: string, credentialFile: string, channel: Channel, caFile?: string,
+  static async openRemote(endpoint: string, channel: Channel,
     event: (record: Record<string, unknown>) => void = () => undefined): Promise<{ client: LocalClient; hello: Record<string, unknown> }> {
     let url: URL;
-    try { url = new URL(endpoint); } catch { throw new Error("Invalid remote HTTPS endpoint"); }
-    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("Remote endpoint must be an HTTPS origin without credentials, path, query or fragment");
-    const device = credential(await privateJson(credentialFile, 16384));
-    if (device.channel !== channel) throw new Error("Device credential channel does not match the selected channel");
+    try { url = new URL(endpoint); } catch { throw new Error("Invalid remote HTTP endpoint"); }
+    if (url.protocol !== "http:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("Remote endpoint must be an HTTP origin without user info, path, query or fragment");
     const origin = url.origin;
-    url.protocol = "wss:"; url.pathname = "/v1/stream";
-    const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${device.deviceId}.${device.secret}` },
-      ca: caFile ? await readFile(caFile) : undefined, rejectUnauthorized: true,
+    url.protocol = "ws:"; url.pathname = "/v1/stream";
+    const ws = new WebSocket(url, {
       followRedirects: false, handshakeTimeout: 10000, perMessageDeflate: false, maxPayload: MAX_RESPONSE,
       allowSynchronousEvents: false });
     ws.on("error", () => undefined);
@@ -56,8 +52,8 @@ export class LocalClient {
     const deadline = setTimeout(() => client.close(), 10000);
     try {
       const hello = await client.request("hello", { version: PROTOCOL, channel });
-      if (!object(hello) || hello.version !== PROTOCOL || hello.channel !== channel || hello.hostId !== device.hostId
-        || hello.deviceId !== device.deviceId || hello.transport !== "wss" || !Array.isArray(hello.capabilities)
+      if (!object(hello) || hello.version !== PROTOCOL || hello.channel !== channel || typeof hello.hostId !== "string"
+        || hello.transport !== "ws" || !Array.isArray(hello.capabilities)
         || !["snapshot", "updates", "control.acquire", "command.status"].every((c) => (hello.capabilities as unknown[]).includes(c))) throw new Error("Incompatible remote service identity/protocol/channel/capabilities; no fallback");
       return { client, hello: { ...hello, remoteEndpoint: origin } };
     } catch (error) { client.close(); throw error; }

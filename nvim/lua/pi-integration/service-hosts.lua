@@ -11,6 +11,11 @@ local function host_label(host)
 	local endpoint = host.remote or host.service_remote or host.root or host.service_root
 	return (host.alias or "Saved host") .. (endpoint and (" (" .. endpoint .. ")") or "")
 end
+local function connection_status(host)
+	if host.connected then return "Connected" end
+	if host.target.enabled == false then return "Disconnected" end
+	return host.connecting and "Connecting" or "Unreachable"
+end
 local function session_title(row)
 	return type(row.name) == "string" and row.name:match("%S") and row.name or "Untitled session"
 end
@@ -31,13 +36,19 @@ local function outcome_label(receipt)
 	if result.changed ~= nil then table.insert(lines, result.changed and "Changed" or "Unchanged") end
 	return table.concat(lines, "\n")
 end
-local function config()
-	local data = store.load("hosts", initial, "config")
+local function normalize(data)
 	assert(data.version == 1 and type(data.hosts) == "table", "Invalid saved hosts")
+	for _, target in ipairs(data.hosts) do
+		if target.remote then target.remote = target.remote:gsub("^https://", "http://") end
+		target.credential_file, target.ca_file = nil, nil
+	end
 	return data
 end
+local function config()
+	return normalize(store.load("hosts", initial, "config"))
+end
 local function update(callback)
-	local ok, err = store.update("hosts", initial, callback, "config")
+	local ok, err = store.update("hosts", initial, function(data) return callback(normalize(data)) end, "config")
 	if not ok then notify(err) end
 	return ok
 end
@@ -119,8 +130,7 @@ function M.refresh()
 	local explicit
 	if vim.env.PI_CONSOLE_SERVICE_REMOTE then
 		explicit = { key = "explicit:" .. vim.fn.sha256(vim.env.PI_CONSOLE_SERVICE_REMOTE), alias = "Explicit remote",
-			remote = vim.env.PI_CONSOLE_SERVICE_REMOTE, credential_file = vim.env.PI_CONSOLE_SERVICE_CREDENTIAL_FILE,
-			ca_file = vim.env.PI_CONSOLE_SERVICE_CA_FILE, enabled = true }
+			remote = vim.env.PI_CONSOLE_SERVICE_REMOTE, host_id = vim.env.PI_CONSOLE_SERVICE_EXPECTED_HOST, enabled = true }
 	elseif vim.env.PI_CONSOLE_SERVICE_ROOT then
 		explicit = { key = "profile:" .. vim.fn.sha256(vim.env.PI_CONSOLE_SERVICE_ROOT), alias = "Local profile", root = vim.env.PI_CONSOLE_SERVICE_ROOT, enabled = true }
 	end
@@ -133,8 +143,7 @@ function M.refresh()
 	for _, target in ipairs(desired) do
 		local host = hosts[target.key]
 		if host and not vim.deep_equal(host.target, target) then
-			if host.root == target.root and host.remote == target.remote and host.credential_file == target.credential_file
-				and host.ca_file == target.ca_file and host.host_id == target.host_id and host.target.enabled == target.enabled then
+			if host.root == target.root and host.remote == target.remote and host.host_id == target.host_id and host.target.enabled == target.enabled then
 				host.alias, host.target, host.saved_identity = target.alias, vim.deepcopy(target), true
 			else stop(host); host = nil end
 		end
@@ -191,7 +200,7 @@ function M.list()
 					end
 				end
 				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host_label(host),
-					connected = host.connected == true, status = host.connected and (row.live and row.live.status or "Idle") or "Disconnected",
+					connected = host.connected == true, status = host.connected and (row.live and row.live.status or "Idle") or connection_status(host),
 					title = session_title(row), cwd = row.cwd, directory = row.cwd,
 					location = host.alias, controller = row.live and row.live.controller, activity = nil,
 					workspace_cwd = row.live and row.live.cwd or row.cwd, last_focused_at = focused,
@@ -217,8 +226,7 @@ function M.expected_identity(target)
 	return identity
 end
 function M.target(host)
-	return { service_root = host.root, service_remote = host.remote, credential_file = host.credential_file,
-		ca_file = host.ca_file, expected_host = host.host_id }
+	return { service_root = host.root, service_remote = host.remote, expected_host = host.host_id }
 end
 function M.open(entry, in_place)
 	local host = M.find(entry.host_id)
@@ -375,7 +383,7 @@ function M.select_host(callback)
 	for _, host in pairs(hosts) do table.insert(choices, host) end
 	table.sort(choices, function(a, b) return a.alias < b.alias end)
 	vim.ui.select(choices, { prompt = "Host", format_item = function(host)
-		return host_label(host) .. " | " .. (host.connected and "Connected" or host.connecting and "Connecting" or "Disconnected")
+		return host_label(host) .. " | " .. connection_status(host)
 	end }, function(host)
 		if not host then return end
 		local function ready(connected)
@@ -489,7 +497,7 @@ function M.manage(entry, action, argument)
 	return true
 end
 
--- Import a D1 out-of-band device credential only after TLS + identity validation.
+-- Confirm service identity before saving an endpoint.
 local function confirm_target(target, previous)
 	local probe = vim.deepcopy(target); probe.host_id = nil
 	local connection
@@ -503,53 +511,27 @@ local function confirm_target(target, previous)
 		vim.ui.select({ "Cancel", "Save confirmed identity" }, { prompt = (changed and "REPLACEMENT service. Old pins remain separate. " or "") .. host_label(target) .. " / " .. hello.channel }, function(choice)
 			if choice ~= "Save confirmed identity" then return end
 			target.host_id, target.enabled = hello.hostId, true
-			if target.remote then
-				local directory = vim.fs.joinpath(store.root("config"), "credentials")
-				local ok, err = pcall(function()
-					store.prepare(directory)
-					local destination = vim.fs.joinpath(directory, uid() .. ".json")
-					assert(vim.uv.fs_copyfile(target.credential_file, destination, 1))
-					assert(vim.uv.fs_chmod(destination, 384))
-					local copied, device = pcall(vim.json.decode, table.concat(vim.fn.readfile(destination), "\n"))
-					if not copied or device.hostId ~= hello.hostId or device.channel ~= hello.channel or device.deviceId ~= hello.deviceId then
-						vim.uv.fs_unlink(destination); error("Credential changed during confirmation; host was not saved")
-					end
-					target.credential_file = destination
-				end)
-				if not ok then notify(err); return end
-			end
-			if persist(target) then
-				if previous and previous.credential_file and previous.credential_file ~= target.credential_file
-					and vim.fs.dirname(previous.credential_file) == vim.fs.joinpath(store.root("config"), "credentials") then vim.uv.fs_unlink(previous.credential_file) end
-				M.refresh()
-			end
+			if persist(target) then M.refresh() end
 		end)
 	end)
 end
 local function edit(previous)
 	local target = previous and vim.deepcopy(previous.target) or { key = uid() }
-	vim.ui.input({ prompt = "Host alias: ", default = target.alias or "" }, function(alias)
-		if not alias or vim.trim(alias) == "" or alias:find("%c") then return end
+	vim.ui.input({ prompt = "Host alias (optional): ", default = target.alias or "" }, function(alias)
+		if not alias or alias:find("%c") then return end
 		target.alias = vim.trim(alias)
-		vim.ui.select({ "HTTPS service", "Local service profile" }, { prompt = "Transport" }, function(kind)
+		vim.ui.select({ "HTTP service", "Local service profile" }, { prompt = "Transport" }, function(kind)
 			if not kind then return end
-			vim.ui.input({ prompt = kind == "HTTPS service" and "HTTPS origin: " or "Absolute local service root: ", default = target.remote or target.root or "" }, function(endpoint)
+			vim.ui.input({ prompt = kind == "HTTP service" and "HTTP origin (http://hostname:8443): " or "Absolute local service root: ", default = target.remote or target.root or "" }, function(endpoint)
 				if not endpoint or endpoint == "" then return end
+				if target.alias == "" then target.alias = endpoint end
 				if kind == "Local service profile" then
 					if endpoint:sub(1, 1) ~= "/" then notify("Local root must be absolute"); return end
-					target.root, target.remote, target.credential_file, target.ca_file = endpoint, nil, nil, nil
+					target.root, target.remote = endpoint, nil
 					confirm_target(target, previous)
 				else
 					target.remote, target.root = endpoint, nil
-					vim.ui.input({ prompt = "D1 device credential file (issued on owner; transferred privately): ", default = target.credential_file or "", completion = "file" }, function(file)
-						if not file or file == "" then return end
-						target.credential_file = vim.fn.fnamemodify(vim.fn.expand(file), ":p")
-						vim.ui.input({ prompt = "CA file (blank = system trust): ", default = target.ca_file or "", completion = "file" }, function(ca)
-							if ca == nil then return end
-							target.ca_file = ca ~= "" and vim.fn.fnamemodify(vim.fn.expand(ca), ":p") or nil
-							confirm_target(target, previous)
-						end)
-					end)
+					confirm_target(target, previous)
 				end
 			end)
 		end)
@@ -562,7 +544,7 @@ function M.picker()
 	table.sort(choices, function(a, b) return a.alias < b.alias end)
 	table.insert(choices, { alias = "+ Add host", add = true })
 	vim.ui.select(choices, { prompt = "Hosts", format_item = function(host)
-		return host.add and host.alias or host.alias .. " | " .. (host.remote or host.root or "Local service") .. " | " .. (host.connected and "Connected" or host.connecting and "Connecting" or "Disconnected") .. (host.error and " | " .. host.error or "")
+		return host.add and host.alias or host.alias .. " | " .. (host.remote or host.root or "Local service") .. " | " .. connection_status(host) .. (host.error and " | " .. host.error or "")
 	end }, function(host)
 		if not host then return end
 		if host.add then edit(); return end
@@ -598,15 +580,14 @@ function M.picker()
 			elseif action == "Edit / confirm identity" then edit(host)
 			elseif action == "Forget" then
 				if host.key == "local" then notify("Default local source can be disconnected, not forgotten"); return end
-				vim.ui.select({ "Cancel", "Forget local host and credential" }, { prompt = "Execution continues; no devices are revoked. Organization is retained." }, function(choice)
-					if choice ~= "Forget local host and credential" then return end
+				vim.ui.select({ "Cancel", "Forget host" }, { prompt = "Disconnect and forget this host? Execution and organization are retained." }, function(choice)
+					if choice ~= "Forget host" then return end
 					if update(function(data)
 						for i, saved in ipairs(data.hosts) do if saved.key == host.key then table.remove(data.hosts, i); break end end
 						return true
 					end) then
 						forgotten_explicit[host.key] = true
 						stop(host, true)
-						if host.credential_file and vim.fs.dirname(host.credential_file) == vim.fs.joinpath(store.root("config"), "credentials") then vim.uv.fs_unlink(host.credential_file) end
 						M.refresh()
 					end
 				end)

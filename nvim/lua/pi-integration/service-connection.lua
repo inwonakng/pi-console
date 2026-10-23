@@ -4,8 +4,7 @@ function M.open(target, event)
 	local connection = { pending = {}, sequence = 0 }
 	local args = { "node", vim.fs.joinpath(vim.g.pi_console_root, "server/dist/bridge.js"), "--channel", vim.env.PI_CONSOLE_CHANNEL or "stable" }
 	if target.remote then
-		vim.list_extend(args, { "--remote", target.remote, "--credential-file", target.credential_file })
-		if target.ca_file then vim.list_extend(args, { "--ca-file", target.ca_file }) end
+		vim.list_extend(args, { "--remote", target.remote })
 	elseif target.root then vim.list_extend(args, { "--root", target.root }) end
 	if target.host_id then vim.list_extend(args, { "--expected-host", target.host_id }) end
 	local partial, errors = "", {}

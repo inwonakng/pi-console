@@ -11,7 +11,7 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   let channel = "stable";
   let root: string | undefined, expectedHost: string | undefined;
-  let remote: string | undefined, credentialFile: string | undefined, caFile: string | undefined;
+  let remote: string | undefined;
   while (args.length) {
     const flag = args.shift(); const value = args.shift();
     if (!value) throw new Error("Missing bridge argument");
@@ -19,12 +19,10 @@ async function main(): Promise<void> {
     else if (flag === "--root") root = resolve(value);
     else if (flag === "--expected-host") expectedHost = value;
     else if (flag === "--remote") remote = value;
-    else if (flag === "--credential-file") credentialFile = resolve(value);
-    else if (flag === "--ca-file") caFile = resolve(value);
     else throw new Error("Unknown bridge option");
   }
   if (channel !== "stable" && channel !== "dev") throw new Error("Invalid channel");
-  if (remote ? !credentialFile || root : credentialFile || caFile) throw new Error("Remote requires --credential-file, optional --ca-file, and no --root");
+  if (remote && root) throw new Error("Remote attachment cannot use --root");
   const writer = new RecordWriter(process.stdout);
   let failure: Error | undefined;
   const output = async (record: unknown) => {
@@ -37,7 +35,7 @@ async function main(): Promise<void> {
     if (record.type === "disconnected") { failure = new Error(String(record.message)); process.stdin.destroy(); }
   };
   const opened = remote
-    ? await LocalClient.openRemote(remote, credentialFile!, channel, caFile, event)
+    ? await LocalClient.openRemote(remote, channel, event)
     : await LocalClient.open(root ?? defaultRoot(channel), channel, event);
   client = opened.client;
   if (expectedHost && opened.hello.hostId !== expectedHost) {

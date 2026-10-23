@@ -205,8 +205,7 @@ function M.launch_service(launcher, target, session_id, cwd, resume)
 	end
 	if target.expected_host then vim.list_extend(args, { "--expected-host", target.expected_host }) end
 	if target.service_remote then
-		vim.list_extend(args, { "--remote", target.service_remote, "--credential-file", target.credential_file })
-		if target.ca_file then vim.list_extend(args, { "--ca-file", target.ca_file }) end
+		vim.list_extend(args, { "--remote", target.service_remote })
 	elseif target.service_root then vim.list_extend(args, { "--root", target.service_root }) end
 	local shell_command = table.concat(vim.tbl_map(vim.fn.shellescape, args), " ")
 	-- This is a local frontend window; an owner's cwd is never a local tmux path.

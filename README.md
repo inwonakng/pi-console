@@ -56,6 +56,11 @@ pi-console
 A local launch ensures the independent service and opens an unstarted frontend in
 the invocation directory. The first prompt or shell command creates a conversation.
 Closing Neovim leaves started conversations running.
+Every service also listens on all IPv4 interfaces, port `8443` by default.
+**Anyone who can reach that port can view and control sessions. There is no
+authentication or encryption; restrict access with your VPN/network and firewall.**
+Connect with `pi-console --remote http://HOST:8443`; `pi-console server status`
+reports candidate URLs. Use `server start/restart/enable --port PORT` for another port.
 `pi-console --overview` and `--sidebar` create no conversation. Use `--attach ID`
 for a live conversation or `--resume ID` for a saved service conversation.
 

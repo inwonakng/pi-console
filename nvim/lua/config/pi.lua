@@ -10,6 +10,10 @@ local restore_file = restart_file and (restart_file .. ".restore")
 if restore_file and vim.fn.filereadable(restore_file) == 1 then
 	restore = vim.json.decode(table.concat(vim.fn.readfile(restore_file), "\n"))
 	assert(vim.fn.delete(restore_file) == 0, "Could not consume frontend restart state")
+	if restore.service_remote then restore.service_remote = restore.service_remote:gsub("^https://", "http://") end
+	if vim.env.PI_CONSOLE_SERVICE_REMOTE then
+		vim.env.PI_CONSOLE_SERVICE_REMOTE = vim.env.PI_CONSOLE_SERVICE_REMOTE:gsub("^https://", "http://")
+	end
 	vim.api.nvim_set_current_dir(restore.cwd)
 end
 vim.g.pi_overview = role ~= "conversation"

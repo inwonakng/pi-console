@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
-import { resolve, join, isAbsolute, dirname } from "node:path";
-import { tlsListenerOptions } from "./remote-transport.js";
+import { lstat, open, realpath } from "node:fs/promises";
+import { resolve, join, isAbsolute } from "node:path";
+import { listenerPort } from "./remote-transport.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -20,13 +20,16 @@ async function main(): Promise<void> {
   requireNode();
   const args = process.argv.slice(2);
   const action = args.shift();
-  const credentialAction = action === "credentials" ? args.shift() : undefined;
   const flags = new Map<string, string>();
   let force = false;
   while (args.length) {
     const key = args.shift()!;
     if (key === "--force") { force = true; continue; }
-    if (!["--channel", "--root", "--binary", "--app-root", "--cwd", "--session", "--id", "--provider", "--model", "--tls-config", "--label", "--output", "--device", "--supervisor-dir", "--path"].includes(key) || !args.length || flags.has(key)) throw new Error(`Invalid service argument: ${key}`);
+    // Old OS startup definitions can still contain this flag until re-registration.
+    if (action === "run" && key === "--tls-config" && args.length) {
+      args.shift(); console.error("Ignoring obsolete --tls-config; serving HTTP without credentials on the default port unless --port is set."); continue;
+    }
+    if (!["--channel", "--root", "--binary", "--app-root", "--cwd", "--session", "--id", "--provider", "--model", "--port", "--supervisor-dir", "--path"].includes(key) || !args.length || flags.has(key)) throw new Error(`Invalid service argument: ${key}`);
     flags.set(key, args.shift()!);
   }
   const channel = flags.get("--channel") ?? process.env.PI_CONSOLE_CHANNEL ?? "stable";
@@ -61,8 +64,9 @@ async function main(): Promise<void> {
     }
     return file;
   };
+  const port = listenerPort(flags.get("--port"));
   const extraArgs: string[] = [];
-  if (flags.has("--tls-config")) extraArgs.push("--tls-config", resolve(flags.get("--tls-config")!));
+  if (flags.has("--port")) extraArgs.push("--port", String(port));
   if (options.provider) extraArgs.push("--provider", options.provider);
   if (options.model) extraArgs.push("--model", options.model);
   if (action === "reconcile") {
@@ -75,8 +79,7 @@ async function main(): Promise<void> {
   if (action === "run") {
     await managementIdentity(options.appRoot, channel);
     if (!binary || !isAbsolute(binary)) throw new Error("server run/start requires an explicit absolute --binary Pi path (or PI_BINARY)");
-    const tls = flags.has("--tls-config") ? await tlsListenerOptions(resolve(flags.get("--tls-config")!)) : undefined;
-    await runService({ ...options, tls }); return;
+    await runService({ ...options, port }); return;
   }
   if (["start", "stop", "restart", "enable", "disable"].includes(action ?? "")) {
     await managementIdentity(options.appRoot, channel);
@@ -85,10 +88,13 @@ async function main(): Promise<void> {
       let supervisor = await ServiceSupervisor.load(root, channel, options.appRoot, flags.get("--supervisor-dir"));
       if (supervisor) await supervisor.loaded();
       const existing = await connect();
+      let startupExit: string | undefined;
       if (existing) {
         try {
           await assertManagementOwner(existing.hello);
           if (existing.hello.stopping) throw new Error("Service is stopping; wait for closure and retry explicitly");
+          if (action === "restart" && !supervisor && !flags.has("--port") && object(existing.hello.network)
+            && typeof existing.hello.network.port === "number") extraArgs.push("--port", String(listenerPort(existing.hello.network.port)));
         }
         catch (error) { existing.client.close(); throw error; }
       }
@@ -105,6 +111,7 @@ async function main(): Promise<void> {
         await supervisor.enable(!existing);
       } else if (action === "enable") {
         existing?.client.close();
+        if (!existing) await supervisor!.configurePort(flags.has("--port") ? port : undefined);
         await supervisor!.enable(!existing);
       } else if (action === "stop" || action === "restart" || action === "disable") {
         if (existing) {
@@ -137,18 +144,24 @@ async function main(): Promise<void> {
       }
       if (action !== "enable") {
         await requireNoClaim();
-        if (supervisor) { await (await privateLog()).close(); await supervisor.start(); }
+        if (supervisor) {
+          await (await privateLog()).close();
+          await supervisor.configurePort(flags.has("--port") ? port : undefined);
+          await supervisor.start();
+        }
         else {
           const log = await privateLog();
           try {
             const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "run", "--channel", channel, "--root", root, "--binary", binary!, "--app-root", options.appRoot, ...extraArgs],
               { detached: true, cwd: options.appRoot, stdio: ["ignore", log.fd, log.fd], env: process.env });
+            child.once("exit", (code, signal) => { startupExit = `code ${code}, signal ${signal}`; });
             await new Promise<void>((done, fail) => { child.once("spawn", done); child.once("error", fail); });
             child.unref();
           } finally { await log.close(); }
         }
       }
       for (let n = 0; n < 600; n++) {
+        if (startupExit) throw new Error(`Service exited during startup (${startupExit}); inspect ${join(root, "service.log")}`);
         const view = await connect(true);
         if (view) {
           view.client.close(); await assertManagementOwner(view.hello);
@@ -176,31 +189,7 @@ async function main(): Promise<void> {
     finally { view.client.close(); }
     return;
   }
-  if (action === "credentials") {
-    const { client, hello } = await LocalClient.open(root, channel);
-    try {
-      await assertManagementOwner(hello);
-      if (credentialAction === "list") console.log(JSON.stringify(await client.request("credentials.list")));
-      else if (credentialAction === "revoke") {
-        if (!flags.has("--device")) throw new Error("Credential revocation requires --device ID");
-        await client.request("credentials.revoke", { deviceId: flags.get("--device") });
-        console.log("Device revoked; its connections and grants are closed. Accepted work continues.");
-      } else if (credentialAction === "issue") {
-        if (!flags.has("--label") || !flags.has("--output")) throw new Error("Credential issuance requires --label NAME --output PRIVATE_FILE");
-        const output = resolve(flags.get("--output")!);
-        await mkdir(dirname(output), { recursive: true, mode: 0o700 });
-        const file = await open(output, "wx", 0o600);
-        let issued = false;
-        try {
-          const result = await client.request("credentials.issue", { label: flags.get("--label") });
-          await file.writeFile(JSON.stringify(result) + "\n"); await file.sync(); issued = true;
-        } finally { await file.close(); if (!issued) await unlink(output); }
-        console.log("Device credential saved privately. Transfer it out of band; never paste it into arguments or transcripts.");
-      } else throw new Error("Usage: server credentials {issue --label NAME --output PRIVATE_FILE|list|revoke --device ID}");
-    } finally { client.close(); }
-    return;
-  }
-  if (!["create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|enable|disable|reconcile|list|create|resume|credentials} [--channel stable|dev] [--root PATH] [--binary ABSOLUTE_PI] [--tls-config PRIVATE_FILE] [--force] [--cwd PATH|--session ID] [--id COMMAND_ID]");
+  if (!["create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|enable|disable|reconcile|list|create|resume} [--channel stable|dev] [--root PATH] [--binary ABSOLUTE_PI] [--port PORT] [--force] [--cwd PATH|--session ID] [--id COMMAND_ID]");
   const { client, hello } = await LocalClient.open(root, channel);
   try {
     let result: unknown;

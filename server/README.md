@@ -1,7 +1,7 @@
 # Host-side Pi owner (in development)
 
 This package contains the independent service and default Neovim attachment,
-typed single-session operations, HTTPS/WSS hosts, owner resource reads/completion,
+typed single-session operations, HTTP/WS hosts, owner resource reads/completion,
 workspace review/guarded saves, saved-session archival/deletion and live frontend
 effects. Stable/dev full and server-only packaging includes explicit macOS launchd
 and Linux user-systemd startup management. Symlink/submodule staging/restoration
@@ -71,7 +71,9 @@ bin/pi-console --resume SERVICE_SESSION_ID
 ```
 
 Use `--root /short/private/path` on both service and frontend for an isolated profile;
-Unix socket paths over 100 bytes refuse. Service CLI also accepts `--channel stable|dev`;
+Unix socket paths over 100 bytes refuse. Each running profile needs a separate network
+port; use `server start/run/enable --port PORT` (default `8443`), or `server restart
+--port PORT` to change it. Stable and dev instances also need distinct ports. Service CLI also accepts `--channel stable|dev`;
 the launcher selects its existing channel. The frontend displays the target channel,
 host/build and controller separately from Pi tool permissions. Another dev checkout
 or stable installation cannot administer the same profile. Explicit compatible
@@ -177,44 +179,46 @@ Disable/uninstall retains service catalogs, Pi JSONL, workspaces, recovery data,
 credentials and runtime snapshots. There is no automatic data purge. Back up a
 quiescent complete profile before any separately authorized manual removal.
 
-### D1 explicit remote attachment
+### Remote attachment
 
-The owner still starts with local IPC only unless `server run/start/restart` receives
-`--tls-config /private/listener.json`. That owner-only JSON file contains
-`{"bind":"0.0.0.0","port":8443,"certFile":"/absolute/fullchain.pem","keyFile":"/absolute/key.pem"}`.
-The operator supplies a currently valid certificate/key pair and network reachability.
-Clients validate the certificate chain, validity and hostname; there is no plaintext,
-proxy, redirect or insecure fallback. Restart is explicit when configuration changes.
+Every service listens on all IPv4 interfaces (`0.0.0.0`), port `8443` by default.
+No opt-in, device credential, TLS configuration or certificate is required.
+**Anyone who can reach this port can view and control sessions as the execution
+host's user. Traffic is unencrypted.** Use a trusted network/VPN and firewall rules;
+pi-console does not limit the listener to VPN interfaces or provide authentication.
 
-Issue credentials through the running owner's private local IPC, one per device:
+`server start` and `server status` report `network.bind`, `network.port` and candidate
+HTTP URLs using the machine hostname and IPv4 addresses. Use a hostname or VPN IP
+reachable from the client; hostname resolution and firewall access are external.
 
 ```sh
-bin/pi-console server credentials issue --label laptop --output /private/device/laptop.json
-bin/pi-console server credentials list
-bin/pi-console server credentials revoke --device DEVICE_ID
-bin/pi-console --service --remote https://host.example:8443 \
-  --credential-file /private/device/laptop.json --attach SESSION_ID
+bin/pi-console server start --binary /absolute/path/to/pi
+# On another machine, using the matching launcher channel:
+bin/pi-console --remote http://host.example:8443 --attach SESSION_ID
 ```
 
-Transfer the credential file out of band and keep it owner-only (0600).
-The parent directory need not be private. Issuance exclusively creates the output
-file with mode 0600; it never prints the secret. The owner
-stores only SHA-256 verification hashes. `--ca-file /path/to/operator-ca.pem` explicitly
-selects a private CA trust bundle when the certificate is not publicly trusted.
-Only file paths, never bearer secrets, belong in arguments. A credential pins the
-host identity and channel; another identity requires explicitly issued credentials.
-Use the matching launcher channel. A remote launch without an attachment opens the
-existing session selector rather than creating work using the frontend's local cwd.
+`:PiHosts` adds an HTTP origin and optional alias, confirms the service identity and
+saves it for later connections. Removing a host disconnects and forgets that entry;
+it does not stop execution or change the other machine's configuration. Each service
+reports only its own sessions, so reciprocal registration does not forward remote
+summaries recursively. An unavailable enabled host is shown as unreachable.
+A remote launch without an attachment opens the session selector rather than creating
+work using the frontend's local cwd. Saved host identities and protocol/channel checks
+remain in effect; these detect accidental replacements, not impersonation.
 
-The bridge uses the authenticated WSS `/v1/stream` endpoint on that HTTPS listener;
-HTTP routes expose no session/admin data. Every operation rechecks device validity,
-including inside asynchronous durable admission. Local-only credential administration
-and service shutdown are absent from the remote allowlist. Browser origins are refused.
-Revocation closes all streams and grants for that device; accepted work remains owned
-by the service. Reconnect starts as viewer and never replays mutations. Remote capacity
+The bridge uses WS `/v1/stream`. HTTP routes currently return 404; there is no web UI
+yet. Service shutdown remains local-only, and browser-origin WebSocket connections
+are refused. Reconnect starts as viewer and never replays mutations. Remote capacity
 is separate from local IPC; frames, output and subscriptions remain bounded, and a
 dropped subscription destroys its transport even when its writer is backpressured.
 Neovim displays the endpoint, host/channel identity and control role.
+
+Existing saved HTTPS hosts are read as HTTP with the same address/port; obsolete
+credential/CA references are dropped when the host list is next saved. Credential,
+CA and certificate files are left untouched. Old startup `--tls-config` arguments
+are ignored without reading the file; the default port applies unless `--port` is
+set. Explicit start/restart/enable of a stopped registered service removes obsolete
+startup arguments. Existing running services retain their old runtime until restarted.
 
 ### Attachment UI
 
@@ -432,7 +436,7 @@ selected service build; it never silently restarts a different running build.
 
 Methods: `health`, `sessions`, `host.command`, `host.status`, `attach`, `detach`,
 `snapshot`, typed `session.read`, `resource.read`, `resource.complete`, `host.directories`, `command`, `grant`, `heartbeat`, `command.status`, `effect.inspect`,
-`service.stop`; local administration also has `credentials.issue/list/revoke`. All have typed allowlisted fields; raw RPC is rejected. A connection
+`service.stop` (local-only). All have typed allowlisted fields; raw RPC is rejected. A connection
 owns at most one subscription. `command` accepts the existing version-1 session
 command **without** `attachmentId`; the service stamps its own transport attachment
 and rejects caller-supplied attachment IDs or other targets. Tokens are returned only
@@ -779,9 +783,8 @@ busy sessions, unsupported managed commands and capacity limits.
 
 `controlGrant(attachmentId)` returns the current holder's secret token only to that
 attachment; snapshots/events/receipts contain only controller label, attachment ID
-and grant ID. These private methods do not authenticate a device: a later transport
-must bind the caller to its attachment and protect grant delivery. Attachment IDs
-are not device credentials. Heartbeat every 5 seconds with
+and grant ID. The transport binds each caller to its attachment; these grants control
+session editing, not network access. Heartbeat every 5 seconds with
 `heartbeat(attachmentId, token)`; expiry is 20 seconds on `performance.now()`, not
 client/wall-clock time. Heartbeats are ephemeral liveness checks, not durable
 commands, and never reacquire a grant. Timer/authority checks expire old grants.
