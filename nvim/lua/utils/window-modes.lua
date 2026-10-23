@@ -85,7 +85,7 @@ local function resize_height(amount)
 		-- Move the boundary above this pane so footer restoration cannot undo the resize.
 		local above = vim.fn.winnr("k")
 		if above ~= current then
-			vim.fn.win_move_statusline(above, -amount)
+			vim.fn.win_move_statusline(vim.fn.win_getid(above), -amount)
 		end
 		return
 	end
