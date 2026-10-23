@@ -56,6 +56,7 @@ export type ConversationSnapshot = {
     interrupted: boolean;
     /** Successful settlement number for this run; absent while active or unsuccessful. */
     completionSeq?: number;
+    outcome?: "completed" | "error" | "aborted";
     compaction?: Extract<JsonAgentSessionEvent, { type: "compaction_start" | "compaction_end" }>;
     retry?: Extract<JsonAgentSessionEvent, { type: "auto_retry_start" | "auto_retry_end" }>;
     summarization?: Extract<JsonAgentSessionEvent, { type: "summarization_retry_scheduled" | "summarization_retry_attempt_start" }>;
@@ -102,7 +103,7 @@ export class PiConversation {
   private readonly messageBytes: number[] = [];
   private version = 0;
   private unsettled = false;
-  private completionPending = false;
+  private pendingOutcome?: ConversationSnapshot["execution"]["outcome"];
   private completionSeq = 0;
   private readonly liveSizes = new Map<string, number>();
   private liveBytes = 0;
@@ -141,6 +142,10 @@ export class PiConversation {
     return { afterMessage: this.state.messageKeys.at(-1) ?? null };
   }
   get sessionState(): RpcSessionState | undefined { return this.state.piState; }
+  get completedTurns(): number { return this.completionSeq; }
+  get turnOutcome(): ConversationSnapshot["execution"]["outcome"] { return this.state.execution.outcome; }
+  get compacting(): boolean { return this.state.piState?.isCompacting === true || this.state.execution.compaction?.type === "compaction_start"; }
+  get retrying(): boolean { return this.state.execution.retry?.type === "auto_retry_start" || !!this.state.execution.summarization; }
   status(key: string): string | undefined { return this.state.statuses[key]; }
   get idle(): boolean {
     return !this.state.execution.running && (!this.state.partialAssistant || this.state.partialAssistant.interrupted)
@@ -240,7 +245,7 @@ export class PiConversation {
       }
       case "runtime_ended":
         this.unsettled = false;
-        this.completionPending = false;
+        this.pendingOutcome = undefined;
         this.state.hydrated = false;
         this.state.execution = { running: false, interrupted: true };
         if (this.state.partialAssistant) this.state.partialAssistant.interrupted = true;
@@ -385,26 +390,35 @@ export class PiConversation {
       case "queue_update": this.reserve("queue", event); this.state.queue = { steering: event.steering, followUp: event.followUp }; break;
       case "agent_start":
         this.unsettled = true;
-        this.completionPending = false;
+        this.pendingOutcome = undefined;
+        this.state.execution.outcome = undefined;
         this.state.execution.completionSeq = undefined;
         this.state.execution.running = true;
         this.state.execution.interrupted = false;
         break;
       case "agent_end": {
         const assistant = [...event.messages].reverse().find((message) => message.role === "assistant");
-        this.completionPending = !event.willRetry && assistant !== undefined
-          && assistant.stopReason !== "error" && assistant.stopReason !== "aborted";
+        this.pendingOutcome = event.willRetry ? undefined
+          : !assistant || assistant.stopReason === "error" || assistant.errorMessage ? "error"
+          : assistant.stopReason === "aborted" ? "aborted" : "completed";
         break;
       }
       // agent_end is not settlement: retries, compaction and queues can continue.
       case "agent_settled":
-        if (this.unsettled && this.completionPending && !event.aborted) this.state.execution.completionSeq = ++this.completionSeq;
-        this.completionPending = false;
+        if (this.unsettled) {
+          this.state.execution.outcome = event.aborted ? "aborted" : this.pendingOutcome;
+          if (this.state.execution.outcome === "completed") this.state.execution.completionSeq = ++this.completionSeq;
+        }
+        this.pendingOutcome = undefined;
         this.unsettled = false;
         this.state.execution.running = false;
         break;
       case "compaction_start": case "compaction_end": this.reserve("execution:compaction", event); this.state.execution.compaction = event; break;
-      case "auto_retry_start": case "auto_retry_end": this.reserve("execution:retry", event); this.state.execution.retry = event; break;
+      case "auto_retry_start": case "auto_retry_end":
+        this.reserve("execution:retry", event);
+        this.state.execution.retry = event;
+        if (event.type === "auto_retry_end" && !event.success && this.unsettled) this.pendingOutcome = "error";
+        break;
       case "summarization_retry_scheduled": case "summarization_retry_attempt_start": this.reserve("execution:summarization", event); this.state.execution.summarization = event; break;
       case "summarization_retry_finished": this.reserve("execution:summarization", undefined); this.state.execution.summarization = undefined; break;
       case "session_info_changed":

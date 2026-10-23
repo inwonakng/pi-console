@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext, SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { assertManagedResources } from "../../scripts/managed-process.mjs";
 import { getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, workspaceDisplayState, type WorkspaceRecord } from "./workspace";
@@ -71,26 +71,29 @@ export async function moveToLocation(
   if (!projectTrustReady()) throw new Error("Resolve project trust before switching workspaces");
   if (ctx.cwd !== cwd || options.reload) await prepareProjectTrust(ctx, cwd);
   const ownsPending = (ctx.cwd !== cwd || options.reload === true) && !getPendingWorkspaceId();
+  const previousCwd = ctx.cwd;
+  const previousModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
   const arrival = async (nextCtx: ExtensionCommandContext, sendMessage?: MoveContext["sendMessage"]) => {
+    const manager = nextCtx.sessionManager as SessionManager;
     try {
       if (options.navigateTo) {
         const result = await nextCtx.navigateTree(options.navigateTo);
         if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
       } else if (leafId === null) {
-        nextCtx.sessionManager.resetLeaf();
-      } else if (nextCtx.sessionManager.getLeafId() !== leafId) {
+        manager.resetLeaf();
+      } else if (manager.getLeafId() !== leafId) {
         // Call Pi's navigation API to restore the finalized model context, not just the JSONL leaf.
         const result = await nextCtx.navigateTree(leafId);
         if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
       }
       if (options.markLocation) {
-        nextCtx.sessionManager.appendCustomEntry(LOCATION_ENTRY, {
+        manager.appendCustomEntry(LOCATION_ENTRY, {
           workspaceId: options.workspaceId ?? null,
           label: options.workspaceLabel ?? "Origin checkout",
           cwd,
         });
       } else if (options.saveCursor !== false) {
-        nextCtx.sessionManager.appendCustomEntry(CURSOR_ENTRY, {});
+        manager.appendCustomEntry(CURSOR_ENTRY, {});
       }
       setExpectedWorkspaceMissing(undefined);
       await options.onArrival?.(nextCtx);
@@ -99,6 +102,21 @@ export async function moveToLocation(
         setPendingWorkspace(undefined);
         publishWorkspaceState(nextCtx);
       }
+    }
+    const selected = nextCtx.model;
+    const registered = selected && selected.provider !== "unknown" && selected.id !== "unknown" && selected.api !== "unknown"
+      ? nextCtx.modelRegistry.find(selected.provider, selected.id) : undefined;
+    const configured = registered ? nextCtx.modelRegistry.hasConfiguredAuth(registered) : false;
+    const blocked = !!options.continueWith && (!registered || !configured);
+    manager.appendCustomEntry("pi-workspace-runtime", {
+      version: 1, previousCwd, cwd: nextCtx.cwd, previousModel,
+      model: selected ? { provider: selected.provider, id: selected.id } : undefined,
+      registered: !!registered, configured,
+      continuation: options.continueWith ? blocked ? "blocked" : "ready" : "none",
+    });
+    if (blocked) {
+      nextCtx.ui.notify("Workspace switch completed, but automatic continuation stopped because the selected model is unavailable or its provider is not configured. Select a valid model (in pi-console: <leader>m), then explicitly continue. No prompt was sent or queued.", "error");
+      return;
     }
     if (options.continueWith) {
       if (!sendMessage) throw new Error("The switched session cannot resume the agent.");

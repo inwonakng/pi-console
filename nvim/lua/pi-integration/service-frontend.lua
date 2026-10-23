@@ -40,7 +40,10 @@ end
 local function publish_attachment()
 	local tmux = require("pi-integration.backends.tmux")
 	if M.config.role ~= "conversation" or not tmux.available() then return end
-	if frontend_focused then state.seen_seq = state.completion_seq end
+	if frontend_focused then
+		state.seen_seq = state.completion_seq
+		state.viewed_seq = state.completion_seq
+	end
 	local pi_state = snapshot and snapshot.piState or {}
 	local name = pi_state.sessionName ~= "" and pi_state.sessionName or "New Session"
 	local label = status_data("pi-session-label")
@@ -51,21 +54,16 @@ local function publish_attachment()
 	if not session_id then status = starting and "Starting" or "Unstarted"
 	elseif not job then status = "Disconnected"
 	elseif not attachment then status = hello and (session_status or "Unattached") or "Connecting"
-	elseif snapshot and snapshot.phase == "stopped" then status = "Stopped"
-	elseif snapshot and snapshot.phase == "failed" then status = "Error"
-	elseif snapshot and snapshot.phase == "stopping" then status = "Stopping"
 	elseif snapshot then
-		local pending = false
-		for _, item in ipairs(snapshot.interactions.pending) do if not item.submitted then pending = true end end
-		status = snapshot.error and "Error" or pending and "Waiting"
-			or snapshot.piState and snapshot.piState.isCompacting and "Compacting"
-			or snapshot.conversation.execution.running and "Working"
-			or snapshot.phase == "ready" and (state.completion_seq > state.seen_seq and "Done" or "Idle") or "Loading"
+		status = snapshot.status
+		if status == "Idle" and snapshot.turnOutcome == "completed" and state.completion_seq > state.seen_seq then status = "Done" end
 	end
 	tmux.publish({ version = 1, frontend_attachment = true, host_id = identity, session_id = session_id,
 		pid = vim.uv.os_getpid(), updated = os.time(), cwd = vim.fn.getcwd(),
 		title = name, slug = slug,
-		status = status, last_focused_at = state.last_focused_at })
+		status = status, last_focused_at = state.last_focused_at,
+		service_epoch = snapshot and snapshot.serviceEpoch, runtime_revision = snapshot and snapshot.runtimeRevision,
+		seen_seq = state.seen_seq, viewed_seq = state.viewed_seq })
 end
 local function owner_key() return M.config.expected_host or M.config.service_remote or M.config.service_root or "local" end
 local function owner_label(identity, remote, root)
@@ -419,7 +417,6 @@ local function update_status_state()
 	local conversation = snapshot and snapshot.conversation
 	local statuses = conversation and conversation.statuses or {}
 	local pi_state = snapshot and snapshot.piState or {}
-	local execution = conversation and conversation.execution or {}
 	state.session_name = pi_state.sessionName ~= "" and pi_state.sessionName or nil
 	state.session_id = session_id
 	state.session_cwd = snapshot and snapshot.interactions.runtime and snapshot.interactions.runtime.cwd or selected_cwd
@@ -464,15 +461,16 @@ local function update_status_state()
 			contextUsage = { tokens = 0, contextWindow = context_window or vim.NIL } }
 	end
 	state.codex_usage = status_data("pi-codex-usage")
-	local spawns = status_data("pi-spawn-runs")
-	state.spawn_running_count = spawns and spawns.running or 0
+	state.spawn_running_count = snapshot and #(snapshot.subagentRuns or {}) or 0
+	state.session_activity = attachment and snapshot and snapshot.status or nil
 	state.is_loading = job ~= nil and (not hello or session_status == "checking" or session_status == "attaching"
 		or session_status == "restoring" or attachment ~= nil and snapshot and snapshot.phase == "initializing")
-	state.is_agent_running = attachment ~= nil and (execution.running == true or pi_state.isCompacting == true)
+	state.is_agent_running = state.session_activity == "Working" or state.session_activity == "Compacting"
 	state.is_streaming = attachment ~= nil and pi_state.isStreaming == true
-	state.is_retrying = attachment ~= nil and execution.retry and execution.retry.type == "auto_retry_start" or false
-	state.activity_label = pi_state.isCompacting and "compacting" or "work"
+	state.is_retrying = state.session_activity == "Retrying"
+	state.activity_label = state.session_activity == "Compacting" and "compacting" or "work"
 	state.pending_user_messages = snapshot and snapshot.acceptedQueue.items or {}
+	state.queue_edit_item = snapshot and snapshot.acceptedQueue.reservation and snapshot.acceptedQueue.reservation.itemId
 	local previous = state.pending_ui_requests
 	state.pending_ui_requests, state.active_ui_request_id = {}, nil
 	for _, item in ipairs(snapshot and snapshot.interactions.pending or {}) do
@@ -545,11 +543,12 @@ local function apply_snapshot(value)
 	if not snapshot or value.serviceEpoch ~= snapshot.serviceEpoch or value.sequence >= snapshot.sequence then snapshot = value end
 	local same_runtime = previous and previous.serviceEpoch == snapshot.serviceEpoch
 		and previous.runtimeRevision == snapshot.runtimeRevision
-	state.completion_seq = snapshot.conversation.execution.completionSeq or 0
+	state.completion_seq = snapshot.completionSeq or 0
 	if not same_runtime then
 		state.pending_transcript_scroll = nil
 		-- Existing history on attach/reconnect or a replacement runtime is already seen.
 		state.seen_seq = state.completion_seq
+		state.viewed_seq = nil
 	end
 	if grant and not control_current() then grant = nil; close_approval() end
 	if approval_request then

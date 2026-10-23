@@ -34,7 +34,13 @@ type RenameFlight = {
   worker: PiProcess; revision: number; runtimeId: string; invocationId: string;
   message: string; dispatched: boolean; requestId?: string; result?: RenameResult;
 };
-export type OwnedSessionState = {
+type SessionActivity = {
+  status: "Starting" | "Stopping" | "Stopped" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Idle";
+  completionSeq: number;
+  turnOutcome?: ConversationSnapshot["execution"]["outcome"];
+  subagentRuns: { runId: string; status: "running"; agent?: string; role?: string; progress?: string }[];
+};
+export type OwnedSessionState = SessionActivity & {
   sessionId: string;
   serviceEpoch: string;
   runtimeRevision: number;
@@ -48,8 +54,8 @@ export type OwnedSessionState = {
   exit?: PiExit;
 };
 export type OwnedSessionSnapshot = OwnedSessionState & { sequence: number; conversation: ConversationSnapshot; commands: CommandReceipt[]; acceptedQueue: AcceptedQueueSnapshot };
-export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevision" | "controller"> & {
-  status: "Starting" | "Stopping" | "Error" | "Waiting" | "Compacting" | "Working" | "Idle";
+export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevision" | "controller" | keyof SessionActivity> & {
+  sequence: number;
   piState?: Pick<RpcSessionState, "isStreaming" | "isCompacting" | "pendingMessageCount">;
   pendingInteractions: number;
   accessMode?: string; integrationMode?: string; notificationsEnabled: boolean; cwd: string;
@@ -529,13 +535,7 @@ export class OwnedSession {
   summary(): OwnedSessionSummary {
     const state = this.conversation.sessionState;
     const pendingInteractions = this.worker?.interactionSnapshot().pending.filter((item) => !item.submitted).length ?? 0;
-    const status = this.error || this.phase === "failed" ? "Error"
-      : this.phase === "initializing" ? "Starting"
-      : this.phase === "stopping" || this.phase === "stopped" ? "Stopping"
-      : pendingInteractions ? "Waiting"
-      : state?.isCompacting ? "Compacting"
-      : this.queueRunPending || !this.conversation.executionSettled ? "Working" : "Idle";
-    return { phase: this.phase, runtimeRevision: this.runtimeRevision, controller: this.control.snapshot(), status, pendingInteractions,
+    return { ...this.activity(), sequence: this.sequence, phase: this.phase, runtimeRevision: this.runtimeRevision, controller: this.control.snapshot(), pendingInteractions,
       accessMode: this.conversation.status("pi-access-mode")?.match(/^Mode: (\w+)$/)?.[1],
       integrationMode: this.conversation.status("pi-integration-mode")?.match(/^Integration: (\w+)$/)?.[1],
       notificationsEnabled: this.conversation.status("pi-notifications") === "notify on", cwd: this.workspace?.cwd ?? this.record.cwd,
@@ -1274,9 +1274,39 @@ export class OwnedSession {
     if (changed) { await this.catalog.replaceQueue(this.id, items); this.queueChanged(); }
   }
 
+  private activity(): SessionActivity {
+    const pending = this.worker?.interactionSnapshot().pending.some((item) => !item.submitted);
+    const status = this.error || this.phase === "failed" ? "Error"
+      : this.phase === "stopping" ? "Stopping"
+      : this.phase === "stopped" ? "Stopped"
+      : pending ? "Waiting"
+      : this.phase === "initializing" ? "Starting"
+      : this.conversation.compacting ? "Compacting"
+      : this.conversation.retrying ? "Retrying"
+      : this.queueRunPending || !this.conversation.executionSettled ? "Working"
+      : this.conversation.turnOutcome === "error" ? "Error" : "Idle";
+    const subagentRuns: SessionActivity["subagentRuns"] = [];
+    const raw = this.conversation.status("pi-spawn-runs");
+    if (raw) {
+      try {
+        const value: unknown = JSON.parse(raw);
+        if (object(value) && Array.isArray(value.runs)) {
+          for (const run of value.runs) {
+            if (!object(run) || run.status !== "running" || typeof run.runId !== "string") continue;
+            subagentRuns.push({ runId: run.runId, status: "running",
+              agent: typeof run.agent === "string" ? run.agent : undefined,
+              role: typeof run.role === "string" ? run.role : undefined,
+              progress: typeof run.progress === "string" ? run.progress : undefined });
+          }
+        }
+      } catch { /* A malformed extension status cannot change owner activity. */ }
+    }
+    return { status, completionSeq: this.conversation.completedTurns, turnOutcome: this.conversation.turnOutcome, subagentRuns };
+  }
+
   private ownerState(): OwnedSessionState {
     return structuredClone({
-      sessionId: this.id, serviceEpoch: this.catalog.epoch, runtimeRevision: this.runtimeRevision,
+      ...this.activity(), sessionId: this.id, serviceEpoch: this.catalog.epoch, runtimeRevision: this.runtimeRevision,
       phase: this.phase, trust: this.trust, workspace: this.workspace, piState: this.conversation.sessionState,
       interactions: this.worker?.interactionSnapshot() ?? { revision: 0, pending: [] }, controller: this.control.snapshot(),
       error: this.error?.message, exit: this.exit,

@@ -228,13 +228,14 @@ local function activity_statusline_label(state)
 		end
 	end
 	local suffix = queued > 0 and ("·" .. tostring(queued) .. " queued") or ""
+	if state.session_activity == "Error" then return " error" .. suffix end
 	local request = state.active_ui_request_id and (state.pending_ui_requests or {})[state.active_ui_request_id]
 	if request and not request.navigation and (not request.expires or request.expires > vim.uv.now()) then
 		return " waiting·" .. request.label .. suffix .. (request.hidden and "·<leader>pa" or "")
 	end
 	if not state.is_loading and not state.is_agent_running and not state.is_streaming
 		and not state.is_retrying and not state.awaiting_agent_output then
-		if next_pending and next_pending.edit_buf then
+		if next_pending and (next_pending.edit_buf or next_pending.id == state.queue_edit_item) then
 			return " waiting·editing queued message" .. suffix
 		end
 		return suffix

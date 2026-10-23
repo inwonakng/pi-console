@@ -3,6 +3,7 @@ local transport = require("pi-integration.service-connection")
 local M = {}
 local hosts, started, timer = {}, false, nil
 local forgotten_explicit = {}
+local completion_states = {}
 local initial = { version = 1, hosts = {} }
 local channel = vim.env.PI_CONSOLE_CHANNEL or "stable"
 local function notify(message) vim.notify(tostring(message), vim.log.levels.WARN, { title = "Pi hosts" }) end
@@ -237,7 +238,7 @@ function M.find(identity)
 end
 function M.list()
 	M.start()
-	local owners, entries = {}, {}
+	local owners, entries, next_completions = {}, {}, {}
 	local ordered = vim.tbl_keys(hosts); table.sort(ordered)
 	for _, key in ipairs(ordered) do
 		local host = hosts[key]
@@ -251,17 +252,34 @@ function M.list()
 		for _, row in ipairs(host.rows or {}) do
 			if row.state == "open" then
 				local id = vim.json.encode({ identity, row.id })
-				local focused
+				local live = row.live or {}
+				local epoch = host.hello and host.hello.serviceEpoch
+				local completion = live.completionSeq or 0
+				local focused, pane_baseline, pane_viewed
 				for _, pane in ipairs(attachments or {}) do
 					if pane.host_id == identity and pane.session_id == row.id then
 						focused = math.max(focused or 0, pane.last_focused_at or 0)
+						if pane.status ~= "Unresponsive" and pane.service_epoch == epoch
+							and pane.runtime_revision == live.runtimeRevision and type(pane.seen_seq) == "number" then
+							-- An unfocused attachment's initial history baseline is not a read acknowledgement.
+							pane_baseline = math.min(pane_baseline or pane.seen_seq, pane.seen_seq)
+							if type(pane.viewed_seq) == "number" then pane_viewed = math.max(pane_viewed or 0, pane.viewed_seq) end
+						end
 					end
 				end
+				local previous = completion_states[id]
+				local seen = previous and previous.epoch == epoch and previous.revision == live.runtimeRevision
+					and previous.seen or pane_baseline or completion
+				seen = math.max(seen, pane_viewed or 0)
+				next_completions[id] = { epoch = epoch, revision = live.runtimeRevision, seen = seen }
+				local status = live.status or "Idle"
+				if status == "Idle" and live.turnOutcome == "completed" and completion > seen then status = "Done" end
 				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host_label(host),
-					connected = host.connected == true, status = host.connected and (row.live and row.live.status or "Idle") or connection_status(host),
+					connected = host.connected == true, status = host.connected and status or connection_status(host),
 					title = session_title(row), cwd = row.cwd, directory = row.cwd,
 					location = host.alias, controller = row.live and row.live.controller, activity = nil,
 					workspace_cwd = row.live and row.live.cwd or row.cwd, last_focused_at = focused,
+					subagent_runs = live.subagentRuns or {}, subagents = #(live.subagentRuns or {}),
 					access_mode = row.live and row.live.accessMode, integration_mode = row.live and row.live.integrationMode,
 					notification_status = row.live and row.live.notificationsEnabled and "notify on" or "notify off",
 					channel = channel, service_epoch = host.hello and host.hello.serviceEpoch,
@@ -269,6 +287,7 @@ function M.list()
 			end
 		end
 	end
+	completion_states = next_completions
 	return entries
 end
 function M.expected_identity(target)
