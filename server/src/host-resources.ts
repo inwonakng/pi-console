@@ -1,9 +1,9 @@
 import { createHash, type Hash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, mkdir, open, readdir, realpath } from "node:fs/promises";
+import { access, lstat, mkdir, open, readFile, readdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Channel } from "./session-catalog.js";
 import type { ResourceManifest, ResourceStamp } from "../../pi/scripts/managed-process.mjs";
 export type { ResourceStamp } from "../../pi/scripts/managed-process.mjs";
@@ -51,7 +51,7 @@ export async function prepareHostResources(options: HostResourcesOptions): Promi
   if (channel !== "stable" && channel !== "dev") throw new Error("Unknown service channel");
   const environment = hostEnvironment(options.environment ?? process.env);
   const appRoot = await realpath(resolve(options.appRoot));
-  const binary = await realpath(resolve(options.binary));
+  const binary = await resolveManagedLauncher(await realpath(resolve(options.binary)), environment);
   if (!(await lstat(appRoot)).isDirectory()) throw new Error("Application root must be a host directory");
   if (!(await lstat(binary)).isFile()) throw new Error("Pi binary must be a host file");
   await access(binary, constants.X_OK);
@@ -115,6 +115,37 @@ async function manifest(path: string): Promise<Manifest> {
 
 function missing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+/** Resolve the installer's launcher without executing shell code or retaining its
+ * mutable version selector. Workers must execute and fingerprint the same release. */
+async function resolveManagedLauncher(binary: string, environment: NodeJS.ProcessEnv): Promise<string> {
+  if (basename(binary) !== "pi" || basename(dirname(binary)) !== "bin") return binary;
+  const root = join(dirname(dirname(binary)), "install");
+  const markerPath = join(root, "managed-install.json");
+  let marker: unknown;
+  try { marker = JSON.parse(await readFile(markerPath, "utf8")); }
+  catch (error) { if (missing(error)) return binary; throw error; }
+  if (!marker || typeof marker !== "object" || !("kind" in marker) || marker.kind !== "pi-managed-install"
+    || !("schemaVersion" in marker) || marker.schemaVersion !== 1 || !("layout" in marker) || marker.layout !== "releases-v1") {
+    throw new Error(`Managed Pi install marker is invalid: ${markerPath}`);
+  }
+  const versionPath = join(root, "current-version");
+  const version = (await readFile(versionPath, "utf8")).split("\n", 1)[0];
+  if (!/^[0-9A-Za-z._+-]+$/.test(version) || version === "." || version === "..") {
+    throw new Error(`Managed Pi version file is invalid: ${versionPath}`);
+  }
+  const resolved = await realpath(join(root, "releases", version, "node_modules", ".bin", "pi"));
+  environment.PI_MANAGED_INSTALL_ROOT = root;
+  // Preserve the launcher's Node/npm PATH setup, but pin the resolved directory.
+  const nodeBin = join(environment.XDG_DATA_HOME || join(environment.HOME!, ".local", "share"), "pi-node", "current", "bin");
+  try {
+    await access(join(nodeBin, "node"), constants.X_OK);
+    environment.PATH = `${await realpath(nodeBin)}${delimiter}${environment.PATH}`;
+  } catch (error) {
+    if (!missing(error) && (error as NodeJS.ErrnoException).code !== "EACCES") throw error;
+  }
+  return resolved;
 }
 
 async function installedPackage(binary: string): Promise<string> {
