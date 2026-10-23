@@ -20,7 +20,7 @@ async function readText(path, maxBytes = MAX_BYTES) {
 }
 
 try {
-  const { readExtensionSettings } = await import("../extensions/shared/extension-settings.mjs");
+  const { readExtensionSettings } = await import("../extensions/shared/read-extension-settings.mjs");
   const root = process.argv[2];
   const fromHost = path => import(pathToFileURL(join(root, "dist", path)).href);
   const [{ ModelRuntime }, { ReadOnlyAuthStorage }, { getAgentDir, CONFIG_DIR_NAME }, ai,
