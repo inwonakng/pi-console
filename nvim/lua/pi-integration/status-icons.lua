@@ -19,6 +19,7 @@ local styles = {
 	Compacting = { icon = "", color = colors.mauve },
 	Loading = { frames = loading_frames, color = colors.blue },
 	Idle = { icon = "󰽥", color = colors.muted },
+	Unstarted = { icon = "", color = colors.muted },
 	Error = { icon = "", color = colors.red },
 	["Not Open"] = { icon = "", color = colors.muted },
 	Disconnected = { icon = "", color = colors.muted },
