@@ -134,7 +134,7 @@ export class HostOwner {
   summaries(): HostSummaries {
     return { sessions: this.catalog.list().map(({ id, cwd, name, state }) => {
       const session = this.sessions.get(id);
-      return { id, cwd, name, state, ...(session && !session.finished ? { live: session.summary() } : {}) };
+      return { id, cwd, name: session?.name || name, state, ...(session && !session.finished ? { live: session.summary() } : {}) };
     }), hostId: this.hostId, channel: this.options.channel, serviceEpoch: this.serviceEpoch };
   }
 
@@ -487,6 +487,7 @@ export class OwnedSession {
   }
 
   get id(): string { return this.record.id; }
+  get name(): string | undefined { return this.conversation.sessionState?.sessionName; }
   get finished(): boolean { return this.done && !this.lifecyclePending; }
   get recoverable(): boolean { return !this.stopRequested && !this.error && !this.done; }
   ready(): Promise<void> { return this.initialized; }

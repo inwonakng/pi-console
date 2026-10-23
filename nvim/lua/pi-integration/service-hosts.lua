@@ -101,7 +101,7 @@ local function connect(host)
 	host.connection = connection
 end
 local function local_target()
-	return { key = "local", alias = "This machine", enabled = true }
+	return { key = "local", alias = "localhost", enabled = true }
 end
 function M.refresh()
 	local ok, data = pcall(config)
@@ -109,6 +109,9 @@ function M.refresh()
 	local desired = { local_target() }
 	for _, target in ipairs(data.hosts) do
 		if target.key == "local" then desired[1] = target else table.insert(desired, target) end
+	end
+	if desired[1].alias == "This machine" then
+		desired[1] = vim.tbl_extend("force", desired[1], { alias = "localhost" })
 	end
 	local explicit
 	if vim.env.PI_CONSOLE_SERVICE_REMOTE then
