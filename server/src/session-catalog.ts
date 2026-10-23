@@ -11,7 +11,7 @@ import { CommandError, type CommandReceipt, type StoredCommand } from "./session
 import { validQueueItem, type AcceptedQueueItem } from "./session-queue.js";
 import { validEffectiveTitle } from "./session-rename.js";
 import { commandBytes, insertCommand, insertQueue, insertSession, openStorage, privateDirectory, privateJson,
-  readManagedTitle, splitReceipt, syncDirectory, validateManagedFile, type CatalogSession, type Channel } from "./catalog-storage.js";
+  readManagedMetadata, splitReceipt, syncDirectory, validateManagedFile, type CatalogSession, type Channel } from "./catalog-storage.js";
 export type { CatalogSession, Channel } from "./catalog-storage.js";
 
 const MiB = 1024 * 1024;
@@ -125,7 +125,7 @@ export class SessionCatalog {
       const { db, hostId } = await openStorage(root, options.channel, () => { retainClaim = true; });
       catalog = new SessionCatalog(root, options.channel, hostId, epoch, db, lock, lifetime);
       await catalog.recover();
-      await catalog.backfillTitles();
+      await catalog.backfillMetadata();
       return catalog;
     } catch (error) {
       catalog?.db.close();
@@ -162,8 +162,9 @@ export class SessionCatalog {
   }
 
   list(): CatalogSession[] {
-    return this.read(() => this.db.prepare("SELECT metadata FROM sessions ORDER BY rowid").all()
-      .map((row) => this.withQueue(JSON.parse(String(row.metadata)) as CatalogSession)).filter(session => !session.deleted));
+    return this.read(() => this.db.prepare("SELECT metadata FROM sessions ORDER BY rowid DESC").all()
+      .map((row) => this.withQueue(JSON.parse(String(row.metadata)) as CatalogSession)).filter(session => !session.deleted)
+      .sort((left, right) => Date.parse(right.lastActivityAt ?? right.createdAt) - Date.parse(left.lastActivityAt ?? left.createdAt)));
   }
 
   get(id: string): CatalogSession {
@@ -284,17 +285,29 @@ export class SessionCatalog {
     });
   }
 
-  private async backfillTitles(): Promise<void> {
+  async updateActivity(id: string, timestamp = new Date().toISOString()): Promise<void> {
+    await this.serial(() => {
+      const session = this.get(id);
+      if (session.deleted || Date.parse(timestamp) <= Date.parse(session.lastActivityAt ?? session.createdAt)) return;
+      this.transaction(() => {
+        session.lastActivityAt = timestamp;
+        this.updateSession(session);
+      });
+    });
+  }
+
+  private async backfillMetadata(): Promise<void> {
     for (const session of this.list()) {
       // Never read a file still claimed by an unresolved worker.
       if (session.ownerEpoch !== undefined) continue;
-      let name: string | undefined;
-      try { name = await readManagedTitle(this.root, session); }
+      let metadata: Awaited<ReturnType<typeof readManagedMetadata>>;
+      try { metadata = await readManagedMetadata(this.root, session); }
       catch (error) {
-        console.warn(`Could not refresh title for session ${session.id}:`, error);
+        console.warn(`Could not refresh metadata for session ${session.id}:`, error);
         continue; // An unreadable history must not hide other saved sessions.
       }
-      await this.updateTitle(session.id, name);
+      await this.updateTitle(session.id, metadata.name);
+      await this.updateActivity(session.id, metadata.lastActivityAt);
     }
   }
 
@@ -399,7 +412,7 @@ export class SessionCatalog {
     const record: CatalogSession = { id, piSessionId: id, cwd, createdAt: new Date().toISOString(), state: "saved" };
     const header = await validateManagedFile(this.root, record);
     if (header.cwd !== cwd) throw new Error("Clone cwd does not match its header");
-    record.name = await readManagedTitle(this.root, record);
+    Object.assign(record, await readManagedMetadata(this.root, record));
     const handle = await open(file, "r+");
     try { await handle.sync(); } finally { await handle.close(); }
     await syncDirectory(directory);

@@ -63,10 +63,11 @@ require explicit reconnection; mutations are never replayed. Refresh hosts reloa
 the registry without replacing unchanged tab attachments. Internal empty system
 prompt patches and hidden custom messages are omitted from the transcript.
 
-Click `?` for keyboard controls. Outside text fields, Space starts a Neovim-style
-leader shortcut; overview navigation supports j/k, Enter, `/`, and H. Standard Tab
-navigation remains available, and the focused tab bar supports Left/Right and
-Home/End. Ctrl/Cmd+Enter sends a prompt.
+All actions use on-screen controls, with no custom keyboard shortcuts. Use Send
+to submit a prompt, and the conversation's Actions menu to rename, stop, or create
+a new session in the same workspace. Standard browser keyboard navigation remains
+available. Execution hosts expands to show connection status and reconnection
+controls; registrations for the same host share a single display entry.
 
 The UI supports creation, attachment, control acquisition/takeover/release,
 prompts, abort, rename, questions, approvals, and queue inspection. Conversation

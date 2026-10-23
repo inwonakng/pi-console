@@ -1738,6 +1738,11 @@ export class OwnedSession {
         } catch { /* Retained state is still data, never an instruction to replay. */ }
       }
     }
+    // Persist conversation activity, never token deltas or status polling.
+    if (event.type === "message_start" || event.type === "message_end" || event.type === "compaction_end" || event.type === "session_info_changed"
+      || event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-history-changed") {
+      this.trackCommand(this.catalog.updateActivity(this.id));
+    }
     if (event.type === "session_info_changed") this.trackCommand(this.catalog.updateTitle(this.id, event.name));
     const change = this.conversation.event(event);
     if (change) {

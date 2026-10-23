@@ -295,7 +295,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
     });
     await chmod(path, 0o600);
     remote = new RemoteListener(port, (stream, onDetach) => connection(stream, true, onDetach),
-      webRoot ? { root: webRoot, channel: options.channel, hostId: owner.hostId } : undefined);
+      webRoot ? { root: webRoot, serviceRoot: options.root, channel: options.channel, hostId: owner.hostId } : undefined);
     await remote.listen();
     console.log(JSON.stringify({ network: listenerAddresses(port) }));
     startReady();

@@ -21,7 +21,6 @@ const sessionName = row => row?.name || row?.cwd?.split("/").filter(Boolean).pop
 const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
 let hosts = [], tabs = new Map(), activeKey = null, connecting = false, generation = 0;
-let selectedRow = null;
 const completionStates = new Map(), expandedSubagents = new Set();
 function sessionStatus(host, row, activity = row.live, resetSeen = false, viewed = false) {
   if (row.state !== "open") return row.state === "interrupted" ? "Error" : "Stopped";
@@ -157,25 +156,33 @@ async function connectAll() {
     }));
   } finally { connecting = false; $("connect").disabled = false; renderOverview(); }
 }
+function hostIdentity(host) { return host.hello?.hostId || host.key; }
 function uniqueHosts() {
   const result = new Map();
   for (const host of hosts) {
-    const key = host.hello?.hostId || host.key;
-    if (!result.has(key) || host.connected) result.set(key, host);
+    const key = hostIdentity(host), previous = result.get(key);
+    if (!previous || !previous.connected && host.connected) result.set(key, host);
   }
   return [...result.values()];
 }
 function renderHostOptions() {
   for (const id of ["host-filter", "history-host", "create-host"]) {
     const select = $(id), value = select.value;
+    const selected = hosts.find(host => host.key === value);
+    const visible = uniqueHosts();
+    const replacement = selected && visible.find(host => hostIdentity(host) === hostIdentity(selected));
     const choices = id === "create-host" ? [] : [new Option("All hosts", "")];
-    for (const host of hosts) {
+    for (const host of visible) {
       const option = new Option(host.alias, host.key);
       option.disabled = id === "create-host" && !host.connected;
       choices.push(option);
     }
-    select.replaceChildren(...choices);
-    if (choices.some(option => option.value === value && !option.disabled)) select.value = value;
+    if (select.options.length !== choices.length || choices.some((option, index) => {
+      const existing = select.options[index];
+      return existing.value !== option.value || existing.text !== option.text || existing.disabled !== option.disabled;
+    })) select.replaceChildren(...choices);
+    const nextValue = replacement?.key || value;
+    if (choices.some(option => option.value === nextValue && !option.disabled)) select.value = nextValue;
   }
 }
 function filteredRows(historyView = false) {
@@ -186,18 +193,20 @@ function filteredRows(historyView = false) {
     && `${sessionName(row)} ${row.cwd} ${host.alias}`.toLowerCase().includes(query)).map(row => ({ host, row })));
 }
 function renderOverview() {
-  const connected = hosts.filter(host => host.connected).length;
-  $("connection-state").textContent = `${connected}/${hosts.length} hosts`;
+  const visible = uniqueHosts();
+  const connected = visible.filter(host => host.connected).length;
+  renderHostOptions();
+  $("connection-state").textContent = `${connected}/${visible.length} connected`;
   $("connection-state").className = connected ? "connected" : "";
   $("connect").textContent = hosts.length ? "Refresh hosts" : "Connect";
   $("new-session").disabled = !connected;
   const focusedRow = document.activeElement.closest("#session-list a")?.dataset.key;
-  $("hosts").replaceChildren(...hosts.map(host => {
+  $("hosts").replaceChildren(...visible.map(host => {
     const node = text("div", "", "host-state");
     const state = host.connected ? "Connected" : host.connecting ? "Connecting" : host.enabled === false ? "Disabled" : "Disconnected";
     node.append(text("span", `${host.alias} / ${state}`));
     if (!host.connected && !host.connecting && host.enabled !== false) node.append(button("Reconnect", () => perform(() => connectHost(host))));
-    if (host.error) node.title = host.error;
+    if (host.error) node.append(text("p", host.error, "host-error"));
     return node;
   }));
   const rows = filteredRows();
@@ -208,11 +217,6 @@ function renderOverview() {
     link.href = sessionRoute(host, row);
     link.dataset.key = key;
     link.setAttribute("aria-disabled", String(!host.connected));
-    if (selectedRow === key) link.classList.add("selected");
-    link.addEventListener("focus", () => {
-      selectedRow = key;
-      for (const row of $("session-list").querySelectorAll("a.session-row")) row.classList.toggle("selected", row === link);
-    });
     link.addEventListener("click", event => {
       event.preventDefault();
       if (host.connected) navigate(link.hash);
@@ -267,9 +271,9 @@ function renderHistory() {
 }
 function showHistory() {
   renderHostOptions(); renderHistory();
-  $("history-dialog").showModal(); $("history-search").focus();
+  $("history-dialog").showModal();
   void perform(async () => {
-    await Promise.all(hosts.filter(host => host.connected).map(async host => {
+    await Promise.all(uniqueHosts().filter(host => host.connected).map(async host => {
       const connection = host.client;
       const result = await connection.request("sessions");
       if (host.client !== connection || result.serviceEpoch !== host.hello.serviceEpoch) return;
@@ -281,12 +285,12 @@ function showHistory() {
 function showCreate(inWorkspace = false) {
   renderHostOptions();
   const tab = tabs.get(activeKey);
-  const host = tab?.host || hosts.find(host => host.connected);
+  const host = tab ? uniqueHosts().find(host => host.connected && hostIdentity(host) === tab.identity)
+    : uniqueHosts().find(host => host.connected);
   if (!host) { notice("Connect to an execution host first."); return; }
   $("create-host").value = host.key;
   $("cwd").value = inWorkspace ? tab?.cwd() || "" : "";
   $("create-dialog").showModal();
-  $("cwd").focus();
 }
 function renderTabs() {
   $("overview-tab").setAttribute("aria-current", activeKey ? "false" : "page");
@@ -366,62 +370,11 @@ $("create-form").addEventListener("submit", event => {
 });
 $("cwd").addEventListener("input", () => $("cwd").setCustomValidity(""));
 $("search").addEventListener("input", renderOverview);
-$("search").addEventListener("keydown", event => { if (event.key === "Escape") $("overview").focus(); });
 $("host-filter").addEventListener("change", renderOverview);
 $("history").addEventListener("click", showHistory);
 $("close-history").addEventListener("click", () => $("history-dialog").close());
 $("history-search").addEventListener("input", renderHistory);
 $("history-host").addEventListener("change", renderHistory);
-$("help").addEventListener("click", () => $("help-dialog").showModal());
-$("close-help").addEventListener("click", () => $("help-dialog").close());
-$("tabs").addEventListener("keydown", event => {
-  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-  const links = [...$("tabs").querySelectorAll("a")];
-  const index = links.indexOf(document.activeElement);
-  if (index < 0) return;
-  event.preventDefault();
-  const next = event.key === "Home" ? 0 : event.key === "End" ? links.length - 1 : (index + (event.key === "ArrowLeft" ? -1 : 1) + links.length) % links.length;
-  links[next].focus(); links[next].click();
-});
-let keys = "", lastKey = 0;
-document.addEventListener("keydown", event => {
-  if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey || document.querySelector("dialog[open]")
-    || event.target.closest("input, textarea, select, [contenteditable=true]")) { keys = ""; return; }
-  if (Date.now() - lastKey > 1000) keys = "";
-  lastKey = Date.now();
-  const tab = tabs.get(activeKey);
-  if (event.key === "Escape") {
-    if (keys === "Escape") tab?.action("abort");
-    keys = "Escape"; return;
-  }
-  if (event.key === " " || keys.startsWith(" ")) {
-    keys += event.key;
-    const actions = {
-      " o": () => navigate(""), " s": showHistory, " pn": () => showCreate(), " pN": () => showCreate(true),
-      " pc": () => tab?.action("control"), " R": () => tab?.action("rename"), " pk": () => tab?.action("stop"),
-      " qq": () => closeTab(activeKey), " pq": () => tab?.action("queue-panel"),
-      " pi": () => tab?.action("prompt"), " pt": () => tab?.action("transcript"), " ?": () => $("help-dialog").showModal(),
-    };
-    if (actions[keys]) { actions[keys](); keys = ""; }
-    else if (!Object.keys(actions).some(key => key.startsWith(keys))) keys = "";
-    event.preventDefault(); return;
-  }
-  keys = "";
-  if (event.key === "?") { event.preventDefault(); $("help-dialog").showModal(); return; }
-  if (activeKey) return;
-  if (event.key === "/") { event.preventDefault(); $("search").focus(); }
-  else if (event.key === "H") { event.preventDefault(); $("host-filter").focus(); }
-  else if (["j", "k", "ArrowDown", "ArrowUp"].includes(event.key)) {
-    const links = [...$("session-list").querySelectorAll("a")];
-    const index = links.findIndex(link => link.dataset.key === selectedRow);
-    const delta = ["j", "ArrowDown"].includes(event.key) ? 1 : -1;
-    const link = links[Math.max(0, Math.min(links.length - 1, index < 0 ? 0 : index + delta))];
-    if (link) { selectedRow = link.dataset.key; link.focus(); }
-    event.preventDefault();
-  } else if (event.key === "Enter" && event.target === $("overview")) {
-    $("session-list").querySelector("a")?.click();
-  }
-});
 function refreshViewedStatus() {
   tabs.get(activeKey)?.viewed();
   renderOverview(); renderTabs();
@@ -592,7 +545,7 @@ function createConversation(host, row) {
     $("prompt").disabled = !controlled || !ready;
     $("send").disabled = !controlled || !ready || busy || !$("prompt").value.trim();
     $("composer-hint").textContent = !controlled ? "Take control to send a prompt." : !ready ? "Waiting for session setup."
-      : snapshot?.conversation.execution.running ? "Prompts sent while working are queued." : "Ctrl/Cmd+Enter to send. Enter adds a line.";
+      : snapshot?.conversation.execution.running ? "Prompts sent while working are queued." : "Tap Send when your prompt is ready.";
     if (snapshot) renderInteractions();
   }
   function displayStatus() {
@@ -707,8 +660,9 @@ function createConversation(host, row) {
     const key = JSON.stringify([pending, enabled, runtimeRevision]);
     if (key === interactionKey) return;
     interactionKey = key;
-    const target = $("interactions");
-    target.hidden = !pending.length;
+    $("interactions").hidden = !pending.length;
+    $("interaction-summary").textContent = `Questions and approvals (${pending.length})`;
+    const target = $("interaction-list");
     target.replaceChildren(...pending.map(item => {
       const request = item.request;
       const captured = context();
@@ -804,11 +758,9 @@ function createConversation(host, row) {
     });
   });
   $("prompt").addEventListener("input", renderControls);
-  $("prompt").addEventListener("keydown", event => {
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.isComposing) {
-      event.preventDefault();
-      if (!$("send").disabled) $("composer").requestSubmit();
-    }
+  $("new-workspace").addEventListener("click", () => showCreate(true));
+  $("session-actions").addEventListener("click", event => {
+    if (event.target.closest("button")) $("session-actions").open = false;
   });
   $("stop").addEventListener("click", () => {
     if (confirm('Stop "' + sessionName(row) + '" on ' + host.alias + '? Active work will be interrupted; history is preserved.')) {
@@ -875,12 +827,6 @@ function createConversation(host, row) {
     },
     cwd: () => owner?.interactions.runtime?.cwd || row.cwd,
     show() { if (snapshot) renderSession(); element.focus({ preventScroll: true }); },
-    action(id) {
-      const target = $(id);
-      if (id === "queue-panel") { target.open = !target.open; target.querySelector("summary").focus(); }
-      else if (id === "prompt" || id === "transcript") target.focus();
-      else target.click();
-    },
     dispose() {
       disposed = true;
       clearInterval(heartbeat); clearTimeout(refreshTimer);

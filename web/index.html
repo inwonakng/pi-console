@@ -2,7 +2,7 @@
 <html lang="en" data-pi-channel="{{PI_CONSOLE_CHANNEL}}">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#171b1a">
   <title>pi-console</title>
@@ -13,39 +13,47 @@
     <a class="wordmark" href="#">pi<span>/</span>console</a>
     <form id="connection-form" class="connection-form">
       <span id="channel" aria-label="Server channel"></span>
-      <span id="connection-state" role="status">Disconnected</span>
       <button id="connect" type="submit">Connect</button>
-      <button id="help" type="button" aria-label="Keyboard shortcuts">?</button>
     </form>
   </header>
   <div id="notice" class="notice" role="alert" hidden></div>
   <nav id="tabs" aria-label="Open conversations"><a id="overview-tab" href="#" aria-current="page">Overview</a><div id="conversation-tabs"></div></nav>
   <main id="panels">
     <section id="overview" aria-label="Session overview" tabindex="-1">
-      <div class="overview-heading"><h1>Open sessions <span id="session-count">0</span></h1><div class="actions"><button id="history">History</button><button id="new-session" disabled>+ New</button></div></div>
+      <div class="overview-heading"><h1>Open sessions <span id="session-count">0</span></h1><div class="actions"><button id="history">History</button><button id="new-session" disabled>New session</button></div></div>
       <div class="filters">
         <label for="search">Filter sessions<input id="search" type="search" placeholder="Title, directory or host" autocomplete="off"></label>
         <label for="host-filter">Host<select id="host-filter"><option value="">All hosts</option></select></label>
       </div>
-      <div id="hosts" aria-label="Registered hosts"></div>
+      <details class="hosts-panel">
+        <summary>Execution hosts <span id="connection-state" role="status">Disconnected</span></summary>
+        <div id="hosts" aria-label="Registered hosts"></div>
+      </details>
       <nav id="session-list" aria-label="Open sessions"><p class="empty">Connect to see sessions across registered hosts.</p></nav>
-      <footer>Enter open &middot; j/k move &middot; / filter &middot; Space s history &middot; Space pn new &middot; ? keys</footer>
     </section>
   </main>
   <template id="conversation-template">
     <section class="conversation" aria-label="Conversation" tabindex="-1" hidden>
       <div data-id="notice" class="notice" role="alert" hidden></div>
       <header class="session-header">
-        <div class="session-heading"><h2 data-id="session-title"></h2><p data-id="session-directory"></p></div>
-        <span data-id="session-status" class="status"></span>
+        <div class="session-heading"><div class="session-title-row"><h2 data-id="session-title"></h2><span data-id="session-status" class="status"></span></div><p data-id="session-directory"></p></div>
         <button data-id="reconnect" hidden>Reconnect</button>
-        <button data-id="rename" disabled>Rename</button>
-        <button data-id="stop" disabled>Stop session</button>
+        <details data-id="session-actions" class="session-actions">
+          <summary>Actions</summary>
+          <div class="actions">
+            <button data-id="new-workspace">New in this workspace</button>
+            <button data-id="rename" disabled>Rename session</button>
+            <button data-id="stop" class="danger" disabled>Stop session</button>
+          </div>
+        </details>
       </header>
       <div class="control-bar"><span data-id="controller" role="status">Read only</span><button data-id="control" disabled>Take control</button><button data-id="abort" disabled>Stop turn</button></div>
       <div data-id="transcript" class="transcript" tabindex="0" aria-label="Conversation transcript"></div>
       <button data-id="latest" class="latest" hidden>Jump to latest</button>
-      <section data-id="interactions" class="interactions" aria-label="Questions and approvals" hidden></section>
+      <details data-id="interactions" class="interactions" hidden>
+        <summary data-id="interaction-summary">Questions and approvals</summary>
+        <div data-id="interaction-list"></div>
+      </details>
       <details data-id="queue-panel" class="queue-panel" hidden><summary data-id="queue-summary">Queued prompts</summary><div data-id="queue"></div></details>
       <form data-id="composer" class="composer">
         <label data-id="prompt-label">Prompt</label>
@@ -70,12 +78,6 @@
     <div class="filters"><label for="history-search">Filter history<input id="history-search" type="search" autocomplete="off"></label><label for="history-host">Host<select id="history-host"><option value="">All hosts</option></select></label></div>
     <p class="muted">Stopped sessions stay here until you explicitly resume them.</p>
     <div id="history-list"></div>
-  </dialog>
-  <dialog id="help-dialog">
-    <h2>Keyboard shortcuts</h2>
-    <p>Outside text fields, Space starts a Neovim-style leader shortcut.</p>
-    <dl><dt>Space o</dt><dd>Overview</dd><dt>Space s</dt><dd>Session history</dd><dt>Space pn / Space pN</dt><dd>New session / new in current workspace</dd><dt>Space pc</dt><dd>Take or release control</dd><dt>Space R</dt><dd>Rename conversation</dd><dt>Space pk</dt><dd>Stop session (confirmation required)</dd><dt>Space qq</dt><dd>Close tab, leaving session running</dd><dt>Space pq</dt><dd>Queued prompts</dd><dt>Space pi / Space pt</dt><dd>Focus prompt / transcript</dd><dt>j/k, Enter, /, H</dt><dd>Overview: move, open, filter, host filter</dd><dt>Escape Escape</dt><dd>Stop current turn outside text fields</dd><dt>Ctrl/Cmd+Enter</dt><dd>Send prompt</dd><dt>Left/Right, Home/End</dt><dd>Navigate the focused tab bar</dd><dt>?</dt><dd>This help</dd></dl>
-    <div class="dialog-actions"><button id="close-help">Close</button></div>
   </dialog>
   <noscript>This frontend needs JavaScript to connect to pi-console.</noscript>
   <script type="module" src="./app.js"></script>

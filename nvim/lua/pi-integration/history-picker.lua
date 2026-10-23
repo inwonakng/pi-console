@@ -120,9 +120,9 @@ function M.pick(host, rows, format_item, on_choice)
 	require("fzf-lua").fzf_exec(entries, {
 		prompt = "History on " .. host.alias .. " > ",
 		previewer = { _ctor = previewer },
-		winopts = { height = 1.0, width = 1.0, preview = { layout = "vertical", vertical = "up:60%", hidden = false },
+		winopts = { height = 1.0, width = 1.0, preview = { layout = "vertical", vertical = "up:60%", hidden = false, wrap = true },
 			on_close = function() closed = true end },
-		fzf_opts = { ["--delimiter"] = "[\t]", ["--with-nth"] = "2..", ["--no-multi"] = true,
+		fzf_opts = { ["--delimiter"] = "[\t]", ["--with-nth"] = "2..", ["--no-multi"] = true, ["--no-sort"] = true,
 			["--header"] = "Ctrl-f / Ctrl-b: scroll transcript preview" },
 		keymap = { builtin = { ["<C-f>"] = "preview-page-down", ["<C-b>"] = "preview-page-up" },
 			fzf = { ["ctrl-f"] = "preview-page-down", ["ctrl-b"] = "preview-page-up" } },

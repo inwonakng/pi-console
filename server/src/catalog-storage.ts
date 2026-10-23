@@ -14,6 +14,7 @@ export type CatalogSession = {
   piSessionId: string;
   cwd: string;
   createdAt: string;
+  lastActivityAt?: string;
   name?: string;
   archived?: boolean;
   deleted?: boolean;
@@ -226,20 +227,24 @@ export async function validateManagedFile(root: string, session: CatalogSession)
   finally { await file.close(); }
 }
 
-/** Session names are session-wide: the last session_info wins, including a clear. */
-export async function readManagedTitle(root: string, session: CatalogSession): Promise<string | undefined> {
+/** Session-wide metadata, independent of the currently selected branch. */
+export async function readManagedMetadata(root: string, session: CatalogSession): Promise<{ name?: string; lastActivityAt: string }> {
   const { file } = await openManagedFile(root, session);
   try {
     let name: string | undefined;
+    let lastActivityAt = session.createdAt;
     for await (const line of file.readLines({ autoClose: false })) {
       let entry: unknown;
       try { entry = JSON.parse(line); }
       catch { continue; } // Pi also tolerates malformed or interrupted history lines.
-      if (object(entry) && entry.type === "session_info") {
-        name = typeof entry.name === "string" ? entry.name.trim() || undefined : undefined;
+      if (!object(entry)) continue;
+      // The last session_info wins, including a cleared title.
+      if (entry.type === "session_info") name = typeof entry.name === "string" ? entry.name.trim() || undefined : undefined;
+      if (entry.type !== "session" && typeof entry.timestamp === "string" && Date.parse(entry.timestamp) > Date.parse(lastActivityAt)) {
+        lastActivityAt = new Date(entry.timestamp).toISOString();
       }
     }
-    return name;
+    return { name, lastActivityAt };
   } finally { await file.close(); }
 }
 

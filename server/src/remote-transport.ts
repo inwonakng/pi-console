@@ -1,13 +1,14 @@
 import { createServer, type Server } from "node:http";
 import { readFileSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, createWebSocketStream } from "ws";
 import { MAX_REQUEST } from "./local-protocol.js";
 import { readHostRegistry, type RegisteredHost } from "../../pi/extensions/shared/read-host-registry.mjs";
 import { webRelay } from "./web-relay.js";
 import type { Channel } from "./session-catalog.js";
+import { defaultRoot } from "./service-paths.js";
 
 export const DEFAULT_PORT = 8443;
 export function listenerPort(value: string | number = DEFAULT_PORT): number {
@@ -34,7 +35,7 @@ export class RemoteListener {
   private readonly timer: NodeJS.Timeout;
   constructor(private readonly port: number,
     connection: (stream: Duplex, onDetach: (detach: () => void) => void) => Promise<void>,
-    web?: { root: string; channel: Channel; hostId: string }) {
+    web?: { root: string; serviceRoot: string; channel: Channel; hostId: string }) {
     // Load the fixed asset set at startup; never resolve request paths on disk.
     const assets = new Map<string, { body: Buffer; type: string }>();
     if (web) {
@@ -57,7 +58,9 @@ export class RemoteListener {
         }
         try {
           const hosts = [{ key: "local", alias: "localhost", enabled: true, hostId: web.hostId, stream: "/v1/stream" },
-            ...readHostRegistry(web.channel).map(({ key, alias, enabled, hostId }) =>
+            ...readHostRegistry(web.channel).filter((host) => host.remote !== undefined
+              || resolve(host.root ?? defaultRoot(web.channel)) !== resolve(web.serviceRoot))
+              .map(({ key, alias, enabled, hostId }) =>
               ({ key, alias, enabled, hostId, stream: `/v1/hosts/${key}/stream` }))];
           const body = JSON.stringify({ channel: web.channel, hosts });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(body),
