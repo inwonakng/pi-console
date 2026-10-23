@@ -196,8 +196,9 @@ bin/pi-console --service --remote https://host.example:8443 \
   --credential-file /private/device/laptop.json --attach SESSION_ID
 ```
 
-Transfer the credential file out of band into an owner-only 0700 directory/0600 file.
-Issuance exclusively creates the output file; it never prints the secret. The owner
+Transfer the credential file out of band and keep it owner-only (0600).
+The parent directory need not be private. Issuance exclusively creates the output
+file with mode 0600; it never prints the secret. The owner
 stores only SHA-256 verification hashes. `--ca-file /path/to/operator-ca.pem` explicitly
 selects a private CA trust bundle when the certificate is not publicly trusted.
 Only file paths, never bearer secrets, belong in arguments. A credential pins the

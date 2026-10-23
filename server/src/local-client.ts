@@ -40,8 +40,6 @@ export class LocalClient {
     let url: URL;
     try { url = new URL(endpoint); } catch { throw new Error("Invalid remote HTTPS endpoint"); }
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("Remote endpoint must be an HTTPS origin without credentials, path, query or fragment");
-    const directory = await lstat(dirname(credentialFile));
-    if (!directory.isDirectory() || directory.uid !== process.getuid?.() || (directory.mode & 0o077)) throw new Error("Client credentials require a private same-user 0700 directory");
     const device = credential(await privateJson(credentialFile, 16384));
     if (device.channel !== channel) throw new Error("Device credential channel does not match the selected channel");
     const origin = url.origin;

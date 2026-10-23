@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, open, realpath, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { resolve, join, isAbsolute, dirname } from "node:path";
 import { tlsListenerOptions } from "./remote-transport.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { HostOwner } from "./host-owner.js";
-import { privateDirectory, privateJson } from "./catalog-storage.js";
+import { privateJson } from "./catalog-storage.js";
 import { object } from "./pi-records.js";
 import { LocalClient } from "./local-client.js";
 import { runService } from "./local-service.js";
@@ -188,7 +188,7 @@ async function main(): Promise<void> {
       } else if (credentialAction === "issue") {
         if (!flags.has("--label") || !flags.has("--output")) throw new Error("Credential issuance requires --label NAME --output PRIVATE_FILE");
         const output = resolve(flags.get("--output")!);
-        await privateDirectory(dirname(output));
+        await mkdir(dirname(output), { recursive: true, mode: 0o700 });
         const file = await open(output, "wx", 0o600);
         let issued = false;
         try {
