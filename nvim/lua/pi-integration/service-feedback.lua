@@ -1,11 +1,6 @@
 -- Frontend acknowledgments only. These records never authorize or replay work.
 local M = {}
 local message_utils = require("pi-integration.utils.message")
-local labels = {
-	["shell.run"] = "Shell", ["steering.submit"] = "Steering",
-	["followUp.submit"] = "Follow-up", ["side.prompt"] = "Side message",
-	["turn.abort"] = "Stopping", ["shell.abort"] = "Stopping shell", ["side.abort"] = "Stopping side conversation",
-}
 function M.tracks(operation)
 	return not operation:match("^control%.") and not operation:match("^interaction%.")
 		and operation ~= "queue.reserve" and operation ~= "queue.release"
@@ -109,15 +104,7 @@ function M.append_messages(entries, session, visible)
 	end
 	return covered
 end
-local function represented(entry, snapshot)
-	if not snapshot or entry.serviceEpoch ~= snapshot.serviceEpoch or entry.runtimeRevision ~= snapshot.runtimeRevision then return false end
-	local id = queue_id(entry)
-	if id then
-		for _, item in ipairs(snapshot.acceptedQueue.items) do if item.id == id then return true end end
-	end
-	return false
-end
-function M.lines(entries, session, snapshot)
+function M.prompt_errors(entries, session, snapshot)
 	local lines = {}
 	for _, entry in ipairs(entries) do
 		if entry.sessionId == session and entry.operation == "prompt.submit" then
@@ -126,20 +113,6 @@ function M.lines(entries, session, snapshot)
 				if item.id == queue_id(entry) and item.error then error = item.error.message end
 			end
 			if error then vim.list_extend(lines, { "", "Error: " .. error }) end
-		elseif entry.sessionId == session and not represented(entry, snapshot) then
-			table.insert(lines, "")
-			local label = labels[entry.operation] or entry.operation
-			table.insert(lines, "## " .. label .. (entry.payload.text and "" or " (" .. entry.status .. ")"))
-			table.insert(lines, "")
-			local payload = entry.payload
-			local body = payload.text or payload.command or payload.title or payload.mode or payload.level or payload.modelId
-			if not body and payload.enabled ~= nil then body = payload.enabled and "Enabled requested" or "Disabled requested" end
-			-- Accepted shell output has its own owner work block. Keep the local
-			-- acknowledgment, without repeating the command beside that output.
-			if body and not (entry.operation == "shell.run" and entry.status == "Accepted") then
-				vim.list_extend(lines, vim.split(body, "\n", { plain = true }))
-			end
-			if entry.error then table.insert(lines, entry.error) end
 		end
 	end
 	return lines

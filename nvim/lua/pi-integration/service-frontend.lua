@@ -505,7 +505,7 @@ render = function()
 			end
 		end
 	end
-	vim.list_extend(lines, feedback_ui.lines(feedback, session_id, snapshot))
+	vim.list_extend(lines, feedback_ui.prompt_errors(feedback, session_id, snapshot))
 	if valid(side_buf) then
 		local side = status_data("pi-side")
 		local side_lines = { "# Side conversation on owner", "", "Local draft: :PiSidePrompt. :PiSideNew resets; :PiSideAbort stops.", "" }
