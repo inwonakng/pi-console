@@ -21,6 +21,7 @@ function M.metadata_lines(ctx)
 	local lines = {
 		"---",
 		"title: " .. yaml_value(title),
+		"session_id: " .. yaml_value(state.session_id),
 		"model: " .. yaml_value(state.model_id or ctx.config.model),
 		"provider: " .. yaml_value(state.provider or ctx.config.provider),
 		"thinking: " .. yaml_value(state.thinking_level),
