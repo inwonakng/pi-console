@@ -16,4 +16,5 @@ vim.g.pi_overview = role ~= "conversation"
 local integration = require("pi-integration")
 integration.setup({ role = role, show_thinking = true,
 	launcher = vim.fs.joinpath(app_root, "bin", "pi-console"), restart_file = restart_file })
-vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = function() integration.open(restore) end })
+-- Build the layout after VimEnter finishes restoring the startup window.
+vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = vim.schedule_wrap(function() integration.open(restore) end) })
