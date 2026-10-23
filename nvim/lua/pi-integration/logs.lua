@@ -97,7 +97,7 @@ function M.show(ctx)
 	local state = ctx.state
 	local buf = ensure_buffer(ctx)
 	M.refresh(ctx)
-	if valid_win(state.logs_win) then
+	if valid_win(state.logs_win) and vim.api.nvim_win_get_tabpage(state.logs_win) == vim.api.nvim_get_current_tabpage() then
 		vim.api.nvim_set_current_win(state.logs_win)
 	else
 		vim.cmd("botright 12split")

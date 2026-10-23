@@ -15,6 +15,7 @@ import { PiConversation, type ConversationChange, type ConversationSnapshot, typ
 import { SessionSubscription } from "./session-subscription.js";
 import { CommandError, SessionControl, commandFingerprint, sessionCommand, type CommandReceipt, type Controller,
   type ControlGrant, type SessionCommand } from "./session-commands.js";
+import { managementCommand, managementFingerprint, type ManagementCommand } from "./session-management.js";
 import { SessionCatalog, type CatalogSession, type Channel } from "./session-catalog.js";
 import { QueueReservations, editableItem, type AcceptedQueueItem, type AcceptedQueueSnapshot } from "./session-queue.js";
 import { RENAME_COMMAND, RENAME_RESULT, renameResult, type RenameResult } from "./session-rename.js";
@@ -50,6 +51,7 @@ export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevi
   status: "Starting" | "Stopping" | "Error" | "Waiting" | "Compacting" | "Working" | "Idle";
   piState?: Pick<RpcSessionState, "isStreaming" | "isCompacting" | "pendingMessageCount">;
   pendingInteractions: number;
+  accessMode?: string; integrationMode?: string; notificationsEnabled: boolean; cwd: string;
 };
 export type HostSummaries = {
   sessions: (Pick<CatalogSession, "id" | "cwd" | "name" | "state"> & { live?: OwnedSessionSummary })[];
@@ -240,6 +242,25 @@ export class HostOwner {
   hostStatus(epoch: string, id: string): HostReceipt | { status: "unknown" } {
     const receipt = this.catalog.hostRecord(epoch, id)?.receipt;
     return receipt && ["host.create", "host.resume", "host.recover", "host.archive", "host.delete"].includes(receipt.operation) ? receipt : { status: "unknown" };
+  }
+
+  manage(input: unknown, admission?: () => void): Promise<CommandReceipt> {
+    const command = managementCommand(input);
+    if (command.serviceEpoch !== this.serviceEpoch) throw new CommandError("stale_epoch", "Management request belongs to another service epoch");
+    this.assertOpen();
+    const previous = this.catalog.commandRecord(command.serviceEpoch, command.id);
+    if (previous) {
+      if (previous.fingerprint !== managementFingerprint(command)) throw new CommandError("command_conflict", "Command ID was used for another mutation");
+      return Promise.resolve(previous.receipt);
+    }
+    const session = this.lookup(command.sessionId);
+    if (!session) throw new CommandError("session_unavailable", "Session is not live; management never resumes it");
+    return session.manage(command, admission);
+  }
+
+  managementStatus(epoch: string, id: string, sessionId: string): CommandReceipt | { status: "unknown" } {
+    const receipt = this.catalog.commandRecord(epoch, id)?.receipt;
+    return receipt?.authority === "management" && receipt.sessionId === sessionId ? receipt : { status: "unknown" };
   }
 
   /** Host IDs are disk identities, not connection IDs. Duplicate lookups never
@@ -456,6 +477,9 @@ export class OwnedSession {
       : state?.isCompacting ? "Compacting"
       : this.queueRunPending || !this.conversation.executionSettled ? "Working" : "Idle";
     return { phase: this.phase, runtimeRevision: this.runtimeRevision, controller: this.control.snapshot(), status, pendingInteractions,
+      accessMode: this.conversation.status("pi-access-mode")?.match(/^Mode: (\w+)$/)?.[1],
+      integrationMode: this.conversation.status("pi-integration-mode")?.match(/^Integration: (\w+)$/)?.[1],
+      notificationsEnabled: this.conversation.status("pi-notifications") === "notify on", cwd: this.workspace?.cwd ?? this.record.cwd,
       ...(state ? { piState: { isStreaming: state.isStreaming, isCompacting: state.isCompacting, pendingMessageCount: state.pendingMessageCount } } : {}) };
   }
 
@@ -654,6 +678,40 @@ export class OwnedSession {
         this.trackCommand(task.finally(() => this.nativeQueueCommands.delete(task)));
       } else if (rename) this.trackCommand(this.executeRename(receipt, rename));
       else this.trackCommand(this.executeCommand(command, receipt));
+      return structuredClone(receipt);
+    });
+    this.admission = task.then(() => undefined, () => undefined);
+    return task.finally(() => { this.admitting--; });
+  }
+
+  /** Management admission shares ordering and receipts, but never touches controller grants. */
+  manage(input: ManagementCommand, admission?: () => void): Promise<CommandReceipt> {
+    const command = managementCommand(input);
+    if (command.sessionId !== this.id) throw new CommandError("invalid_command", "Management targets another session");
+    if (command.serviceEpoch !== this.catalog.epoch) throw new CommandError("stale_epoch", "Management owner changed");
+    if (this.admitting >= 128) throw new CommandError("command_limit", "Owner command admission limit exceeded");
+    this.admitting++;
+    const task = this.admission.then(async () => {
+      admission?.();
+      const fingerprint = managementFingerprint(command);
+      const existing = this.catalog.commandRecord(command.serviceEpoch, command.id);
+      if (existing) {
+        if (existing.fingerprint !== fingerprint) throw new CommandError("command_conflict", "Command ID was used for another mutation");
+        return existing.receipt;
+      }
+      const worker = this.commandRuntime(command.runtimeRevision);
+      if (this.lifecyclePending) throw new CommandError("session_busy", "Session lifecycle operation pending");
+      const bundled = command.operation !== "session.kill" ? this.prepareBundled(command, worker) : undefined;
+      const receipt: CommandReceipt = { id: command.id, sessionId: this.id, serviceEpoch: this.catalog.epoch,
+        runtimeRevision: command.runtimeRevision, operation: command.operation, authority: "management", status: "accepted" };
+      try { await this.catalog.reserveCommand({ fingerprint, receipt }, undefined, admission); }
+      catch (error) { if (!(error instanceof CommandError)) this.commandFailure(error); throw error; }
+      if (bundled) this.bundled = bundled;
+      this.publish({ command: receipt });
+      if (command.operation === "session.kill") {
+        this.lifecyclePending = true;
+        this.lifecycle = this.executeLifecycle(command, receipt).catch((error: unknown) => this.commandFailure(error));
+      } else if (bundled) this.trackCommand(this.executeBundled(receipt, bundled));
       return structuredClone(receipt);
     });
     this.admission = task.then(() => undefined, () => undefined);
@@ -890,7 +948,7 @@ export class OwnedSession {
 
   get workspaceTransitionPending(): boolean { return !!this.bundled && contextOperation(this.bundled.operation) || this.lifecyclePending; }
 
-  private prepareBundled(command: SessionCommand & BundledOperation, worker: PiProcess): BundledFlight {
+  private prepareBundled(command: { runtimeRevision: number } & BundledOperation, worker: PiProcess): BundledFlight {
     if (contextOperation(command.operation)) this.assertSavedIdle();
     const interruptingJoin = command.operation === "spawn.stop" && this.bundled?.operation === "spawn.join" && !this.bundledInterrupt;
     if (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another owner operation is pending");
@@ -1201,7 +1259,7 @@ export class OwnedSession {
     this.publish({ command: outcome });
   }
 
-  private async executeLifecycle(command: SessionCommand & { operation: "session.kill" | "session.restart" }, receipt: CommandReceipt): Promise<void> {
+  private async executeLifecycle(command: { runtimeRevision: number; operation: "session.kill" | "session.restart" }, receipt: CommandReceipt): Promise<void> {
     let error: unknown;
     try {
       // No takeover can cancel an already accepted kill/restart. Context and

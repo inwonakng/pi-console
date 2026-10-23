@@ -123,8 +123,8 @@ function M.refresh(window, run, attempt)
 	local entries, pane_count = {}, 0
 	for line in pane_output:gmatch("[^\n]+") do
 		local pane, dead, sidebar, value = line:match("^(%%%d+)\t(%d)\t(.-)\t(.*)$")
-		if pane then
-			if sidebar ~= "1" then pane_count = pane_count + 1 end
+		if pane and sidebar ~= "1" then
+			pane_count = pane_count + 1
 			local entry = json.decode_object(value)
 			if dead == "0" and entry and entry.version == 1 and type(entry.pid) == "number"
 				and entry.pid > 0 and entry.pid == math.floor(entry.pid)

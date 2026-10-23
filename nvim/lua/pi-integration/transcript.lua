@@ -14,20 +14,10 @@ local function yaml_value(value)
 	return vim.json.encode(tostring(value))
 end
 
-local function session_label(state)
-	if not state.session_file or state.session_file == "" then
-		return nil
-	end
-	return vim.fn.fnamemodify(state.session_file, ":t")
-end
-
 function M.metadata_lines(ctx)
 	local state = ctx.state
-	local title = state.session_name or (ctx.service_mode and "Untitled session" or "Pi Session")
+	local title = state.session_name or "Untitled session"
 	local cwd = state.session_cwd
-	if not ctx.service_mode then
-		cwd = (state.workspace and state.workspace.cwd) or vim.fn.getcwd()
-	end
 	local lines = {
 		"---",
 		"title: " .. yaml_value(title),
@@ -36,19 +26,15 @@ function M.metadata_lines(ctx)
 		"thinking: " .. yaml_value(state.thinking_level),
 		"access: " .. yaml_value(state.access_mode),
 		"integration: " .. yaml_value(state.integration_mode),
-		"session: " .. yaml_value(ctx.service_mode and state.session_id or session_label(state)),
+		"session: " .. yaml_value(state.session_id),
 		"project: " .. yaml_value(state.workspace and state.workspace.project),
 		"workspace: " .. yaml_value(cwd),
 	}
-	if ctx.service_mode then
-		vim.list_extend(lines, {
-			"host: " .. yaml_value(state.host_name),
-			"connection: " .. yaml_value(state.connection_status),
-			"client: " .. yaml_value(state.client_status),
-		})
-	else
-		table.insert(lines, "last_updated: " .. yaml_value(state.last_updated))
-	end
+	vim.list_extend(lines, {
+		"host: " .. yaml_value(state.host_name),
+		"connection: " .. yaml_value(state.connection_status),
+		"client: " .. yaml_value(state.client_status),
+	})
 	table.insert(lines, "---")
 	return lines
 end

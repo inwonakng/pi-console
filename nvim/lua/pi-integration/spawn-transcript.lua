@@ -15,10 +15,9 @@ local function decode_json(line)
 	return json.decode_object(line)
 end
 
-local function read_messages(path, contents)
+local function read_messages(contents)
 	local messages = {}
-	if not contents and (not path or vim.fn.filereadable(path) ~= 1) then return messages end
-	for _, line in ipairs(contents and vim.split(contents, "\n", { plain = true }) or vim.fn.readfile(path)) do
+	for _, line in ipairs(vim.split(contents or "", "\n", { plain = true })) do
 		local record = decode_json(line)
 		local event = type(record) == "table" and record.event or nil
 		if type(record) == "table" and record.type == "message" and type(record.message) == "table" then
@@ -65,7 +64,7 @@ local function render_lines(path, state, contents)
 	pi_tool_output.reset(state)
 	pi_thinking_output.reset(state)
 	pi_skills.reset(state)
-	local lines, items = pi_messages.collect_message_lines(make_render_ctx(state, path), read_messages(path, contents))
+	local lines, items = pi_messages.collect_message_lines(make_render_ctx(state, path), read_messages(contents))
 	state.transcript_items = items or {}
 	return lines
 end
@@ -119,13 +118,10 @@ local function open_item(ctx, state, parent_win)
 end
 
 function M.open(ctx, path, title, query, contents)
-	if ctx.resources and not contents then
+	assert(ctx.resources, "Owner resources required")
+	if not contents then
 		query = query or { kind = "spawn", runId = path and path:match("/runs/([^/]+)/"), artifact = "transcript" }
 		ctx.resources.document(query, function(text, page) M.open(ctx, page.path, title, query, text) end)
-		return
-	end
-	if not contents and (not path or vim.fn.filereadable(path) ~= 1) then
-		ctx.ui.notify("Could not read " .. tostring(path), vim.log.levels.WARN)
 		return
 	end
 
@@ -152,8 +148,7 @@ function M.open(ctx, path, title, query, contents)
 	}
 
 	local buf = buffer_utils.create_scratch({ filetype = "markdown" })
-	if ctx.resources then ctx.resources.qualify(buf, title or "transcript", nil)
-	else vim.api.nvim_buf_set_name(buf, "pi://spawn/transcript/" .. buf .. "/" .. vim.fn.fnamemodify(path, ":h:t")) end
+	ctx.resources.qualify(buf, title or "transcript", nil)
 	markdown_render.prepare_buffer(buf, { latex = true })
 
 	state.transcript_buf = buf
@@ -204,9 +199,7 @@ function M.open(ctx, path, title, query, contents)
 	vim.keymap.set("n", "q", dismiss, { buffer = buf, silent = true, desc = "Close spawn transcript" })
 	vim.keymap.set("n", "<Esc>", dismiss, { buffer = buf, silent = true, desc = "Close spawn transcript" })
 	vim.keymap.set("n", "r", function()
-		if ctx.resources then M.open(ctx, path, title, query); return end
-		refresh()
-		ctx.ui.notify("Refreshed spawn transcript")
+		M.open(ctx, path, title, query)
 	end, { buffer = buf, silent = true, desc = "Refresh spawn transcript" })
 	vim.keymap.set("n", "<CR>", function()
 		if not require("pi-integration.utils.markdown-links").follow((owner.workspace or {}).cwd, ctx.resources) then

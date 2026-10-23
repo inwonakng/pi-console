@@ -1,23 +1,9 @@
 local json = require("pi-integration.utils.json")
-local runtime = require("pi-integration.runtime")
 
 local M = {}
 
-local function organization_path()
-	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.frontend-store").path("organization") end
-	return vim.fs.joinpath(vim.fn.stdpath("state"), "pi-console", "session-organization.json")
-end
-
 local function valid_name(name)
 	return type(name) == "string" and name ~= "" and name == vim.trim(name) and not name:find("%c")
-end
-
-local function live_key(entry)
-	if type(entry.id) == "string" and entry.id ~= "" and type(entry.pid) == "number"
-		and entry.pid > 0 and entry.pid % 1 == 0 then
-		-- JSON encodes the tuple without delimiter collisions; paths are absolute.
-		return "live:" .. json.encode({ entry.id, entry.pid })
-	end
 end
 
 local function entry_key(entry)
@@ -25,7 +11,6 @@ local function entry_key(entry)
 		return nil
 	end
 	if entry.host_id and entry.session_id then return "service:" .. json.encode({ entry.host_id, entry.session_id }) end
-	return runtime.canonical_path(entry.path) or live_key(entry)
 end
 
 local function valid_key(key)
@@ -38,12 +23,7 @@ local function valid_key(key)
 			and type(tuple[1]) == "string" and tuple[1] ~= "" and type(tuple[2]) == "string" and tuple[2] ~= ""
 			and "service:" .. json.encode(tuple) == key
 	end
-	if key:sub(1, 5) == "live:" then
-		local tuple = json.decode(key:sub(6))
-		return type(tuple) == "table" and vim.islist(tuple) and #tuple == 2
-			and live_key({ id = tuple[1], pid = tuple[2] }) == key
-	end
-	return key:sub(1, 1) == "/" and runtime.canonical_path(key) == key
+	return false
 end
 
 local function valid_state(state)
@@ -85,96 +65,16 @@ local function valid_state(state)
 end
 
 local function load()
-	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
-		local ok, state = pcall(require("pi-integration.frontend-store").load, "organization", { version = 1, groups = {}, ungrouped = {} })
-		if not ok or not valid_state(state) then return nil, "Invalid service organization: " .. tostring(state) end
-		return state
-	end
-	local file = organization_path()
-	local stat, stat_error, code = vim.uv.fs_stat(file)
-	if not stat then
-		if code == "ENOENT" then
-			return { version = 1, groups = {}, ungrouped = {} }
-		end
-		return nil, "Could not read session organization: " .. tostring(stat_error)
-	end
-	local ok, lines = pcall(vim.fn.readfile, file)
-	if not ok then
-		return nil, "Could not read session organization: " .. tostring(lines)
-	end
-	local state = json.decode(table.concat(lines, "\n"))
-	if not valid_state(state) then
-		return nil, "Invalid session organization file: " .. file
-	end
+	local ok, state = pcall(require("pi-integration.frontend-store").load, "organization", { version = 1, groups = {}, ungrouped = {} })
+	if not ok or not valid_state(state) then return nil, "Invalid organization: " .. tostring(state) end
 	return state
 end
 
-local function save(state)
-	local file = organization_path()
-	local temporary = file .. "." .. vim.uv.os_getpid() .. ".tmp"
-	local ok, err = pcall(function()
-		if vim.fn.writefile({ json.encode(state) }, temporary) ~= 0 then
-			error("could not write session organization")
-		end
-		local renamed, rename_error = vim.uv.fs_rename(temporary, file)
-		if not renamed then
-			error(rename_error)
-		end
-	end)
-	vim.fn.delete(temporary)
-	if not ok then
-		return nil, "Could not save session organization: " .. tostring(err)
-	end
-	return true
-end
-
 local function with_state(callback)
-	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
-		return require("pi-integration.frontend-store").update("organization", { version = 1, groups = {}, ungrouped = {} }, function(state)
-			if not valid_state(state) then return nil, "Invalid service organization" end
-			return callback(state)
-		end)
-	end
-	local lock = organization_path() .. ".lock"
-	local made, mkdir_error = pcall(vim.fn.mkdir, vim.fs.dirname(lock), "p")
-	if not made then
-		return nil, "Could not prepare session organization: " .. tostring(mkdir_error)
-	end
-	-- Protect the entire read/modify/write, as in session-pins.
-	local fd, lock_error, code = vim.uv.fs_open(lock, "wx", 384)
-	if not fd then
-		if code == "EEXIST" then
-			return nil, "Session organization is busy; retry shortly. If this persists after closing all viewers, remove " .. lock
-		end
-		return nil, "Could not lock session organization: " .. tostring(lock_error)
-	end
-	local ok, result, err = pcall(function()
-		local state, load_error = load()
-		if not state then
-			return nil, load_error
-		end
-		local before = vim.deepcopy(state)
-		local value, callback_error = callback(state)
-		if not value then
-			return nil, callback_error
-		end
-		if not vim.deep_equal(before, state) then
-			local saved, save_error = save(state)
-			if not saved then
-				return nil, save_error
-			end
-		end
-		return value
+	return require("pi-integration.frontend-store").update("organization", { version = 1, groups = {}, ungrouped = {} }, function(state)
+		if not valid_state(state) then return nil, "Invalid organization" end
+		return callback(state)
 	end)
-	vim.uv.fs_close(fd)
-	local removed, remove_error = vim.uv.fs_unlink(lock)
-	if not removed then
-		return nil, "Could not release session organization lock: " .. tostring(remove_error)
-	end
-	if not ok then
-		return nil, "Could not update session organization: " .. tostring(result)
-	end
-	return result, err
 end
 
 local function group_keys(state, id)
@@ -207,19 +107,6 @@ local function resolve_entry(state, entry)
 	local key = entry_key(entry)
 	if not key then
 		return nil, "Session has no saved path or live identity"
-	end
-	local ephemeral = live_key(entry)
-	local keys, index = locate(state, ephemeral)
-	if ephemeral ~= key and keys then
-		local previous = locate(state, key)
-		if previous then
-			-- A saved assignment is authoritative. A stale viewer can reintroduce
-			-- the live key after migration, or an initializing frontend can
-			-- briefly appear unsaved before reopening an already organized path.
-			table.remove(keys, index)
-		else
-			keys[index] = key
-		end
 	end
 	entry.organization_key = key
 	return key

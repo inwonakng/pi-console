@@ -1,5 +1,4 @@
 local buffer = require("pi-integration.utils.buffer")
-local diff_stats = require("pi-integration.diff-stats")
 local build_info = require("pi-integration.build-info")
 
 local M = {}
@@ -8,7 +7,6 @@ local status_ns = vim.api.nvim_create_namespace("pi-console-status-bars")
 -- Each bar has one buffer row and one native statusline row.
 local footer = { buf = "status_buf", win = "status_win", name = "pi://status", split = "below" }
 local header = { buf = "header_buf", win = "header_win", name = "pi://header", split = "above" }
-local footer_bars = { footer }
 local service_bars = { header, footer }
 
 local icons = require("pi-integration.status-icons")
@@ -623,9 +621,6 @@ local function render_bar(ctx, bar, buf, width)
 end
 
 function M.setup(ctx)
-	if not ctx.service_mode then
-		diff_stats.setup(ctx.state, function() M.update(ctx) end)
-	end
 	local update_scheduled = false
 	local function schedule_update()
 		if update_scheduled then
@@ -638,9 +633,9 @@ function M.setup(ctx)
 		end)
 	end
 
-	local bars = ctx.service_mode and service_bars or footer_bars
+	local bars = service_bars
 	local footer_group = vim.api.nvim_create_augroup("PiNvimStatusFooter", { clear = true })
-	if ctx.service_mode then
+	do
 		local interval_ms = 250 -- Match the stable conversation footer.
 		local timer = vim.uv.new_timer()
 		timer:start(interval_ms, interval_ms, vim.schedule_wrap(function()
@@ -698,10 +693,7 @@ end
 
 function M.update(ctx)
 	local state = ctx.state
-	if not ctx.service_mode then
-		diff_stats.refresh(state, function() M.update(ctx) end)
-	end
-	local bars = ctx.service_mode and service_bars or footer_bars
+	local bars = service_bars
 	if not ctx.transcript.win_valid() then
 		for _, bar in ipairs(bars) do close_bar(state, bar) end
 		return

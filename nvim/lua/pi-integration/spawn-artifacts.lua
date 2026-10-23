@@ -74,11 +74,8 @@ local function artifact_choices(artifacts, transcript_first)
 end
 
 local function open_text(ctx, title, path, filetype, is_output, page, query, anchor)
-	if not page and (not path or vim.fn.filereadable(path) ~= 1) then
-		ctx.ui.notify("Could not read " .. tostring(path), vim.log.levels.WARN)
-		return
-	end
-	local text = page and page.text or table.concat(vim.fn.readfile(path), "\n")
+	assert(ctx.resources and page, "Owner artifact page required")
+	local text = page.text
 	local state = ctx.state
 	floats.close_window(state.spawn_win)
 	state.spawn_win = nil
@@ -88,8 +85,7 @@ local function open_text(ctx, title, path, filetype, is_output, page, query, anc
 		lines = vim.split(text, "\n", { plain = true }),
 	})
 
-	if ctx.resources then ctx.resources.qualify(buf, title, query.kind == "file" and path or nil)
-	else vim.api.nvim_buf_set_name(buf, "pi://spawn/" .. buf .. "/" .. vim.fn.fnamemodify(path, ":t")) end
+	ctx.resources.qualify(buf, title, query.kind == "file" and path or nil)
 	local width = math.min(math.max(72, math.floor(vim.o.columns * 0.82)), vim.o.columns - 4)
 	local height = math.min(math.max(16, math.floor(vim.o.lines * 0.75)), vim.o.lines - 4)
 	local row = math.max(1, math.floor((vim.o.lines - height) / 2))
@@ -167,10 +163,8 @@ local function select_artifact(ctx, choices, prompt, is_output, send_action)
 			send_action()
 		elseif choice.kind == "transcript" then
 			require("pi-integration.spawn-transcript").open(ctx, choice.path, "Spawn transcript", ctx.resources and { kind = "spawn", runId = choice.runId, artifact = choice.kind } or nil)
-		elseif ctx.resources then
-			ctx.resources.open({ kind = "spawn", runId = choice.runId, artifact = choice.kind }, "Spawn " .. choice.label, choice.filetype)
 		else
-			open_text(ctx, "Spawn " .. choice.label, choice.path, choice.filetype, is_output)
+			ctx.resources.open({ kind = "spawn", runId = choice.runId, artifact = choice.kind }, "Spawn " .. choice.label, choice.filetype)
 		end
 	end)
 end

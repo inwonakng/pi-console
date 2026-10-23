@@ -102,15 +102,7 @@ local function output_path(output)
 end
 
 local function filetype_from_path(path)
-	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-resources").filetype(path) end
-	if type(path) ~= "string" or path == "" then
-		return "text"
-	end
-	local ok, filetype = pcall(vim.filetype.match, { filename = path })
-	if ok and type(filetype) == "string" and filetype ~= "" then
-		return filetype
-	end
-	return "text"
+	return require("pi-integration.service-resources").filetype(path)
 end
 
 local function parse_unified_hunk_header(line)
@@ -969,19 +961,8 @@ function M.summary_text(state, output_id)
 	return label .. " · " .. (edit_label or line_label) .. artifact_label
 end
 
-local function codemode_output(output, resources)
-	local text = output.text or ""
-	if resources then return output.owner_full_text or text, output.owner_full_text and "Owner-retained full output" or nil end
-	local details = type(output.details) == "table" and output.details or {}
-	local path = details.fullOutputPath
-	if type(path) ~= "string" or path == "" then return text end
-	local ok, lines = pcall(vim.fn.readfile, path, "b")
-	if not ok then
-		return text, "Full output unavailable; showing the truncated recorded result.\nSaved path: " .. path
-	end
-	-- The saved file contains only the output, without Pi's completion/time header.
-	local header = text:match("^(Script [^\n]*\nWall time [^\n]*\nOutput:\n)") or ""
-	return header .. table.concat(lines, "\n"), "Full output: " .. path
+local function codemode_output(output)
+	return output.owner_full_text or output.text or "", output.owner_full_text and "Owner-retained full output" or nil
 end
 
 local function highlight_codemode(buf, source_end, output_start, text)
@@ -1075,7 +1056,7 @@ function M.open_float(ctx, output_id, resolved)
 	end
 	local full_output_note
 	if output.name == "codemode" then
-		rendered_text, full_output_note = codemode_output(output, ctx.resources)
+		rendered_text, full_output_note = codemode_output(output)
 		rendered_filetype = "text"
 	end
 	local workspace_review = not pending and historical_workspace_review(output) or nil
@@ -1157,22 +1138,8 @@ function M.open_float(ctx, output_id, resolved)
 	floats.close_on_win_leave(buf, close_tool_win, { win = win, parent = ctx.window.parent })
 	if workspace_review or owner_review then
 		vim.keymap.set("n", "d", function()
-			if ctx.resources then
-				close_tool_win()
-				ctx.resources.review(output.details.id, workspace_review)
-				return
-			end
-			local opened, err = require("pi-integration.backends.tmux").review_workspace(
-				output.details.destinationRoot,
-				workspace_review.before,
-				workspace_review.after
-			)
-			if not opened then
-				ctx.ui.notify(
-					"Could not open historical workspace diff: " .. (err or "unknown error"),
-					vim.log.levels.ERROR
-				)
-			end
+			close_tool_win()
+			ctx.resources.review(output.details.id, workspace_review)
 		end, { buffer = buf, silent = true, desc = "Review historical workspace diff" })
 	end
 	vim.keymap.set("n", "q", close_tool_win, { buffer = buf, silent = true, desc = "Close tool output" })

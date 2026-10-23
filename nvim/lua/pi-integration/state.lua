@@ -4,49 +4,8 @@ function M.is_agent_active(state)
 	return state.is_agent_running or state.is_streaming or state.is_retrying or state.awaiting_agent_output
 end
 
-function M.restart_block_reason(state)
-	if state.side and (state.side.submitting or state.side.data.running) then
-		return "The side conversation is working. Wait or use :PiSideAbort before restarting."
-	end
-	if (state.spawn_running_count or 0) > 0 then
-		return "There are running subagents. Join or stop them before restarting."
-	end
-	for _, run in ipairs(state.spawn_runs or {}) do
-		if run.status == "running" or run.joinRequested == true then
-			return "Wait for the current subagent work to finish before restarting."
-		end
-	end
-	if M.is_agent_active(state) or state.is_compacting or state.is_loading or state.reverting_history
-		or state.session_replacement_pending or state.rpc_tearing_down or state.restart_requested
-		or (state.workspace and state.workspace.transitionPending) then
-		return "Wait for the current Pi work to finish before restarting."
-	end
-	for _, pending in ipairs(state.pending_user_messages or {}) do
-		if pending.status == "queued" or pending.status == "sending" then
-			return "Wait for pending prompts to finish before restarting."
-		end
-	end
-	if state.active_ui_request_id or next(state.pending_ui_requests or {}) or #(state.pending_ui_queue or {}) > 0 then
-		return "Resolve the pending Pi request before restarting."
-	end
-	if next(state.callbacks or {}) then
-		return "Wait for pending Pi requests to finish before restarting."
-	end
-	return nil
-end
-
 function M.new()
 	return {
-		job = nil,
-		rpc_process = nil,
-		trust_status = nil,
-		trust_restart = false,
-		rpc_tearing_down = false,
-		stdout_pending = "",
-		stderr_pending = "",
-		restart_requested = false,
-		next_id = 0,
-		callbacks = {},
 		transcript_buf = nil,
 		input_buf = nil,
 		status_buf = nil,
@@ -74,8 +33,6 @@ function M.new()
 		tree_scope = "all",
 		tree_search_query = "",
 		tree_match_rows = {},
-		tree_clone_pending = false,
-		tree_clone_result = nil,
 		is_streaming = false,
 		is_agent_running = false,
 		refresh_transcript_after_settled = false,
@@ -89,9 +46,6 @@ function M.new()
 		loading_error = nil,
 		reverting_history = nil,
 		revert_cover = nil,
-		workspace_status_received = false,
-		session_sync_complete = false,
-		session_sync_generation = 0,
 		pending_ui_requests = {},
 		active_ui_request_id = nil,
 		pending_retry_error = nil,
@@ -101,17 +55,8 @@ function M.new()
 		activity_spinner_tick = 1,
 		activity_timer = nil,
 		access_mode = "ask",
-		pending_access_mode = nil,
 		integration_mode = "ask",
-		pending_integration_mode = nil,
-		command_sources = {},
-		workspace = {
-			name = "Local checkout",
-			path = vim.fn.getcwd(),
-			cwd = vim.fn.getcwd(),
-			lifecycle = "local",
-			localCheckout = true,
-		},
+		workspace = {},
 		current_message_started = false,
 		current_thinking_rendered = false,
 		assistant_block_open = false,

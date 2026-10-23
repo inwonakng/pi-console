@@ -116,7 +116,7 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
         // Authentication remains current for every operation, including buffered
         // records after revocation. Accepted owner work is never cancelled here.
         if (socket.destroyed || deviceId && !credentials.active(deviceId)) throw new CommandError("attachment_closed", "Remote authentication is no longer valid");
-        if (deviceId && !["hello", "health", "sessions", "sessions.subscribe", "host.command", "host.status", "attach", "detach", "snapshot", "session.read", "resource.read", "resource.complete", "host.directories", "host.saved", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
+        if (deviceId && !["hello", "health", "sessions", "sessions.subscribe", "host.command", "host.status", "session.manage", "session.manage.status", "attach", "detach", "snapshot", "session.read", "resource.read", "resource.complete", "host.directories", "host.saved", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
           throw new CommandError("unsupported_command", "Method is not available on remote transport");
         }
         let result: unknown;
@@ -168,6 +168,14 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
             });
             break;
           case "host.command": result = await owner.command(p, remoteAdmission); break;
+          case "session.manage": result = await owner.manage(p, () => {
+            if (socket.destroyed) throw new CommandError("attachment_closed", "Management client disconnected");
+            remoteAdmission?.();
+          }); break;
+          case "session.manage.status":
+            exact(p, ["serviceEpoch", "commandId", "sessionId"]);
+            if (!identifier(p.serviceEpoch) || !identifier(p.commandId) || !identifier(p.sessionId)) throw new CommandError("invalid_command", "Invalid management lookup");
+            result = owner.managementStatus(p.serviceEpoch, p.commandId, p.sessionId); break;
           case "host.status":
             exact(p, ["serviceEpoch", "commandId"]);
             if (!identifier(p.serviceEpoch) || !identifier(p.commandId)) throw new CommandError("invalid_command", "Invalid command lookup");

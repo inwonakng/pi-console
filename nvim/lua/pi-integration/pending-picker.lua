@@ -3,40 +3,6 @@ local M = {}
 -- Track the live RPC dialog for response/timeout/session cleanup. Select and
 -- confirm requests keep ownership when hidden; input uses a Markdown float.
 local active
-local drain
-
--- Main and side agents share the same dialog surface. Keep subsequent RPC
--- requests pending instead of denying them when another approval is visible.
-function M.enqueue(ctx, event, dispatch)
-	local queue = ctx.state.pending_ui_queue or {}
-	ctx.state.pending_ui_queue = queue
-	table.insert(queue, {
-		event = event,
-		dispatch = dispatch,
-		expires = type(event.timeout) == "number" and (vim.uv.now() + event.timeout) or nil,
-	})
-	drain(ctx)
-	ctx.transcript.refresh_ui()
-end
-
-drain = function(ctx)
-	if active then return end
-	local queue = ctx.state.pending_ui_queue or {}
-	while not active and #queue > 0 do
-		local request = table.remove(queue, 1)
-		if request.expires and request.expires <= vim.uv.now() then
-			ctx.rpc.send({ type = "extension_ui_response", id = request.event.id, cancelled = true })
-		else
-			if request.expires then request.event.timeout = request.expires - vim.uv.now() end
-			local ok, err = pcall(request.dispatch, request.event)
-			if not ok then
-				ctx.logs.add("error", "Pi dialog failed", tostring(err))
-				ctx.rpc.send({ type = "extension_ui_response", id = request.event.id, cancelled = true })
-			end
-		end
-	end
-end
-
 function M.owns_buffer(buf)
 	return active ~= nil and active.request.resumable and active.buf == buf
 end
@@ -81,26 +47,6 @@ local function finish(picker, choice, respond, explicit_cancel)
 		state.active_ui_request_id = nil
 	end
 	refresh(picker)
-	vim.schedule(function() drain(picker.ctx) end)
-end
-
-function M.clear_side(ctx, generation, dialog_ids)
-	local keep = {}
-	for _, id in ipairs(dialog_ids) do keep[id] = true end
-	local function stale(request)
-		return request.side_dialog_id and (request.side_conversation_id ~= generation or not keep[request.side_dialog_id])
-	end
-	local queue = ctx.state.pending_ui_queue or {}
-	for index = #queue, 1, -1 do
-		local request = queue[index]
-		if stale(request.event) then
-			table.remove(queue, index)
-			ctx.rpc.send({ type = "extension_ui_response", id = request.event.id, cancelled = true })
-		end
-	end
-	if active and active.ctx.state == ctx.state and stale(active.request) then
-		finish(active, nil, true)
-	end
 end
 
 function M.can_open(request_id)
@@ -160,33 +106,9 @@ function M.restore(ctx)
 	refresh(picker)
 end
 
--- When Pi is still alive (e.g. abort/switch), settle the waiting RPC dialog.
--- On process exit or after session replacement, only dispose its frontend.
-function M.clear_main(ctx, respond)
-	local queue = ctx.state.pending_ui_queue or {}
-	for index = #queue, 1, -1 do
-		local request = queue[index]
-		if not request.event.side_dialog_id then
-			table.remove(queue, index)
-			if respond then ctx.rpc.send({ type = "extension_ui_response", id = request.event.id, cancelled = true }) end
-		end
-	end
-	if active and active.ctx.state == ctx.state and not active.request.side_dialog_id then
-		finish(active, nil, respond)
-	end
-end
-
-function M.clear(ctx, respond)
-	local queue = ctx.state.pending_ui_queue or {}
-	ctx.state.pending_ui_queue = {}
-	if respond then
-		for _, request in ipairs(queue) do
-			ctx.rpc.send({ type = "extension_ui_response", id = request.event.id, cancelled = true })
-		end
-	end
-	if active and active.ctx.state == ctx.state then
-		finish(active, nil, respond)
-	end
+-- Dispose only the frontend; the owner retains the pending interaction.
+function M.clear(ctx)
+	if active and active.ctx.state == ctx.state then finish(active, nil, false) end
 end
 
 function M.select(ctx, id, items, opts, on_choice)

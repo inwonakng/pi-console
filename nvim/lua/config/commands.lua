@@ -1,5 +1,4 @@
 local build_info = require("pi-integration.build-info")
-local service_mode = vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1"
 
 vim.api.nvim_create_user_command("PiConsoleVersion", function()
 	local build = build_info.snapshot()
@@ -13,7 +12,7 @@ local function set_clipboard(text)
 end
 
 local function file_path(relative)
-	if service_mode then
+	do
 		local buf = vim.api.nvim_get_current_buf()
 		local resource = require("pi-integration.service-resources").for_buffer(buf)
 		local review_path = vim.b[buf].pi_review_path
@@ -80,15 +79,9 @@ vim.api.nvim_create_user_command("PiCommand", function()
 	require("pi-integration").pick_command()
 end, { desc = "Pick a Pi slash command/template/skill" })
 
-if service_mode then
-	vim.api.nvim_create_user_command("PiCd", function()
-		require("pi-integration.service-hosts").new_conversation()
-	end, { desc = "Start a NEW conversation: choose owner and owner directory" })
-else
-	vim.api.nvim_create_user_command("PiCd", function(opts)
-		require("pi-integration").change_cwd(opts.args)
-	end, { nargs = "?", complete = "dir", desc = "Change CWD before the first Pi message" })
-end
+vim.api.nvim_create_user_command("PiCd", function()
+	require("pi-integration").change_cwd()
+end, { desc = "Start a new conversation: choose owner and owner directory" })
 
 vim.api.nvim_create_user_command("PiRestart", function()
 	require("pi-integration").restart()
@@ -96,7 +89,7 @@ end, { desc = "Restart Pi" })
 
 vim.api.nvim_create_user_command("PiConsoleRestart", function()
 	require("pi-integration").restart_console()
-end, { desc = "Restart frontend (legacy mode also restarts Pi)" })
+end, { desc = "Restart frontend" })
 
 vim.api.nvim_create_user_command("PiSteer", function(opts)
 	local text

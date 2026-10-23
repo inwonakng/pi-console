@@ -1,8 +1,6 @@
 local floats = require("pi-integration.floats")
 local help = require("pi-integration.help")
 local list_cursor = require("pi-integration.list-cursor")
-local guard = require("pi-integration.utils.guard")
-local json = require("pi-integration.utils.json")
 local time_utils = require("pi-integration.utils.time")
 local tree_model = require("pi-integration.tree-model")
 
@@ -12,10 +10,6 @@ local tree_preview_augroup = vim.api.nvim_create_augroup("PiNvimTreePreview", { 
 local tree_highlight_ns = vim.api.nvim_create_namespace("pi-console-tree-highlights")
 local search_highlight_ns = vim.api.nvim_create_namespace("pi-console-tree-search")
 local workspace_highlight_count = 14
-
-local function decode_record(line)
-	return json.decode_object(line)
-end
 
 local function node_text(ctx, node)
 	return tree_model.node_text(node, ctx.messages.extract_text)
@@ -96,19 +90,10 @@ local function compact_text(text, max_width)
 	return truncate_display(text, max_width or 96)
 end
 
-local function read_session_tree(ctx, path)
+local function build_tree(ctx)
 	local records = ctx.state.tree_records
-	if not ctx.tree then
-		if not path or vim.fn.filereadable(path) ~= 1 then return {}, nil end
-		records = {}
-		for _, line in ipairs(vim.fn.readfile(path)) do
-			local record = decode_record(line)
-			if record then table.insert(records, record) end
-		end
-	end
 	local model = tree_model.build(records or {})
 	local requested_leaf = ctx.state.tree_leaf_id
-	if not ctx.tree and requested_leaf == nil then requested_leaf = model.last_id end
 	local active_ids = {}
 	local raw = model.raw_by_id[requested_leaf]
 	while raw do
@@ -366,14 +351,6 @@ local function apply_tree_highlights(ctx)
 	end
 end
 
-local function focus_input_window(ctx)
-	local state = ctx.state
-	state.input_win = require("pi-integration.utils.buffer").find_window(state.input_buf, state.input_win)
-	if state.input_win then
-		vim.api.nvim_set_current_win(state.input_win)
-	end
-end
-
 local function close_tree_window(ctx, preserve_data)
 	local state = ctx.state
 	if ctx.tree and not preserve_data then
@@ -563,13 +540,7 @@ end
 local function render_tree_buffer(ctx, opts)
 	opts = opts or {}
 	local state = ctx.state
-	local path = state.session_file or state.pending_session_file
-	if not ctx.tree and (not path or path == "") then
-		ctx.ui.notify("No Pi session selected yet.", vim.log.levels.WARN)
-		return false
-	end
-
-	local roots, leaf_id, focus_id = read_session_tree(ctx, path)
+	local roots, leaf_id, focus_id = build_tree(ctx)
 	if #roots == 0 and not opts.allow_empty and (state.tree_search_query or "") == "" and state.tree_scope ~= "branch" then
 		ctx.ui.notify("No tree entries found in this session.", vim.log.levels.WARN)
 		return false
@@ -597,7 +568,7 @@ local function render_tree_buffer(ctx, opts)
 	local filters = { default = "Default", ["user-only"] = "User only", all = "All entries" }
 	local mode = state.tree_filter_mode or "default"
 	hint_line({ { "b", state.tree_scope == "branch" and "Current branch" or "Full tree" }, { "o", filters[mode] or mode } })
-	if ctx.tree and not ctx.tree.writable(state.tree_context) then
+	if not ctx.tree.writable(state.tree_context) then
 		hint_line({ { "r", "Refresh (read-only)" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
 	else
 		hint_line({ { "Enter", "Jump" }, { "c", "Clone" }, { "d", "Delete" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
@@ -743,138 +714,35 @@ local function search_turns(ctx)
 	vim.cmd("startinsert!")
 end
 
-local function selected_session_path(ctx)
-	local path = ctx.state.session_file or ctx.state.pending_session_file
-	if not path or path == "" then
-		ctx.ui.notify("No Pi session selected yet.", vim.log.levels.WARN)
-		return nil
-	end
-	return path
-end
-
 local function jump_to_node(ctx, summarize)
 	local node = current_node(ctx)
-	if not node then
-		return
-	end
-	if ctx.tree then
-		local captured = ctx.state.tree_context
-		if not ctx.tree.can_mutate(captured) then return end
-		close_tree_window(ctx)
-		ctx.tree.jump(node.target_id, summarize, captured)
-		return
-	end
-	if not guard.if_history_change_allowed(ctx, "changing history") then
-		return
-	end
-	local entry_id = node.target_id
-	if not selected_session_path(ctx) then
-		return
-	end
+	if not node then return end
+	local captured = ctx.state.tree_context
+	if not ctx.tree.can_mutate(captured) then return end
 	close_tree_window(ctx)
-
-	local message = "/pi-tree-jump " .. entry_id .. (summarize and " --summary" or "")
-	ctx.rpc.send({ type = "prompt", message = message }, function(event)
-		if not event.success then
-			ctx.ui.notify(event.error or "Could not navigate session tree", vim.log.levels.ERROR)
-			return
-		end
-		ctx.rpc.send({ type = "get_state" }, function(state_event)
-			if state_event.success and state_event.data then
-				ctx.session.apply_state(state_event.data)
-			end
-			ctx.actions.refresh_messages()
-			focus_input_window(ctx)
-		end)
-	end)
+	ctx.tree.jump(node.target_id, summarize, captured)
 end
 
 local function clone_node(ctx)
 	local node = current_node(ctx)
 	if not node or (node.kind ~= "user" and node.kind ~= "assistant") then
-		ctx.ui.notify("Select a user or assistant turn to clone.", vim.log.levels.WARN)
-		return
+		ctx.ui.notify("Select a user or assistant turn to clone.", vim.log.levels.WARN); return
 	end
-	if ctx.tree then
-		local captured = ctx.state.tree_context
-		if not ctx.tree.can_mutate(captured, "clone") then return end
-		close_tree_window(ctx)
-		ctx.tree.clone(node.target_id, captured)
-		return
-	end
-	if not guard.if_history_change_allowed(ctx, "cloning history") or ctx.state.tree_clone_pending then return end
-	local runtime = require("pi-integration.runtime")
-	if not runtime.available() then
-		ctx.ui.notify("No supported backend for opening a clone in a new window.", vim.log.levels.ERROR)
-		return
-	end
-	local state = ctx.state
-	local source = state.session_file
-	local request_id = tostring(vim.uv.hrtime())
-	state.tree_clone_pending = true
-	state.tree_clone_result = nil
+	local captured = ctx.state.tree_context
+	if not ctx.tree.can_mutate(captured, "clone") then return end
 	close_tree_window(ctx)
-	ctx.rpc.send({ type = "prompt", message = "/pi-tree-clone " .. node.target_id .. " " .. request_id }, function(event)
-		state.tree_clone_pending = false
-		local result = state.tree_clone_result
-		state.tree_clone_result = nil
-		if not event.success then
-			ctx.ui.notify(event.error or "Could not clone turn", vim.log.levels.ERROR)
-		elseif not result or result.requestId ~= request_id or result.sourceSessionFile ~= source then
-			ctx.ui.notify("Clone command returned no matching result.", vim.log.levels.ERROR)
-		elseif result.error then
-			ctx.ui.notify(result.error, vim.log.levels.ERROR)
-		elseif not result.cancelled then
-			local launched, err = runtime.launch(ctx.config.launcher, result.cwd, result.sessionFile)
-			if not launched then
-				ctx.ui.notify((err or "Could not open clone") .. "\nClone saved at: " .. result.sessionFile, vim.log.levels.ERROR)
-			end
-		end
-	end)
+	ctx.tree.clone(node.target_id, captured)
 end
 
 local function delete_node(ctx)
 	local node = current_node(ctx)
-	if not node then
-		return
-	end
-	if ctx.tree then
-		local captured = ctx.state.tree_context
-		if not ctx.tree.can_mutate(captured) then return end
-		local position = selected_tree_position(ctx)
-		position.view = save_tree_view(ctx)
-		close_tree_window(ctx)
-		ctx.tree.delete(node.start_id, captured, position)
-		return
-	end
-	if not guard.if_history_change_allowed(ctx, "deleting history") then
-		return
-	end
-	if not selected_session_path(ctx) then
-		return
-	end
-
+	if not node then return end
+	local captured = ctx.state.tree_context
+	if not ctx.tree.can_mutate(captured) then return end
 	local position = selected_tree_position(ctx)
 	position.view = save_tree_view(ctx)
-	local entry_id = node.start_id
-
-	-- The backend opens a mode picker and confirmation. Close the tree first so
-	-- its transient-window cleanup cannot steal focus from those dialogs.
 	close_tree_window(ctx)
-	ctx.rpc.send({ type = "prompt", message = "/pi-tree-delete " .. entry_id }, function(event)
-		if not event.success then
-			ctx.ui.notify(event.error or "Could not delete session tree entry", vim.log.levels.ERROR)
-			return
-		end
-		ctx.rpc.send({ type = "get_state" }, function(state_event)
-			if state_event.success and state_event.data then
-				ctx.session.apply_state(state_event.data)
-			end
-			ctx.actions.refresh_messages()
-			M.show(ctx)
-			refresh_tree_in_place(ctx, position)
-		end)
-	end)
+	ctx.tree.delete(node.start_id, captured, position)
 end
 
 local function show_tree(ctx, position)
@@ -956,8 +824,8 @@ local function show_tree(ctx, position)
 				"- `Enter` jump to the selected turn (preserves history).",
 				"- `S` jump with a branch summary.",
 				"- `c` clone through the selected turn into a new window.",
-				ctx.tree and "- Connected viewers can browse; mutations require current control and an idle owner. Refresh after taking control." or "",
-				ctx.tree and "- History is fetched from the owner; disconnecting closes this view. Offline browsing is unavailable." or "",
+				"- Connected viewers can browse; mutations require current control and an idle owner. Refresh after taking control.",
+				"- History is fetched from the owner; disconnecting closes this view. Offline browsing is unavailable.",
 				"- `d` delete the turn and all descendants; choose whether to undo recorded work.",
 				"- `b` toggle full tree / current branch.",
 				"- `o` cycle entry filters.",
@@ -1019,7 +887,6 @@ local function show_tree(ctx, position)
 end
 
 function M.show(ctx, position)
-	if not ctx.tree then show_tree(ctx, position); return end
 	local state = ctx.state
 	if win_valid(state.tree_win) then
 		position = position or selected_tree_position(ctx)

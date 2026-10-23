@@ -1,6 +1,5 @@
 local help = require("pi-integration.help")
 local runtime = require("pi-integration.runtime")
-local sessions = require("pi-integration.sessions")
 local session_list = require("pi-integration.session-list")
 local list_cursor = require("pi-integration.list-cursor")
 local icons = require("pi-integration.status-icons")
@@ -217,7 +216,7 @@ function M.open(config)
 			" Pi sessions · " .. #instances .. " open · " .. pinned_count .. " pinned",
 			query == "" and "" or (" Filter: " .. query),
 			"",
-			"     " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. (vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" and "  " .. column("Host", 18) or "") .. "  Title",
+			"     " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. ("  " .. column("Host", 18)) .. "  Title",
 		}
 		local function highlight(row, first, last, group)
 			table.insert(highlights, { row = row - 1, first = first, last = last, group = group })
@@ -300,21 +299,6 @@ function M.open(config)
 		end
 		refresh()
 	end
-	local history_ctx = {
-		config = config,
-		state = require("pi-integration.state").new(),
-		notices = { empty_session = "No messages yet." },
-		ui = {
-			notify = function(message, level)
-				vim.notify(message, level, { title = "Pi sessions" })
-			end,
-		},
-		session = {
-			open_candidate = function(candidate)
-				report(runtime.launch(config.launcher, candidate.cwd or vim.fn.getcwd(), candidate.path))
-			end,
-		},
-	}
 	local mapping_specs = {}
 	local help_state = {}
 	local function map(key, callback, description)
@@ -379,28 +363,12 @@ function M.open(config)
 	map("<leader>n", function()
 		control_selected("toggle_notifications")
 	end, "Toggle selected conversation notifications")
-	map("<leader>s", function()
-		if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-frontend").pick_session() end
-		sessions.pick(history_ctx)
-	end, "Pick session")
-	map("<leader>pn", function()
-		if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-hosts").new_conversation() end
-		require("pi-integration.directory-history").input(
-			{ prompt = "New conversation project: ", default = vim.fn.getcwd(), completion = "dir" },
-			function(cwd)
-				if cwd and vim.trim(cwd) ~= "" then
-					report(runtime.launch(config.launcher, vim.fn.fnamemodify(vim.fn.expand(cwd), ":p")))
-				end
-			end
-		)
-	end, "New conversation with chosen project")
+	map("<leader>s", function() require("pi-integration.service-hosts").history_picker() end, "Pick session")
+	map("<leader>pn", function() require("pi-integration.service-hosts").new_conversation() end, "New conversation with chosen owner/project")
 	map("<leader>pN", function()
-		if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then return require("pi-integration.service-hosts").new_conversation() end
 		local entry = require_selected()
-		if entry then
-			report(runtime.launch(config.launcher, project(entry)))
-		end
-	end, "New conversation in selected project")
+		if entry then report(require("pi-integration.service-hosts").new_in_project(entry)) end
+	end, "New conversation in selected workspace")
 	map("<leader>?", function()
 		local lines = { "# 󰕮 Help", "", "## Keys", "" }
 		for _, spec in ipairs(mapping_specs) do

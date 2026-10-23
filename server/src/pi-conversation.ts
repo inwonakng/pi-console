@@ -119,6 +119,7 @@ export class PiConversation {
   get awaitingSettlement(): boolean { return this.unsettled; }
   get hydrated(): boolean { return this.state.hydrated; }
   get sessionState(): RpcSessionState | undefined { return this.state.piState; }
+  status(key: string): string | undefined { return this.state.statuses[key]; }
   get idle(): boolean {
     return !this.state.execution.running && (!this.state.partialAssistant || this.state.partialAssistant.interrupted)
       && !this.state.tools.some((tool) => tool.state === "running")

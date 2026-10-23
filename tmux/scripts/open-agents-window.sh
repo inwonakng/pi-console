@@ -18,11 +18,7 @@ current_session=$(tmux display-message -p -t "$pane_id" '#{session_name}')
 
 # Ensure the channel's agents session exists without changing the current view.
 bash "$script_dir/open-agents-overview.sh" --ensure "$pane_id" "$client_name" >/dev/null
-frontend_args=()
-if [ "${PI_CONSOLE_SERVICE_FRONTEND-}" = 1 ] || [ "$(tmux display-message -p -t "$pane_id" '#{@pi_service_frontend}')" = 1 ]; then
-    frontend_args=(--service --new)
-fi
-conversation_pane=$(tmux new-window -P -F '#{pane_id}' -t "=$PI_CONSOLE_TMUX_SESSION:" -n 'New Session' -c "$current_path" bash "$launcher" "${frontend_args[@]}")
+conversation_pane=$(tmux new-window -P -F '#{pane_id}' -t "=$PI_CONSOLE_TMUX_SESSION:" -n 'New Session' -c "$current_path" bash "$launcher" --new)
 # Launcher-created windows follow the Pi title until manually renamed.
 tmux set-option -wo -t "$conversation_pane" @pi_console_tab "{\"pane\":\"$conversation_pane\",\"name\":\"New Session\"}"
 

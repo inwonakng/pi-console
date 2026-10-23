@@ -30,7 +30,7 @@ end
 restore_focus = function(group)
 	local fallback
 	for win, buf in pairs(group.members) do
-		if member_valid(win, buf) then
+		if member_valid(win, buf) and vim.api.nvim_win_get_tabpage(win) == vim.api.nvim_get_current_tabpage() then
 			fallback = fallback or win
 		else
 			group.members[win] = nil
@@ -191,7 +191,7 @@ local function same_group(a, b)
 end
 
 local function focus_window(win)
-	if win_valid(win) then
+	if win_valid(win) and vim.api.nvim_win_get_tabpage(win) == vim.api.nvim_get_current_tabpage() then
 		pcall(vim.api.nvim_set_current_win, win)
 		return true
 	end

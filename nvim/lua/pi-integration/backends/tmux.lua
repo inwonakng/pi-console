@@ -136,40 +136,19 @@ function M.focus(id)
 	return command({ "select-window", "-t", session .. ":" .. window, ";", "select-pane", "-t", id })
 end
 
-function M.kill(entry)
-	local instances, err = M.list()
-	if not instances then
-		return nil, err
-	end
-	local found = false
-	for _, current in ipairs(instances) do
-		if current.id == entry.id and current.pid == entry.pid then
-			found = true
-			break
-		end
-	end
-	if not found then
-		return nil, "That conversation is no longer open"
-	end
-	local target, target_err = command({ "display-message", "-p", "-t", entry.id, "#{window_id}\t#{pane_dead}" })
-	if not target then
-		return nil, target_err
-	end
-	local window, dead = target:match("^(@%d+)\t(%d)$")
-	if not window or dead ~= "0" then
-		return nil, "That pane is no longer open"
-	end
-	local panes, panes_err = command({ "list-panes", "-t", window, "-F", "#{pane_id}\t#{==:#{@pi_sidebar},1}" })
-	if not panes then
-		return nil, panes_err
-	end
+-- Remove only sidebar companions when this is the window's sole content pane.
+function M.close_sidebar()
+	local panes = command({ "list-panes", "-t", vim.env.TMUX_PANE, "-F", "#{pane_id}\t#{@pi_sidebar}" })
+	if not panes then return end
+	local sidebars = {}
 	for line in panes:gmatch("[^\n]+") do
-		local pane, sidebar = line:match("^(%%%d+)\t([01])$")
-		if pane ~= entry.id and sidebar ~= "1" then
-			return nil, "Cannot close a tmux window containing other panes"
+		local pane, sidebar = line:match("^(%%%d+)\t(.*)$")
+		if pane ~= vim.env.TMUX_PANE then
+			if sidebar ~= "1" then return end
+			table.insert(sidebars, pane)
 		end
 	end
-	return command({ "kill-window", "-t", window })
+	for _, pane in ipairs(sidebars) do command({ "kill-pane", "-t", pane }) end
 end
 
 local function launch_window(shell_command, cwd, entry)
@@ -211,16 +190,15 @@ local function launch_window(shell_command, cwd, entry)
 	return M.focus(pane)
 end
 
-function M.launch(launcher, cwd, path)
-	local shell_command = "bash " .. vim.fn.shellescape(launcher)
-	if path then shell_command = shell_command .. " --session " .. vim.fn.shellescape(path) end
-	return launch_window(shell_command, cwd, { path = path,
-		title = path and vim.fn.fnamemodify(path, ":t") or "New Session", is_new_session = path == nil })
-end
-
-function M.launch_service(launcher, target, session_id)
-	if not M.available() then return nil, "Opening a service frontend requires tmux" end
-	local args = { "bash", launcher, "--resume", session_id }
+function M.launch_service(launcher, target, session_id, cwd, resume)
+	if not M.available() then return nil, "Opening a conversation window requires tmux" end
+	local args = { "bash", launcher }
+	if session_id then vim.list_extend(args, { resume and "--resume" or "--attach", session_id })
+	else
+		if not cwd or cwd == "" then return nil, "New conversation requires an owner directory" end
+		vim.list_extend(args, { "--new", "--cwd", cwd })
+	end
+	if target.expected_host then vim.list_extend(args, { "--expected-host", target.expected_host }) end
 	if target.service_remote then
 		vim.list_extend(args, { "--remote", target.service_remote, "--credential-file", target.credential_file })
 		if target.ca_file then vim.list_extend(args, { "--ca-file", target.ca_file }) end
@@ -228,35 +206,7 @@ function M.launch_service(launcher, target, session_id)
 	local shell_command = table.concat(vim.tbl_map(vim.fn.shellescape, args), " ")
 	-- This is a local frontend window; an owner's cwd is never a local tmux path.
 	return launch_window(shell_command, vim.fn.getcwd(), { frontend_attachment = true,
-		host_id = target.expected_host, session_id = session_id, title = "Cloned conversation" })
-end
-
-function M.review_workspace(root, before, after)
-	if not M.available() then
-		return nil, "Workspace diff review requires tmux"
-	end
-	local script = vim.g.pi_console_root .. "/pi/scripts/review-workspace.sh"
-	local args = { "bash", script, root, before, after }
-	local quoted = vim.tbl_map(vim.fn.shellescape, args)
-	local pane, err = command({
-		"split-window",
-		"-h",
-		"-P",
-		"-F",
-		"#{pane_id}",
-		"-t",
-		vim.env.TMUX_PANE,
-		"-c",
-		root,
-		table.concat(quoted, " "),
-	})
-	if not pane then
-		return nil, err
-	end
-	if not pane:match("^%%%d+$") then
-		return nil, "tmux did not return the reviewer pane ID"
-	end
-	return command({ "select-pane", "-t", pane })
+		host_id = target.expected_host, session_id = session_id, title = "Conversation" })
 end
 
 function M.start_overview()
@@ -279,17 +229,9 @@ function M.start_overview()
 	return true
 end
 
-function M.mark_service_frontend()
-	owner_pane = owner_pane or vim.env.TMUX_PANE
-	return command({ "set-option", "-p", "-t", owner_pane, "@pi_service_frontend", "1", ";",
-		"set-option", "-p", "-t", owner_pane, "@pi_service_frontend_pid", tostring(vim.uv.os_getpid()) })
-end
-
 local function publish_tab(snapshot, run)
 	local installed, install_err = tabs.install_hooks(run)
 	if not installed then return nil, install_err end
-	local marker, marker_error = run({ "set-option", "-p", "-t", owner_pane, "@pi_service_frontend", snapshot.frontend_attachment and "1" or "0" })
-	if not marker then return nil, marker_error end
 	local window, err = run({
 		"set-option", "-p", "-t", owner_pane, option, json.encode(snapshot),
 		";", "display-message", "-p", "-t", owner_pane, "#{window_id}",
@@ -356,11 +298,6 @@ function M.clear()
 		local entry = payload and json.decode_object(payload)
 		if entry and entry.pid == vim.uv.os_getpid() then
 			command({ "set-option", "-pu", "-t", owner_pane, option })
-		end
-		local marker_pid = command({ "show-options", "-pqv", "-t", owner_pane, "@pi_service_frontend_pid" })
-		if marker_pid == tostring(vim.uv.os_getpid()) then
-			command({ "set-option", "-pu", "-t", owner_pane, "@pi_service_frontend", ";",
-				"set-option", "-pu", "-t", owner_pane, "@pi_service_frontend_pid" })
 		end
 		if owner_window and (not entry or entry.pid == vim.uv.os_getpid()) then
 			tabs.refresh(owner_window, command)

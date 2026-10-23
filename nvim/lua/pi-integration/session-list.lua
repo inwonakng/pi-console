@@ -132,7 +132,7 @@ function M.new()
 			end
 			refresh()
 		end
-		if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
+		do
 			map("<leader>ph", function() require("pi-integration.service-hosts").picker() end, "Hosts: add/connect/disconnect/edit/forget")
 			map("H", function()
 				local choices, seen = { { name = "All hosts" } }, {}
@@ -159,12 +159,7 @@ function M.new()
 			if node and node.kind == "group" then return toggle() end
 			local entry = session()
 			if not entry then return end
-			if entry.host_id then return report(runtime.open(entry)) end
-			if entry.status == "Not Open" then
-				report(runtime.launch(config.launcher, entry.cwd, entry.path))
-			else
-				report(runtime.focus(entry.id))
-			end
+			report(runtime.open(entry))
 		end, "Focus/reopen session or toggle group")
 		map("p", function()
 			local entry = session()
@@ -216,21 +211,7 @@ function M.new()
 			end
 			local entry = session()
 			if not entry then return end
-			if entry.host_id then return report(runtime.kill(entry)) end
-			local entries, err = runtime.list()
-			if not entries then return report(nil, err) end
-			local current
-			for _, candidate in ipairs(entries) do
-				if candidate.id == entry.id and candidate.pid == entry.pid then current = candidate; break end
-			end
-			if not current then return report(nil, "That conversation is no longer open") end
-			if runtime.kill_needs_confirmation(current) then
-				vim.ui.select({ "Yes", "No" }, { prompt = "Kill running conversation " .. M.text(current.title) .. " and close its window?", pi_select_layout = "compact" }, function(choice)
-					if choice == "Yes" then report(runtime.kill(current, true)) end
-				end)
-			else
-				report(runtime.kill(current, false))
-			end
+			report(runtime.kill(entry))
 		end, "Kill session / delete group (keep sessions)")
 	end
 

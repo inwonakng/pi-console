@@ -44,6 +44,7 @@ export type CommandReceipt = {
   status: "accepted" | "completed" | "failed" | "uncertain";
   /** Snapshot-only marker: full recovery text remains available through commandStatus. */
   recoveryAvailable?: true;
+  authority?: "management";
   /** Completion describes command handling, NOT completion of agent work. */
   result?: { delivery?: "flushed"; cleared?: { steering: string[]; followUp: string[] }; idle?: boolean;
     queueItemId?: string; queueItemRevision?: number; queueItemText?: string; reservationId?: string; title?: string;
@@ -103,7 +104,8 @@ export function sessionCommand(value: unknown): SessionCommand {
   return structuredClone(value) as SessionCommand;
 }
 
-export function commandFingerprint(command: SessionCommand): string {
+export function commandFingerprint(command: Pick<SessionCommand, "sessionId" | "serviceEpoch" | "runtimeRevision"> &
+  (SessionCommand | import("./session-management.js").ManagementOperation)): string {
   // Attachment/grant are delivery authority, not mutation identity: reconnects
   // resolve an old command without acquiring or replaying its old grant.
   const payload = command.operation === "interaction.respond"

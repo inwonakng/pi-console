@@ -16,7 +16,7 @@ M.specs = {
 		{ lhs = "<leader>pc", action = "change_cwd", desc = "Change CWD" },
 		{ lhs = "<leader>pd", action = "show_workspace_diff", desc = "Diff" },
 		{ lhs = "<leader>pr", action = "restart", desc = "Restart Pi" },
-		{ lhs = "<leader>pR", action = "restart_console", desc = "Restart pi-console and Pi" },
+		{ lhs = "<leader>pR", action = "restart_console", desc = "Restart frontend" },
 		{ lhs = "<leader>pt", action = "show_transcript", desc = "Show Pi transcript" },
 		{ lhs = "<leader>pl", action = "show_logs", desc = "Show Pi logs" },
 		{ lhs = "<leader>pu", action = "show_usage", desc = "Show Codex usage" },
@@ -30,8 +30,8 @@ M.specs = {
 		{ lhs = "<leader>t", action = "pick_thinking", desc = "Pick thinking level" },
 		{ lhs = "<leader>s", action = "pick_session", desc = "Pick session" },
 		{ lhs = "<leader>h", action = "show_tree", desc = "Conversation history tree" },
-		{ lhs = "<leader>pn", action = "new_session", desc = "New session in current window" },
-		{ lhs = "<leader>pN", action = "new_session_window", desc = "New session in project directory" },
+		{ lhs = "<leader>pn", action = "new_session", desc = "New session in current window/workspace" },
+		{ lhs = "<leader>pN", action = "new_session_window", desc = "New session window in current workspace" },
 		{ lhs = "<leader>n", action = "toggle_notifications", desc = "Toggle notifications" },
 		{ lhs = "<leader>r", action = "refresh_messages", desc = "Refresh transcript" },
 		{ lhs = "<leader>R", action = "rename_session", desc = "Rename session" },
@@ -48,12 +48,7 @@ M.specs = {
 
 local function action_fn(ctx, action)
 	if action == "open_transcript_item" then
-		if ctx.service_mode then return ctx.actions.open_transcript_item end
-		return function()
-			if not require("pi-integration.utils.markdown-links").follow((ctx.state.workspace or {}).cwd) then
-				ctx.transcript.open_item_under_cursor()
-			end
-		end
+		return ctx.actions.open_transcript_item
 	end
 
 	return function()
@@ -110,14 +105,9 @@ end
 function M.setup(ctx)
 	local input_specs = M.merged("input")
 	local transcript_specs = M.merged("transcript")
-	if ctx.service_mode then
-		local specs = {
-			{ lhs = "<leader>ph", action = "pick_hosts", desc = "Hosts" },
-			{ lhs = "<leader>po", action = "show_overview", desc = "Combined overview" },
-		}
-		vim.list_extend(input_specs, specs)
-		vim.list_extend(transcript_specs, specs)
-	end
+	local specs = { { lhs = "<leader>ph", action = "pick_hosts", desc = "Hosts" } }
+	vim.list_extend(input_specs, specs)
+	vim.list_extend(transcript_specs, specs)
 
 	set_keymaps(ctx, ctx.state.input_buf, input_specs)
 	set_keymaps(ctx, ctx.state.transcript_buf, transcript_specs)

@@ -15,13 +15,6 @@ local function sanitize_buf_name_part(value)
 	return tostring(value or "skill"):gsub("[^%w%._%-]+", "-")
 end
 
-local function read_file(path)
-	if type(path) ~= "string" or path == "" or vim.fn.filereadable(path) ~= 1 then
-		return nil
-	end
-	return table.concat(vim.fn.readfile(path), "\n")
-end
-
 function M.skill_name_from_read_path(path)
 	local normalized = normalized_path(path)
 	if not normalized then
@@ -177,7 +170,6 @@ function M.open_float(ctx, output_id, resolved)
 		return true
 	end
 	local text = output.text
-	if (not text or text == "") and not ctx.resources then text = read_file(output.path) end
 	if not text or text == "" then
 		ctx.ui.notify("Skill prompt unavailable", vim.log.levels.WARN)
 		return true

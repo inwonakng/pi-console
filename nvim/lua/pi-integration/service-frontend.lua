@@ -1,6 +1,6 @@
 -- Attachments own UI/drafts only. Typed lifecycle requests execute on the owner.
 local M = { config = { access_modes = { "readonly", "ask", "edit", "full" },
-	integration_modes = { "ask", "allowed" } }, service_mode = true }
+	integration_modes = { "ask", "allowed" } } }
 local tree = require("pi-integration.tree")
 local layout = require("pi-integration.layout")
 local messages = require("pi-integration.messages")
@@ -24,15 +24,14 @@ local approval_win, approval_request, heartbeat
 local approval_context, pending_context
 local pending_seen, pending_replies = {}, {}
 local ctx, sync_pending
-local recovery_id, backup_scheduled
+local recovery_id, backup_scheduled, restarting_frontend
 local render, refresh, connect, attach, recover_selection, tree_ctx
 local side_buf
 local owner_states, create_requested = {}, nil
-local conversation_tab, picker_tab
-local selection_ready, invocation_cwd, new_control_selection
+local invocation_cwd, new_control_selection
 local function publish_attachment()
 	local tmux = require("pi-integration.backends.tmux")
-	if not tmux.available() or not session_id then return end
+	if M.config.role ~= "conversation" or not tmux.available() or not session_id then return end
 	local name = snapshot and snapshot.piState and snapshot.piState.sessionName or session_id or "Unattached"
 	local identity = M.config.expected_host or "unknown"
 	local status = "Loading"
@@ -51,7 +50,7 @@ local function publish_attachment()
 	tmux.publish({ version = 1, frontend_attachment = true, host_id = identity, session_id = session_id,
 		pid = vim.uv.os_getpid(), updated = os.time(), cwd = vim.fn.getcwd(),
 		title = "[" .. identity:sub(1, 8) .. "] " .. name,
-		status = status })
+		status = status, last_focused_at = state.last_focused_at })
 end
 local function owner_key() return M.config.expected_host or M.config.service_remote or M.config.service_root or "local" end
 
@@ -248,7 +247,7 @@ local function local_snapshot()
 	return { cwd = vim.fn.getcwd(), service_session = session_id, service_root = M.config.service_root,
 		service_remote = M.config.service_remote, credential_file = M.config.credential_file, ca_file = M.config.ca_file,
 		expected_host = M.config.expected_host, owner_states = owner_states,
-		view = vim.api.nvim_get_current_tabpage() == conversation_tab and "conversation" or (M.config.start_view or "overview"),
+		role = M.config.role,
 		host = hello and hello.hostId, channel = hello and hello.channel, saved_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
 		input_lines = valid(state.input_buf) and vim.api.nvim_buf_get_lines(state.input_buf, 0, -1, false) or { "" },
 		unresolved = unresolved, submission_status = submission_status, pending_host = pending_host, pending_host_select = pending_host_select,
@@ -274,7 +273,7 @@ local function status_data(key)
 	local ok, value = pcall(vim.json.decode, raw or "")
 	return ok and value or nil
 end
-ctx = { state = state, config = M.config, service_mode = true,
+ctx = { state = state, config = M.config,
 	ui = { notify = notify }, logs = { add = function(_, message, details) notify(message .. ": " .. tostring(details), vim.log.levels.ERROR) end },
 	notices = { empty_session = "Send non-slash text after acquiring control." },
 	buffer = { valid = valid, set_modifiable = function(buf, value) vim.bo[buf].modifiable = value end },
@@ -459,7 +458,7 @@ local function disconnected()
 	generation = generation + 1
 	job, attachment, grant, authority, hello = nil, nil, nil, nil, nil
 	session_status, session_error = "unattached", nil
-	callbacks, outcomes, selection_ready, new_control_selection = {}, {}, nil, nil
+	callbacks, outcomes, new_control_selection = {}, {}, nil
 	refreshing, refresh_scheduled, dirty = false, false, false
 	close_approval()
 	render()
@@ -478,7 +477,6 @@ attach = function(id, acquire_control)
 		if gen ~= generation or selected ~= selection then return end
 		if not ok then
 			session_status, session_error = "unavailable", value.message .. " Use :PiReconnect to retry or :PiSessions to explicitly reopen."
-			selection_ready = nil
 			render()
 			return
 		end
@@ -488,8 +486,6 @@ attach = function(id, acquire_control)
 		-- Only an explicitly completed New may acquire; attach/reconnect stays a viewer.
 		if acquire_control then new_control_selection = stamp() end
 		apply_snapshot(value.snapshot)
-		local ready = selection_ready; selection_ready = nil
-		if ready then ready() end
 		local lookups = {}
 		for command_id, envelope in pairs(unresolved) do
 			if envelope.sessionId == id then table.insert(lookups, { id = command_id, epoch = envelope.serviceEpoch }) end
@@ -540,7 +536,6 @@ local function host_operation(operation, payload)
 				notify("Host request " .. receipt.status .. ": " .. receipt.error.message, vim.log.levels.WARN)
 				if same_selection(captured) then
 					session_status, session_error = "unavailable", receipt.error.message .. " Use :PiReconnect to retry or :PiSessions to explicitly reopen."
-					selection_ready = nil
 					render()
 				end
 			end
@@ -567,7 +562,6 @@ recover_selection = function(allow_restore)
 			session_status = not row and "unavailable" or row.archived and "archived" or row.deleted and "deleted" or row.state
 			session_error = "Session " .. session_status .. ". Use :PiSessions to inspect or explicitly reopen it."
 		end
-		selection_ready = nil
 		render()
 	end)
 end
@@ -737,7 +731,8 @@ function M.host_disconnected(identity, target)
 	local endpoint_match = not identity and target and target.service_remote == M.config.service_remote and target.service_root == M.config.service_root
 	if endpoint_match or identity and M.config.expected_host == identity and not (source and source.connected) then M.detach() end
 end
-function M.select_owner(target, id, resume, cwd, on_ready)
+function M.select_owner(target, id, resume, cwd)
+	assert(M.config.role == "conversation", "Only conversation frontends can select an owner")
 	local switching = target.expected_host ~= M.config.expected_host or id ~= session_id or cwd ~= nil or resume
 		or target.service_root ~= M.config.service_root or target.service_remote ~= M.config.service_remote
 		or target.credential_file ~= M.config.credential_file or target.ca_file ~= M.config.ca_file
@@ -759,29 +754,14 @@ function M.select_owner(target, id, resume, cwd, on_ready)
 		selection = selection + 1
 		if valid(state.input_buf) then layout.set_buffer_lines(ctx, state.input_buf, { "" }, true) end
 	end
-	selection_ready = on_ready
-	if conversation_tab and vim.api.nvim_tabpage_is_valid(conversation_tab) then
-		vim.api.nvim_set_current_tabpage(conversation_tab)
-	else
-		vim.cmd("tabnew")
-		conversation_tab = vim.api.nvim_get_current_tabpage()
-	end
 	layout.open(ctx)
 	render()
 	if not job then connect()
 	elseif id and not attachment then attach(id)
-	elseif selection_ready then
-		local ready = selection_ready; selection_ready = nil; ready()
 	end
 end
 function M.pick_hosts() require("pi-integration.service-hosts").picker() end
-function M.show_overview()
-	if picker_tab and vim.api.nvim_tabpage_is_valid(picker_tab) then vim.api.nvim_set_current_tabpage(picker_tab); return end
-	vim.cmd("tabnew")
-	picker_tab = vim.api.nvim_get_current_tabpage()
-	require("pi-integration.overview").open(M.config)
-end
-local function acquire_control(takeover, captured, on_control)
+local function acquire_control(takeover, captured)
 	if not same_context(captured) or captured.controller ~= (current_controller() and current_controller().grantId) then
 		notify("Attachment/controller changed; request control again for this session."); return
 	end
@@ -794,7 +774,6 @@ local function acquire_control(takeover, captured, on_control)
 				if not synced or not same_context(captured) then return end
 				apply_snapshot(value_snapshot)
 				if not same_context(captured) then notify("Session runtime changed; select the action again."); return end
-				if on_control and control_current() then on_control() end
 			end)
 		end)
 	end)
@@ -805,59 +784,6 @@ function M.take_control(takeover)
 		if choice == "Take over" then acquire_control(true, captured) end
 	end)
 	else acquire_control(false, captured) end
-end
--- Overview actions attach locally, then ask explicitly for authority. Every
--- deferred choice stays bound to this selection, runtime and observed controller.
-function M.overview_control(entry, action, argument)
-	local host = require("pi-integration.service-hosts").find(entry.host_id)
-	if not host or not host.connected then return nil, "Host disconnected; mutations disabled" end
-	local supported = { cycle_access_mode = true, set_access_mode = true, cycle_integration_mode = true,
-		set_integration_mode = true, toggle_notifications = true, kill = true }
-	if not supported[action] then return nil, "Unsupported overview action" end
-	local connection = host.connection
-	local function ready()
-		local controller = current_controller()
-		if host.connection ~= connection or not host.connected or M.config.expected_host ~= entry.host_id
-			or session_id ~= entry.session_id or not snapshot or snapshot.serviceEpoch ~= entry.service_epoch
-			or current_revision() ~= entry.runtime_revision
-			or (controller and controller.grantId) ~= (entry.controller and entry.controller.grantId) then
-			notify("Session/runtime/controller changed; select the action again."); return
-		end
-		local captured = stamp()
-		local function execute()
-			if not control_current() then return end
-			local authorized = stamp()
-			local operation, payload
-			if action == "cycle_access_mode" then operation, payload = "access.cycle", { modes = M.config.access_modes }
-			elseif action == "set_access_mode" then operation, payload = "access.set", { mode = argument }
-			elseif action == "cycle_integration_mode" then operation, payload = "integration.cycle", { modes = M.config.integration_modes }
-			elseif action == "set_integration_mode" then operation, payload = "integration.set", { mode = argument }
-			elseif action == "toggle_notifications" then
-				operation, payload = "notifications.set", { enabled = snapshot.conversation.statuses["pi-notifications"] ~= "notify on" }
-			elseif action == "kill" then
-				vim.ui.select({ "Cancel", "Kill session" }, { prompt = "Kill session on " .. host.alias .. "? Active work is interrupted; history/workspaces remain." }, function(choice)
-					if choice == "Kill session" then command("session.kill", { confirmed = true }, nil, authorized, function(receipt)
-						if receipt.status == "completed" then M.show_overview() end
-					end) end
-				end)
-				return
-			end
-			command(operation, payload, nil, authorized)
-		end
-		if control_current() then execute(); return end
-		local choice = controller and "Take over" or "Acquire control"
-		vim.ui.select({ "Cancel", choice }, { prompt = choice .. " for this session on " .. host.alias .. " before " .. action .. "? Accepted work continues." }, function(selected)
-			if selected ~= choice then return end
-			if host.connection ~= connection or not host.connected or not same_context(captured)
-				or captured.controller ~= (current_controller() and current_controller().grantId) then
-				notify("Attachment/controller changed; select the action again."); return
-			end
-			-- This choice is the explicit takeover confirmation, not a silent steal.
-			acquire_control(controller ~= nil, captured, execute)
-		end)
-	end
-	M.select_owner(require("pi-integration.service-hosts").target(host), entry.session_id, false, nil, ready)
-	return true
 end
 function M.submit_prompt()
 	local original = text(state.input_buf)
@@ -1084,8 +1010,13 @@ function M.show_offers()
 	end)
 end
 function M.pick_session() require("pi-integration.service-hosts").history_picker() end
-function M.new_session() require("pi-integration.service-hosts").new_conversation() end
-function M.change_cwd() M.new_session() end
+function M.new_session()
+	if M.config.role ~= "conversation" then return require("pi-integration.service-hosts").new_conversation() end
+	local cwd = snapshot and snapshot.workspace and snapshot.workspace.cwd or state.session_cwd
+	if not hello or not cwd then notify("Connect to a session before creating in its workspace."); return end
+	M.select_owner(M.config, nil, false, cwd)
+end
+function M.change_cwd() require("pi-integration.service-hosts").new_conversation(true) end
 local function lifecycle(operation, label)
 	local captured = stamp()
 	vim.ui.select({ "Cancel", label }, { prompt = label .. " on owner? Active work is interrupted; history/workspaces and recovery text remain." }, function(choice)
@@ -1103,7 +1034,12 @@ function M.restart() lifecycle("session.restart", "Restart session") end
 function M.kill_session()
 	if can_close_frontend() then lifecycle("session.kill", "Kill session and close") end
 end
-function M.new_session_window() M.new_session() end
+function M.new_session_window()
+	local cwd = snapshot and snapshot.workspace and snapshot.workspace.cwd or state.session_cwd
+	if not hello or not cwd then notify("Connect to a session before creating in its workspace."); return end
+	local opened, err = require("pi-integration.backends.tmux").launch_service(M.config.launcher, M.config, nil, cwd)
+	if not opened then notify(err) end
+end
 local function owner_read(kind, callback, captured)
 	captured = captured or stamp()
 	if not snapshot then return end
@@ -1278,7 +1214,7 @@ tree_ctx.tree = {
 	clone = function(id, captured)
 		history_command("history.clone", { entryId = id }, captured, function(result)
 			if not result.sessionId then return end
-			local opened, err = require("pi-integration.backends.tmux").launch_service(M.config.launcher, M.config, result.sessionId)
+			local opened, err = require("pi-integration.backends.tmux").launch_service(M.config.launcher, M.config, result.sessionId, nil, true)
 			if not opened then notify((err or "Could not open clone") .. "\nClone saved on owner: " .. result.sessionId, vim.log.levels.ERROR) end
 		end)
 	end,
@@ -1312,7 +1248,7 @@ function M.refresh_messages() refresh() end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer("pi://service-help/" .. uid(), "# Local service attachment\n\n:PiControl / :PiTakeover / :PiRelease\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain IDs; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session IDs; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: saved owners, connect/retry/disconnect/edit/forget.\n:PiOverview / <leader>po: combined overview, groups and pins.\n:PiNew: choose owner and browse its directories.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer("pi://service-help/" .. uid(), "# Local service attachment\n\n:PiControl / :PiTakeover / :PiRelease\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain IDs; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session IDs; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: saved owners, connect/retry/disconnect/edit/forget.\n:PiManagement: inspect overview management outcomes.\n:PiNew: new conversation in the current workspace.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()
@@ -1354,10 +1290,10 @@ function M.restart_console()
 	local value = local_snapshot()
 	local ok, err = pcall(function()
 		assert(vim.fn.writefile({ vim.json.encode(value) }, path) == 0, "Could not write restart handoff")
-		-- Only our preserved draft buffers may be discarded by this relaunch.
+		restarting_frontend = true
 		vim.cmd("qall!")
 	end)
-	if not ok then vim.fn.delete(path); notify(tostring(err), vim.log.levels.ERROR) end
+	if not ok then restarting_frontend = false; vim.fn.delete(path); notify(tostring(err), vim.log.levels.ERROR) end
 end
 function M.follow_markdown_link()
 	local buf = vim.api.nvim_get_current_buf()
@@ -1367,24 +1303,33 @@ function M.follow_markdown_link()
 end
 function M.show_logs() require("pi-integration.logs").show(ctx) end
 function M.restore_status_footer() statusline.update(ctx) end
-function M.get_commands(callback) callback({}) end
 function M.on_transcript_rendered(buf)
 	if buf == state.transcript_buf then transcript.finish_pending_scroll(ctx) end
 end
-function M.maybe_prompt_session_archive() end
 function M.setup(config)
 	M.config = vim.tbl_extend("force", M.config, config or {}, { service_root = vim.env.PI_CONSOLE_SERVICE_ROOT,
 		service_remote = vim.env.PI_CONSOLE_SERVICE_REMOTE, credential_file = vim.env.PI_CONSOLE_SERVICE_CREDENTIAL_FILE,
-		ca_file = vim.env.PI_CONSOLE_SERVICE_CA_FILE })
+		ca_file = vim.env.PI_CONSOLE_SERVICE_CA_FILE, expected_host = vim.env.PI_CONSOLE_SERVICE_EXPECTED_HOST })
 	assert(not M.config.service_remote or (M.config.credential_file and not M.config.service_root), "Remote attachment requires a credential file and no local root")
 	assert(not M.config.service_remote or (M.config.service_remote:match("^https://[^/?#@%s]+/?$")
 		and not M.config.service_remote:find("[%c]")), "Remote endpoint must be an HTTPS origin without credentials, path, query or fragment")
+	assert(vim.tbl_contains({ "conversation", "overview", "sidebar" }, M.config.role), "Invalid frontend role")
 	ctx.config, tree_ctx.config = M.config, M.config
 end
-function M.open(_, restore)
+function M.open(restore)
 	invocation_cwd = vim.fn.getcwd()
+	if restore then assert(restore.role == M.config.role, "Restart cannot change frontend role") end
+	if M.config.role ~= "conversation" then
+		local hosts = require("pi-integration.service-hosts")
+		for name, fn in pairs({ PiHosts = M.pick_hosts, PiSessions = M.pick_session, PiNew = hosts.new_conversation,
+			PiManagement = hosts.management_operations, PiSavedOperations = hosts.saved_operations, PiConsoleRestart = M.restart_console }) do
+			vim.api.nvim_create_user_command(name, fn, {})
+		end
+		hosts.start()
+		require("pi-integration." .. M.config.role).open(M.config)
+		return
+	end
 	if restore then
-		M.config.start_view = restore.view ~= "conversation" and restore.view or nil
 		assert(restore.expected_host or (restore.service_remote == M.config.service_remote and restore.credential_file == M.config.credential_file
 			and restore.ca_file == M.config.ca_file), "Restart target differs from explicit attachment; refusing to restore execution identities")
 		if restore.expected_host then
@@ -1403,13 +1348,18 @@ function M.open(_, restore)
 	ctx.session.setup_keymaps = function()
 		local actions = setmetatable({ open_transcript_item = M.open_transcript_item }, { __index = M })
 		require("pi-integration.keymaps").setup({ state = state, actions = actions, buffer = ctx.buffer,
-			ui = { notify = notify }, transcript = { open_item_under_cursor = M.open_transcript_item }, service_mode = true })
+			ui = { notify = notify }, transcript = { open_item_under_cursor = M.open_transcript_item } })
 	end
 	statusline.setup(ctx)
-	if restore or not M.config.start_view then
-		conversation_tab = vim.api.nvim_get_current_tabpage()
-		layout.open(ctx)
+	local function record_focus()
+		local seconds, microseconds = vim.uv.gettimeofday()
+		state.last_focused_at = seconds * 1000000 + microseconds
+		publish_attachment()
 	end
+	vim.api.nvim_create_autocmd("FocusGained", { callback = record_focus })
+	local backend = require("pi-integration.backends.tmux")
+	if backend.available() and backend.is_focused() then record_focus() end
+	layout.open(ctx)
 	if restore then
 		layout.set_buffer_lines(ctx, state.input_buf, restore.input_lines or { "" }, true)
 		for _, draft in ipairs(restore.drafts or {}) do recovered_draft(draft) end
@@ -1419,7 +1369,7 @@ function M.open(_, restore)
 		PiOffers = M.show_offers, PiDrafts = M.show_drafts, PiSubmissions = M.show_submissions, PiDetach = M.detach, PiReconnect = M.reconnect,
 		PiFollowUp = M.follow_up, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
 		PiSavedOperations = require("pi-integration.service-hosts").saved_operations,
-		PiHosts = M.pick_hosts, PiOverview = M.show_overview, PiSessions = M.pick_session, PiNew = M.new_session, PiTranscript = M.show_owner_transcript,
+		PiHosts = M.pick_hosts, PiManagement = require("pi-integration.service-hosts").management_operations, PiSessions = M.pick_session, PiNew = M.new_session, PiTranscript = M.show_owner_transcript,
 		PiWorkspaceReview = M.show_workspace_diff, PiWorkspaceReviews = M.pick_workspace_reviews,
 		PiWorkspace = M.pick_workspace, PiKill = M.kill_session, PiRetitle = M.retitle, PiOperations = M.show_operations, PiHostRequest = M.show_host_request }) do
 		vim.api.nvim_create_user_command(name, fn, {})
@@ -1440,31 +1390,23 @@ function M.open(_, restore)
 			end)
 		end
 	end))
-	local tmux = require("pi-integration.backends.tmux")
-	if tmux.available() then tmux.mark_service_frontend() end
 	publish_attachment()
 	require("pi-integration.service-hosts").start()
-	if M.config.start_view then
-		if restore then vim.cmd("tabnew") end
-		picker_tab = vim.api.nvim_get_current_tabpage()
-		require("pi-integration." .. M.config.start_view).open(M.config)
-		if restore and session_id then connect() end
-	-- The launcher retains --new across frontend restarts. A restored owner
-	-- selection or unresolved host request takes precedence over that startup flag.
-	elseif vim.env.PI_CONSOLE_SERVICE_NEW == "1" and not (restore and (session_id or pending_host)) then
+	if vim.env.PI_CONSOLE_SERVICE_NEW == "1" and not (restore and (session_id or pending_host)) then
 		vim.env.PI_CONSOLE_SERVICE_NEW = nil
-		M.new_session()
+		create_requested = vim.env.PI_CONSOLE_SERVICE_CWD or invocation_cwd
+		vim.env.PI_CONSOLE_SERVICE_CWD = nil
+		connect()
 	else connect() end
-end
-for _, name in ipairs({ "restore_session_transcript",
-	"start", "refresh_session_stats", "fail_pending_prompts", "flush_queued_prompts", "finish_loading_if_ready" }) do
-	M[name] = function() unavailable(name) end
 end
 vim.api.nvim_create_autocmd("VimLeavePre", { callback = function()
 	if heartbeat then heartbeat:stop(); heartbeat:close(); heartbeat = nil end
 	backup()
 	M.detach()
 	local tmux = require("pi-integration.backends.tmux")
-	if tmux.available() then tmux.clear() end
+	if tmux.available() then
+		tmux.clear()
+		if M.config.role == "conversation" and not restarting_frontend then tmux.close_sidebar() end
+	end
 end })
 return M

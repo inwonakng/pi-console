@@ -149,16 +149,27 @@ function M.list()
 		local host = hosts[key]
 		if host.host_id and (not owners[host.host_id] or host.connected and not owners[host.host_id].connected) then owners[host.host_id] = host end
 	end
+	local tmux = require("pi-integration.backends.tmux")
+	local attachments = tmux.available() and tmux.list() or {}
 	local identities = vim.tbl_keys(owners); table.sort(identities)
 	for _, identity in ipairs(identities) do
 		local host = owners[identity]
 		for _, row in ipairs(host.rows or {}) do
 			if row.state == "open" then
 				local id = vim.json.encode({ identity, row.id })
+				local focused
+				for _, pane in ipairs(attachments or {}) do
+					if pane.host_id == identity and pane.session_id == row.id then
+						focused = math.max(focused or 0, pane.last_focused_at or 0)
+					end
+				end
 				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host.alias,
 					connected = host.connected == true, status = host.connected and (row.live and row.live.status or "Idle") or "Disconnected",
 					title = row.name or row.cwd or row.id, cwd = row.cwd, directory = row.cwd,
 					location = host.alias, controller = row.live and row.live.controller, activity = nil,
+					workspace_cwd = row.live and row.live.cwd or row.cwd, last_focused_at = focused,
+					access_mode = row.live and row.live.accessMode, integration_mode = row.live and row.live.integrationMode,
+					notification_status = row.live and row.live.notificationsEnabled and "notify on" or "notify off",
 					channel = channel, service_epoch = host.hello and host.hello.serviceEpoch,
 					runtime_revision = row.live and row.live.runtimeRevision })
 			end
@@ -182,7 +193,7 @@ function M.target(host)
 	return { service_root = host.root, service_remote = host.remote, credential_file = host.credential_file,
 		ca_file = host.ca_file, expected_host = host.host_id }
 end
-function M.open(entry)
+function M.open(entry, in_place)
 	local host = M.find(entry.host_id)
 	if not host or not host.connected then return nil, "Host disconnected; cached rows cannot be attached or mutated" end
 	for _, row in ipairs(host.rows or {}) do
@@ -191,7 +202,22 @@ function M.open(entry)
 	local connection = host.connection
 	local function select(resume)
 		if not host.connected or host.connection ~= connection then notify("Owner connection changed; select the session again"); return end
-		require("pi-integration.service-frontend").select_owner(M.target(host), entry.session_id, resume)
+		local frontend = require("pi-integration.service-frontend")
+		if in_place == nil then in_place = frontend.config.role == "conversation" end
+		if in_place then frontend.select_owner(M.target(host), entry.session_id, resume); return end
+		local tmux = require("pi-integration.backends.tmux")
+		if not tmux.available() then notify("Opening a conversation from this view requires tmux"); return end
+		local panes, err = tmux.list()
+		if not panes then notify(err); return end
+		for _, pane in ipairs(panes) do
+			if pane.host_id == entry.host_id and pane.session_id == entry.session_id then
+				local ok, focus_error = tmux.focus(pane.id)
+				if not ok then notify(focus_error) end
+				return
+			end
+		end
+		local opened, failure = tmux.launch_service(frontend.config.launcher, M.target(host), entry.session_id, nil, resume)
+		if not opened then notify(failure) end
 	end
 	if entry.status == "Not Open" then
 		vim.ui.select({ "Cancel", "Resume" }, { prompt = "Resume stopped session on " .. host.alias .. "? No work is replayed." }, function(choice) if choice == "Resume" then select(true) end end)
@@ -310,7 +336,7 @@ function M.history_picker()
 		end)
 	end)
 end
-function M.new_conversation()
+function M.new_conversation(in_place)
 	M.start()
 	local choices = {}
 	for _, host in pairs(hosts) do table.insert(choices, host) end
@@ -328,13 +354,105 @@ function M.new_conversation()
 				current = current, request = function(query, callback)
 					connection.request("host.directories", vim.tbl_extend("force", query, { serviceEpoch = epoch }), callback)
 				end }, function(cwd)
-				if current() then require("pi-integration.service-frontend").select_owner(M.target(host), nil, false, cwd) end
+				if not current() then return end
+				local frontend = require("pi-integration.service-frontend")
+				if in_place and frontend.config.role == "conversation" then frontend.select_owner(M.target(host), nil, false, cwd)
+				else
+					local opened, err = require("pi-integration.backends.tmux").launch_service(frontend.config.launcher, M.target(host), nil, cwd)
+					if not opened then notify(err) end
+				end
 			end)
 		end
 		if host.connecting then host.waiters = host.waiters or {}; table.insert(host.waiters, choose_directory)
 		else choose_directory(host.connected) end
 	end)
 end
+function M.new_in_project(entry)
+	local host = M.find(entry.host_id)
+	if not host or not host.connected then return nil, "Host disconnected" end
+	local cwd = entry.workspace_cwd or entry.cwd
+	local opened, err = require("pi-integration.backends.tmux").launch_service(
+		require("pi-integration.service-frontend").config.launcher, M.target(host), nil, cwd)
+	return opened, err
+end
+
+local function save_management(host_id, envelope, receipt)
+	return store.update("management", vim.empty_dict(), function(records)
+		records[host_id .. "/" .. envelope.id] = { host_id = host_id, envelope = envelope, receipt = receipt }
+		return true
+	end)
+end
+function M.management_operations()
+	local records = store.load("management", vim.empty_dict())
+	vim.ui.select(vim.tbl_values(records), { prompt = "Management outcomes (status only; never replay)", format_item = function(item)
+		return item.envelope.operation .. " " .. item.envelope.sessionId .. " " .. (item.receipt and item.receipt.status or "unknown")
+	end }, function(item)
+		if not item then return end
+		local host = M.find(item.host_id)
+		if not host or not host.connected then notify("Connect to that host before looking up its outcome"); return end
+		host.connection.request("session.manage.status", { serviceEpoch = item.envelope.serviceEpoch,
+			sessionId = item.envelope.sessionId, commandId = item.envelope.id }, function(ok, receipt)
+			if not ok then notify(receipt.message); return end
+			local saved, err = save_management(item.host_id, item.envelope, receipt)
+			if not saved then notify(err) end
+			vim.notify(vim.inspect(receipt), vim.log.levels.INFO, { title = "Management outcome" })
+		end)
+	end)
+end
+function M.manage(entry, action, argument)
+	local host = M.find(entry.host_id)
+	if not host or not host.connected then return nil, "Host disconnected; mutations disabled" end
+	if not vim.tbl_contains(host.hello.capabilities or {}, "session.manage") then return nil, "Server does not support session management" end
+	local operations = { cycle_access_mode = "access.cycle", set_access_mode = "access.set",
+		cycle_integration_mode = "integration.cycle", set_integration_mode = "integration.set",
+		toggle_notifications = "notifications.set", kill = "session.kill" }
+	local operation = operations[action]
+	if not operation then return nil, "Unsupported management action" end
+	local frontend = require("pi-integration.service-frontend")
+	local connection = host.connection
+	local function send()
+		if not host.connected or host.connection ~= connection or host.hello.serviceEpoch ~= entry.service_epoch then
+			notify("Host changed; select the action again"); return
+		end
+		local payload
+		if action == "cycle_access_mode" then payload = { modes = frontend.config.access_modes }
+		elseif action == "cycle_integration_mode" then payload = { modes = frontend.config.integration_modes }
+		elseif action == "set_access_mode" or action == "set_integration_mode" then payload = { mode = argument }
+		elseif action == "toggle_notifications" then payload = { enabled = entry.notification_status ~= "notify on" }
+		else payload = { confirmed = true } end
+		local envelope = { version = 1, id = uid(), sessionId = entry.session_id, serviceEpoch = entry.service_epoch,
+			runtimeRevision = entry.runtime_revision, operation = operation, payload = payload }
+		local saved, err = save_management(entry.host_id, envelope)
+		if not saved then notify("Nothing sent: " .. tostring(err)); return end
+		connection.request("session.manage", envelope, function(ok, receipt)
+			if not ok then notify(tostring(receipt.message) .. " Inspect :PiManagement; nothing was replayed."); return end
+			local stored, failure = save_management(entry.host_id, envelope, receipt)
+			if not stored then notify(failure) end
+			local attempts = 0
+			local function inspect()
+				if not host.connected or host.connection ~= connection then return end
+				connection.request("session.manage.status", { serviceEpoch = envelope.serviceEpoch,
+					sessionId = envelope.sessionId, commandId = envelope.id }, function(found, outcome)
+					if not found then notify("Inspect :PiManagement for request " .. envelope.id); return end
+					local persisted, problem = save_management(entry.host_id, envelope, outcome)
+					if not persisted then notify(problem) end
+					attempts = attempts + 1
+					if outcome.status == "accepted" and attempts < 30 then vim.defer_fn(inspect, 1000)
+					else notify(operation .. ": " .. outcome.status .. (outcome.error and ("\n" .. outcome.error.message) or "")) end
+				end)
+			end
+			if receipt.status == "accepted" then vim.defer_fn(inspect, 250)
+			else notify(operation .. ": " .. receipt.status) end
+		end)
+	end
+	if action == "kill" then
+		vim.ui.select({ "Cancel", "Kill session" }, { prompt = "Kill " .. entry.title .. " on " .. host.alias .. "? Active work is interrupted; history/workspaces remain." }, function(choice)
+			if choice == "Kill session" then send() end
+		end)
+	else send() end
+	return true
+end
+
 -- Import a D1 out-of-band device credential only after TLS + identity validation.
 local function confirm_target(target, previous)
 	local probe = vim.deepcopy(target); probe.host_id = nil

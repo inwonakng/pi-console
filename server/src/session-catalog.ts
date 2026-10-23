@@ -385,7 +385,7 @@ export class SessionCatalog {
       if (!command || command.receipt.status !== "accepted") throw new Error("Command receipt is not pending");
       const updated = { fingerprint: command.fingerprint, receipt: next };
       if (next.sessionId !== command.receipt.sessionId || next.operation !== command.receipt.operation
-        || next.runtimeRevision !== command.receipt.runtimeRevision) throw new Error("Command outcome identity changed");
+        || next.runtimeRevision !== command.receipt.runtimeRevision || next.authority !== command.receipt.authority) throw new Error("Command outcome identity changed");
       if (commandBytes(updated) > commandBytes(command) || Buffer.byteLength(JSON.stringify(updated)) > commandBytes(command)) {
         throw new Error("Command outcome exceeds its reserved storage budget");
       }

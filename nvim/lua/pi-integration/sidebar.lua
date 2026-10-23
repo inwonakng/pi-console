@@ -219,9 +219,7 @@ function M.open(config)
 		vim.ui.input({ prompt = "Filter sessions/hosts: ", default = query }, function(value) if value then query = value; refresh() end end)
 	end, "Search sessions/hosts")
 	map("c", function() query = ""; refresh() end, "Clear search")
-	if vim.env.PI_CONSOLE_SERVICE_FRONTEND == "1" then
-		map("<leader>pn", function() require("pi-integration.service-hosts").new_conversation() end, "New conversation on chosen owner")
-	end
+	map("<leader>pn", function() require("pi-integration.service-hosts").new_conversation() end, "New conversation on chosen owner")
 	map("<leader>?", function()
 		local lines = { "# 󰕮 Sidebar", "", "## Keys", "" }
 		for _, spec in ipairs(mapping_specs) do
