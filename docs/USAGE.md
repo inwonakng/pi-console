@@ -17,7 +17,7 @@ releases, see [Maintaining pi-console](../MAINTAINING.md).
 ## Launch and service controls
 
 `pi-console` ensures the local service and selects the invocation directory.
-The first prompt or shell submission creates a session; an unused frontend creates none.
+The first prompt creates a session; an unused frontend creates none.
 `--overview` and `--sidebar` show discovery without creating a conversation.
 `--attach ID` selects a live service conversation; `--resume ID` explicitly resumes
 saved history. Neither starts a replacement owner when the target is unavailable.
@@ -436,8 +436,6 @@ and start a new Pi session. This restores the existing best-effort OS-log
 collection, including reports for some commands that exit zero. The reader runs
 continuously until session shutdown, including while idle. Set it back to
 `false` and start a new session when finished. Linux monitoring is unchanged.
-
-**Commands you type with `!` or `!!` bypass the agent sandbox and its approvals.**
 
 ## Project trust
 

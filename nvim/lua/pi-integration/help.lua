@@ -95,7 +95,6 @@ function M.toggle(ctx)
 		"- Network approval can expose readable data, including environment values; readonly still blocks shell network access.",
 		"- Network grants are not inherited by new conversations, forks, or subagents; existing saved host grants still apply.",
 		"- Without a grant, the proxy denies undeclared access instead of prompting during execution.",
-		"- Explicit user-entered `!`/`!!` commands run with host-user access, without our sandbox or approvals.",
 		"- Bash has no default timeout. Use its timeout field for short diagnostic probes or user-requested deadlines; omit it otherwise.",
 		"- Execution deadlines start after approvals. Embedded shell timeouts remain reserved for user requests or timeout testing.",
 		"- Diagnostic scripts must exit on success or failure; headless Neovim probes use cquit on error and install any watchdog before plugin loading.",

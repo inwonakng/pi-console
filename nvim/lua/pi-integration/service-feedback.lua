@@ -65,8 +65,8 @@ function M.reconcile(entries, snapshot)
 		end
 	end
 end
--- Queue state is authoritative for accepted text. Local feedback supplies only
--- submissions not yet present in an owner snapshot, never text-based matching.
+-- Only observed conversation turns belong in the transcript. Pending text stays
+-- in the queue picker; failed deliveries add standalone errors, never user turns.
 function M.timeline_messages(entries, session, snapshot)
 	local conversation = snapshot and snapshot.conversation or {}
 	local history = vim.deepcopy(conversation.messages or {})
@@ -77,48 +77,37 @@ function M.timeline_messages(entries, session, snapshot)
 		positions[key] = index
 	end
 	local buckets, unmatched, queued = {}, {}, {}
-	local function place(text, status, error, timeline)
+	local function place(error, timeline)
+		if not error or error == "" then return end
 		local observed = timeline and positions[timeline.observedMessage]
-		if observed and not ambiguous[timeline.observedMessage] and history[observed].role == "user" then
-			if error then history[observed].submission = { status = status, error = error } end
-			return
-		end
 		local at
-		if timeline then
+		if observed and not ambiguous[timeline.observedMessage] then
+			at = observed
+			-- Pi may already have recorded the same failure in this turn.
+			for index = observed + 1, #history do
+				if history[index].role == "user" then break end
+				if history[index].errorMessage == error then return end
+			end
+		elseif timeline then
 			if timeline.afterMessage == vim.NIL and (conversation.omittedMessages or 0) == 0 then at = 0
 			elseif timeline.afterMessage and not ambiguous[timeline.afterMessage] then at = positions[timeline.afterMessage] end
 		end
-		local message = { role = "user", content = { { type = "text", text = text } },
-			submission = { status = status, error = error, unmatched = at == nil } }
+		local message = { role = "error", content = { { type = "text", text = error } } }
 		if at then
 			buckets[at] = buckets[at] or {}
 			table.insert(buckets[at], message)
 		else table.insert(unmatched, message) end
 	end
 	local queue = snapshot and snapshot.acceptedQueue.items or {}
-	for index, item in ipairs(queue) do queued[item.id] = index end
-	local emitted = 0
-	local function emit_queue(through)
-		while emitted < through do
-			emitted = emitted + 1
-			local item = queue[emitted]
-			place(item.text, item.status, item.error and item.error.message, item.timeline)
-		end
+	for _, item in ipairs(queue) do
+		queued[item.id] = true
+		place(item.error and item.error.message, item.timeline)
 	end
-	-- Substitute shared records at their known local submission positions. Keep
-	-- owner order for queue-only records and for records accepted by another UI.
 	for _, entry in ipairs(entries) do
-		if entry.sessionId == session and entry.operation == "prompt.submit" then
-			local at = queued[queue_id(entry)]
-			if at then emit_queue(at)
-			else
-				-- Keep surviving predecessors even if the last one was removed.
-				for _, id in ipairs(entry.queuePredecessors or {}) do emit_queue(queued[id] or 0) end
-				place(entry.payload.text, entry.status, entry.error, entry.timeline)
-			end
+		if entry.sessionId == session and entry.operation == "prompt.submit" and not queued[queue_id(entry)] then
+			place(entry.error, entry.timeline)
 		end
 	end
-	emit_queue(#queue)
 	local visible = {}
 	vim.list_extend(visible, buckets[0] or {})
 	for index, message in ipairs(history) do
@@ -126,8 +115,7 @@ function M.timeline_messages(entries, session, snapshot)
 		vim.list_extend(visible, buckets[index] or {})
 	end
 	if conversation.partialAssistant then table.insert(visible, vim.deepcopy(conversation.partialAssistant.message)) end
-	-- A removed/compacted/ambiguous anchor cannot establish chronology. Keep
-	-- recovery text separate and label it, rather than assigning it to a turn.
+	-- An unavailable anchor cannot establish chronology. Keep its error separate.
 	vim.list_extend(visible, unmatched)
 	return visible
 end

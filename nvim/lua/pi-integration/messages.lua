@@ -13,7 +13,7 @@ local function message_role_title(message)
 		return "Tool"
 	end
 	if role == "user" or role == "You" then
-		return message.submission and message.submission.unmatched and "User (unmatched context)" or "User"
+		return "User"
 	end
 	return role:gsub("^%l", string.upper)
 end
@@ -166,10 +166,8 @@ local function append_text_message(lines, message, text, has_body)
 	return header_line
 end
 
-local function append_diagnostic(lines, label, text)
-	for index, line in ipairs(vim.split(text or "", "\n", { plain = true })) do
-		table.insert(lines, "> " .. (index == 1 and (label .. ": ") or "") .. line)
-	end
+function M.append_error(lines, text, has_body, title)
+	append_text_message(lines, { role = title or "Error" }, tostring(text or ""), has_body)
 end
 
 local function append_assistant_blocks(ctx, lines, items, message, has_body, options)
@@ -244,13 +242,6 @@ local function append_assistant_blocks(ctx, lines, items, message, has_body, opt
 		end
 	end
 	flush_text()
-	if message.stopReason == "error" or message.stopReason == "aborted" or message.errorMessage then
-		ensure_assistant_message()
-		ensure_inline_gap("message")
-		append_diagnostic(lines, message.stopReason == "aborted" and "Aborted" or "Error",
-			message.errorMessage or (message.stopReason == "aborted" and "Response aborted." or "Model request failed."))
-		appended, last_rendered_kind = true, "message"
-	end
 	return appended, last_rendered_kind
 end
 
@@ -452,9 +443,8 @@ function M.collect_message_lines(ctx, messages, tools)
 				end
 				appended = false
 				if message.isError then
-					ensure_assistant_block()
-					append_diagnostic(lines, "Skill read failed", text)
-					appended, rendered_kind = true, "message"
+					appended = render_tool_summary(ctx, lines, items, message, ensure_assistant_block)
+					rendered_kind = appended and "tool" or nil
 				end
 			elseif name == "spawn" and not message.isError and not has_tool_item(ctx.state, tool_call_id)
 				and update_existing_spawn_output(ctx, lines, items, message, text) then
@@ -495,6 +485,13 @@ function M.collect_message_lines(ctx, messages, tools)
 				appended = true
 				rendered_kind = "skill"
 			end
+			if message.stopReason == "error" or message.stopReason == "aborted" or message.errorMessage then
+				M.append_error(lines,
+					message.errorMessage or (message.stopReason == "aborted" and "Response aborted." or "Model request failed."),
+					has_body or appended, message.stopReason == "aborted" and "Aborted" or "Error")
+				close_assistant_block()
+				appended, rendered_kind = true, "error"
+			end
 		elseif role == "custom" then
 			local name = message_utils.spawn_custom_tool_name(message)
 			if name then
@@ -524,11 +521,6 @@ function M.collect_message_lines(ctx, messages, tools)
 			if text and text ~= "" then
 				close_assistant_block()
 				append_text_message(lines, message, text, has_body)
-				if message.submission then
-					table.insert(lines, "")
-					append_diagnostic(lines, "Submission", message.submission.status)
-					if message.submission.error then append_diagnostic(lines, "Error", message.submission.error) end
-				end
 				appended = true
 				rendered_kind = "message"
 			end

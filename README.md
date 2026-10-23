@@ -54,7 +54,7 @@ pi-console
 ```
 
 A local launch ensures the independent service and opens an unstarted frontend in
-the invocation directory. The first prompt or shell command creates a conversation.
+the invocation directory. The first prompt creates a conversation.
 Closing Neovim leaves started conversations running.
 Every service also listens on all IPv4 interfaces, port `8443` by default.
 **Anyone who can reach that port can view and control sessions. There is no
@@ -158,8 +158,7 @@ for setup details.
 
 **By default, the agent can read all files your user can read, including
 credentials and private files.** The default `ask` mode requests approval for
-writes outside configured paths and for shell network access. User-entered
-`!`/`!!` shell commands bypass the agent sandbox.
+writes outside configured paths and for shell network access.
 
 Project trust controls whether Pi loads a project's configuration and executable
 resources; it does not restrict file access. Credentials, settings, and history

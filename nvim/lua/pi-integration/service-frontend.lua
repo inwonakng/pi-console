@@ -307,8 +307,6 @@ local function command(operation, payload, callback, captured, terminal, submiss
 		local keys = snapshot.conversation.messageKeys or {}
 		entry.timeline = (#keys > 0 or #snapshot.conversation.messages == 0)
 			and { afterMessage = keys[#keys] or vim.NIL } or nil
-		entry.queuePredecessors = {}
-		for _, item in ipairs(snapshot.acceptedQueue.items) do table.insert(entry.queuePredecessors, item.id) end
 		if valid(input_buf) then
 			layout.set_buffer_lines(ctx, input_buf, { "" }, true)
 			vim.bo[input_buf].modified = false
@@ -501,23 +499,9 @@ render = function()
 	require("pi-integration.skills").reset(state)
 	local lines, items = messages.collect_message_lines(ctx, visible, conversation and conversation.tools)
 	if snapshot and snapshot.error then
-		vim.list_extend(lines, { "", "Error: " .. snapshot.error })
+		messages.append_error(lines, snapshot.error, true)
 	end
-	if not attachment and session_error then vim.list_extend(lines, { "", session_error }) end
-	if conversation then
-		for _, work in ipairs(conversation.work or {}) do
-			if work.kind == "bash" then
-				vim.list_extend(lines, { "", "## Bash (owner) — " .. work.state, work.text,
-					work.result and ("Exit: " .. tostring(work.result.exitCode) .. (work.result.cancelled and " (cancelled)" or "")) or "",
-					work.omittedOutputBytes and ("Omitted stream bytes: " .. work.omittedOutputBytes) or "", "", work.output or "" })
-			end
-		end
-		for _, queue in ipairs({ { "steering", "Steering" }, { "followUp", "Follow-up" } }) do
-			for _, value in ipairs(conversation.queue[queue[1]] or {}) do
-				vim.list_extend(lines, { "", "### " .. queue[2] .. " (queued)", value })
-			end
-		end
-	end
+	if not attachment and session_error then messages.append_error(lines, session_error, true) end
 	if valid(side_buf) then
 		local side = status_data("pi-side")
 		local side_lines = { "# Side conversation on owner", "", "Local draft: :PiSidePrompt. :PiSideNew resets; :PiSideAbort stops.", "" }
@@ -533,11 +517,16 @@ render = function()
 					end
 					vim.list_extend(side_lines, vim.split(content or ("[" .. tostring(block.type or "Content") .. "]"), "\n", { plain = true }))
 				end end
+				if message.errorMessage or message.stopReason == "error" or message.stopReason == "aborted" then
+					messages.append_error(side_lines,
+						message.errorMessage or (message.stopReason == "aborted" and "Response aborted." or "Model request failed."),
+						true, message.stopReason == "aborted" and "Aborted" or "Error")
+				end
 			end
 			if side.partialMessage then
 				for _, block in ipairs(side.partialMessage.content or {}) do vim.list_extend(side_lines, vim.split(block.text or block.thinking or "", "\n", { plain = true })) end
 			end
-			if side.error then table.insert(side_lines, side.error) end
+			if side.error then messages.append_error(side_lines, side.error, true) end
 		end
 		layout.set_buffer_lines(ctx, side_buf, side_lines, false)
 	end
@@ -1006,13 +995,9 @@ function M.take_control()
 	else acquire_control(false, captured) end
 end
 local function submit_input(original, entry)
-	local trimmed = vim.trim(original)
-	local excluded = trimmed:sub(1, 2) == "!!"
-	local operation = trimmed:sub(1, 1) == "!" and "shell.run" or "prompt.submit"
-	local payload = operation == "shell.run" and { command = trimmed:sub(excluded and 3 or 2), excludeFromContext = excluded } or { text = original }
 	for id, envelope in pairs(unresolved) do
-		if (envelope.operation == "prompt.submit" or envelope.operation == "shell.run") and envelope.sessionId == session_id
-			and vim.trim(envelope.payload.text or envelope.payload.command) == vim.trim(payload.text or payload.command) then
+		if envelope.operation == "prompt.submit" and envelope.sessionId == session_id
+			and vim.trim(envelope.payload.text) == vim.trim(original) then
 			notify("This submission may already be accepted. Review :PiSubmissions before sending this text again.", vim.log.levels.WARN)
 			if entry then
 				entry.status, entry.error = "Not sent", "An earlier submission of this text is protected. Review :PiSubmissions before resending."
@@ -1021,7 +1006,7 @@ local function submit_input(original, entry)
 			return
 		end
 	end
-	local id = command(operation, payload, nil, nil, nil, { entry = entry, input_buf = not entry and state.input_buf or nil })
+	local id = command("prompt.submit", { text = original }, nil, nil, nil, { entry = entry, input_buf = not entry and state.input_buf or nil })
 	if entry and not id then
 		entry.status, entry.error = "Not sent", "Submission could not proceed; text remains in :PiDrafts."
 		render()
@@ -1072,7 +1057,6 @@ function M.submit_prompt()
 	local trimmed = vim.trim(original)
 	if trimmed == "" then return end
 	if trimmed:sub(1, 1) == "/" then unavailable("Freeform slash commands; use typed controls"); return end
-	if trimmed:sub(1, 1) == "!" and vim.trim(trimmed:gsub("^!!?", "")) == "" then return end
 	if starting then notify("Session startup is already pending; input remains local."); return end
 	if not session_id then
 		if not hello or not job then notify("Connect to a host before submitting."); return end
@@ -1081,10 +1065,7 @@ function M.submit_prompt()
 	elseif next(pending_settings) then
 		if not control_current() then notify("Use :PiControl before applying pending settings and submitting."); return end
 	else submit_input(original); return end
-	local excluded = trimmed:sub(1, 2) == "!!"
-	local operation = trimmed:sub(1, 1) == "!" and "shell.run" or "prompt.submit"
-	local payload = operation == "shell.run" and { command = trimmed:sub(excluded and 3 or 2), excludeFromContext = excluded } or { text = original }
-	local entry = feedback_ui.add(feedback, uid(), operation, payload, session_id, hello.serviceEpoch, current_revision())
+	local entry = feedback_ui.add(feedback, uid(), "prompt.submit", { text = original }, session_id, hello.serviceEpoch, current_revision())
 	entry.status = "Starting session"
 	starting = { input = original, entry = entry }
 	layout.set_buffer_lines(ctx, state.input_buf, { "" }, true)
@@ -1152,8 +1133,20 @@ end
 function M.pick_queue()
 	if not snapshot then return end
 	local captured = stamp()
-	vim.ui.select(snapshot.acceptedQueue.items, { prompt = "Shared accepted queue", format_item = function(item) return item.status .. " r" .. item.revision .. " " .. item.text end }, function(item)
+	local choices = vim.deepcopy(snapshot.acceptedQueue.items)
+	for _, queue in ipairs({ { "steering", "Steering" }, { "followUp", "Follow-up" } }) do
+		for _, value in ipairs(snapshot.conversation.queue[queue[1]] or {}) do
+			table.insert(choices, { kind = queue[2], text = value })
+		end
+	end
+	vim.ui.select(choices, { prompt = "Queued messages", format_item = function(item)
+		return (item.kind or item.status) .. ": " .. preview(item.text)
+	end }, function(item)
 		if not item or not same_context(captured) then return end
+		if item.kind then
+			draft_buffer(scratch_name("queue-inspect"), "# " .. item.kind .. " (queued)\n\n" .. item.text)
+			return
+		end
 		vim.ui.select({ "Edit", "Remove", "Inspect" }, { prompt = item.status .. ": " .. preview(item.text) }, function(action)
 			if action == "Remove" then command("queue.remove", { itemId = item.id, expectedRevision = item.revision }, nil, captured)
 			elseif action == "Edit" then
@@ -1660,11 +1653,10 @@ function M.show_tree()
 end
 function M.pick_command()
 	local captured = stamp()
-	vim.ui.select({ "Compact", "Abort retry", "Abort shell", "Steer", "Follow up", "Steering delivery", "Follow-up delivery", "Auto compaction", "Auto retry", "History" }, { prompt = "Typed owner operations" }, function(choice)
+	vim.ui.select({ "Compact", "Abort retry", "Steer", "Follow up", "Steering delivery", "Follow-up delivery", "Auto compaction", "Auto retry", "History" }, { prompt = "Typed owner operations" }, function(choice)
 		if not current(captured) then notify("Controller/context changed; select again."); return end
 		if choice == "Compact" then vim.ui.input({ prompt = "Compaction instructions: " }, function(value) if value then command("compaction.run", { instructions = value }, nil, captured) end end)
 		elseif choice == "Abort retry" then command("retry.abort", {}, nil, captured)
-		elseif choice == "Abort shell" then command("shell.abort", {}, nil, captured)
 		elseif choice == "Steer" then M.steer()
 		elseif choice == "Follow up" then M.follow_up()
 		elseif choice == "History" then M.show_tree()
@@ -1679,7 +1671,7 @@ function M.refresh_messages() refresh() end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain outcomes; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the current workspace. First prompt or shell creates the session.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain outcomes; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the current workspace. First prompt creates the session.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()
