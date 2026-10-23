@@ -47,8 +47,29 @@ export function readExtensionSettings(agentDir) {
 		const value = document.toJS();
 		if (value === null && document.contents === null) return {};
 		const root = requireMapping(value, "settings");
-		requireKnownKeys(root, ["notifications", "access-mode", "integration-mode", "auto-title", "session-picker"], "settings");
+		requireKnownKeys(root, ["notifications", "access-mode", "integration-mode", "auto-title", "session-picker", "server"], "settings");
 		const settings = {};
+
+		if (Object.hasOwn(root, "server")) {
+			const server = requireMapping(root.server, "server");
+			requireKnownKeys(server, ["port", "webui"], "server");
+			settings.server = {};
+			if (Object.hasOwn(server, "port")) {
+				if (!Number.isInteger(server.port) || server.port < 1 || server.port > 65535) {
+					throw new Error("server.port must be an integer between 1 and 65535");
+				}
+				settings.server.port = server.port;
+			}
+			if (Object.hasOwn(server, "webui")) {
+				const webui = requireMapping(server.webui, "server.webui");
+				requireKnownKeys(webui, ["enabled"], "server.webui");
+				settings.server.webui = {};
+				if (Object.hasOwn(webui, "enabled")) {
+					if (typeof webui.enabled !== "boolean") throw new Error("server.webui.enabled must be a boolean");
+					settings.server.webui.enabled = webui.enabled;
+				}
+			}
+		}
 
 		if (Object.hasOwn(root, "notifications")) {
 			const notifications = requireMapping(root.notifications, "notifications");

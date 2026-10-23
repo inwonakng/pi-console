@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#171b1a">
+  <title>pi-console</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="app-header">
+    <a class="wordmark" href="#">pi<span>/</span>console</a>
+    <form id="connection-form" class="connection-form">
+      <label for="channel">Channel</label>
+      <select id="channel"><option value="stable">stable</option><option value="dev">dev</option></select>
+      <span id="connection-state" role="status">Disconnected</span>
+      <button id="connect" type="submit">Connect</button>
+    </form>
+  </header>
+  <div id="notice" class="notice" role="alert" hidden></div>
+  <div class="shell">
+    <aside id="overview" aria-label="Session overview">
+      <div class="overview-heading"><h1>Sessions <span id="session-count">0</span></h1><button id="new-session" disabled>+ New</button></div>
+      <label class="search-label" for="search">Find a session</label>
+      <input id="search" type="search" placeholder="Search title or directory" autocomplete="off">
+      <nav id="session-list" aria-label="Sessions"><p class="empty">Connect to see this host's sessions.</p></nav>
+      <footer id="host-info">Execution stays on the host.</footer>
+    </aside>
+    <main id="session-panel" tabindex="-1">
+      <section id="welcome" class="welcome">
+        <span class="eyebrow">pi-console / web</span>
+        <h2>Your sessions,<br>one place.</h2>
+        <p>Select a session to read its conversation, or start one in a directory on the host.</p>
+        <p class="muted">Closing this page leaves your work running.</p>
+      </section>
+      <section id="session" hidden aria-label="Selected session">
+        <header class="session-header">
+          <button id="back" class="mobile-only" aria-label="Back to sessions">Sessions</button>
+          <div class="session-heading"><h2 id="session-title"></h2><p id="session-directory"></p></div>
+          <span id="session-status" class="status"></span>
+          <button id="rename" disabled>Rename</button>
+        </header>
+        <div class="control-bar"><span id="controller" role="status">Read only</span><button id="control" disabled>Take control</button><button id="abort" disabled>Stop turn</button></div>
+        <div id="transcript" tabindex="0" aria-label="Conversation"></div>
+        <button id="latest" hidden>Jump to latest</button>
+        <section id="interactions" aria-label="Questions and approvals" hidden></section>
+        <details id="queue-panel" hidden><summary id="queue-summary">Queued prompts</summary><div id="queue"></div></details>
+        <form id="composer">
+          <label for="prompt">Prompt</label>
+          <textarea id="prompt" rows="3" placeholder="Write a prompt..." disabled></textarea>
+          <div class="composer-footer"><span id="composer-hint">Take control to send a prompt.</span><button id="send" type="submit" disabled>Send</button></div>
+        </form>
+        <p id="command-status" role="status"></p>
+      </section>
+    </main>
+  </div>
+  <dialog id="create-dialog">
+    <form id="create-form">
+      <h2>New session</h2>
+      <label for="cwd">Directory on the host</label>
+      <input id="cwd" placeholder="/absolute/project/path" required autocomplete="off">
+      <p class="muted">Use the execution host's path, not this device's.</p>
+      <div class="dialog-actions"><button id="cancel-create" type="button">Cancel</button><button type="submit">Create session</button></div>
+    </form>
+  </dialog>
+  <noscript>This frontend needs JavaScript to connect to pi-console.</noscript>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

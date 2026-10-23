@@ -2,6 +2,10 @@ import type { AccessMode } from "./access-state.js";
 import type { IntegrationMode } from "./integration-state.js";
 
 export interface ExtensionSettings {
+	server?: {
+		port?: number;
+		webui?: { enabled?: boolean };
+	};
 	notifications?: {
 		default?: "enabled" | "disabled";
 	};

@@ -966,13 +966,15 @@ function M.select_owner(target, id, resume, cwd)
 	elseif id and not attachment then attach(id)
 	end
 end
-function M.pick_hosts() require("pi-integration.service-hosts").picker() end
-function M.change_host()
+function M.pick_hosts()
+	local hosts = require("pi-integration.service-hosts")
+	if M.config.role ~= "conversation" then hosts.picker(); return end
 	local captured = stamp()
-	require("pi-integration.service-hosts").select_host(function(host)
+	hosts.picker(function(host)
 		if not same_selection(captured) then return end
-		local target = require("pi-integration.service-hosts").target(host)
-		if target.expected_host ~= M.config.expected_host then M.select_owner(target) end
+		local target = hosts.target(host)
+		if target.expected_host ~= M.config.expected_host or target.service_root ~= M.config.service_root
+			or target.service_remote ~= M.config.service_remote then M.select_owner(target) end
 	end)
 end
 local function acquire_control(takeover, captured)
@@ -1677,7 +1679,7 @@ function M.refresh_messages() refresh() end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiHost / <leader>pH (switch frontend host; existing sessions keep running)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain outcomes; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: saved owners, connect/retry/disconnect/edit/forget.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the current workspace. First prompt or shell creates the session.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain outcomes; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the current workspace. First prompt or shell creates the session.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()
@@ -1809,7 +1811,7 @@ function M.open(restore)
 		PiOffers = M.show_offers, PiDrafts = M.show_drafts, PiSubmissions = M.show_submissions, PiDetach = M.detach, PiReconnect = M.reconnect,
 		PiFollowUp = M.follow_up, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
 		PiSavedOperations = require("pi-integration.service-hosts").saved_operations,
-		PiHosts = M.pick_hosts, PiHost = M.change_host, PiManagement = require("pi-integration.service-hosts").management_operations, PiSessions = M.pick_session, PiNew = M.new_session, PiTranscript = M.show_owner_transcript,
+		PiHosts = M.pick_hosts, PiManagement = require("pi-integration.service-hosts").management_operations, PiSessions = M.pick_session, PiNew = M.new_session, PiTranscript = M.show_owner_transcript,
 		PiWorkspaceReview = M.show_workspace_diff, PiWorkspaceReviews = M.pick_workspace_reviews,
 		PiWorkspace = M.pick_workspace, PiKill = M.kill_session, PiRetitle = M.retitle, PiOperations = M.show_operations, PiHostRequest = M.show_host_request }) do
 		vim.api.nvim_create_user_command(name, fn, {})

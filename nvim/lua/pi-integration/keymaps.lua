@@ -15,7 +15,6 @@ M.specs = {
 		{ lhs = "<leader>pa", action = "restore_pending_action", desc = "Restore pending action" },
 		{ lhs = "<leader>pc", action = "take_control", desc = "Take control" },
 		{ lhs = "<leader>pC", action = "change_cwd", desc = "Choose directory on current host" },
-		{ lhs = "<leader>pH", action = "change_host", desc = "Switch frontend host" },
 		{ lhs = "<leader>pd", action = "show_workspace_diff", desc = "Diff" },
 		{ lhs = "<leader>pr", action = "restart", desc = "Restart Pi" },
 		{ lhs = "<leader>pR", action = "restart_console", desc = "Restart frontend" },

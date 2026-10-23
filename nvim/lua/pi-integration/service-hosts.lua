@@ -377,6 +377,14 @@ function M.history_picker(identity)
 		pick(host)
 	else M.select_host(pick) end
 end
+local function with_connected_host(host, callback)
+	local function ready(connected)
+		if not connected then notify("Host unavailable; connect/retry in Hosts."); return end
+		callback(host)
+	end
+	if host.connecting then host.waiters = host.waiters or {}; table.insert(host.waiters, ready)
+	else ready(host.connected) end
+end
 function M.select_host(callback)
 	M.start()
 	local choices = {}
@@ -386,12 +394,7 @@ function M.select_host(callback)
 		return host_label(host) .. " | " .. connection_status(host)
 	end }, function(host)
 		if not host then return end
-		local function ready(connected)
-			if not connected then notify("Host unavailable; connect/retry in Hosts."); return end
-			callback(host)
-		end
-		if host.connecting then host.waiters = host.waiters or {}; table.insert(host.waiters, ready)
-		else ready(host.connected) end
+		with_connected_host(host, callback)
 	end)
 end
 function M.new_conversation()
@@ -537,7 +540,7 @@ local function edit(previous)
 		end)
 	end)
 end
-function M.picker()
+function M.picker(on_attach)
 	M.start()
 	local choices = {}
 	for _, host in pairs(hosts) do table.insert(choices, host) end
@@ -548,8 +551,12 @@ function M.picker()
 	end }, function(host)
 		if not host then return end
 		if host.add then edit(); return end
-		vim.ui.select({ "Connect/retry", "Disconnect", "Edit alias", "Edit / confirm identity", "Forget" }, { prompt = host.alias }, function(action)
-			if action == "Connect/retry" then
+		local actions = { "Connect/retry", "Disconnect", "Edit alias", "Edit / confirm identity", "Forget" }
+		if on_attach then table.insert(actions, 1, "Attach current frontend") end
+		vim.ui.select(actions, { prompt = host.alias }, function(action)
+			if action == "Attach current frontend" then
+				with_connected_host(host, on_attach)
+			elseif action == "Connect/retry" then
 				local target = vim.deepcopy(host.target); target.enabled = true
 				if persist(target) then stop(host); host.retry_at, host.attempts = nil, 0; M.refresh() end
 			elseif action == "Disconnect" then
