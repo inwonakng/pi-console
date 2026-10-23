@@ -11,6 +11,8 @@ export type AcceptedQueueItem = {
   text: string;
   status: "queued" | "sending" | "failed";
   error?: { code: string; message: string };
+  /** Display-only references. Never authorize delivery or automatic replay. */
+  timeline?: { afterMessage: string | null; observedMessage?: string };
 };
 export type QueueReservation = {
   id: string; itemId: string; attachmentId: string; grantId: string;
@@ -25,7 +27,10 @@ export function validQueueItem(value: unknown): value is AcceptedQueueItem {
     && typeof value.serviceEpoch === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.serviceEpoch)
     && Number.isSafeInteger(value.runtimeRevision) && (value.runtimeRevision as number) >= 0
     && validPromptText(value.text) && typeof value.status === "string" && ["queued", "sending", "failed"].includes(value.status)
-    && (value.error === undefined || object(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string");
+    && (value.error === undefined || object(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string")
+    && (value.timeline === undefined || object(value.timeline)
+      && (value.timeline.afterMessage === null || typeof value.timeline.afterMessage === "string" && /^[a-f0-9]{64}$/.test(value.timeline.afterMessage))
+      && (value.timeline.observedMessage === undefined || typeof value.timeline.observedMessage === "string" && /^[a-f0-9]{64}$/.test(value.timeline.observedMessage)));
 }
 
 export function editableItem(items: AcceptedQueueItem[], id: string, revision: number): AcceptedQueueItem {

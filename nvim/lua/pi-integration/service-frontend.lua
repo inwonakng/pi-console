@@ -304,7 +304,11 @@ local function command(operation, payload, callback, captured, terminal, submiss
 			snapshot.serviceEpoch, current_revision())
 		entry.id, entry.sessionId, entry.serviceEpoch, entry.runtimeRevision = envelope.id, session_id, snapshot.serviceEpoch, current_revision()
 		entry.status, entry.sent = "Sending", true
-		entry.messageOffset = (snapshot.conversation.omittedMessages or 0) + #snapshot.conversation.messages
+		local keys = snapshot.conversation.messageKeys or {}
+		entry.timeline = (#keys > 0 or #snapshot.conversation.messages == 0)
+			and { afterMessage = keys[#keys] or vim.NIL } or nil
+		entry.queuePredecessors = {}
+		for _, item in ipairs(snapshot.acceptedQueue.items) do table.insert(entry.queuePredecessors, item.id) end
 		if valid(input_buf) then
 			layout.set_buffer_lines(ctx, input_buf, { "" }, true)
 			vim.bo[input_buf].modified = false
@@ -491,9 +495,7 @@ render = function()
 	local conversation = snapshot and snapshot.conversation
 	update_status_state()
 	layout.update_input_sidebar(ctx)
-	local visible = vim.deepcopy(conversation and conversation.messages or {})
-	if conversation and conversation.partialAssistant then table.insert(visible, conversation.partialAssistant.message) end
-	local covered_queue = feedback_ui.append_messages(feedback, session_id, visible)
+	local visible = feedback_ui.timeline_messages(feedback, session_id, snapshot)
 	require("pi-integration.tool-output").reset(state)
 	require("pi-integration.thinking-output").reset(state)
 	require("pi-integration.skills").reset(state)
@@ -510,19 +512,12 @@ render = function()
 					work.omittedOutputBytes and ("Omitted stream bytes: " .. work.omittedOutputBytes) or "", "", work.output or "" })
 			end
 		end
-		for _, item in ipairs(snapshot.acceptedQueue.items) do
-			if not covered_queue[item.id] then
-				vim.list_extend(lines, { "", "### Queue — " .. item.status .. " r" .. item.revision,
-					item.text, item.error and item.error.message or "" })
-			end
-		end
 		for _, queue in ipairs({ { "steering", "Steering" }, { "followUp", "Follow-up" } }) do
 			for _, value in ipairs(conversation.queue[queue[1]] or {}) do
 				vim.list_extend(lines, { "", "### " .. queue[2] .. " (queued)", value })
 			end
 		end
 	end
-	vim.list_extend(lines, feedback_ui.prompt_errors(feedback, session_id, snapshot))
 	if valid(side_buf) then
 		local side = status_data("pi-side")
 		local side_lines = { "# Side conversation on owner", "", "Local draft: :PiSidePrompt. :PiSideNew resets; :PiSideAbort stops.", "" }

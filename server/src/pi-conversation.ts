@@ -1,8 +1,19 @@
+import { createHash } from "node:crypto";
 import type { JsonAgentSessionEvent, RpcCommand, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
 import { type PiEvent } from "./pi-records.js";
 
 type Success<C extends string> = Extract<RpcResponse, { command: C; success: true }>;
 export type PiMessage = Success<"get_messages">["data"]["messages"][number];
+
+/** A reference to owner-observed message content, never submitted prompt text.
+ * Ambiguous identical messages must remain unresolved by consumers. */
+export function messageKey(message: PiMessage): string {
+  const content = [message.role, "timestamp" in message ? message.timestamp : null,
+    "content" in message ? message.content : message];
+  return createHash("sha256").update(JSON.stringify(content, (_key, value: unknown) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)).digest("hex");
+}
 type Assistant = Extract<PiMessage, { role: "assistant" }>;
 type SessionStats = Success<"get_session_stats">["data"] & {
   tokens: { sessionCacheRead?: number; sessionCacheWrite?: number };
@@ -15,6 +26,8 @@ export type ToolState = Omit<ToolStart, "type"> & {
   result?: ToolEnd["result"];
   isError?: boolean;
   durationMs?: number;
+  /** Assistant message that owns this execution, including nested calls. */
+  messageKey?: string;
 };
 export type WorkState = {
   id: string;
@@ -30,6 +43,7 @@ export type WorkState = {
 export type ConversationSnapshot = {
   /** Current Pi projection, not the full session tree. Older messages are separate history. */
   messages: PiMessage[];
+  messageKeys: string[];
   omittedMessages: number;
   historyRevision: number;
   hydrated: boolean;
@@ -80,7 +94,7 @@ const LIFECYCLE_STATUSES = new Set(["pi-console-runtime", "pi-console-dialog"]);
 /** Always reduced by the owner, even with no subscribers. No frontend actions here. */
 export class PiConversation {
   private state: ConversationSnapshot = {
-    messages: [], omittedMessages: 0, historyRevision: 0, hydrated: false,
+    messages: [], messageKeys: [], omittedMessages: 0, historyRevision: 0, hydrated: false,
     tools: [], work: [], queue: { steering: [], followUp: [] },
     execution: { running: false, interrupted: false }, statuses: {}, widgets: {},
   };
@@ -122,6 +136,10 @@ export class PiConversation {
   get historyVersion(): number { return this.version; }
   get awaitingSettlement(): boolean { return this.unsettled; }
   get hydrated(): boolean { return this.state.hydrated; }
+  get timelineAnchor(): { afterMessage: string | null } | undefined {
+    if (!this.state.hydrated && !this.state.messageKeys.length) return;
+    return { afterMessage: this.state.messageKeys.at(-1) ?? null };
+  }
   get sessionState(): RpcSessionState | undefined { return this.state.piState; }
   status(key: string): string | undefined { return this.state.statuses[key]; }
   get idle(): boolean {
@@ -178,6 +196,7 @@ export class PiConversation {
     switch (change.type) {
       case "history":
         this.state.messages = [];
+        this.state.messageKeys = [];
         this.messageBytes.length = 0;
         this.historyBytes = 0;
         this.state.omittedMessages = 0;
@@ -269,10 +288,12 @@ export class PiConversation {
     const bytes = size(message);
     if (bytes > HISTORY_BYTES) throw new Error("Pi conversation message exceeds 16 MiB");
     this.state.messages.push(message);
+    this.state.messageKeys.push(messageKey(message));
     this.messageBytes.push(bytes);
     this.historyBytes += bytes;
     while (this.state.messages.length > 512 || this.historyBytes > HISTORY_BYTES) {
       this.state.messages.shift();
+      this.state.messageKeys.shift();
       this.historyBytes -= this.messageBytes.shift()!;
       this.state.omittedMessages++;
     }
@@ -311,8 +332,20 @@ export class PiConversation {
           this.state.tools.splice(index, 1);
         }
         const { type: _type, ...tool } = event;
-        this.reserve(`tool:${tool.toolCallId}`, tool);
-        this.state.tools.push({ ...tool, state: "running" });
+        let anchor = tool.parentToolCallId
+          ? this.state.tools.find((parent) => parent.toolCallId === tool.parentToolCallId)?.messageKey : undefined;
+        if (!anchor) {
+          for (let index = this.state.messages.length - 1; index >= 0; index--) {
+            const message = this.state.messages[index]!;
+            if (message.role === "assistant" && message.content.some((block) => block.type === "toolCall" && block.id === tool.toolCallId)) {
+              anchor = this.state.messageKeys[index];
+              break;
+            }
+          }
+        }
+        const execution: ToolState = { ...tool, messageKey: anchor, state: "running" };
+        this.reserve(`tool:${tool.toolCallId}`, execution);
+        this.state.tools.push(execution);
         break;
       }
       case "tool_execution_update": {

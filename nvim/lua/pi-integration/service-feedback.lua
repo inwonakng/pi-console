@@ -1,6 +1,5 @@
 -- Frontend acknowledgments only. These records never authorize or replay work.
 local M = {}
-local message_utils = require("pi-integration.utils.message")
 function M.tracks(operation)
 	return not operation:match("^control%.") and not operation:match("^interaction%.")
 		and operation ~= "queue.reserve" and operation ~= "queue.release"
@@ -58,29 +57,6 @@ function M.reconcile(entries, snapshot)
 			M.receipt(entries, entry.id, true, receipt, true)
 		end
 	end
-	local conversation = snapshot.conversation
-	local last_observed = 0
-	for _, entry in ipairs(entries) do
-		if entry.sessionId == snapshot.sessionId and entry.operation == "prompt.submit"
-			and entry.serviceEpoch == snapshot.serviceEpoch and entry.runtimeRevision == snapshot.runtimeRevision then
-			local item = queued[queue_id(entry)]
-			entry.messageOffset = math.max(entry.messageOffset or ((conversation.omittedMessages or 0) + #conversation.messages), last_observed)
-			if item and item.status == "queued" then
-				-- Queued text cannot be in history yet. Ignore older identical prompts.
-				entry.messageOffset = math.max(entry.messageOffset, (conversation.omittedMessages or 0) + #conversation.messages)
-			elseif entry.sent and not entry.observedPosition then
-				for index, message in ipairs(conversation.messages) do
-					local position = (conversation.omittedMessages or 0) + index
-					if position > entry.messageOffset and message.role == "user"
-						and vim.trim(message_utils.extract_text(message) or "") == vim.trim(entry.payload.text) then
-						entry.observedPosition = position
-						break
-					end
-				end
-			end
-			last_observed = entry.observedPosition or last_observed
-		end
-	end
 	for index = #entries, 1, -1 do
 		local entry = entries[index]
 		if entry.sessionId == snapshot.sessionId and entry.operation == "prompt.submit"
@@ -89,32 +65,70 @@ function M.reconcile(entries, snapshot)
 		end
 	end
 end
--- Local prompts use the same renderer as history. Keep their queue identity
--- until handoff finishes, so an observed user message cannot leave a second row.
-function M.append_messages(entries, session, visible)
-	local covered = {}
+-- Queue state is authoritative for accepted text. Local feedback supplies only
+-- submissions not yet present in an owner snapshot, never text-based matching.
+function M.timeline_messages(entries, session, snapshot)
+	local conversation = snapshot and snapshot.conversation or {}
+	local history = vim.deepcopy(conversation.messages or {})
+	local positions, ambiguous = {}, {}
+	for index, key in ipairs(conversation.messageKeys or {}) do
+		history[index].messageKey = key
+		if positions[key] then ambiguous[key] = true end
+		positions[key] = index
+	end
+	local buckets, unmatched, queued = {}, {}, {}
+	local function place(text, status, error, timeline)
+		local observed = timeline and positions[timeline.observedMessage]
+		if observed and not ambiguous[timeline.observedMessage] and history[observed].role == "user" then
+			if error then history[observed].submission = { status = status, error = error } end
+			return
+		end
+		local at
+		if timeline then
+			if timeline.afterMessage == vim.NIL and (conversation.omittedMessages or 0) == 0 then at = 0
+			elseif timeline.afterMessage and not ambiguous[timeline.afterMessage] then at = positions[timeline.afterMessage] end
+		end
+		local message = { role = "user", content = { { type = "text", text = text } },
+			submission = { status = status, error = error, unmatched = at == nil } }
+		if at then
+			buckets[at] = buckets[at] or {}
+			table.insert(buckets[at], message)
+		else table.insert(unmatched, message) end
+	end
+	local queue = snapshot and snapshot.acceptedQueue.items or {}
+	for index, item in ipairs(queue) do queued[item.id] = index end
+	local emitted = 0
+	local function emit_queue(through)
+		while emitted < through do
+			emitted = emitted + 1
+			local item = queue[emitted]
+			place(item.text, item.status, item.error and item.error.message, item.timeline)
+		end
+	end
+	-- Substitute shared records at their known local submission positions. Keep
+	-- owner order for queue-only records and for records accepted by another UI.
 	for _, entry in ipairs(entries) do
 		if entry.sessionId == session and entry.operation == "prompt.submit" then
-			local id = queue_id(entry)
-			if id then covered[id] = true end
-			if not entry.observedPosition then
-				table.insert(visible, { role = "user", content = { { type = "text", text = entry.payload.text } } })
+			local at = queued[queue_id(entry)]
+			if at then emit_queue(at)
+			else
+				-- Keep surviving predecessors even if the last one was removed.
+				for _, id in ipairs(entry.queuePredecessors or {}) do emit_queue(queued[id] or 0) end
+				place(entry.payload.text, entry.status, entry.error, entry.timeline)
 			end
 		end
 	end
-	return covered
-end
-function M.prompt_errors(entries, session, snapshot)
-	local lines = {}
-	for _, entry in ipairs(entries) do
-		if entry.sessionId == session and entry.operation == "prompt.submit" then
-			local error = entry.error
-			for _, item in ipairs(snapshot and snapshot.acceptedQueue.items or {}) do
-				if item.id == queue_id(entry) and item.error then error = item.error.message end
-			end
-			if error then vim.list_extend(lines, { "", "Error: " .. error }) end
-		end
+	emit_queue(#queue)
+	local visible = {}
+	vim.list_extend(visible, buckets[0] or {})
+	for index, message in ipairs(history) do
+		table.insert(visible, message)
+		vim.list_extend(visible, buckets[index] or {})
 	end
-	return lines
+	if conversation.partialAssistant then table.insert(visible, vim.deepcopy(conversation.partialAssistant.message)) end
+	-- A removed/compacted/ambiguous anchor cannot establish chronology. Keep
+	-- recovery text separate and label it, rather than assigning it to a turn.
+	vim.list_extend(visible, unmatched)
+	return visible
 end
 return M

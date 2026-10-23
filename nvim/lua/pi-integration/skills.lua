@@ -141,7 +141,9 @@ function M.apply_tool_result(state, message, text)
 		return false
 	end
 	output.text = text or output.text
-	return true
+	output.is_error = message.isError == true
+	output.loaded = not output.is_error
+	return load.output_id
 end
 
 function M.summary_lines(state, output_id)
@@ -149,7 +151,8 @@ function M.summary_lines(state, output_id)
 	if not output then
 		return { "> 󰢱 Skill unavailable." }
 	end
-	return { "> 󰢱 Using skill: " .. tostring(output.name or "unknown") }
+	local label = output.is_error and "Skill read failed: " or output.loaded and "Using skill: " or "Loading skill: "
+	return { "> 󰢱 " .. label .. tostring(output.name or "unknown") }
 end
 
 function M.open_float(ctx, output_id, resolved)

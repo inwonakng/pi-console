@@ -13,7 +13,7 @@ local function message_role_title(message)
 		return "Tool"
 	end
 	if role == "user" or role == "You" then
-		return "User"
+		return message.submission and message.submission.unmatched and "User (unmatched context)" or "User"
 	end
 	return role:gsub("^%l", string.upper)
 end
@@ -166,23 +166,17 @@ local function append_text_message(lines, message, text, has_body)
 	return header_line
 end
 
+local function append_diagnostic(lines, label, text)
+	for index, line in ipairs(vim.split(text or "", "\n", { plain = true })) do
+		table.insert(lines, "> " .. (index == 1 and (label .. ": ") or "") .. line)
+	end
+end
+
 local function append_assistant_blocks(ctx, lines, items, message, has_body, options)
 	options = options or {}
 	local content = message.content
 	if type(content) ~= "table" then
-		local text = message_utils.extract_text(message)
-		if text and text ~= "" then
-			if options.continue_trace then
-				if lines[#lines] ~= "" then
-					table.insert(lines, "")
-				end
-				vim.list_extend(lines, vim.split(text, "\n", { plain = true }))
-			else
-				append_text_message(lines, message, text, has_body)
-			end
-			return true, "message"
-		end
-		return false, nil
+		content = { { type = "text", text = message_utils.extract_text(message) or "" } }
 	end
 
 	local started = false
@@ -250,26 +244,40 @@ local function append_assistant_blocks(ctx, lines, items, message, has_body, opt
 		end
 	end
 	flush_text()
+	if message.stopReason == "error" or message.stopReason == "aborted" or message.errorMessage then
+		ensure_assistant_message()
+		ensure_inline_gap("message")
+		append_diagnostic(lines, message.stopReason == "aborted" and "Aborted" or "Error",
+			message.errorMessage or (message.stopReason == "aborted" and "Response aborted." or "Model request failed."))
+		appended, last_rendered_kind = true, "message"
+	end
 	return appended, last_rendered_kind
 end
 
 local function with_tool_executions(messages, tools)
 	if not tools or #tools == 0 then return messages or {} end
-	local calls, results, ambiguous, by_id, at_message = {}, {}, {}, {}, {}
+	local calls, results, by_id, at_message, anchors = {}, {}, {}, {}, {}
+	local call_positions, result_positions = {}, {}
 	for index, message in ipairs(messages or {}) do
+		if message.messageKey then
+			if anchors[message.messageKey] ~= nil then anchors[message.messageKey] = false
+			else anchors[message.messageKey] = index end
+		end
 		if message.role == "assistant" and type(message.content) == "table" then
 			for _, block in ipairs(message.content) do
 				if type(block) == "table" and (block.type == "toolCall" or block.type == "tool_call") then
 					local id = message_utils.tool_call_id(block)
 					if id then
-						if calls[id] then ambiguous[id] = true end
 						calls[id] = index
+						call_positions[id] = call_positions[id] or {}
+						table.insert(call_positions[id], index)
 					end
 				end
 			end
 		elseif message.role == "toolResult" and message.toolCallId then
-			if results[message.toolCallId] then ambiguous[message.toolCallId] = true end
 			results[message.toolCallId] = index
+			result_positions[message.toolCallId] = result_positions[message.toolCallId] or {}
+			table.insert(result_positions[message.toolCallId], index)
 		end
 	end
 	for _, tool in ipairs(tools) do by_id[tool.toolCallId] = tool end
@@ -282,10 +290,23 @@ local function with_tool_executions(messages, tools)
 			root = by_id[parent] or { toolCallId = parent }
 		end
 		local id = root and root.toolCallId
-		local at = id and not ambiguous[id] and (calls[id] or results[id])
-		-- A reused ID cannot identify which occurrence owns a retained execution.
-		if at and calls[id] and results[id] and results[id] < calls[id] then at = nil end
-		if at and not results[tool.toolCallId] then
+		local key = tool.messageKey or (root and root.messageKey)
+		local at = key and anchors[key] or (not key and id and (calls[id] or results[id]))
+		local result_at, call_at = results[tool.toolCallId], calls[tool.toolCallId] or (id and calls[id])
+		local has_result = result_at and (not call_at or result_at > call_at)
+		if key and at then
+			-- Old nested records can outlive a reused parent ID. Attach them only
+			-- to their observed owner, and look for results in that occurrence.
+			local boundary = #messages + 1
+			for _, position in ipairs(call_positions[id] or {}) do
+				if position > at then boundary = position; break end
+			end
+			has_result = false
+			for _, position in ipairs(result_positions[tool.toolCallId] or {}) do
+				if position > at and position < boundary then has_result = true; break end
+			end
+		end
+		if at and not has_result then
 			at_message[at] = at_message[at] or {}
 			table.insert(at_message[at], tool)
 		end
@@ -303,6 +324,46 @@ local function with_tool_executions(messages, tools)
 				table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_update" }))
 			end
 		end
+	end
+	return visible
+end
+
+-- RPC call IDs identify live executions, but providers may reuse them in later
+-- turns. Give each historical occurrence its own rendering key, including its
+-- nested execution records, so later results cannot update an earlier row.
+local function scope_tool_calls(messages)
+	local visible, current, counts, completed = {}, {}, {}, {}
+	local function next_key(id)
+		counts[id] = (counts[id] or 0) + 1
+		current[id] = id .. ":" .. counts[id]
+		completed[id] = nil
+		return current[id]
+	end
+	for _, original in ipairs(messages) do
+		local message = original
+		local role = original.role or original.type or ""
+		if role == "assistant" and type(original.content) == "table" then
+			message = vim.deepcopy(original)
+			for _, block in ipairs(message.content) do
+				if type(block) == "table" and (block.type == "toolCall" or block.type == "tool_call") then
+					local id = message_utils.tool_call_id(block)
+					if id then block.id = next_key(id) end
+				end
+			end
+		elseif role == "toolResult" or role:match("^tool_execution_") then
+			message = vim.deepcopy(original)
+			local id = message_utils.tool_call_id(message)
+			if id then
+				if not current[id] or role == "tool_execution_start" and completed[id]
+					or role == "toolResult" and completed[id] == "toolResult" then next_key(id) end
+				message.id, message.toolCallId = nil, current[id]
+				-- Spawn logs contain both execution_end and message_end for a
+				-- result. They describe the same occurrence, not another call.
+				if role == "toolResult" or role == "tool_execution_end" then completed[id] = role end
+			end
+			if message.parentToolCallId then message.parentToolCallId = current[message.parentToolCallId] end
+		end
+		table.insert(visible, message)
 	end
 	return visible
 end
@@ -336,7 +397,7 @@ function M.collect_message_lines(ctx, messages, tools)
 		assistant_block_open = false
 	end
 
-	for _, message in ipairs(with_tool_executions(messages, tools)) do
+	for _, message in ipairs(scope_tool_calls(with_tool_executions(messages, tools))) do
 		local role = message.role or message.type
 		local appended = false
 		local rendered_kind = nil
@@ -383,8 +444,18 @@ function M.collect_message_lines(ctx, messages, tools)
 			local tool_call_id = message_utils.tool_call_id(message)
 			pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed", message.parentToolCallId)
 			if pi_skills.tool_result_skill_name(ctx.state, message) then
-				pi_skills.apply_tool_result(ctx.state, message, text)
+				local output_id = pi_skills.apply_tool_result(ctx.state, message, text)
+				for _, item in ipairs(items) do
+					if item.kind == "skill" and item.output_id == output_id then
+						lines[item.start_line] = pi_skills.summary_lines(ctx.state, output_id)[1]
+					end
+				end
 				appended = false
+				if message.isError then
+					ensure_assistant_block()
+					append_diagnostic(lines, "Skill read failed", text)
+					appended, rendered_kind = true, "message"
+				end
 			elseif name == "spawn" and not message.isError and not has_tool_item(ctx.state, tool_call_id)
 				and update_existing_spawn_output(ctx, lines, items, message, text) then
 				appended = false
@@ -453,6 +524,11 @@ function M.collect_message_lines(ctx, messages, tools)
 			if text and text ~= "" then
 				close_assistant_block()
 				append_text_message(lines, message, text, has_body)
+				if message.submission then
+					table.insert(lines, "")
+					append_diagnostic(lines, "Submission", message.submission.status)
+					if message.submission.error then append_diagnostic(lines, "Error", message.submission.error) end
+				end
 				appended = true
 				rendered_kind = "message"
 			end

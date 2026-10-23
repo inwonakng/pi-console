@@ -11,7 +11,7 @@ import type { RpcCommand, RpcExtensionUIResponse, RpcResponse, RpcSessionState }
 import { PiCommandError, PiProcess, type PiExit, type PiProcessOptions } from "./pi-process.js";
 import type { InteractionSnapshot } from "./pi-interactions.js";
 import { dialogRequest, object, type PiEvent } from "./pi-records.js";
-import { PiConversation, type ConversationChange, type ConversationSnapshot, type FrontendEffect } from "./pi-conversation.js";
+import { PiConversation, messageKey, type ConversationChange, type ConversationSnapshot, type FrontendEffect } from "./pi-conversation.js";
 import { SessionSubscription } from "./session-subscription.js";
 import { CommandError, SessionControl, commandFingerprint, sessionCommand, type CommandReceipt, type Controller,
   type ControlGrant, type SessionCommand } from "./session-commands.js";
@@ -435,7 +435,7 @@ export class OwnedSession {
   // restart never revives a grant; explicit edits capture their own recipient.
   private readonly queueRecipients = new Map<string, Controller>();
   private queueFlight?: {
-    itemId: string; recipient?: Controller; dispatched: boolean; userObserved: boolean; settled: boolean;
+    itemId: string; recipient?: Controller; requestId?: string; dispatched: boolean; observedMessage?: string; settled: boolean;
     outcome?: { disposition: "started" | "handled" } | { error: unknown };
   };
   private readonly offers = new Map<string, { revision: number; offer: EffectOffer; bytes: number }>();
@@ -750,7 +750,11 @@ export class OwnedSession {
   }
 
   private queueSnapshot(): AcceptedQueueSnapshot {
-    return { items: this.catalog.queue(this.id), reservation: this.reservations.snapshot() };
+    const items = this.catalog.queue(this.id);
+    const flight = this.queueFlight;
+    const item = flight && items.find((item) => item.id === flight.itemId);
+    if (item?.timeline && flight?.observedMessage) item.timeline.observedMessage = flight.observedMessage;
+    return { items, reservation: this.reservations.snapshot() };
   }
 
   private queueChanged(): void {
@@ -768,7 +772,8 @@ export class OwnedSession {
     const items = this.catalog.queue(this.id);
     if (command.operation === "prompt.submit") {
       const item: AcceptedQueueItem = { id: randomUUID(), revision: 1, serviceEpoch: this.catalog.epoch,
-        runtimeRevision: command.runtimeRevision, text: command.payload.text.trim(), status: "queued" };
+        runtimeRevision: command.runtimeRevision, text: command.payload.text.trim(), status: "queued",
+        timeline: this.conversation.timelineAnchor };
       items.push(item);
       // Pi publishes message_end before appending history. Keep a recoverable
       // copy after live queue handoff; receipt data never authorizes replay.
@@ -781,6 +786,9 @@ export class OwnedSession {
       if (command.operation === "queue.remove") items.splice(items.indexOf(item), 1);
       else if (command.operation === "queue.edit") {
         item.text = command.payload.text.trim();
+        if (!item.timeline || item.serviceEpoch !== this.catalog.epoch || item.runtimeRevision !== command.runtimeRevision || item.timeline.observedMessage) {
+          item.timeline = this.conversation.timelineAnchor;
+        }
         item.status = "queued";
         item.error = undefined;
         item.serviceEpoch = this.catalog.epoch;
@@ -822,7 +830,8 @@ export class OwnedSession {
       if (!item || item.status !== "sending") throw new Error("Accepted queue lost its sending item");
       const stale = item.runtimeRevision !== this.runtimeRevision;
       const outcome = flight.outcome;
-      if (!stale && (!outcome || !("error" in outcome) && outcome.disposition !== "handled" && !flight.userObserved && !flight.settled)) return;
+      if (!stale && (!outcome || !("error" in outcome) && outcome.disposition !== "handled" && !flight.observedMessage && !flight.settled)) return;
+      if (item.timeline && flight.observedMessage) item.timeline.observedMessage = flight.observedMessage;
       if (stale) {
         item.status = "failed"; item.revision++;
         item.error = { code: "stale_runtime", message: "Runtime changed during prompt delivery; inspect the conversation before editing/resubmitting" };
@@ -831,7 +840,7 @@ export class OwnedSession {
         item.status = outcome.error instanceof QueueDeferred ? "queued" : "failed";
         item.revision++;
         item.error = outcome.error instanceof QueueDeferred ? undefined : queueError(outcome.error);
-      } else if (outcome && outcome.disposition === "started" && !flight.userObserved) {
+      } else if (outcome && outcome.disposition === "started" && !flight.observedMessage) {
         item.status = "failed"; item.revision++;
         item.error = { code: "delivery_uncertain", message: "Pi settled without an observed user message; review before editing/resubmitting" };
       } else items.splice(items.indexOf(item), 1);
@@ -857,7 +866,7 @@ export class OwnedSession {
     item.status = "sending"; item.revision++;
     await this.catalog.replaceQueue(this.id, items);
     const next: NonNullable<OwnedSession["queueFlight"]> = { itemId: item.id, recipient: this.queueRecipients.get(item.id),
-      dispatched: false, userObserved: false, settled: false };
+      dispatched: false, settled: false };
     this.queueFlight = next;
     this.queueChanged();
     this.trackCommand((async () => {
@@ -1587,7 +1596,11 @@ export class OwnedSession {
       this.queueRunPending = false;
       if (this.queueFlight?.dispatched) this.queueFlight.settled = true;
     }
-    if (event.type === "message_end" && event.message.role === "user" && this.queueFlight?.dispatched) this.queueFlight.userObserved = true;
+    const flight = this.queueFlight;
+    if (event.type === "message_end" && event.message.role === "user" && flight?.dispatched
+      && flight.outcome && "disposition" in flight.outcome && flight.outcome.disposition === "started" && !flight.observedMessage) {
+      flight.observedMessage = messageKey(event.message);
+    }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-console-runtime") {
       const runtime = this.worker?.interactionSnapshot().runtime;
       if (!runtime?.active) this.retain({ type: "runtime_ended" });
@@ -1698,6 +1711,7 @@ export class OwnedSession {
     if (command.type === "prompt") {
       // Only a committed editable-queue flight supplies main-turn provenance.
       // Missing provenance must not fall back to whoever controls dispatch now.
+      if (this.queueFlight?.dispatched) this.queueFlight.requestId = command.id;
       this.turnRecipient = this.queueFlight?.dispatched ? this.queueFlight.recipient ?? null : null;
       if (this.queueFlight?.dispatched && this.conversation.settled && !this.nativePending && !this.nativeQueueCommands.size) this.mainEffectsAmbiguous = false;
     } else if (command.type === "steer" || command.type === "follow_up") {
@@ -1715,6 +1729,13 @@ export class OwnedSession {
 
   private response(response: RpcResponse, command: RpcCommand & { id: string }): void {
     if (response.id === this.rename?.requestId || response.id === this.bundled?.requestId || response.id === this.bundledInterrupt?.requestId) return;
+    // Prompt acceptance precedes its user events in Pi's stdout stream. Record
+    // it synchronously, before a later event in the same batch is reduced.
+    const flight = this.queueFlight;
+    if (flight && response.id === flight.requestId && response.success && response.command === "prompt"
+      && (response.data.disposition === "started" || response.data.disposition === "handled")) {
+      flight.outcome = { disposition: response.data.disposition };
+    }
     if (response.success && response.command === "get_state") {
       if (response.data.sessionId === this.record.piSessionId && response.data.sessionFile === this.catalog.sessionFile(this.id)) {
         this.trackCommand(this.catalog.updateTitle(this.id, response.data.sessionName));
