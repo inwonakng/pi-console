@@ -9,7 +9,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAccessMode } from "./shared/access-state";
 import { projectTrustReady } from "./shared/project-trust";
@@ -215,6 +215,32 @@ function formatStatus(ctx: ExtensionContext): string {
   const missing = getExpectedWorkspaceMissing();
   if (missing) lines.push(`- missing expected workspace: ${missing}`);
   return lines.join("\n");
+}
+
+function workspaceList(offset = 0, limit = 20) {
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new Error("Workspace list offset must be a non-negative safe integer.");
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+    throw new Error("Workspace list limit must be an integer between 1 and 50.");
+  }
+  const all = listWorkspaces();
+  const records = all.slice(offset, offset + limit).map((record) => {
+    const file = record.targetSessionFile ?? record.sourceSessionFile;
+    // Pi uses timestamp_id.jsonl; owner-managed sessions use id.jsonl.
+    const sessionId = file ? basename(file, ".jsonl").replace(/^\d{4}-\d{2}-\d{2}T[^_]+_/, "") : undefined;
+    return { id: record.id, sessionId };
+  });
+  const nextOffset = offset + records.length < all.length ? offset + records.length : null;
+  const lines = records.length > 0
+    ? [`Workspaces ${offset + 1}-${offset + records.length} of ${all.length} (newest first):`,
+      ...records.map((record) => `${record.id} | session: ${record.sessionId ?? "unknown"}`)]
+    : [all.length === 0 ? "No Pi workspaces." : `No workspaces at offset ${offset} (${all.length} total).`];
+  lines.push("Details: workspace action=status id=<workspace-id>, or /pi-workspace status <workspace-id>.");
+  if (nextOffset !== null) {
+    lines.push(`Next page: workspace action=list offset=${nextOffset} limit=${limit}, or /pi-workspace list ${nextOffset} ${limit}.`);
+  }
+  return { text: lines.join("\n"), details: { records, total: all.length, offset, limit, nextOffset } };
 }
 
 function managedRepositoryPath(path: string): boolean {
@@ -557,24 +583,32 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("pi-workspace", {
-    description: "Show Pi workspace status or list retained workspaces",
+    description: "Show workspace details (status [id]) or a compact page (list [offset] [limit])",
     handler: async (args, ctx) => {
-      const action = args.trim() || "status";
-      if (action === "status") {
+      const [action = "status", first, second, ...extra] = args.trim() ? args.trim().split(/\s+/) : [];
+      if (action === "status" && second === undefined) {
+        const record = first ? loadWorkspace(first) : undefined;
+        if (first && !record) {
+          ctx.ui.notify(`Unknown workspace: ${first}`, "warning");
+          return;
+        }
         publishWorkspaceState(ctx);
-        ctx.ui.notify(formatStatus(ctx), "info");
+        ctx.ui.notify(record ? formatWorkspaceRecord(record) : formatStatus(ctx), "info");
         return;
       }
-      if (action === "list") {
-        const records = listWorkspaces();
-        ctx.ui.notify(records.length > 0 ? records.map(formatWorkspaceRecord).join("\n\n") : "No Pi workspaces.", "info");
+      if (action === "list" && extra.length === 0) {
+        try {
+          ctx.ui.notify(workspaceList(first === undefined ? undefined : Number(first), second === undefined ? undefined : Number(second)).text, "info");
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+        }
         return;
       }
-      ctx.ui.notify("Usage: /pi-workspace status|list", "warning");
+      ctx.ui.notify("Usage: /pi-workspace status [id] | list [offset] [limit]", "warning");
     },
   });
 
-  type WorkspaceParams = { action: WorkspaceAction; id?: string; ignoredFiles?: string[]; approved?: boolean };
+  type WorkspaceParams = { action: WorkspaceAction; id?: string; offset?: number; limit?: number; ignoredFiles?: string[]; approved?: boolean };
   type Move = (action: "enter" | "return", id: string) => Promise<void>;
   let executeWorkspace: (callId: string, params: WorkspaceParams, signal: AbortSignal | undefined, update: unknown, ctx: ExtensionContext, move?: Move) => Promise<{ content: { type: "text"; text: string }[]; details: unknown; terminate?: boolean; cleanupAttempted?: boolean }>;
   const registerWorkspaceTool = (available: boolean, guidance: string[]) => pi.registerTool({
@@ -582,7 +616,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     defaultActive: false,
     label: "Workspace",
     exposure: available ? "direct" : "hidden",
-    description: "Create/reuse a task worktree, optionally copying named ignored files on entry, inspect workspace state, integrate or discard. Status includes full workspace paths.",
+    description: "Create/reuse a task worktree, optionally copying named ignored files on entry, inspect workspace state, integrate or discard. List returns only workspace/session IDs, newest first, with pagination (default 20, max 50). Use status with an id for full details and paths.",
     promptSnippet: "Manage the current task's isolated Git worktree and integration lifecycle.",
     promptGuidelines: [
       "Before making implementation changes with edit or write inside the git repository containing the current session cwd, call workspace with action=enter as the only tool call in that assistant response, unless the current session is already in an associated workspace. To edit existing ignored files, provide their paths relative to the original cwd in ignoredFiles on the first enter call; only those files are copied and later integrated. Wait for the cwd switch before using more tools.",
@@ -595,6 +629,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     parameters: Type.Object({
       action: StringEnum(WORKSPACE_ACTIONS, { description: "Workspace lifecycle action." }),
       id: Type.Optional(Type.String({ description: "Workspace id for enter, status, integration, or discard; enter creates a new task workspace unless an id is specified." })),
+      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "List only: zero-based offset (default 0). Use nextOffset from the previous page." })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "List only: number of entries per page (default 20, maximum 50)." })),
       ignoredFiles: Type.Optional(Type.Array(Type.String(), { description: "Existing ignored file paths relative to the original cwd, copied into a new task worktree on enter and copied back on integration." })),
       approved: Type.Optional(Type.Boolean({ description: "Required for integration or discard in ask mode when no interactive UI is available; does not bypass interactive confirmation." })),
     }),
@@ -603,16 +639,14 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       const action = params.action as WorkspaceAction;
       if (action === "status") {
         const record = params.id ? loadWorkspace(params.id) : workspaceForContext(ctx.cwd, sessionFile(ctx));
+        if (params.id && !record) throw new Error(`Unknown workspace: ${params.id}`);
         const text = record ? formatWorkspaceRecord(record) : formatStatus(ctx);
         publishWorkspaceState(ctx);
         return { content: [{ type: "text", text }], details: record ?? workspaceDisplayState(ctx.cwd, sessionFile(ctx)) };
       }
       if (action === "list") {
-        const records = listWorkspaces();
-        return {
-          content: [{ type: "text", text: records.length > 0 ? records.map(formatWorkspaceRecord).join("\n\n") : "No Pi workspaces." }],
-          details: { records },
-        };
+        const { text, details } = workspaceList(params.offset, params.limit);
+        return { content: [{ type: "text", text }], details };
       }
       if (params.ignoredFiles !== undefined && action !== "enter") {
         throw new Error("ignoredFiles only applies to action=enter.");
