@@ -13,7 +13,7 @@ local function message_role_title(message)
 		return "Tool"
 	end
 	if role == "user" or role == "You" then
-		return "User"
+		return message.submissionStatus and ("User (" .. message.submissionStatus .. ")") or "User"
 	end
 	return role:gsub("^%l", string.upper)
 end
@@ -388,7 +388,21 @@ function M.collect_message_lines(ctx, messages, tools)
 		assistant_block_open = false
 	end
 
-	for _, message in ipairs(scope_tool_calls(with_tool_executions(messages, tools))) do
+	local visible = scope_tool_calls(with_tool_executions(messages, tools))
+	local superseded_errors, retry_error = {}, nil
+	for index, message in ipairs(visible) do
+		local role = message.role or message.type
+		if role == "assistant" and message.stopReason ~= "aborted"
+			and (message.stopReason == "error" or message.errorMessage) then
+			-- Keep response content, but only the latest error in a retry sequence.
+			if retry_error then superseded_errors[retry_error] = true end
+			retry_error = index
+		elseif role ~= "agent_end" or not message.willRetry then
+			retry_error = nil
+		end
+	end
+
+	for index, message in ipairs(visible) do
 		local role = message.role or message.type
 		local appended = false
 		local rendered_kind = nil
@@ -485,7 +499,8 @@ function M.collect_message_lines(ctx, messages, tools)
 				appended = true
 				rendered_kind = "skill"
 			end
-			if message.stopReason == "error" or message.stopReason == "aborted" or message.errorMessage then
+			if not superseded_errors[index]
+				and (message.stopReason == "error" or message.stopReason == "aborted" or message.errorMessage) then
 				M.append_error(lines,
 					message.errorMessage or (message.stopReason == "aborted" and "Response aborted." or "Model request failed."),
 					has_body or appended, message.stopReason == "aborted" and "Aborted" or "Error")

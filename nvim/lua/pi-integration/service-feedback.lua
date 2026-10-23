@@ -4,9 +4,12 @@ function M.tracks(operation)
 	return not operation:match("^control%.") and not operation:match("^interaction%.")
 		and operation ~= "queue.reserve" and operation ~= "queue.release"
 end
-function M.add(entries, id, operation, payload, session, epoch, revision)
+function M.add(entries, id, operation, payload, session, epoch, revision, snapshot)
+	local conversation = snapshot and snapshot.conversation or { messages = {} }
+	local keys = conversation.messageKeys or {}
 	local entry = { id = id, operation = operation, payload = payload, sessionId = session,
-		serviceEpoch = epoch, runtimeRevision = revision, status = "Pending", sent = false }
+		serviceEpoch = epoch, runtimeRevision = revision, status = "Pending", sent = false,
+		timeline = (#keys > 0 or #conversation.messages == 0) and { afterMessage = keys[#keys] or vim.NIL } or nil }
 	table.insert(entries, entry)
 	return entry
 end
@@ -65,8 +68,8 @@ function M.reconcile(entries, snapshot)
 		end
 	end
 end
--- Only observed conversation turns belong in the transcript. Pending text stays
--- in the queue picker; failed deliveries add standalone errors, never user turns.
+-- Local turns are display-only. Queue identities and observed message keys
+-- replace them with owner history without matching text or authorizing delivery.
 function M.timeline_messages(entries, session, snapshot)
 	local conversation = snapshot and snapshot.conversation or {}
 	local history = vim.deepcopy(conversation.messages or {})
@@ -77,35 +80,42 @@ function M.timeline_messages(entries, session, snapshot)
 		positions[key] = index
 	end
 	local buckets, unmatched, queued = {}, {}, {}
-	local function place(error, timeline)
-		if not error or error == "" then return end
-		local observed = timeline and positions[timeline.observedMessage]
+	local function place(text, status, error, timeline)
+		local observed_key = timeline and timeline.observedMessage
+		local observed = positions[observed_key]
 		local at
-		if observed and not ambiguous[timeline.observedMessage] then
+		if observed and not ambiguous[observed_key] then
 			at = observed
 			-- Pi may already have recorded the same failure in this turn.
 			for index = observed + 1, #history do
 				if history[index].role == "user" then break end
-				if history[index].errorMessage == error then return end
+				if history[index].errorMessage == error then error = nil; break end
 			end
 		elseif timeline then
 			if timeline.afterMessage == vim.NIL and (conversation.omittedMessages or 0) == 0 then at = 0
 			elseif timeline.afterMessage and not ambiguous[timeline.afterMessage] then at = positions[timeline.afterMessage] end
 		end
-		local message = { role = "error", content = { { type = "text", text = error } } }
+		local messages = {}
+		if not observed or ambiguous[observed_key] then
+			table.insert(messages, { role = "user", content = { { type = "text", text = text } }, submissionStatus = status })
+		end
+		if error and error ~= "" then
+			table.insert(messages, { role = "error", content = { { type = "text", text = error } } })
+		end
 		if at then
 			buckets[at] = buckets[at] or {}
-			table.insert(buckets[at], message)
-		else table.insert(unmatched, message) end
+			vim.list_extend(buckets[at], messages)
+		else vim.list_extend(unmatched, messages) end
 	end
 	local queue = snapshot and snapshot.acceptedQueue.items or {}
 	for _, item in ipairs(queue) do
 		queued[item.id] = true
-		place(item.error and item.error.message, item.timeline)
+		local status = ({ queued = "Queued", sending = "Sending", failed = "Failed" })[item.status]
+		place(item.text, status, item.error and item.error.message, item.timeline)
 	end
 	for _, entry in ipairs(entries) do
 		if entry.sessionId == session and entry.operation == "prompt.submit" and not queued[queue_id(entry)] then
-			place(entry.error, entry.timeline)
+			place(entry.payload.text, entry.status, entry.error, entry.timeline)
 		end
 	end
 	local visible = {}
@@ -115,7 +125,7 @@ function M.timeline_messages(entries, session, snapshot)
 		vim.list_extend(visible, buckets[index] or {})
 	end
 	if conversation.partialAssistant then table.insert(visible, vim.deepcopy(conversation.partialAssistant.message)) end
-	-- An unavailable anchor cannot establish chronology. Keep its error separate.
+	-- Unavailable anchors fall back to the end, keeping local text and errors together.
 	vim.list_extend(visible, unmatched)
 	return visible
 end

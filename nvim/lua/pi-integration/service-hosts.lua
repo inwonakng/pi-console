@@ -314,7 +314,7 @@ function M.open(entry, in_place)
 		if not opened then notify(failure) end
 	end
 	if entry.status == "Not Open" then
-		vim.ui.select({ "Cancel", "Resume" }, { prompt = "Resume stopped session on " .. host.alias .. "? No work is replayed." }, function(choice) if choice == "Resume" then select(true) end end)
+		vim.ui.select({ "Resume", "Cancel" }, { prompt = "Resume stopped session on " .. host.alias .. "? No work is replayed." }, function(choice) if choice == "Resume" then select(true) end end)
 	else select(false) end
 	return true
 end
@@ -368,7 +368,7 @@ function M.saved_operations()
 				end)
 				vim.notify(item.envelope.operation .. ": " .. outcome_label(receipt), vim.log.levels.INFO, { title = "Saved-session outcome" })
 				if receipt.status == "unknown" or receipt.status == "uncertain" then
-					vim.ui.select({ "Keep protected", "Allow a new saved-session request" }, { prompt = "Original work may have partially or fully run. Inspect owner session/workspace state first. This does not replay it." }, function(choice)
+					vim.ui.select({ "Allow a new saved-session request", "Keep protected" }, { prompt = "Original work may have partially or fully run. Inspect owner session/workspace state first. This does not replay it." }, function(choice)
 						if choice ~= "Allow a new saved-session request" then return end
 						local saved, err = store.update("saved-requests", vim.empty_dict(), function(records)
 							local entry = records[item.host_id .. "/" .. item.envelope.id]
@@ -400,7 +400,7 @@ local function saved_action(host, row, operation)
 			end
 			table.insert(lines, "Recovery patches are prepared after confirmation. Ignored untracked files, including copied ignored files, are NOT in patches and will be removed with worktrees. Patches and workspace records are kept on the owner.")
 		end
-		vim.ui.select({ "Cancel", verb }, { prompt = table.concat(lines, "\n") }, function(choice)
+		vim.ui.select({ verb, "Cancel" }, { prompt = table.concat(lines, "\n") }, function(choice)
 			if choice ~= verb then return end
 			if not current() then notify("Owner connection changed while confirming; select the conversation again"); return end
 			local payload = { sessionId = row.id, expectedVersion = preview.version, confirmed = true }
@@ -552,7 +552,7 @@ function M.manage(entry, action, argument)
 		end)
 	end
 	if action == "kill" then
-		vim.ui.select({ "Cancel", "Kill session" }, { prompt = "Kill " .. entry.title .. " on " .. host.alias .. "? Active work is interrupted; history/workspaces remain." }, function(choice)
+		vim.ui.select({ "Kill session", "Cancel" }, { prompt = "Kill " .. entry.title .. " on " .. host.alias .. "? Active work is interrupted; history/workspaces remain." }, function(choice)
 			if choice == "Kill session" then send() end
 		end)
 	else send() end
@@ -570,7 +570,7 @@ local function confirm_target(target, previous)
 		local hello = record.result
 		if hello.channel ~= channel then notify("Channel mismatch; host was not saved"); return end
 		local changed = previous and previous.host_id ~= hello.hostId
-		vim.ui.select({ "Cancel", "Save confirmed identity" }, { prompt = (changed and "REPLACEMENT service. Old pins remain separate. " or "") .. host_label(target) .. " / " .. hello.channel }, function(choice)
+		vim.ui.select({ "Save confirmed identity", "Cancel" }, { prompt = (changed and "REPLACEMENT service. Old pins remain separate. " or "") .. host_label(target) .. " / " .. hello.channel }, function(choice)
 			if choice ~= "Save confirmed identity" then return end
 			target.host_id, target.enabled = hello.hostId, true
 			if save_identity(target, hello.hostId, true) and persist(target, previous and previous.key) then M.refresh() end
@@ -645,7 +645,7 @@ function M.picker(on_attach)
 			elseif action == "Edit / confirm identity" then edit(host)
 			elseif action == "Forget" then
 				if host.key == "local" then notify("Default local source can be disconnected, not forgotten"); return end
-				vim.ui.select({ "Cancel", "Forget host" }, { prompt = "Disconnect and forget this host? Execution and organization are retained." }, function(choice)
+				vim.ui.select({ "Forget host", "Cancel" }, { prompt = "Disconnect and forget this host? Execution and organization are retained." }, function(choice)
 					if choice ~= "Forget host" then return end
 					if update(function(data)
 						for i, saved in ipairs(data.hosts) do if saved.key == host.key then table.remove(data.hosts, i); break end end

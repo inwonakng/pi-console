@@ -301,12 +301,9 @@ local function command(operation, payload, callback, captured, terminal, submiss
 		local entry = submission and submission.entry
 		local input_buf = submission and submission.input_buf
 		entry = entry or feedback_ui.add(feedback, envelope.id, operation, envelope.payload, session_id,
-			snapshot.serviceEpoch, current_revision())
+			snapshot.serviceEpoch, current_revision(), snapshot)
 		entry.id, entry.sessionId, entry.serviceEpoch, entry.runtimeRevision = envelope.id, session_id, snapshot.serviceEpoch, current_revision()
 		entry.status, entry.sent = "Sending", true
-		local keys = snapshot.conversation.messageKeys or {}
-		entry.timeline = (#keys > 0 or #snapshot.conversation.messages == 0)
-			and { afterMessage = keys[#keys] or vim.NIL } or nil
 		if valid(input_buf) then
 			layout.set_buffer_lines(ctx, input_buf, { "" }, true)
 			vim.bo[input_buf].modified = false
@@ -989,7 +986,7 @@ function M.take_control()
 	local captured = stamp()
 	local controller = current_controller()
 	if controller then
-		vim.ui.select({ "Cancel", "Take over" }, { prompt = "Take control from " .. controller.label .. "? Accepted work continues." }, function(choice)
+		vim.ui.select({ "Take over", "Cancel" }, { prompt = "Take control from " .. controller.label .. "? Accepted work continues." }, function(choice)
 			if choice == "Take over" then acquire_control(true, captured) end
 		end)
 	else acquire_control(false, captured) end
@@ -1064,7 +1061,7 @@ function M.submit_prompt()
 	elseif next(pending_settings) then
 		if not control_current() then notify("Use :PiControl before applying pending settings and submitting."); return end
 	else submit_input(original); return end
-	local entry = feedback_ui.add(feedback, uid(), "prompt.submit", { text = original }, session_id, hello.serviceEpoch, current_revision())
+	local entry = feedback_ui.add(feedback, uid(), "prompt.submit", { text = original }, session_id, hello.serviceEpoch, current_revision(), snapshot)
 	entry.status = "Starting session"
 	starting = { input = original, entry = entry }
 	layout.set_buffer_lines(ctx, state.input_buf, { "" }, true)
@@ -1080,7 +1077,7 @@ function M.show_host_request()
 	local envelope = pending_host
 	request("host.status", { serviceEpoch = envelope.serviceEpoch, commandId = envelope.id }, function(ok, receipt)
 		draft_buffer(scratch_name("host-request"), operation_summary(envelope, receipt))
-		vim.ui.select({ "Keep protected", "Allow a new host request" }, { prompt = "Existing request may already have created/resumed a session; review its outcome first." }, function(choice)
+		vim.ui.select({ "Allow a new host request", "Keep protected" }, { prompt = "Existing request may already have created/resumed a session; review its outcome first." }, function(choice)
 			if choice == "Allow a new host request" and pending_host == envelope then pending_host, pending_host_select = nil, nil end
 		end)
 	end)
@@ -1118,7 +1115,7 @@ function M.show_submissions()
 			end
 			draft_buffer(scratch_name("submission-review"), operation_summary(envelope, receipt))
 			render()
-			vim.ui.select({ "Keep protected", "Allow a new submission" }, { prompt = "This text may already have executed. Allowing a new submission can duplicate work." }, function(choice)
+			vim.ui.select({ "Allow a new submission", "Keep protected" }, { prompt = "This text may already have executed. Allowing a new submission can duplicate work." }, function(choice)
 				if choice == "Allow a new submission" then unresolved[id] = nil; submission_status[id] = nil; render() end
 			end)
 		end)
@@ -1351,7 +1348,7 @@ function M.change_cwd()
 end
 local function lifecycle(operation, label, prompt)
 	local captured = stamp()
-	vim.ui.select({ "Cancel", label }, { prompt = prompt or label .. " on owner? Active work is interrupted; history/workspaces and recovery text remain." }, function(choice)
+	vim.ui.select({ label, "Cancel" }, { prompt = prompt or label .. " on owner? Active work is interrupted; history/workspaces and recovery text remain." }, function(choice)
 		if choice ~= label then return end
 		command(operation, { confirmed = true }, nil, captured, function(receipt)
 			if receipt.status == "completed" and operation == "session.kill" then
@@ -1492,7 +1489,7 @@ function M.toggle_side()
 end
 function M.new_side()
 	local captured = stamp()
-	vim.ui.select({ "Cancel", "New side conversation" }, { prompt = "Stop and replace the side conversation on owner?" }, function(choice)
+	vim.ui.select({ "New side conversation", "Cancel" }, { prompt = "Stop and replace the side conversation on owner?" }, function(choice)
 		if choice == "New side conversation" then command("side.reset", {}, nil, captured) end
 	end)
 end

@@ -1185,7 +1185,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
           prompt: `There are running subagents. Continuing will stop them. Continue ${action}?`,
           notify: false,
         }),
-        ["Cancel", "Continue and stop subagents"],
+        ["Continue and stop subagents", "Cancel"],
       );
       if (choice !== "Continue and stop subagents") return { cancel: true };
       for (const run of running) stopRun(run, "session_switch");

@@ -88,7 +88,7 @@ function M.open(options, workspace_id, pinned)
 			if action.pending then vim.b[buf].pi_review_command_id, vim.b[buf].pi_review_command_epoch = action.pending, captured.epoch end
 		end
 		if operation == "restore" then
-			vim.ui.select({ "Cancel", "Restore baseline" }, { prompt = "Restore " .. path .. " on owner? Restores baseline bytes/index, or removes an added file while keeping its index entry. Original bytes remain in the receipt; local drafts stay unchanged." }, function(choice)
+			vim.ui.select({ "Restore baseline", "Cancel" }, { prompt = "Restore " .. path .. " on owner? Restores baseline bytes/index, or removes an added file while keeping its index entry. Original bytes remain in the receipt; local drafts stay unchanged." }, function(choice)
 				if choice == "Restore baseline" then send() end
 			end)
 		else send() end
