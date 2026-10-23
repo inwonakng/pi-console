@@ -215,7 +215,12 @@ end
 
 function M.start_overview()
 	local pane = vim.env.TMUX_PANE
-	local marked, err = command({ "set-option", "-w", "-t", pane, "@pi_overview", "1", ";", "set-option", "-w", "-t", pane, "@pi_overview_pane", pane })
+	local marked, err = command({
+		"set-option", "-w", "-t", pane, "@pi_overview", "1",
+		";", "set-option", "-w", "-t", pane, "@pi_overview_pane", pane,
+		";", "set-option", "-wF", "-t", pane, "window-status-style", "#{window-status-style},fg=#42D9F3",
+		";", "set-option", "-wF", "-t", pane, "window-status-current-style", "#{window-status-current-style},fg=#42D9F3",
+	})
 	if not marked then
 		return nil, err
 	end

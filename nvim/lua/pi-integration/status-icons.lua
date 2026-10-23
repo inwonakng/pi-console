@@ -1,5 +1,5 @@
 -- Shared by the compact overview and managed tmux window titles.
--- Colors match the dedicated frontend's Catppuccin Frappe palette.
+-- Colors use Catppuccin Frappe with a dedicated new-session accent.
 local M = { animation_interval_ms = 500, subagent_icon = "󰇥" }
 -- The conversation footer uses these same frames at its faster local cadence.
 M.working_frames = { "⠖", "⠲", "⢒", "⢰", "⣰", "⣠", "⣄", "⣆" }
@@ -11,6 +11,7 @@ local colors = {
 	mauve = "#ca9ee6",
 	muted = "#737994",
 	red = "#e78284",
+	apricot = "#FFAB5C",
 }
 local styles = {
 	Done = { icon = "✓", color = colors.green, bold = true },
@@ -19,7 +20,7 @@ local styles = {
 	Compacting = { icon = "", color = colors.mauve },
 	Loading = { frames = loading_frames, color = colors.blue },
 	Idle = { icon = "󰽥", color = colors.muted },
-	Unstarted = { icon = "", color = colors.muted },
+	Unstarted = { icon = "", color = colors.apricot },
 	Error = { icon = "", color = colors.red },
 	["Not Open"] = { icon = "", color = colors.muted },
 	Disconnected = { icon = "", color = colors.muted },
