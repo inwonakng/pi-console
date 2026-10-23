@@ -1,7 +1,7 @@
 local map = vim.keymap.set
 
 -- window manipulation
-map("n", "<leader>qq", "<cmd>qa<cr>", { desc = "Quit" })
+map("n", "<leader>qq", "<cmd>qa<cr>", { desc = "Close frontend" })
 map("n", "<leader>wd", "<cmd>q<cr>", { desc = "Close Window" })
 map("n", "<leader>\\", "<cmd>vsplit<cr>", { desc = "Vertical split" })
 map("n", "<leader>-", "<cmd>split<cr>", { desc = "Horizontal split" })

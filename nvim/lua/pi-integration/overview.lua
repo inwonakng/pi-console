@@ -14,6 +14,7 @@ local function text(value)
 end
 
 local function column(value, width)
+	if width <= 0 then return "" end
 	value = text(value)
 	if vim.fn.strdisplaywidth(value) > width then
 		while vim.fn.strdisplaywidth(value) > width - 1 do
@@ -71,6 +72,17 @@ end
 local blank_indicators = column("", indicator_widths[1])
 	.. " " .. column("", indicator_widths[2])
 	.. " " .. column("", indicator_widths[3])
+
+local function column_widths(win)
+	-- Reserve the pin/expand prefix, indicators, and five two-space gaps.
+	local usable = math.max(0, vim.api.nvim_win_get_width(win) - 5 - vim.fn.strdisplaywidth(blank_indicators) - 10)
+	return {
+		status = math.min(13, math.floor(usable * 0.08)),
+		project = math.min(20, math.floor(usable * 0.14)),
+		workspace = math.min(14, math.floor(usable * 0.12)),
+		host = math.min(12, math.floor(usable * 0.10)),
+	}
+end
 
 local function set_lines(buf, lines)
 	if not vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), lines) then
@@ -132,7 +144,7 @@ function M.open(config)
 	local closed = false
 	local refreshing = false
 	local select_last_focused = true
-	local focus_autocmd
+	local focus_autocmd, resize_autocmd
 	local timer = vim.uv.new_timer()
 	local function selected()
 		if vim.api.nvim_win_is_valid(list_win) then
@@ -214,11 +226,12 @@ function M.open(config)
 		for _, entry in ipairs(entries) do
 			if entry.pinned then pinned_count = pinned_count + 1 end
 		end
+		local widths = column_widths(list_win)
 		local lines = {
 			" Pi sessions · " .. #instances .. " open · " .. pinned_count .. " pinned",
 			query == "" and "" or (" Filter: " .. query),
 			"",
-			"     " .. column("Status", 13) .. "  " .. blank_indicators .. "  " .. column("Project", 20) .. "  " .. column("Workspace", 10) .. ("  " .. column("Host", 18)) .. "  Title",
+			"     " .. column("Status", widths.status) .. "  " .. blank_indicators .. "  " .. column("Project", widths.project) .. "  " .. column("Workspace", widths.workspace) .. "  " .. column("Host", widths.host) .. "  Title",
 		}
 		local function highlight(row, first, last, group)
 			table.insert(highlights, { row = row - 1, first = first, last = last, group = group })
@@ -239,13 +252,15 @@ function M.open(config)
 				local name = vim.fn.fnamemodify(project(entry), ":t")
 				local indicators, spans = indicator_columns(entry)
 				local prefix = " " .. session_list.session_prefix(node)
-				local indicator_start = #prefix + #column(entry.status, 13) + 2
-				local row_prefix = prefix .. column(entry.status, 13) .. "  " .. indicators .. "  " .. column(name, 20) .. "  " .. column(workspace_label(entry), 10) .. "  " .. column(entry.host_name, 18) .. "  "
+				local status_cell = column(entry.status, widths.status)
+				local indicator_start = #prefix + #status_cell + 2
+				local host_alias = text(entry.location) ~= "" and entry.location or entry.host_name
+				local row_prefix = prefix .. status_cell .. "  " .. indicators .. "  " .. column(name, widths.project) .. "  " .. column(workspace_label(entry), widths.workspace) .. "  " .. column(host_alias, widths.host) .. "  "
 				local badge = build_info.is_dev(entry) and "DEV " or ""
 				local suffix = session_list.session_suffix(node)
 				local title = badge .. text(entry.title) .. suffix
 				table.insert(lines, row_prefix .. title)
-				highlight(row, #prefix, #prefix + #text(entry.status), icons.highlight(entry.status))
+				highlight(row, #prefix, #prefix + #status_cell, icons.highlight(entry.status))
 				for _, span in ipairs(spans) do
 					highlight(row, indicator_start + span.start_col, indicator_start + span.end_col, span.highlight)
 				end
@@ -402,6 +417,7 @@ function M.open(config)
 		if not closed then
 			closed = true
 			vim.api.nvim_del_autocmd(focus_autocmd)
+			vim.api.nvim_del_autocmd(resize_autocmd)
 			timer:stop()
 			timer:close()
 		end
@@ -412,6 +428,7 @@ function M.open(config)
 			refresh()
 		end,
 	})
+	resize_autocmd = vim.api.nvim_create_autocmd("WinResized", { callback = refresh })
 	vim.api.nvim_create_autocmd("BufWipeout", { buffer = list_buf, once = true, callback = stop })
 	vim.api.nvim_create_autocmd("VimLeavePre", { once = true, callback = stop })
 	refresh()

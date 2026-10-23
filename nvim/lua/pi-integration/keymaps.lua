@@ -7,6 +7,7 @@ M.specs = {
 		{ modes = { "n", "i" }, lhs = "<C-CR>", action = "submit_prompt", desc = "Submit prompt" },
 	},
 	shared = {
+		{ lhs = "<leader>qk", action = "kill_session", desc = "Kill conversation and close frontend" },
 		{ lhs = "<leader>a", action = "cycle_access_mode", desc = "Cycle access mode" },
 		{ lhs = "<leader>i", action = "cycle_integration_mode", desc = "Cycle integration mode" },
 		{ lhs = "<leader>?", action = "show_help", desc = "Pi help" },
@@ -119,6 +120,7 @@ end
 function M.help_key_lines()
 	local lines = {
 		"- `<C-CR>` submit the input buffer.",
+		"- `<leader>qq` close the frontend; conversation keeps running.",
 	}
 	for _, spec in ipairs(M.specs.shared) do
 		table.insert(lines, "- `" .. spec.lhs .. "` " .. spec.desc .. ".")
