@@ -10,6 +10,8 @@ local buffer = require("pi-integration.utils.buffer")
 local state = require("pi-integration.state").new()
 local resources = require("pi-integration.service-resources")
 local pending_picker = require("pi-integration.pending-picker")
+local feedback_ui = require("pi-integration.service-feedback")
+local feedback = {}
 state.show_nested_tools = true
 local session_id, attachment, snapshot, hello, grant, job
 local authority
@@ -25,7 +27,7 @@ local approval_context, pending_context
 local pending_seen, pending_replies = {}, {}
 local ctx, sync_pending
 local recovery_id, backup_scheduled, restarting_frontend
-local render, refresh, connect, attach, recover_selection, tree_ctx, advance_start, host_options
+local render, refresh, connect, attach, recover_selection, tree_ctx, advance_start, host_options, backup
 local side_buf
 local owner_states, pending_settings = {}, {}
 local selected_cwd, starting, new_control_selection, startup_options
@@ -166,6 +168,15 @@ end
 local function text_submission(operation)
 	return operation == "prompt.submit" or operation == "shell.run" or operation == "steering.submit" or operation == "followUp.submit" or operation == "side.prompt"
 end
+local function fail_start(message)
+	if not starting then return end
+	if starting.entry then
+		starting.entry.status, starting.entry.error = "Not sent", message
+	end
+	starting = nil
+	notify(message)
+	if render then render() end
+end
 local function close_approval()
 	approval_request, approval_context = nil, nil
 	if ctx then pending_picker.clear(ctx, false) end
@@ -273,7 +284,7 @@ function M.complete_files(prefix, callback)
 	if not job or not snapshot or not attachment then callback({ entries = {} }); return end
 	resources.complete(resource_options(), prefix, callback)
 end
-local function command(operation, payload, callback, captured, terminal)
+local function command(operation, payload, callback, captured, terminal, submission)
 	if not snapshot or not attachment then notify("Attach to a live session first."); return end
 	if not hello or not vim.tbl_contains(hello.capabilities or {}, operation) then unavailable(operation); return end
 	if captured and not current(captured) then notify("Stale editor/dialog; its text remains a local draft.", vim.log.levels.WARN); return end
@@ -283,7 +294,29 @@ local function command(operation, payload, callback, captured, terminal)
 	if operation ~= "control.acquire" and operation ~= "control.takeover" then envelope.controlToken = grant and grant.token end
 	unresolved[envelope.id] = envelope -- Diagnostic identity only, never replayed.
 	if terminal then outcomes[envelope.id] = { callback = terminal, captured = captured or stamp(), lifecycle = operation == "session.kill", transition = operation == "history.navigate", history_refresh = operation == "history.delete" } end
+	if feedback_ui.tracks(operation) then
+		local entry = submission and submission.entry
+		local input_buf = submission and submission.input_buf
+		entry = entry or feedback_ui.add(feedback, envelope.id, operation, envelope.payload, session_id,
+			snapshot.serviceEpoch, current_revision())
+		entry.id, entry.sessionId, entry.serviceEpoch, entry.runtimeRevision = envelope.id, session_id, snapshot.serviceEpoch, current_revision()
+		entry.status, entry.sent = "Sending", true
+		if valid(input_buf) then
+			layout.set_buffer_lines(ctx, input_buf, { "" }, true)
+			vim.bo[input_buf].modified = false
+		end
+		render()
+		transcript.scroll_to_bottom_unless_focused(ctx)
+		vim.cmd("redraw")
+		if not backup() then
+			entry.status, entry.error, entry.sent = "Not sent", "Local recovery could not be saved. No command was sent.", false
+			unresolved[envelope.id], outcomes[envelope.id] = nil, nil
+			render()
+			return
+		end
+	end
 	request("command", envelope, function(ok, result)
+		feedback_ui.receipt(feedback, envelope.id, ok, result)
 		-- Only an acknowledgment or proven local non-delivery resolves this send.
 		-- A failed request/status lookup alone never proves non-admission.
 		if (ok and (not operation:match("^workspace%.review%.") or result.status == "completed" or result.status == "failed")) or result.delivery == "not_sent" then
@@ -295,6 +328,7 @@ local function command(operation, payload, callback, captured, terminal)
 			local outcome = outcomes[envelope.id]; outcomes[envelope.id] = nil
 			if outcome_current(outcome, result) then outcome.callback(result) end
 		end
+		render()
 		refresh()
 	end)
 	return envelope.id
@@ -338,14 +372,14 @@ local function local_snapshot()
 	return { cwd = vim.fn.getcwd(), service_session = session_id, service_root = M.config.service_root,
 		service_remote = M.config.service_remote, credential_file = M.config.credential_file, ca_file = M.config.ca_file,
 		expected_host = M.config.expected_host, owner_states = owner_states,
-		selected_cwd = selected_cwd, pending_settings = pending_settings,
+		selected_cwd = selected_cwd, pending_settings = pending_settings, feedback = feedback,
 		role = M.config.role,
 		host = hello and hello.hostId, channel = hello and hello.channel, saved_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
 		input_lines = valid(state.input_buf) and vim.api.nvim_buf_get_lines(state.input_buf, 0, -1, false) or { "" },
 		unresolved = unresolved, submission_status = submission_status, pending_host = pending_host, pending_host_select = pending_host_select,
 		drafts = saved_drafts }
 end
-local function backup()
+backup = function()
 	if not valid(state.input_buf) and next(drafts) == nil then return true end
 	recovery_id = recovery_id or uid()
 	local ok, err = pcall(require("pi-integration.service-drafts").save, recovery_id, local_snapshot())
@@ -435,7 +469,6 @@ local function update_status_state()
 end
 ctx.transcript.metadata_lines = function() return transcript.metadata_lines(ctx) end
 render = function()
-	publish_attachment()
 	if not valid(state.transcript_buf) then return end
 	local conversation = snapshot and snapshot.conversation
 	update_status_state()
@@ -465,7 +498,13 @@ render = function()
 			vim.list_extend(lines, { "", "### Queue — " .. item.status .. " r" .. item.revision,
 				item.text, item.error and item.error.message or "" })
 		end
+		for _, queue in ipairs({ { "steering", "Steering" }, { "followUp", "Follow-up" } }) do
+			for _, value in ipairs(conversation.queue[queue[1]] or {}) do
+				vim.list_extend(lines, { "", "### " .. queue[2] .. " (queued)", value })
+			end
+		end
 	end
+	vim.list_extend(lines, feedback_ui.lines(feedback, session_id, snapshot))
 	if valid(side_buf) then
 		local side = status_data("pi-side")
 		local side_lines = { "# Side conversation on owner", "", "Local draft: :PiSidePrompt. :PiSideNew resets; :PiSideAbort stops.", "" }
@@ -496,6 +535,7 @@ render = function()
 	transcript.apply_collected_transcript_items(ctx, items)
 	transcript.render(ctx)
 	statusline.update(ctx)
+	publish_attachment()
 	if sync_pending then vim.schedule(sync_pending) end
 end
 local function apply_snapshot(value)
@@ -512,6 +552,8 @@ local function apply_snapshot(value)
 		for _, item in ipairs(snapshot.interactions.pending) do if item.request.id == approval_request and not item.submitted then live = true end end
 		if not live then close_approval() end
 	end
+	feedback_ui.reconcile(feedback, snapshot)
+	render()
 	if new_control_selection then
 		local runtime = snapshot.interactions.runtime
 		if not same_selection(new_control_selection) or current_controller() or snapshot.error then
@@ -524,7 +566,6 @@ local function apply_snapshot(value)
 			M.take_control()
 		end
 	end
-	render()
 	-- History may arrive after the initial attachment snapshot.
 	local initial_history = snapshot.conversation.hydrated and (not previous or not previous.conversation.hydrated)
 	if initial_history or same_runtime and previous.conversation.execution.running and not snapshot.conversation.execution.running then
@@ -538,9 +579,10 @@ refresh = function()
 	if refreshing or refresh_scheduled or not attachment or not job then return end
 	refresh_scheduled = true
 	local gen = generation
-	vim.defer_fn(function()
+	vim.schedule(function()
+		if gen ~= generation then return end
 		refresh_scheduled = false
-		if gen ~= generation or not attachment or not job then return end
+		if not attachment or not job then return end
 		dirty, refreshing = false, true
 		local target, selected = attachment, session_id
 		request("snapshot", {}, function(ok, value)
@@ -548,7 +590,7 @@ refresh = function()
 			if ok and gen == generation and target == attachment and selected == session_id then apply_snapshot(value) end
 			if dirty then refresh() end
 		end)
-	end, 100)
+	end)
 end
 local function disconnected()
 	tree.close(tree_ctx)
@@ -557,6 +599,7 @@ local function disconnected()
 	generation = generation + 1
 	job, attachment, grant, authority, hello, startup_options = nil, nil, nil, nil, nil, nil
 	session_status, session_error = "unattached", nil
+	feedback_ui.interrupt(feedback)
 	callbacks, outcomes, new_control_selection, starting = {}, {}, nil, nil
 	refreshing, refresh_scheduled, dirty = false, false, false
 	close_approval()
@@ -575,7 +618,7 @@ attach = function(id, acquire_control)
 	request("attach", { sessionId = id, label = "Neovim " .. vim.fn.getpid() }, function(ok, value)
 		if gen ~= generation or selected ~= selection then return end
 		if not ok then
-			starting = nil
+			fail_start("Startup attachment failed; submitted text remains in :PiDrafts.")
 			session_status, session_error = "unavailable", value.message .. " Use :PiReconnect to retry or :PiSessions to explicitly reopen."
 			render()
 			return
@@ -586,9 +629,21 @@ attach = function(id, acquire_control)
 		-- Only an explicitly completed New may acquire; attach/reconnect stays a viewer.
 		if acquire_control then new_control_selection = stamp() end
 		apply_snapshot(value.snapshot)
-		local lookups = {}
+		local lookups, seen = {}, {}
 		for command_id, envelope in pairs(unresolved) do
-			if envelope.sessionId == id then table.insert(lookups, { id = command_id, epoch = envelope.serviceEpoch }) end
+			if envelope.sessionId == id then
+				table.insert(lookups, { id = command_id, epoch = envelope.serviceEpoch })
+				seen[command_id] = true
+			end
+		end
+		-- Completed receipts can fall outside the snapshot's recent-command
+		-- window. Recover every retained send by its original identity, even
+		-- when its admission acknowledgment already cleared `unresolved`.
+		for _, entry in ipairs(feedback) do
+			if entry.sessionId == id and entry.sent and not seen[entry.id] then
+				table.insert(lookups, { id = entry.id, epoch = entry.serviceEpoch })
+				seen[entry.id] = true
+			end
 		end
 		local attached, next_lookup = attachment, 0
 		local function lookup_next()
@@ -598,10 +653,14 @@ attach = function(id, acquire_control)
 			if not lookup then return end
 			request("command.status", { serviceEpoch = lookup.epoch, commandId = lookup.id }, function(found, receipt)
 				if gen ~= generation or attached ~= attachment then return end
-				if found and unresolved[lookup.id] then
-					submission_status[lookup.id] = receipt.status
-					notify(operation_label(receipt) .. "; draft retained, not replayed. Review via :PiSubmissions.")
+				if found then
+					feedback_ui.receipt(feedback, lookup.id, true, receipt, true)
+					if unresolved[lookup.id] then
+						submission_status[lookup.id] = receipt.status
+						notify(operation_label(receipt) .. "; draft retained, not replayed. Review via :PiSubmissions.")
+					end
 					render()
+					refresh()
 				end
 				lookup_next()
 			end)
@@ -617,12 +676,20 @@ local function host_operation(operation, payload)
 	local captured = stamp()
 	local envelope = { id = uid(), serviceEpoch = hello.serviceEpoch, operation = operation, payload = payload }
 	pending_host, pending_host_select = envelope, true
-	if not backup() then pending_host, pending_host_select, starting = nil, nil, nil; return end
+	if starting and starting.entry then starting.entry.hostRequest = envelope.id end
 	session_status, session_error = "restoring", nil
 	render()
+	vim.cmd("redraw")
+	if not backup() then
+		pending_host, pending_host_select = nil, nil
+		session_status, session_error = "unavailable", "Startup was not sent because local recovery could not be saved."
+		fail_start(session_error)
+		render()
+		return
+	end
 	request("host.command", envelope, function(ok, receipt)
 		if not ok and pending_host == envelope then
-			starting = nil
+			fail_start("Startup did not complete; submitted text remains in :PiDrafts. Inspect :PiHostRequest before retrying.")
 			if receipt.delivery == "not_sent" then pending_host, pending_host_select = nil, nil end
 			if same_selection(captured) then
 				session_status = "unavailable"
@@ -637,11 +704,12 @@ local function host_operation(operation, payload)
 			if receipt.result then
 				if same_selection(captured) then
 					session_id = receipt.result.sessionId
+					feedback_ui.bind(feedback, envelope.id, session_id)
 					backup()
 					attach(session_id, operation == "host.create")
 				else notify("Host request completed; select the session in :PiSessions. Current view was not changed.") end
 			elseif receipt.error then
-				starting = nil
+				fail_start("Startup failed; submitted text remains in :PiDrafts.")
 				notify("Host request " .. receipt.status .. ": " .. receipt.error.message, vim.log.levels.WARN)
 				if same_selection(captured) then
 					session_status, session_error = "unavailable", receipt.error.message .. " Use :PiReconnect to retry or :PiSessions to explicitly reopen."
@@ -684,6 +752,7 @@ local function recover_host(allow_restore)
 			pending_host, pending_host_select = nil, nil
 			if select_result and same_selection(captured) then
 				session_id = receipt.result.sessionId
+				feedback_ui.bind(feedback, envelope.id, session_id)
 				recover_selection(allow_restore)
 			end
 		else
@@ -752,6 +821,10 @@ connect = function()
 			observe_authority(value.update, false)
 			if old_revision ~= current_revision() then close_approval() end
 			local receipt = value.update.command
+			if receipt then
+				feedback_ui.receipt(feedback, receipt.id, true, receipt)
+				render()
+			end
 			if receipt and unresolved[receipt.id] then
 				submission_status[receipt.id] = receipt.status
 				if receipt.operation:match("^workspace%.review%.") and (receipt.status == "completed" or receipt.status == "failed") then unresolved[receipt.id], submission_status[receipt.id] = nil, nil end
@@ -846,13 +919,13 @@ function M.select_owner(target, id, resume, cwd)
 		if not backup() then return end
 		-- The old selection's input must remain recoverable after new autosaves.
 		recovery_id = nil
-		owner_states[owner_key()] = { unresolved = unresolved, submission_status = submission_status,
+		owner_states[owner_key()] = { unresolved = unresolved, submission_status = submission_status, feedback = feedback,
 			pending_host = pending_host, pending_host_select = false }
 		M.detach()
 		M.config.service_root, M.config.service_remote = target.service_root, target.service_remote
 		M.config.credential_file, M.config.ca_file, M.config.expected_host = target.credential_file, target.ca_file, target.expected_host
 		local saved = owner_states[owner_key()] or {}
-		unresolved, submission_status = saved.unresolved or {}, saved.submission_status or {}
+		unresolved, submission_status, feedback = saved.unresolved or {}, saved.submission_status or {}, saved.feedback or {}
 		pending_host, pending_host_select = saved.pending_host, false
 		session_id, resume_requested, selected_cwd, recovery_requested = id, resume, cwd, false
 		snapshot, hello, pending_settings = nil, nil, settings
@@ -879,12 +952,12 @@ local function acquire_control(takeover, captured)
 		notify("Attachment/controller changed; request control again for this session."); return
 	end
 	command(takeover and "control.takeover" or "control.acquire", takeover and { confirmed = true } or {}, function(ok)
-		if not ok or not same_context(captured) then starting = nil; return end
+		if not ok or not same_context(captured) then fail_start("Startup control was not acquired; submitted text remains in :PiDrafts."); return end
 		request("grant", {}, function(found, value)
-			if not found or not same_context(captured) or value == vim.NIL then starting = nil; return end
+			if not found or not same_context(captured) or value == vim.NIL then fail_start("Startup control was not acquired; submitted text remains in :PiDrafts."); return end
 			grant = value
 			request("snapshot", {}, function(synced, value_snapshot)
-				if not synced or not same_context(captured) then starting = nil; return end
+				if not synced or not same_context(captured) then fail_start("Startup synchronization failed; submitted text remains in :PiDrafts."); return end
 				apply_snapshot(value_snapshot)
 				if not same_context(captured) then notify("Session runtime changed; select the action again."); return end
 			end)
@@ -902,7 +975,7 @@ function M.take_control()
 		end)
 	else acquire_control(false, captured) end
 end
-local function submit_input(original)
+local function submit_input(original, entry)
 	local trimmed = vim.trim(original)
 	local excluded = trimmed:sub(1, 2) == "!!"
 	local operation = trimmed:sub(1, 1) == "!" and "shell.run" or "prompt.submit"
@@ -911,30 +984,32 @@ local function submit_input(original)
 		if (envelope.operation == "prompt.submit" or envelope.operation == "shell.run") and envelope.sessionId == session_id
 			and vim.trim(envelope.payload.text or envelope.payload.command) == vim.trim(payload.text or payload.command) then
 			notify("This submission may already be accepted. Review :PiSubmissions before sending this text again.", vim.log.levels.WARN)
+			if entry then
+				entry.status, entry.error = "Not sent", "An earlier submission of this text is protected. Review :PiSubmissions before resending."
+				render()
+			end
 			return
 		end
 	end
-	local captured = stamp()
-	command(operation, payload, function(ok)
-		if ok and same_context(captured) and text(state.input_buf) == original then layout.set_buffer_lines(ctx, state.input_buf, { "" }, true) end
-	end)
+	local id = command(operation, payload, nil, nil, nil, { entry = entry, input_buf = not entry and state.input_buf or nil })
+	if entry and not id then
+		entry.status, entry.error = "Not sent", "Submission could not proceed; text remains in :PiDrafts."
+		render()
+	end
 end
 advance_start = function()
 	local start = starting
 	if not start or not snapshot then return end
 	if snapshot.error or snapshot.phase == "failed" or snapshot.phase == "stopped" then
-		starting = nil
-		notify("Startup failed; input and unapplied settings remain local."); return
+		fail_start("Startup failed; submitted text and unapplied settings remain local in :PiDrafts."); return
 	end
 	if start.context and not current(start.context) then
-		starting = nil
-		notify("Startup context changed; input remains local. Submit again after reviewing the session."); return
+		fail_start("Startup context changed; submitted text remains in :PiDrafts. Review the session before resending."); return
 	end
 	if not control_current() then
 		local controller = current_controller()
 		if controller and controller.attachmentId ~= attachment then
-			starting = nil
-			notify("Startup lost control; input remains local. Use :PiControl before submitting.")
+			fail_start("Startup lost control; submitted text remains in :PiDrafts. Use :PiControl before resending.")
 		end
 		return
 	end
@@ -945,7 +1020,7 @@ advance_start = function()
 		if payload then
 			start.busy = true
 			local function failed()
-				if starting == start then starting = nil; notify("Startup settings did not complete; input remains local. Inspect :PiOperations before retrying."); render() end
+				if starting == start then fail_start("Startup settings did not complete; submitted text remains in :PiDrafts. Inspect :PiOperations before retrying.") end
 			end
 			local id = command(operation, payload, function(ok) if not ok then failed() end end, start.context, function(receipt)
 				if starting ~= start then return end
@@ -959,7 +1034,7 @@ advance_start = function()
 		end
 	end
 	starting = nil
-	submit_input(start.input)
+	submit_input(start.input, start.entry)
 	render()
 end
 function M.submit_prompt()
@@ -973,13 +1048,22 @@ function M.submit_prompt()
 		if not hello or not job then notify("Connect to a host before submitting."); return end
 		if not selected_cwd then notify("Choose a directory with :PiCd before submitting."); return end
 		if pending_host then notify("Host request unresolved; inspect :PiHostRequest before submitting."); return end
-		starting = { input = original }
-		host_operation("host.create", { cwd = selected_cwd })
 	elseif next(pending_settings) then
 		if not control_current() then notify("Use :PiControl before applying pending settings and submitting."); return end
-		starting = { input = original }
-		advance_start()
-	else submit_input(original) end
+	else submit_input(original); return end
+	local excluded = trimmed:sub(1, 2) == "!!"
+	local operation = trimmed:sub(1, 1) == "!" and "shell.run" or "prompt.submit"
+	local payload = operation == "shell.run" and { command = trimmed:sub(excluded and 3 or 2), excludeFromContext = excluded } or { text = original }
+	local entry = feedback_ui.add(feedback, uid(), operation, payload, session_id, hello.serviceEpoch, current_revision())
+	entry.status = "Starting session"
+	starting = { input = original, entry = entry }
+	layout.set_buffer_lines(ctx, state.input_buf, { "" }, true)
+	vim.bo[state.input_buf].modified = false
+	render()
+	transcript.scroll_to_bottom_unless_focused(ctx)
+	vim.cmd("redraw")
+	if not backup() then fail_start("Startup was not sent because local recovery could not be saved."); return end
+	if not session_id then host_operation("host.create", { cwd = selected_cwd }) else advance_start() end
 end
 function M.show_host_request()
 	if not pending_host then notify("No unresolved host request."); return end
@@ -1018,7 +1102,10 @@ function M.show_submissions()
 		local envelope = id and unresolved[id]
 		if not envelope then return end
 		request("command.status", { serviceEpoch = envelope.serviceEpoch, commandId = id }, function(ok, receipt)
-			if ok then submission_status[id] = receipt.status end
+			if ok then
+				submission_status[id] = receipt.status
+				feedback_ui.receipt(feedback, id, true, receipt, true)
+			end
 			draft_buffer(scratch_name("submission-review"), operation_summary(envelope, receipt))
 			render()
 			vim.ui.select({ "Keep protected", "Allow a new submission" }, { prompt = "This text may already have executed. Allowing a new submission can duplicate work." }, function(choice)
@@ -1276,8 +1363,9 @@ local function setting(operation, payload, captured)
 		if captured and not same_selection(captured) then return end
 		pending_settings[operation] = payload
 		if operation == "model.set" then pending_settings["thinking.set"] = nil end
-		backup()
 		render()
+		vim.cmd("redraw")
+		backup()
 	else command(operation, payload, nil, captured) end
 end
 local function pick_setting(operation, values, label)
@@ -1343,19 +1431,16 @@ function M.pick_thinking()
 	end)
 end
 local function native_draft(operation, initial)
-	local captured, accepted_text = stamp(), nil
+	local captured = stamp()
 	local buf = draft_buffer(scratch_name(operation), initial or "", function(buf)
 		local submitted = text(buf)
-		if submitted == accepted_text then notify("This text was already accepted; edit it explicitly before sending new work."); return end
+		if vim.trim(submitted) == "" then return end
 		for id, envelope in pairs(unresolved) do
 			if envelope.operation == operation and envelope.sessionId == captured.session and envelope.payload.text == submitted then
 				notify("This submission may already be accepted; inspect :PiSubmissions."); return
 			end
 		end
-		command(operation, { text = submitted }, function(ok)
-			if ok then accepted_text = submitted end
-			if ok and valid(buf) and text(buf) == submitted then vim.bo[buf].modified = false end
-		end, captured)
+		command(operation, { text = submitted }, nil, captured, nil, { input_buf = buf })
 	end)
 	owner_resources().bind(buf)
 end
@@ -1576,11 +1661,12 @@ function M.show_owner_transcript()
 	require("pi-integration.spawn-transcript").open({ state = state, ui = { notify = notify }, window = { parent = state.transcript_win }, resources = owner_resources() }, nil, "Owner history (all branches)", { kind = "history" })
 end
 function M.show_drafts()
-	local ok, values = pcall(require("pi-integration.service-drafts").list)
-	if not ok then notify(tostring(values), vim.log.levels.ERROR); return end
+	local values = { { value = local_snapshot(), current = true } }
+	local ok, saved = pcall(require("pi-integration.service-drafts").list)
+	if ok then vim.list_extend(values, saved) else notify(tostring(saved), vim.log.levels.ERROR) end
 	vim.ui.select(values, { prompt = "Local draft recovery (inspect only; never replayed)", format_item = function(item)
 		local value = item.value
-		return tostring(value.saved_at) .. " " .. owner_label(value.host or value.expected_host, value.service_remote, value.service_root)
+		return (item.current and "Current frontend " or "") .. tostring(value.saved_at) .. " " .. owner_label(value.host or value.expected_host, value.service_remote, value.service_root)
 			.. " " .. tostring(value.channel or "") .. ": " .. preview(table.concat(value.input_lines or {}, " "))
 	end }, function(item)
 		if item then
@@ -1589,8 +1675,9 @@ function M.show_drafts()
 			for _, draft in ipairs(value.drafts or {}) do
 				recovered_draft(draft)
 			end
-			if next(value.unresolved or {}) or value.pending_host then
+			if next(value.unresolved or {}) or value.pending_host or next(value.feedback or {}) then
 				local summaries = { "# Recovered protected operations", "Inspect only; never replayed." }
+				for _, entry in ipairs(value.feedback or {}) do table.insert(summaries, operation_summary(entry, entry.receipt)) end
 				for _, envelope in pairs(value.unresolved or {}) do table.insert(summaries, operation_summary(envelope)) end
 				if value.pending_host then table.insert(summaries, operation_summary(value.pending_host)) end
 				draft_buffer(scratch_name("recovery-status"), table.concat(summaries, "\n\n"))
@@ -1656,6 +1743,8 @@ function M.open(restore)
 		unresolved = restore.unresolved or {}
 		selected_cwd, pending_settings = restore.selected_cwd, restore.pending_settings or {}
 		submission_status = restore.submission_status or {}
+		feedback = restore.feedback or {}
+		feedback_ui.interrupt(feedback)
 		if restore.expected_host then M.config.service_root = restore.service_root
 		else M.config.service_root = restore.service_root or M.config.service_root end
 		M.config.expected_host = restore.expected_host
