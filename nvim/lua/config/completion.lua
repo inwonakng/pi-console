@@ -75,11 +75,16 @@ cmp.setup({
 		default = function()
 			if is_owner_directory_prompt() then return { "pi_directories" } end
 			if vim.api.nvim_buf_get_name(0) == "pi://input" then
-				return { "pi_zotero", "pi_files", "buffer" }
+				return { "pi_commands", "pi_zotero", "pi_files", "buffer" }
 			end
 			return { "pi_zotero", "pi_files", "lsp", "path", "snippets", "buffer" }
 		end,
 		providers = {
+			pi_commands = {
+				name = "Pi commands",
+				module = "pi-integration.completion",
+				score_offset = 100,
+			},
 			cmdline = { enabled = function() return not is_owner_directory_prompt() end },
 			pi_directories = {
 				name = "Owner directories",

@@ -1056,7 +1056,6 @@ function M.submit_prompt()
 	local original = text(state.input_buf)
 	local trimmed = vim.trim(original)
 	if trimmed == "" then return end
-	if trimmed:sub(1, 1) == "/" then unavailable("Freeform slash commands; use typed controls"); return end
 	if starting then notify("Session startup is already pending; input remains local."); return end
 	if not session_id then
 		if not hello or not job then notify("Connect to a host before submitting."); return end
@@ -1651,27 +1650,56 @@ tree_ctx.tree = {
 function M.show_tree()
 	tree.show(tree_ctx)
 end
-function M.pick_command()
+function M.command_context_current(captured)
+	return captured and job and attachment and same_context(captured) and captured.epoch == snapshot.serviceEpoch
+end
+-- Read the attached runtime every time; no host/session command list is reused.
+function M.get_commands(callback)
+	if not job or not attachment or not snapshot then
+		callback({}, "Attach to a live session to discover its slash commands.")
+		return
+	end
 	local captured = stamp()
-	vim.ui.select({ "Compact", "Abort retry", "Steer", "Follow up", "Steering delivery", "Follow-up delivery", "Auto compaction", "Auto retry", "History" }, { prompt = "Typed owner operations" }, function(choice)
-		if not current(captured) then notify("Controller/context changed; select again."); return end
-		if choice == "Compact" then vim.ui.input({ prompt = "Compaction instructions: " }, function(value) if value then command("compaction.run", { instructions = value }, nil, captured) end end)
-		elseif choice == "Abort retry" then command("retry.abort", {}, nil, captured)
-		elseif choice == "Steer" then M.steer()
-		elseif choice == "Follow up" then M.follow_up()
-		elseif choice == "History" then M.show_tree()
-		elseif choice == "Steering delivery" or choice == "Follow-up delivery" then
-			vim.ui.select({ "all", "one-at-a-time" }, { prompt = choice }, function(mode) if mode then command(choice == "Steering delivery" and "steering.mode" or "followUp.mode", { mode = mode }, nil, captured) end end)
-		elseif choice == "Auto compaction" or choice == "Auto retry" then
-			vim.ui.select({ "Enabled", "Disabled" }, { prompt = choice }, function(value) if value then command(choice == "Auto compaction" and "compaction.auto" or "retry.auto", { enabled = value == "Enabled" }, nil, captured) end end)
+	captured.token, captured.controller = nil, nil -- Completion metadata is read-only.
+	request("session.read", { kind = "commands", runtimeRevision = captured.revision }, function(ok, result)
+		if not M.command_context_current(captured) then
+			callback({})
+			return
 		end
+		if not ok then callback({}, result.message or "Could not read owner commands"); return end
+		callback(result.data.commands or {}, nil, captured)
+	end)
+end
+function M.pick_command()
+	M.get_commands(function(commands, err, captured)
+		if err then notify(err, vim.log.levels.WARN); return end
+		if not captured then return end
+		if #commands == 0 then notify("No slash commands returned by the attached runtime."); return end
+		table.sort(commands, function(a, b) return a.name < b.name end)
+		vim.ui.select(commands, {
+			prompt = "Pi command (" .. current_owner_label() .. ")",
+			format_item = function(item)
+				return "/" .. item.name .. " [" .. item.source .. "]"
+					.. (item.description and item.description ~= "" and " - " .. item.description or "")
+			end,
+		}, function(choice)
+			if not choice then return end
+			if not M.command_context_current(captured) then
+				notify("Owner context changed; select a command again.", vim.log.levels.WARN)
+				return
+			end
+			M.show_input()
+			local value = "/" .. choice.name .. " "
+			layout.set_buffer_lines(ctx, state.input_buf, { value }, true)
+			vim.api.nvim_win_set_cursor(state.input_win, { 1, #value })
+		end)
 	end)
 end
 function M.refresh_messages() refresh() end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain outcomes; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the current workspace. First prompt creates the session.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain outcomes; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history use typed owner operations.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the current workspace. First prompt creates the session.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nSlash commands run on the owner through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()

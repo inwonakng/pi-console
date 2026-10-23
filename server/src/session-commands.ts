@@ -61,13 +61,12 @@ const identifier = (value: unknown): value is string => typeof value === "string
 const exact = (value: Record<string, unknown>, keys: string[]): boolean => Object.keys(value).every((key) => keys.includes(key));
 function invalid(): never { throw new CommandError("invalid_command", "Invalid owner command or payload"); }
 
-/** Non-slash text only. Pi's prompt RPC otherwise dispatches extension commands. */
+/** Pi expands templates/skills and dispatches registered slash commands. */
 export function validPromptText(value: unknown): value is string {
-  return typeof value === "string" && !!value.trim() && !value.trimStart().startsWith("/")
-    && Buffer.byteLength(value) <= 1024 * 1024;
+  return typeof value === "string" && !!value.trim() && Buffer.byteLength(value) <= 1024 * 1024;
 }
 
-/** An explicit application allowlist. No raw RPC records or freeform slash commands. */
+/** An explicit application allowlist, never client-selected raw RPC records. */
 export function sessionCommand(value: unknown): SessionCommand {
   if (!object(value) || value.version !== 1 || !identifier(value.id) || !identifier(value.sessionId)
     || !identifier(value.serviceEpoch) || !identifier(value.attachmentId)

@@ -237,7 +237,7 @@ arguments, confirmations and what completion means.
   to it. `<leader>pC` / `:PiCd` selects a directory on that host. These
   selections and new frontend windows create no session until the first prompt
   or shell submission. Pre-start settings are applied before that submission.
-- `<C-CR>` non-slash text or explicit owner `!` / `!!` shell, `<Esc><Esc>` abort; shared queue via `:PiQueue` / `<leader>pq`.
+- `<C-CR>` text or slash commands, `<Esc><Esc>` abort; shared queue via `:PiQueue` / `<leader>pq`.
   Queue editors are local drafts until `:write`; their 30-second pause may expire.
   A stale revision or dispatched item refuses saving and retains local text.
 - `:PiPending` inspects full retained payloads/previews; only the current controller
@@ -286,7 +286,11 @@ arguments, confirmations and what completion means.
   `gO` opens current owner content separately, `gD` opens the owner patch, and `gS`
   looks up the original review command ID. Uncertain/disconnected operations retain
   that identity; local text and its recovery remain separate and never replay.
-- Freeform slash commands and excluded resource actions report unavailable. No raw RPC tunnel, frontend-local owner-path lookup or implicit
+- `/` completion and `:PiCommand` / `<leader>/` discover the attached runtime's
+  extension commands, prompt templates and skills. They never use a frontend-local
+  command list. Slash submissions run through the owner's shared prompt queue;
+  TUI-only built-ins are not provided by Pi RPC. Excluded resource actions report
+  unavailable. No raw RPC tunnel, frontend-local owner-path lookup or implicit
   Pi fallback exists. Owner `file://` links never reach the OS opener; only HTTP(S)
   links may open externally. Other received URI schemes refuse. Clipboard/Zotero and
   explicitly local helpers remain frontend-local; owner provider setup is separate.
@@ -685,7 +689,7 @@ resume within its service epoch. Interaction responses now go through `command()
 there is no public raw `respond()` bypass. The adapter checks runtime/interaction
 liveness at the actual stdin write position, including under backpressure.
 `assertReady()` rejects dispatch before trust/workspace readiness. The editable
-non-slash accepted queue below rechecks this gate at its actual pipe write position.
+accepted queue below rechecks this gate at its actual pipe write position.
 All APIs remain owner-internal.
 `ready()` records initial startup completion; use the current snapshot/gate to
 check later availability, not that already-resolved promise.
@@ -767,11 +771,11 @@ There is still no arbitrary command endpoint.
   text }`, `queue.remove` and `queue.reserve` with `{ itemId, expectedRevision }`,
   and `queue.release` with `{ reservationId }`.
 
-Only nonempty, non-slash text up to 1 MiB UTF-8 is accepted (trimmed on save).
-Leading-whitespace slash text is rejected too. `prompt.submit` never forwards shell,
-freeform slash commands or raw RPC. C provides shell/settings/history/workspace/lifecycle
-through separate typed operations. Explicit `session.rename` remains a private fixed
-bundled command, not accepted prompt text.
+Nonempty text up to 1 MiB UTF-8 is accepted (trimmed on save), including slash
+commands. Pi dispatches registered extension commands and expands templates/skills.
+`prompt.submit` never forwards raw RPC; shell/settings/history/workspace/lifecycle
+also have separate typed operations. Explicit `session.rename` remains a private
+fixed bundled command.
 
 Every envelope carries `version: 1`, `id`, `sessionId`, `serviceEpoch`,
 `runtimeRevision`, `attachmentId`, `operation`, and `payload`. All but acquisition
@@ -840,7 +844,7 @@ them or holds a finite edit reservation. Native queues remain separate.
 The old frontend's disposal of side picker windows on aborted settlement is not
 an owner-side cancellation of still-live side operations.
 
-### Editable non-slash accepted queue
+### Editable accepted queue
 
 `src/session-queue.ts` defines session-owned items (`id`, `revision`, `serviceEpoch`,
 `runtimeRevision`, `text`, `status`, optional `error`) and ephemeral edit reservations.
@@ -890,13 +894,14 @@ transfer, not automatic retargeting to a new branch. Clean stop/reopen retains
 unfinished items as failed diagnostics; editing explicitly authorizes retry in
 the new context. No automatic replay occurs across owner epochs.
 
-Freeform slash dispatch is deliberately deferred: Pi can execute registered `/commands`
-before ordinary prompt preflight, including broader history/workspace mutations;
-`handled` alone also does not prove extension-command success. C adds typed native
-steering/follow-up and fixed bundled capabilities with positive correlated outcomes,
-not broader slash dispatch. The explicit managed rename below retains its result policy. Trusted input hooks
-still execute inside unchanged Pi; the
-owner fences observed context changes, not arbitrary unpublished extension work.
+Slash commands use the same controller admission and trust/workspace dispatch gates
+as ordinary prompts. A `handled` response retires the queue item without waiting
+for a user message or `agent_settled`, even when the handler changed the context;
+state is refreshed after handling. Command-handler errors are reported to the
+frontend without disabling subsequent submissions. `handled` establishes handling,
+not extension-command success. Typed bundled operations and explicit managed rename
+retain their correlated result policies. Trusted input hooks still execute inside
+Pi; the owner fences observed context changes, not arbitrary unpublished extension work.
 
 ### Bounded typed extension capability: explicit rename
 

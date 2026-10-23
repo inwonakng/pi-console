@@ -830,9 +830,15 @@ export class OwnedSession {
       if (!item || item.status !== "sending") throw new Error("Accepted queue lost its sending item");
       const stale = item.runtimeRevision !== this.runtimeRevision;
       const outcome = flight.outcome;
+      // A slash handler can publish a new context before acknowledging handling.
+      if (item.text.startsWith("/") && !outcome) return;
       if (!stale && (!outcome || !("error" in outcome) && outcome.disposition !== "handled" && !flight.observedMessage && !flight.settled)) return;
       if (item.timeline && flight.observedMessage) item.timeline.observedMessage = flight.observedMessage;
-      if (stale) {
+      if (outcome && !("error" in outcome) && outcome.disposition === "handled") {
+        // A command may intentionally change runtime/history without a user message.
+        items.splice(items.indexOf(item), 1);
+        this.queueRunPending = false;
+      } else if (stale) {
         item.status = "failed"; item.revision++;
         item.error = { code: "stale_runtime", message: "Runtime changed during prompt delivery; inspect the conversation before editing/resubmitting" };
         this.queueRunPending = false;
@@ -1097,11 +1103,13 @@ export class OwnedSession {
   }
 
   /** Typed reads are attachment-bound by transport and fenced across async work. */
-  async read(input: unknown): Promise<unknown> {
+  async read(input: unknown, admission?: () => void): Promise<unknown> {
     if (!validRead(input)) throw new CommandError("invalid_command", "Invalid session read");
     const worker = this.commandRuntime(input.runtimeRevision);
-    const response = await worker.request(readCommand(input.kind)!, () => { this.commandRuntime(input.runtimeRevision, worker); });
-    this.commandRuntime(input.runtimeRevision, worker);
+    const check = () => { admission?.(); this.commandRuntime(input.runtimeRevision, worker); };
+    check();
+    const response = await worker.request(readCommand(input.kind)!, check);
+    check();
     return { runtimeRevision: this.runtimeRevision, data: "data" in response ? response.data : null };
   }
 
@@ -1611,7 +1619,11 @@ export class OwnedSession {
         if (this.phase === "ready") this.scheduleRefresh();
       }
     }
-    if (event.type === "extension_error") this.error ??= new Error(`Pi extension failed during owner execution: ${event.error}`);
+    if (event.type === "extension_error") {
+      if (event.event === "command") {
+        this.offerEffect({ type: "notification", level: "error", message: `${event.extensionPath}: ${event.error}` });
+      } else this.error ??= new Error(`Pi extension failed during owner execution: ${event.error}`);
+    }
     if (event.type === "extension_ui_request" && event.method === "setStatus") {
       if (event.statusKey === "pi-project-trust" || event.statusKey === "pi-workspace") {
         const value: unknown = typeof event.statusText === "string" ? JSON.parse(event.statusText) : undefined;
@@ -1755,7 +1767,9 @@ export class OwnedSession {
     this.scheduleQueue();
     const work = this.conversation.response(response);
     if (work) this.retain({ type: "work", work });
-    if (command.type === "bash") {
+    if (command.type === "bash" || command.type === "prompt" && response.success
+      && response.command === "prompt" && response.data.disposition === "handled") {
+      // Handled slash commands need no agent_settled event to publish their changes.
       this.retain({ type: "invalidate_history" });
       this.scheduleRefresh();
     }

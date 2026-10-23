@@ -7,6 +7,12 @@ local MAX_VIEW_BYTES = 4 * 1024 * 1024
 function M.invalidate()
 	completion_cache = {}
 	viewer_sequence = viewer_sequence + 1
+	local cmp = package.loaded["blink.cmp"]
+	if cmp then
+		cmp.cancel()
+		-- cancel() alone leaves hidden, pending provider requests cached.
+		require("blink.cmp.completion.trigger").hide()
+	end
 end
 
 function M.for_buffer(buf) return buffers[buf or vim.api.nvim_get_current_buf()] end

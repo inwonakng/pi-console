@@ -210,7 +210,12 @@ export async function runService(options: HostOwnerOptions & { root: string; por
             if (!target || !view) throw new CommandError("attachment_closed", "Attach before using session operations");
             switch (record.method) {
               case "snapshot": exact(p, []); result = target.snapshot(); break;
-              case "session.read": result = await target.read(p); break;
+              case "session.read":
+                result = await target.read(p, () => {
+                  if (socket.destroyed || subscription !== view || session !== target) throw new CommandError("attachment_closed", "Read attachment changed");
+                  remoteAdmission?.();
+                });
+                break;
               case "resource.read": case "resource.complete":
                 result = await target.resource(record.method, p, () => {
                   if (socket.destroyed || subscription !== view || session !== target) throw new CommandError("attachment_closed", "Resource attachment changed");
