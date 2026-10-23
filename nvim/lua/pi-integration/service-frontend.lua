@@ -29,10 +29,19 @@ local render, refresh, connect, attach, recover_selection, tree_ctx
 local side_buf
 local owner_states, create_requested = {}, nil
 local invocation_cwd, new_control_selection
+local function status_data(key)
+	local raw = snapshot and snapshot.conversation.statuses[key]
+	local ok, value = pcall(vim.json.decode, raw or "")
+	return ok and value or nil
+end
 local function publish_attachment()
 	local tmux = require("pi-integration.backends.tmux")
 	if M.config.role ~= "conversation" or not tmux.available() or not session_id then return end
-	local name = snapshot and snapshot.piState and snapshot.piState.sessionName or session_id or "Unattached"
+	local pi_state = snapshot and snapshot.piState or {}
+	local name = pi_state.sessionName ~= "" and pi_state.sessionName or "New Session"
+	local label = status_data("pi-session-label")
+	local slug = type(label) == "table" and label.sessionFile == pi_state.sessionFile and label.title == pi_state.sessionName
+		and type(label.slug) == "string" and label.slug ~= "" and label.slug or "new-session"
 	local identity = M.config.expected_host or "unknown"
 	local status = "Loading"
 	if not job then status = "Disconnected"
@@ -49,7 +58,7 @@ local function publish_attachment()
 	end
 	tmux.publish({ version = 1, frontend_attachment = true, host_id = identity, session_id = session_id,
 		pid = vim.uv.os_getpid(), updated = os.time(), cwd = vim.fn.getcwd(),
-		title = "[" .. identity:sub(1, 8) .. "] " .. name,
+		title = name, slug = slug,
 		status = status, last_focused_at = state.last_focused_at })
 end
 local function owner_key() return M.config.expected_host or M.config.service_remote or M.config.service_root or "local" end
@@ -267,11 +276,6 @@ local function can_close_frontend()
 		end
 	end
 	return true
-end
-local function status_data(key)
-	local raw = snapshot and snapshot.conversation.statuses[key]
-	local ok, value = pcall(vim.json.decode, raw or "")
-	return ok and value or nil
 end
 ctx = { state = state, config = M.config,
 	ui = { notify = notify }, logs = { add = function(_, message, details) notify(message .. ": " .. tostring(details), vim.log.levels.ERROR) end },
