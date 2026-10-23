@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, rename } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rename, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { object } from "./pi-records.js";
@@ -201,7 +201,7 @@ async function sourceCopy(root: string, source?: CatalogData): Promise<{ data: C
   finally { await file.close(); }
 }
 
-export async function validateManagedFile(root: string, session: CatalogSession): Promise<{ piSessionId: string; cwd: string }> {
+async function openManagedFile(root: string, session: CatalogSession): Promise<{ file: FileHandle; header: { piSessionId: string; cwd: string } }> {
   const file = await open(join(root, "sessions", session.id + ".jsonl"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
@@ -213,7 +213,33 @@ export async function validateManagedFile(root: string, session: CatalogSession)
     const header: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, end)));
     if (!object(header) || header.type !== "session" || header.version !== 3 || header.id !== session.piSessionId
       || typeof header.cwd !== "string" || !isAbsolute(header.cwd)) throw new Error("Managed session identity does not match its catalog");
-    return { piSessionId: session.piSessionId, cwd: header.cwd };
+    return { file, header: { piSessionId: session.piSessionId, cwd: header.cwd } };
+  } catch (error) {
+    await file.close();
+    throw error;
+  }
+}
+
+export async function validateManagedFile(root: string, session: CatalogSession): Promise<{ piSessionId: string; cwd: string }> {
+  const { file, header } = await openManagedFile(root, session);
+  try { return header; }
+  finally { await file.close(); }
+}
+
+/** Session names are session-wide: the last session_info wins, including a clear. */
+export async function readManagedTitle(root: string, session: CatalogSession): Promise<string | undefined> {
+  const { file } = await openManagedFile(root, session);
+  try {
+    let name: string | undefined;
+    for await (const line of file.readLines({ autoClose: false })) {
+      let entry: unknown;
+      try { entry = JSON.parse(line); }
+      catch { continue; } // Pi also tolerates malformed or interrupted history lines.
+      if (object(entry) && entry.type === "session_info") {
+        name = typeof entry.name === "string" ? entry.name.trim() || undefined : undefined;
+      }
+    }
+    return name;
   } finally { await file.close(); }
 }
 

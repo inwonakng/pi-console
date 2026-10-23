@@ -1654,6 +1654,7 @@ export class OwnedSession {
         } catch { /* Retained state is still data, never an instruction to replay. */ }
       }
     }
+    if (event.type === "session_info_changed") this.trackCommand(this.catalog.updateTitle(this.id, event.name));
     const change = this.conversation.event(event);
     if (change) {
       if (change.type === "notification" || change.type === "editor_text" || change.type === "extension_signal") {
@@ -1714,6 +1715,9 @@ export class OwnedSession {
   private response(response: RpcResponse, command: RpcCommand & { id: string }): void {
     if (response.id === this.rename?.requestId || response.id === this.bundled?.requestId || response.id === this.bundledInterrupt?.requestId) return;
     if (response.success && response.command === "get_state") {
+      if (response.data.sessionId === this.record.piSessionId && response.data.sessionFile === this.catalog.sessionFile(this.id)) {
+        this.trackCommand(this.catalog.updateTitle(this.id, response.data.sessionName));
+      }
       this.retain({ type: "pi_state", state: response.data });
       this.changed();
     }

@@ -11,9 +11,12 @@ local function host_label(host)
 	local endpoint = host.remote or host.service_remote or host.root or host.service_root
 	return (host.alias or "Saved host") .. (endpoint and (" (" .. endpoint .. ")") or "")
 end
+local function session_title(row)
+	return type(row.name) == "string" and row.name:match("%S") and row.name or "Untitled session"
+end
 local function session_label(host, session_id)
 	for _, row in ipairs(host and host.rows or {}) do
-		if row.id == session_id then return row.name or row.cwd or "Conversation" end
+		if row.id == session_id then return session_title(row) end
 	end
 	return "Conversation"
 end
@@ -189,7 +192,7 @@ function M.list()
 				end
 				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host_label(host),
 					connected = host.connected == true, status = host.connected and (row.live and row.live.status or "Idle") or "Disconnected",
-					title = row.name or row.cwd or "Conversation", cwd = row.cwd, directory = row.cwd,
+					title = session_title(row), cwd = row.cwd, directory = row.cwd,
 					location = host.alias, controller = row.live and row.live.controller, activity = nil,
 					workspace_cwd = row.live and row.live.cwd or row.cwd, last_focused_at = focused,
 					access_mode = row.live and row.live.accessMode, integration_mode = row.live and row.live.integrationMode,
@@ -320,8 +323,8 @@ local function saved_action(host, row, operation)
 		if not ok then notify(preview.message); return end
 		local verb = operation == "host.archive" and (preview.archived and "Unarchive" or "Archive")
 			or (preview.mode == "trash" and "Move to owner trash" or "Permanently delete")
-		local lines = { verb .. " conversation (1 file) on " .. host_label(host) .. "?", row.name or row.cwd or "Conversation" }
-		if row.name and row.cwd then table.insert(lines, row.cwd) end
+		local lines = { verb .. " conversation (1 file) on " .. host_label(host) .. "?", session_title(row) }
+		if row.cwd then table.insert(lines, row.cwd) end
 		if operation == "host.delete" and #(preview.workspaces or {}) > 0 then
 			table.insert(lines, "Remaining worktrees will be removed and unintegrated changes discarded; existing destination changes will not be reverted.")
 			for _, workspace in ipairs(preview.workspaces) do
@@ -346,13 +349,13 @@ function M.history_picker(identity)
 		local connection = host.connection
 		connection.request("sessions", {}, function(ok, result)
 			if not ok or not host.connected or host.connection ~= connection then return end
-			vim.ui.select(result.sessions, { prompt = "History on " .. host.alias, format_item = function(row) return (row.name or row.cwd or "Conversation") .. (row.name and row.cwd and (" | " .. row.cwd) or "") .. " (" .. row.state .. (row.archived and ", archived" or "") .. ")" end }, function(row)
+			vim.ui.select(result.sessions, { prompt = "History on " .. host.alias, format_item = function(row) return session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " (" .. row.state .. (row.archived and ", archived" or "") .. ")" end }, function(row)
 				if not row or not host.connected or host.connection ~= connection then return end
 				if row.state == "open" then
 					M.open({ host_id = host.host_id, session_id = row.id, status = "Idle" }); return
 				end
 				local actions = row.archived and { "Unarchive", "Delete" } or { "Resume", "Archive", "Delete" }
-				vim.ui.select(actions, { prompt = "Saved conversation on " .. host_label(host) .. ": " .. (row.name or row.cwd or "Conversation") }, function(action)
+				vim.ui.select(actions, { prompt = "Saved conversation on " .. host_label(host) .. ": " .. session_title(row) }, function(action)
 					if not action or not host.connected or host.connection ~= connection then return end
 					if action == "Resume" then M.open({ host_id = host.host_id, session_id = row.id, status = "Not Open" })
 					else saved_action(host, row, action == "Delete" and "host.delete" or "host.archive") end

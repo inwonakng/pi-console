@@ -11,7 +11,7 @@ import { CommandError, type CommandReceipt, type StoredCommand } from "./session
 import { validQueueItem, type AcceptedQueueItem } from "./session-queue.js";
 import { validEffectiveTitle } from "./session-rename.js";
 import { commandBytes, insertCommand, insertQueue, insertSession, openStorage, privateDirectory, privateJson,
-  splitReceipt, syncDirectory, validateManagedFile, type CatalogSession, type Channel } from "./catalog-storage.js";
+  readManagedTitle, splitReceipt, syncDirectory, validateManagedFile, type CatalogSession, type Channel } from "./catalog-storage.js";
 export type { CatalogSession, Channel } from "./catalog-storage.js";
 
 const MiB = 1024 * 1024;
@@ -125,6 +125,7 @@ export class SessionCatalog {
       const { db, hostId } = await openStorage(root, options.channel, () => { retainClaim = true; });
       catalog = new SessionCatalog(root, options.channel, hostId, epoch, db, lock, lifetime);
       await catalog.recover();
+      await catalog.backfillTitles();
       return catalog;
     } catch (error) {
       catalog?.db.close();
@@ -271,6 +272,32 @@ export class SessionCatalog {
     });
   }
 
+  async updateTitle(id: string, name: string | undefined): Promise<void> {
+    name = name?.trim() || undefined;
+    await this.serial(() => {
+      const session = this.get(id);
+      if (session.name === name || session.deleted) return;
+      this.transaction(() => {
+        session.name = name;
+        this.updateSession(session);
+      });
+    });
+  }
+
+  private async backfillTitles(): Promise<void> {
+    for (const session of this.list()) {
+      // Never read a file still claimed by an unresolved worker.
+      if (session.ownerEpoch !== undefined) continue;
+      let name: string | undefined;
+      try { name = await readManagedTitle(this.root, session); }
+      catch (error) {
+        console.warn(`Could not refresh title for session ${session.id}:`, error);
+        continue; // An unreadable history must not hide other saved sessions.
+      }
+      await this.updateTitle(session.id, name);
+    }
+  }
+
   private updateSession(session: CatalogSession): void {
     const { acceptedQueue: _, ...metadata } = session;
     this.db.prepare("UPDATE sessions SET state=?, owner_epoch=?, metadata=? WHERE id=?")
@@ -372,6 +399,7 @@ export class SessionCatalog {
     const record: CatalogSession = { id, piSessionId: id, cwd, createdAt: new Date().toISOString(), state: "saved" };
     const header = await validateManagedFile(this.root, record);
     if (header.cwd !== cwd) throw new Error("Clone cwd does not match its header");
+    record.name = await readManagedTitle(this.root, record);
     const handle = await open(file, "r+");
     try { await handle.sync(); } finally { await handle.close(); }
     await syncDirectory(directory);
