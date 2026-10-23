@@ -101,11 +101,7 @@ cmp.setup({
 				name = "Pi files",
 				module = "pi-integration.file-completion",
 				score_offset = 90,
-				opts = {
-					get_cwd = function(_)
-						return vim.fn.getcwd()
-					end,
-				},
+				timeout_ms = 5000,
 			},
 			path = {
 				opts = {

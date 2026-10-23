@@ -283,7 +283,7 @@ local function desktop_notification(intent, captured)
 end
 function M.complete_files(prefix, callback)
 	if not job or not snapshot or not attachment then callback({ entries = {} }); return end
-	resources.complete(resource_options(), prefix, callback)
+	return resources.complete(resource_options(), prefix, callback)
 end
 local function command(operation, payload, callback, captured, terminal, submission)
 	if not snapshot or not attachment then notify("Attach to a live session first."); return end

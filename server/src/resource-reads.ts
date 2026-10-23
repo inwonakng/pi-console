@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants, type BigIntStats, type Dirent } from "node:fs";
 import { lstat, open, opendir, realpath, type FileHandle } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { setImmediate as yieldTurn } from "node:timers/promises";
 import { object } from "./pi-records.js";
@@ -458,23 +458,96 @@ export async function completeDirectory(input: unknown, check: () => void): Prom
   });
 }
 
-export async function completeFiles(context: ResourceContext, input: unknown): Promise<{ path: string; entries: FileEntry[]; nextOffset: number | null }> {
+const COMPLETION_FILES = 50_000;
+const COMPLETION_BYTES = 8 * 1024 * 1024;
+const COMPLETION_TTL = 5000;
+const IGNORED_COMPLETION_DIRS = new Set([
+  ".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+  ".tox", "dist", "build", "target", ".next", ".turbo", ".cache",
+]);
+type FileIndex = { path: string; entries: FileEntry[]; truncated: boolean };
+const fileIndexes = new Map<string, { time: number; result: Promise<FileIndex> }>();
+
+async function scanCompletionFiles(context: ResourceContext): Promise<FileIndex> {
+  const root = await canonical({ root: context.workspaceRoot, path: context.cwd }, context.check);
+  const entries: FileEntry[] = [];
+  const directories = [{ path: root, relative: "" }];
+  let visited = 0, bytes = 0, truncated = false;
+  for (const directory of directories) {
+    context.check();
+    let children: Awaited<ReturnType<typeof directoryEntries>>;
+    try { children = await directoryEntries({ root, path: directory.path }, context.check); }
+    catch (error) {
+      // A missing or inaccessible subtree must not hide the rest of the project.
+      if (directory.path === root) throw error;
+      if (error instanceof CommandError && ["resource_unavailable", "resource_denied", "resource_conflict", "resource_limit"].includes(error.code)) {
+        truncated ||= error.code === "resource_limit";
+        continue;
+      }
+      if (error instanceof Error && "code" in error && ["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(String(error.code))) continue;
+      throw error;
+    }
+    for (const child of children.entries) {
+      context.check();
+      if (++visited > COMPLETION_FILES) return { path: root, entries, truncated: true };
+      if (child.isSymbolicLink() || !(child.isDirectory() || child.isFile())
+        || child.isDirectory() && IGNORED_COMPLETION_DIRS.has(child.name)) continue;
+      const path = directory.relative + child.name + (child.isDirectory() ? sep : "");
+      if (!pathString(path)) continue;
+      bytes += Buffer.byteLength(path);
+      if (bytes > COMPLETION_BYTES) return { path: root, entries, truncated: true };
+      entries.push({ path, kind: child.isDirectory() ? "directory" : "file" });
+      if (child.isDirectory()) directories.push({ path: join(directory.path, child.name), relative: path });
+    }
+  }
+  return { path: root, entries, truncated };
+}
+
+async function completionIndex(context: ResourceContext): Promise<FileIndex> {
+  const key = JSON.stringify([context.workspaceRoot, context.cwd]);
+  let cached = fileIndexes.get(key);
+  if (!cached || Date.now() - cached.time >= COMPLETION_TTL) {
+    // Bound retained indexes as well as each individual scan.
+    fileIndexes.delete(key);
+    if (fileIndexes.size >= 4) fileIndexes.delete(fileIndexes.keys().next().value!);
+    cached = { time: Date.now(), result: scanCompletionFiles(context) };
+    fileIndexes.set(key, cached);
+  }
+  try {
+    const result = await cached.result;
+    context.check();
+    return result;
+  } catch (error) {
+    if (fileIndexes.get(key) === cached) fileIndexes.delete(key);
+    throw error;
+  }
+}
+
+/** Empty prefix supplies the recursive project index for frontend fuzzy matching.
+ * Explicit paths list one owner directory, including outside the workspace.
+ * This grants filename discovery only; readResource keeps its existing roots. */
+export async function completeFiles(context: ResourceContext, input: unknown): Promise<{ path: string; entries: FileEntry[]; nextOffset: number | null; truncated: boolean }> {
   return limited(context.check, async () => {
-    if (!exact(input, ["prefix", "offset"]) || !pathString(input.prefix, true) || !offset(input.offset)) {
+    if (!exact(input, ["prefix", "offset"]) || typeof input.prefix !== "string"
+      || Buffer.byteLength(input.prefix) > 4096 || /[\u0000-\u001f\u007f]/.test(input.prefix) || !offset(input.offset)) {
       refuse("resource_payload", "File completion requires prefix and optional offset");
     }
-    const prefix = resolve(context.cwd, input.prefix);
-    const trailing = input.prefix === "" || input.prefix.endsWith(sep);
-    const directory = trailing ? prefix : dirname(prefix);
-    const name = trailing ? "" : basename(prefix);
-    const result = await directoryEntries({ root: context.workspaceRoot, path: directory }, context.check);
-    const matches = result.entries.filter((entry) => entry.name.startsWith(name) && (entry.isDirectory() || entry.isFile()) && !entry.isSymbolicLink());
+    let result: FileIndex;
+    if (input.prefix === "") result = await completionIndex(context);
+    else {
+      const home = input.prefix === "~" || input.prefix.startsWith(`~${sep}`);
+      const expanded = home ? join(homedir(), input.prefix.slice(1)) : resolve(context.cwd, input.prefix);
+      const directory = input.prefix === "~" || input.prefix.endsWith(sep) ? expanded : dirname(expanded);
+      const listed = await directoryEntries({ root: sep, path: directory }, context.check);
+      const parent = input.prefix === "~" ? `~${sep}` : input.prefix.slice(0, input.prefix.lastIndexOf(sep) + 1);
+      result = { path: listed.path, truncated: false, entries: listed.entries
+        .filter((entry) => (entry.isDirectory() || entry.isFile()) && !entry.isSymbolicLink())
+        .map((entry) => ({ path: parent + entry.name + (entry.isDirectory() ? sep : ""), kind: entry.isDirectory() ? "directory" : "file" })) };
+    }
     const start = (input.offset as number | undefined) ?? 0;
-    if (start > matches.length) refuse("resource_offset", "Completion offset is beyond the file page");
-    const page: FileEntry[] = matches.slice(start, start + PAGE_SIZE).map((entry) => ({
-      path: (isAbsolute(input.prefix as string) ? join(result.path, entry.name) : relative(context.cwd, join(result.path, entry.name))) + (entry.isDirectory() ? sep : ""),
-      kind: entry.isDirectory() ? "directory" : "file",
-    }));
-    return { path: result.path, entries: page, nextOffset: start + page.length < matches.length ? start + page.length : null };
+    if (start > result.entries.length) refuse("resource_offset", "Completion offset is beyond the file page");
+    // The bounded project index fits one response, avoiding a round trip per directory/page on remote hosts.
+    const page = result.entries.slice(start, input.prefix === "" ? undefined : start + 2048);
+    return { path: result.path, entries: page, nextOffset: start + page.length < result.entries.length ? start + page.length : null, truncated: result.truncated };
   });
 }

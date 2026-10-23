@@ -1,11 +1,11 @@
 -- Bound read adapters for the existing inspectors. Never interpret owner paths locally.
 local M = {}
-local buffers, completion_cache = {}, {}
+local buffers, completion_cache, completion_pending = {}, {}, {}
 local viewer_sequence, buffer_sequence = 0, 0
 local MAX_VIEW_BYTES = 4 * 1024 * 1024
 
 function M.invalidate()
-	completion_cache = {}
+	completion_cache, completion_pending = {}, {}
 	viewer_sequence = viewer_sequence + 1
 	local cmp = package.loaded["blink.cmp"]
 	if cmp then
@@ -116,22 +116,41 @@ end
 
 function M.complete(options, prefix, callback)
 	local key = options.key .. ":" .. prefix
+	local captured = options.stamp()
+	if not options.current(captured) then callback({ entries = {} }); return end
 	local cached = completion_cache[key]
-	if cached and vim.uv.hrtime() - cached.time < 2000000000 then callback(cached.data); return end
-	local captured, entries, offset = options.stamp(), {}, nil
+	if cached and vim.uv.hrtime() - cached.time < 5000000000 then callback(cached.data); return end
+	-- Typing/backspacing within the same directory shares one owner scan and page chain.
+	local listener = { callback = callback }
+	local cancel = function() listener.callback = nil end
+	local pending = completion_pending[key]
+	if pending then table.insert(pending, listener); return cancel end
+	pending = { listener }
+	completion_pending[key] = pending
+	local entries, offset, truncated = {}, nil, false
+	local function finish(data)
+		if completion_pending[key] == pending then completion_pending[key] = nil end
+		for _, subscriber in ipairs(pending) do if subscriber.callback then subscriber.callback(data) end end
+	end
 	local function fetch()
 		local query = { runtimeRevision = captured.revision, prefix = prefix, offset = offset }
 		options.request("resource.complete", query, function(ok, result)
-			if not options.current(captured) then callback({ entries = {} }); return end
-			if not ok then callback({ entries = {}, error = result.message }); return end
+			if not options.current(captured) then finish({ entries = {} }); return end
+			local listening = false
+			for _, subscriber in ipairs(pending) do if subscriber.callback then listening = true; break end end
+			if not listening then finish({ entries = {} }); return end
+			if not ok then finish({ entries = {}, error = result.message }); return end
 			vim.list_extend(entries, result.data.entries or {})
+			truncated = truncated or result.data.truncated == true
 			offset = result.data.nextOffset
-			if offset and offset ~= vim.NIL and #entries < 1024 then fetch(); return end
-			local data = { entries = entries, incomplete = offset and offset ~= vim.NIL }
+			local more = offset and offset ~= vim.NIL
+			if more and #entries < 50000 then fetch(); return end
+			local data = { entries = entries, truncated = truncated or more == true }
 			completion_cache = { [key] = { data = data, time = vim.uv.hrtime() } }
-			callback(data)
+			finish(data)
 		end)
 	end
 	fetch()
+	return cancel
 end
 return M
