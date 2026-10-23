@@ -48,6 +48,11 @@
         </details>
       </header>
       <div class="control-bar"><span data-id="controller" role="status">Read only</span><button data-id="control" disabled>Take control</button><button data-id="abort" disabled>Stop turn</button></div>
+      <details data-id="settings" class="settings-panel">
+        <summary>Model and settings <span data-id="settings-model" class="muted"></span></summary>
+        <div data-id="settings-fields" class="settings-fields"></div>
+        <div class="settings-footer"><span data-id="settings-hint" role="status">Take control to change settings.</span><button data-id="refresh-settings" type="button">Refresh options</button></div>
+      </details>
       <div data-id="transcript" class="transcript" tabindex="0" aria-label="Conversation transcript"></div>
       <button data-id="latest" class="latest" hidden>Jump to latest</button>
       <details data-id="interactions" class="interactions" hidden>

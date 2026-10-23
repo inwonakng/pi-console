@@ -420,6 +420,34 @@ function createConversation(host, row) {
   let refreshTimer, refreshing = false, dirty = false;
   let transcriptKey = "", interactionKey = "";
   const answerDrafts = new Map(), submittedAnswers = new Set();
+  const settingFields = new Map();
+  let models = [], thinkingLevels = [], optionsKey = "", optionsLoad = null, optionsError = "";
+  for (const [id, label, operation, choices] of [
+    ["model", "Model", "model.set", []],
+    ["thinking", "Thinking level", "thinking.set", []],
+    ["access", "Access mode", "access.set", [["readonly", "Read only"], ["ask", "Ask"], ["edit", "Edit"], ["full", "Full access"]]],
+    ["integration", "Workspace integration", "integration.set", [["ask", "Ask"], ["allowed", "Allowed"]]],
+    ["notifications", "Host notifications", "notifications.set", [["true", "On"], ["false", "Off"]]],
+  ]) {
+    const labelNode = text("label", label);
+    const select = document.createElement("select");
+    select.id = `${panelId}-${id}`;
+    labelNode.htmlFor = select.id;
+    labelNode.append(select);
+    $("settings-fields").append(labelNode);
+    settingFields.set(id, { select, operation, choices });
+    select.addEventListener("change", () => {
+      const value = select.value;
+      const payload = id === "model" ? { provider: JSON.parse(value)[0], modelId: JSON.parse(value)[1] }
+        : id === "thinking" ? { level: value } : id === "notifications" ? { enabled: value === "true" } : { mode: value };
+      run(async () => {
+        const captured = context();
+        const receipt = await command(operation, payload);
+        await terminalReceipt(captured.client, "command.status", { serviceEpoch: hello.serviceEpoch, commandId: receipt.id }, receipt);
+        if (sameContext(captured)) applySnapshot(await captured.client.request("snapshot"));
+      });
+    });
+  }
   function notice(message = "") {
     $("notice").textContent = message;
     $("notice").hidden = !message;
@@ -546,7 +574,69 @@ function createConversation(host, row) {
     $("send").disabled = !controlled || !ready || busy || !$("prompt").value.trim();
     $("composer-hint").textContent = !controlled ? "Take control to send a prompt." : !ready ? "Waiting for session setup."
       : snapshot?.conversation.execution.running ? "Prompts sent while working are queued." : "Tap Send when your prompt is ready.";
+    renderSettings();
     if (snapshot) renderInteractions();
+  }
+  function settingsKey() {
+    const model = snapshot?.piState?.model;
+    return JSON.stringify([attachment, runtimeRevision, model?.provider, model?.id]);
+  }
+  async function loadSettings() {
+    if (!connected || owner?.phase !== "ready" || !hello.capabilities.includes("session.read")) return;
+    const captured = context(), key = settingsKey();
+    if (optionsLoad?.key === key) return;
+    const load = optionsLoad = { key };
+    optionsKey = key;
+    optionsError = "";
+    models = []; thinkingLevels = [];
+    renderSettings();
+    try {
+      const results = await Promise.allSettled(["models", "thinking"].map(kind => captured.client.request("session.read", { kind, runtimeRevision: captured.runtimeRevision })));
+      if (!sameContext(captured) || settingsKey() !== key || optionsLoad !== load) return;
+      if (results[0].status === "fulfilled") models = results[0].value.data.models;
+      if (results[1].status === "fulfilled") thinkingLevels = results[1].value.data.levels;
+      optionsError = results.filter(result => result.status === "rejected").map(result => result.reason.message).join(" ");
+    } finally {
+      if (optionsLoad === load) { optionsLoad = null; renderSettings(); }
+    }
+  }
+  function renderSettings() {
+    const state = snapshot?.piState;
+    const statuses = snapshot?.conversation.statuses || {};
+    const key = settingsKey();
+    const currentModel = state?.model;
+    const modelValue = currentModel ? JSON.stringify([currentModel.provider, currentModel.id]) : "";
+    $("settings-model").textContent = currentModel ? `${currentModel.provider} / ${currentModel.id}` : "";
+    if (optionsKey !== key) {
+      models = []; thinkingLevels = []; optionsError = "";
+      if ($("settings").open) void loadSettings();
+    }
+    const values = {
+      model: modelValue, thinking: state?.thinkingLevel,
+      access: statuses["pi-access-mode"]?.match(/^Mode: (\w+)$/)?.[1],
+      integration: statuses["pi-integration-mode"]?.match(/^Integration: (\w+)$/)?.[1],
+      notifications: statuses["pi-notifications"] === "notify on" ? "true" : statuses["pi-notifications"] === "notify off" ? "false" : "",
+    };
+    const enabled = Boolean(controlsCurrent()) && owner?.phase === "ready" && !busy;
+    for (const [id, field] of settingFields) {
+      const choices = id === "model" ? models.map(model => [JSON.stringify([model.provider, model.id]), `${model.provider} / ${model.id}`])
+        : id === "thinking" ? thinkingLevels.map(level => [level, level]) : field.choices;
+      const value = values[id] ?? "";
+      const options = choices.map(([value, label]) => new Option(label, value));
+      if (!choices.some(([choice]) => choice === value)) {
+        const current = new Option(id === "model" && currentModel ? `${currentModel.provider} / ${currentModel.id}` : value || "Unavailable", value);
+        current.disabled = true;
+        options.unshift(current);
+      }
+      const signature = JSON.stringify(options.map(option => [option.value, option.text, option.disabled]));
+      if (field.signature !== signature) { field.select.replaceChildren(...options); field.signature = signature; }
+      field.select.value = value;
+      field.select.disabled = !enabled || !choices.length || !hello?.capabilities.includes(field.operation) || Boolean(optionsLoad);
+    }
+    $("refresh-settings").disabled = !connected || owner?.phase !== "ready" || Boolean(optionsLoad) || !hello?.capabilities.includes("session.read");
+    $("settings-hint").textContent = optionsLoad ? "Loading model options..." : optionsError ? `${optionsError} Tap Refresh options to retry.`
+      : !connected ? "Reconnect to read current settings." : owner?.phase !== "ready" ? "Waiting for session setup."
+      : !controlsCurrent() ? "Take control to change settings." : "Changes apply to this session on the execution host.";
   }
   function displayStatus() {
     if (row.state !== "open") return row.state === "interrupted" ? "Error" : "Stopped";
@@ -613,9 +703,19 @@ function createConversation(host, row) {
     const nodes = messages.filter(visibleMessage).map((message, index) => {
       const article = text("article", "", "message");
       article.dataset.role = message.role;
-      article.append(text("div", message.role === "assistant" ? "Pi" : message.role === "toolResult" ? message.toolName || "Tool result" : message.role, "message-label"));
-      article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, String(index)));
-      if (message.errorMessage) article.append(text("p", message.errorMessage));
+      if (message.role === "toolResult") {
+        const details = document.createElement("details");
+        details.className = "tool-output";
+        details.dataset.key = `tool-${message.toolCallId || index}`;
+        details.append(text("summary", `${message.toolName || "Tool"} / ${message.isError ? "error" : "output"}`));
+        details.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, String(index)));
+        if (message.errorMessage) details.append(text("p", message.errorMessage));
+        article.append(details);
+      } else {
+        article.append(text("div", message.role === "assistant" ? "Pi" : message.role, "message-label"));
+        article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, String(index)));
+        if (message.errorMessage) article.append(text("p", message.errorMessage));
+      }
       return article;
     });
     if (conversation.omittedMessages) nodes.unshift(text("p", `${conversation.omittedMessages} older messages are outside this snapshot.`, "muted"));
@@ -739,6 +839,8 @@ function createConversation(host, row) {
       if (sameContext(captured)) { grant = value; if (!controlsCurrent()) scheduleRefresh(); }
     }
   }));
+  $("settings").addEventListener("toggle", () => { if ($("settings").open) renderSettings(); });
+  $("refresh-settings").addEventListener("click", () => { void loadSettings(); });
   $("abort").addEventListener("click", () => run(() => command("turn.abort")));
   $("rename").addEventListener("click", () => {
     const title = prompt("Session title", $("session-title").textContent);

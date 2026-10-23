@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { loadExtensionSettings } from "../extensions/shared/extension-settings";
 import { resolveProjectTrust } from "../extensions/shared/project-trust";
+import { modelReady } from "../extensions/shared/model-readiness";
 
 export default function hostOptions(pi: ExtensionAPI): void {
   if (process.env.PI_CONSOLE_SERVICE !== "1") return;
@@ -12,11 +13,11 @@ export default function hostOptions(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       if (args !== "directory-selected" && args !== "directory-required") throw new Error("Invalid host options request");
       const settings = loadExtensionSettings();
-      const model = ctx.model;
+      const model = modelReady(ctx) ? ctx.model : undefined;
       const modelStatus = args === "directory-required" ? "directory-required"
         : !ctx.isProjectTrusted() && resolveProjectTrust(ctx.cwd) === undefined ? "trust-required"
         : model ? undefined : "unavailable";
-      const available = await ctx.modelRegistry.getAvailable();
+      const available = ctx.modelRegistry.getAvailable();
       if (ctx.modelRegistry.getError()) throw new Error("Host model configuration is unavailable");
       // Explicit CLI choices may be valid custom IDs outside the catalog.
       const models = model && !available.some(option => option.provider === model.provider && option.id === model.id)

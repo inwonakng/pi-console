@@ -439,7 +439,9 @@ local function update_status_state()
 	state.provider = model and model.provider
 	state.model_id = model and model.id
 	state.thinking_level = pi_state.thinkingLevel or defaults.thinkingLevel
-	state.model_status = not session_id and (defaults.modelStatus or (not startup_options and "loading" or nil)) or nil
+	state.model_status = statuses["pi-console-model-readiness"] == "unavailable" and "unavailable"
+		or not session_id and (defaults.modelStatus or (not startup_options and "loading" or nil)) or nil
+	if state.model_status == "unavailable" then state.provider, state.model_id = nil, nil end
 	local context_window = defaults.contextWindow
 	if pending_settings["access.set"] then state.access_mode = pending_settings["access.set"].mode end
 	if pending_settings["integration.set"] then state.integration_mode = pending_settings["integration.set"].mode end
@@ -993,6 +995,11 @@ function M.take_control()
 	else acquire_control(false, captured) end
 end
 local function submit_input(original, entry)
+	local statuses = snapshot and snapshot.conversation and snapshot.conversation.statuses or {}
+	if statuses["pi-console-model-readiness"] == "unavailable" and not original:match("^%s*/") then
+		notify("Model unavailable. Select the intended model before submitting; text was not sent.")
+		return
+	end
 	for id, envelope in pairs(unresolved) do
 		if envelope.operation == "prompt.submit" and envelope.sessionId == session_id
 			and vim.trim(envelope.payload.text) == vim.trim(original) then
@@ -1040,11 +1047,15 @@ advance_start = function()
 				if receipt.status ~= "completed" then failed(); return end
 				pending_settings[operation] = nil
 				start.busy = false
-				advance_start()
+				if operation == "model.set" then refresh() else advance_start() end
 			end)
 			if not id then failed() end
 			return
 		end
+	end
+	local statuses = snapshot.conversation and snapshot.conversation.statuses or {}
+	if statuses["pi-console-model-readiness"] == "unavailable" then
+		fail_start("Model unavailable; submitted text remains in :PiDrafts. Select the intended model before resending."); return
 	end
 	starting = nil
 	submit_input(start.input, start.entry)
@@ -1059,6 +1070,9 @@ function M.submit_prompt()
 		if not hello or not job then notify("Connect to a host before submitting."); return end
 		if not selected_cwd then notify("Choose a directory with :PiCd before submitting."); return end
 		if pending_host then notify("Host request unresolved; inspect :PiHostRequest before submitting."); return end
+		if startup_options and startup_options.defaults.modelStatus == "unavailable" and not pending_settings["model.set"] then
+			notify("Model unavailable. Select the intended model before submitting; text remains local."); return
+		end
 	elseif next(pending_settings) then
 		if not control_current() then notify("Use :PiControl before applying pending settings and submitting."); return end
 	else submit_input(original); return end

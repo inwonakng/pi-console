@@ -4,6 +4,7 @@ import { assertManagedResources } from "../../scripts/managed-process.mjs";
 import { getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, workspaceDisplayState, type WorkspaceRecord } from "./workspace";
 import { hasRunningSubagents } from "./subagent-state";
 import { prepareProjectTrust, projectTrustReady } from "./project-trust";
+import { modelReady, preserveModelForSwitch } from "./model-readiness";
 
 const LOCATION_ENTRY = "pi-workspace-location";
 const CURSOR_ENTRY = "pi-workspace-cursor";
@@ -82,7 +83,7 @@ export async function moveToLocation(
       } else if (leafId === null) {
         manager.resetLeaf();
       } else if (manager.getLeafId() !== leafId) {
-        // Call Pi's navigation API to restore the finalized model context, not just the JSONL leaf.
+        // Restore finalized transcript context through Pi's navigation API.
         const result = await nextCtx.navigateTree(leafId);
         if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
       }
@@ -107,7 +108,7 @@ export async function moveToLocation(
     const registered = selected && selected.provider !== "unknown" && selected.id !== "unknown" && selected.api !== "unknown"
       ? nextCtx.modelRegistry.find(selected.provider, selected.id) : undefined;
     const configured = registered ? nextCtx.modelRegistry.hasConfiguredAuth(registered) : false;
-    const blocked = !!options.continueWith && (!registered || !configured);
+    const blocked = !!options.continueWith && !modelReady(nextCtx);
     manager.appendCustomEntry("pi-workspace-runtime", {
       version: 1, previousCwd, cwd: nextCtx.cwd, previousModel,
       model: selected ? { provider: selected.provider, id: selected.id } : undefined,
@@ -134,9 +135,11 @@ export async function moveToLocation(
   }) => Promise<{ cancelled: boolean }>;
   if (ownsPending) setPendingWorkspace("navigation");
   let arrived = false;
+  let releaseSelection: (() => void) | undefined;
   try {
     await options.beforeSwitch?.();
     assertManagedResources();
+    releaseSelection = preserveModelForSwitch(ctx);
     const result = await switchWithCwd(file, {
       cwdOverride: cwd,
       withSession: async (nextCtx) => {
@@ -161,6 +164,7 @@ export async function moveToLocation(
     }
     throw error;
   } finally {
+    releaseSelection?.();
     if (ownsPending) setPendingWorkspace(undefined);
   }
 }

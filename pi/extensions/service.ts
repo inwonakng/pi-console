@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { managedBash } from "./shared/managed-bash";
 import { assertManagedResources } from "../scripts/managed-process.mjs";
 import { startServiceRuntime, stopServiceRuntime } from "./shared/service-ui";
+import { initializeModelReadiness, modelReady, recordModelSelection } from "./shared/model-readiness";
 
 /** Extra lifecycle status for service-owned RPC workers; ordinary Pi is unchanged. */
 export default function serviceExtension(pi: ExtensionAPI): void {
@@ -13,6 +14,17 @@ export default function serviceExtension(pi: ExtensionAPI): void {
     try { assertManagedResources(); }
     catch (error) { ctx.ui.notify(String(error), "error"); return { cancel: true }; }
   });
-  pi.on("session_start", (_event, ctx) => startServiceRuntime(ctx));
-  pi.on("session_shutdown", () => stopServiceRuntime());
+  const lifetime = new AbortController();
+  let initialized = false;
+  pi.on("session_start", async (_event, ctx) => {
+    if (!initialized) {
+      initialized = true;
+      await initializeModelReadiness(pi, ctx, lifetime.signal);
+    }
+    if (lifetime.signal.aborted) return;
+    startServiceRuntime(ctx);
+    if (!modelReady(ctx)) ctx.ui.notify("Model unavailable. Select the intended model before continuing; no prompt was replayed.", "error");
+  });
+  pi.on("model_select", (_event, ctx) => recordModelSelection(ctx));
+  pi.on("session_shutdown", () => { lifetime.abort(); stopServiceRuntime(); });
 }
