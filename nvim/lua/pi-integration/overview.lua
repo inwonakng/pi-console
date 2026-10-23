@@ -387,7 +387,7 @@ function M.open(config)
 	map("<leader>pN", function()
 		local entry = require_selected()
 		if entry then report(require("pi-integration.service-hosts").new_in_project(entry)) end
-	end, "New conversation in selected workspace")
+	end, "New conversation in selected project")
 	map("<leader>?", function()
 		local lines = { "# 󰕮 Help", "", "## Keys", "" }
 		for _, spec in ipairs(mapping_specs) do

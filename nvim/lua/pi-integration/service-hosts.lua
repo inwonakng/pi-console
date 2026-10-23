@@ -497,7 +497,7 @@ end
 function M.new_in_project(entry)
 	local host = M.find(entry.host_id)
 	if not host or not host.connected then return nil, "Host disconnected" end
-	local cwd = entry.workspace_cwd or entry.cwd
+	local cwd = entry.directory or entry.cwd
 	local opened, err = require("pi-integration.backends.tmux").launch_service(
 		require("pi-integration.service-frontend").config.launcher, M.target(host), nil, cwd)
 	return opened, err
