@@ -195,7 +195,7 @@ local function command(operation, payload, callback, captured, terminal)
 	if not snapshot or not attachment then notify("Attach to a live session first."); return end
 	if not hello or not vim.tbl_contains(hello.capabilities or {}, operation) then unavailable(operation); return end
 	if captured and not current(captured) then notify("Stale editor/dialog; its text remains a local draft.", vim.log.levels.WARN); return end
-	if not operation:match("^control%.") and not control_current() then notify("Viewer: use :PiControl or confirmed :PiTakeover first.", vim.log.levels.WARN); return end
+	if not operation:match("^control%.") and not control_current() then notify("Viewer: use :PiControl first.", vim.log.levels.WARN); return end
 	local envelope = { version = 1, id = uid(), sessionId = session_id, serviceEpoch = snapshot.serviceEpoch,
 		runtimeRevision = current_revision(), operation = operation, payload = object_payload(payload) }
 	if operation ~= "control.acquire" and operation ~= "control.takeover" then envelope.controlToken = grant and grant.token end
@@ -429,7 +429,7 @@ local function apply_snapshot(value)
 			-- New allocates before Pi initializes. Send the first acquire only when
 			-- its managed identity is available, including startup approvals.
 			new_control_selection = nil
-			M.take_control(false)
+			M.take_control()
 		end
 	end
 	render()
@@ -782,11 +782,15 @@ local function acquire_control(takeover, captured)
 		end)
 	end)
 end
-function M.take_control(takeover)
+function M.take_control()
+	if not job or not snapshot or not attachment then notify("Attach to a live session first."); return end
+	if control_current() then return end
 	local captured = stamp()
-	if takeover then vim.ui.select({ "Cancel", "Take over" }, { prompt = "Replace the current controller? Accepted work continues." }, function(choice)
-		if choice == "Take over" then acquire_control(true, captured) end
-	end)
+	local controller = current_controller()
+	if controller then
+		vim.ui.select({ "Cancel", "Take over" }, { prompt = "Take control from " .. controller.label .. "? Accepted work continues." }, function(choice)
+			if choice == "Take over" then acquire_control(true, captured) end
+		end)
 	else acquire_control(false, captured) end
 end
 function M.submit_prompt()
@@ -996,7 +1000,7 @@ function M.restore_pending_action()
 	vim.ui.select(choices, { prompt = "Pending owner requests (viewer can inspect)", format_item = function(item) return item.request.method .. " " .. item.request.id end }, function(item)
 		if not item or not same_context(captured) then return end
 		close_approval()
-		local lines = { "# Owner request " .. item.request.id, "", "VIEWER: :PiControl / :PiTakeover is required to answer.", "" }
+		local lines = { "# Owner request " .. item.request.id, "", "VIEWER: :PiControl is required to answer.", "" }
 		preview_lines(item, lines)
 		local approval_buf = layout.create_buffer(nil, "pi://approval/" .. uid(), "markdown", false)
 		layout.set_buffer_lines(ctx, approval_buf, lines, false)
@@ -1200,7 +1204,7 @@ tree_ctx.tree = {
 	end,
 	writable = function(captured) return captured and current(captured) end,
 	can_mutate = function(captured, action)
-		if not control_current() then notify("Viewer: use :PiControl or confirmed :PiTakeover first.", vim.log.levels.WARN); return false end
+		if not control_current() then notify("Viewer: use :PiControl first.", vim.log.levels.WARN); return false end
 		if not captured or not current(captured) then notify("History context changed; refresh the tree before changing history.", vim.log.levels.WARN); return false end
 		if not require("pi-integration.utils.guard").if_history_change_allowed(tree_ctx, "changing history") then return false end
 		if action == "clone" and not require("pi-integration.backends.tmux").available() then
@@ -1252,7 +1256,7 @@ function M.refresh_messages() refresh() end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer("pi://service-help/" .. uid(), "# Local service attachment\n\n:PiControl / :PiTakeover / :PiRelease\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain IDs; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session IDs; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: saved owners, connect/retry/disconnect/edit/forget.\n:PiManagement: inspect overview management outcomes.\n:PiNew: new conversation in the current workspace.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer("pi://service-help/" .. uid(), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (choose owner/directory for a new conversation)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (shared editable queue; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain IDs; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session IDs; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n:PiKill (kill session and close; preserves local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text or ! / !! shell on OWNER; <Esc><Esc> aborts.\nSettings/model/thinking/history and the command picker use typed owner operations.\n:PiHosts / <leader>ph: saved owners, connect/retry/disconnect/edit/forget.\n:PiManagement: inspect overview management outcomes.\n:PiNew: new conversation in the current workspace.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nFreeform slash commands and excluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()
@@ -1368,8 +1372,7 @@ function M.open(restore)
 		layout.set_buffer_lines(ctx, state.input_buf, restore.input_lines or { "" }, true)
 		for _, draft in ipairs(restore.drafts or {}) do recovered_draft(draft) end
 	end
-	for name, fn in pairs({ PiControl = function() M.take_control(false) end, PiTakeover = function() M.take_control(true) end,
-		PiRelease = function() command("control.release", {}) end, PiPending = M.restore_pending_action, PiQueue = M.pick_queue,
+	for name, fn in pairs({ PiControl = M.take_control, PiPending = M.restore_pending_action, PiQueue = M.pick_queue,
 		PiOffers = M.show_offers, PiDrafts = M.show_drafts, PiSubmissions = M.show_submissions, PiDetach = M.detach, PiReconnect = M.reconnect,
 		PiFollowUp = M.follow_up, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
 		PiSavedOperations = require("pi-integration.service-hosts").saved_operations,

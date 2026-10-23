@@ -226,7 +226,9 @@ side/spawn controls, retitle/notifications/usage and confirmed owner-session res
 unresolved create/resume ID. These do not replay work. See the C report for exact
 arguments, confirmations and what completion means.
 
-- `:PiControl`, confirmed `:PiTakeover`, `:PiRelease`; reconnect starts as viewer.
+- `:PiControl` / `<leader>pc` acquires control, confirming before replacing another
+  controller; reconnect starts as viewer. `<leader>pC` / `:PiCd` starts a new
+  conversation by choosing its owner and directory.
 - `<C-CR>` non-slash text or explicit owner `!` / `!!` shell, `<Esc><Esc>` abort; shared queue via `:PiQueue` / `<leader>pq`.
   Queue editors are local drafts until `:write`; their 30-second pause may expire.
   A stale revision or dispatched item refuses saving and retains local text.
