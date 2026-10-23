@@ -50,7 +50,7 @@ function M.update_input_sidebar(ctx)
 	if not state.input_win then
 		return
 	end
-	local highlight = input_sidebar_highlight(state.access_mode)
+	local highlight = state.session_id and input_sidebar_highlight(state.access_mode) or "PiInputSidebarUnknown"
 	for _, win in ipairs(vim.api.nvim_list_wins()) do
 		if buffer.window_matches(win, state.input_buf) then
 			vim.api.nvim_set_option_value("fillchars", "stl:─,stlnc:─,eob:▌", { win = win })
