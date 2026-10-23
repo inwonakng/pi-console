@@ -144,7 +144,9 @@ export class HostOwner {
   }
 
   /** Host metadata shares bounded lifecycle admission, without creating a session. */
-  optionsForHost(check: () => void): Promise<HostOptions> {
+  optionsForHost(cwd: unknown, check: () => void): Promise<HostOptions> {
+    if (cwd !== undefined && (typeof cwd !== "string" || !isAbsolute(cwd) || Buffer.byteLength(cwd) > 4096
+      || /[\u0000-\u001f\u007f]/.test(cwd))) throw new CommandError("invalid_command", "Invalid host options directory");
     this.assertOpen(); check();
     if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");
     this.hostAdmitting++;
@@ -152,7 +154,8 @@ export class HostOwner {
       this.assertOpen(); check();
       this.catalog.assertLaunchAllowed();
       try {
-        const result = await readHostOptions(this.resources, this.options.environment);
+        const result = await readHostOptions(this.resources, this.options.environment,
+          { cwd: cwd as string | undefined, provider: this.options.provider, model: this.options.model });
         this.assertOpen(); check();
         this.catalog.assertExecutionAllowed();
         return result;

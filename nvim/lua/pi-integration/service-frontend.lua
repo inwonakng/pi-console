@@ -25,10 +25,10 @@ local approval_context, pending_context
 local pending_seen, pending_replies = {}, {}
 local ctx, sync_pending
 local recovery_id, backup_scheduled, restarting_frontend
-local render, refresh, connect, attach, recover_selection, tree_ctx, advance_start
+local render, refresh, connect, attach, recover_selection, tree_ctx, advance_start, host_options
 local side_buf
 local owner_states, pending_settings = {}, {}
-local selected_cwd, starting, new_control_selection
+local selected_cwd, starting, new_control_selection, startup_options
 local function status_data(key)
 	local raw = snapshot and snapshot.conversation.statuses[key]
 	local ok, value = pcall(vim.json.decode, raw or "")
@@ -378,6 +378,7 @@ ctx.transcript.refresh_ui = function()
 	if sync_pending then vim.schedule(sync_pending) end
 end
 local function update_status_state()
+	local defaults = not session_id and startup_options and startup_options.defaults or {}
 	local conversation = snapshot and snapshot.conversation
 	local statuses = conversation and conversation.statuses or {}
 	local pi_state = snapshot and snapshot.piState or {}
@@ -390,18 +391,24 @@ local function update_status_state()
 	local terminal = snapshot and (snapshot.phase == "stopped" or snapshot.phase == "failed") and snapshot.phase
 	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active" or "view only")
 		or (session_id and ("session " .. (session_status or "unattached")) or starting and "starting" or "unstarted")
-	state.access_mode = (statuses["pi-access-mode"] or ""):match("^Mode: (%w+)$")
-	state.integration_mode = (statuses["pi-integration-mode"] or ""):match("^Integration: (%w+)$")
+	state.access_mode = (statuses["pi-access-mode"] or ""):match("^Mode: (%w+)$") or defaults.accessMode
+	state.integration_mode = (statuses["pi-integration-mode"] or ""):match("^Integration: (%w+)$") or defaults.integrationMode
 	state.notification_status = statuses["pi-notifications"]
+	if not state.notification_status and defaults.notificationsEnabled ~= nil then
+		state.notification_status = defaults.notificationsEnabled and "notify on" or "notify off"
+	end
 	state.workspace = snapshot and snapshot.workspace
-	state.provider = pi_state.model and pi_state.model.provider
-	state.model_id = pi_state.model and pi_state.model.id
-	state.thinking_level = pi_state.thinkingLevel
+	local model = pi_state.model or defaults.model
+	state.provider = model and model.provider
+	state.model_id = model and model.id
+	state.thinking_level = pi_state.thinkingLevel or defaults.thinkingLevel
 	if pending_settings["access.set"] then state.access_mode = pending_settings["access.set"].mode end
 	if pending_settings["integration.set"] then state.integration_mode = pending_settings["integration.set"].mode end
 	if pending_settings["notifications.set"] then state.notification_status = pending_settings["notifications.set"].enabled and "notify on" or "notify off" end
 	if pending_settings["model.set"] then
-		state.provider, state.model_id = pending_settings["model.set"].provider, pending_settings["model.set"].modelId
+		local pending = pending_settings["model.set"]
+		if pending.provider ~= state.provider or pending.modelId ~= state.model_id then state.thinking_level = nil end
+		state.provider, state.model_id = pending.provider, pending.modelId
 	end
 	if pending_settings["thinking.set"] then state.thinking_level = pending_settings["thinking.set"].level end
 	state.session_stats = conversation and conversation.stats
@@ -546,7 +553,7 @@ local function disconnected()
 	offers = {}
 	resources.invalidate()
 	generation = generation + 1
-	job, attachment, grant, authority, hello = nil, nil, nil, nil, nil
+	job, attachment, grant, authority, hello, startup_options = nil, nil, nil, nil, nil, nil
 	session_status, session_error = "unattached", nil
 	callbacks, outcomes, new_control_selection, starting = {}, {}, nil, nil
 	refreshing, refresh_scheduled, dirty = false, false, false
@@ -725,6 +732,7 @@ connect = function()
 			end
 			hello = result
 			M.config.expected_host = result.hostId
+			if not session_id then host_options() end
 			render()
 			local restore = recovery_requested; recovery_requested = false
 			if recover_host(restore) then return end
@@ -1290,12 +1298,15 @@ function M.cycle_access_mode() cycle_setting("access.set", M.config.access_modes
 function M.set_integration_mode(mode) setting("integration.set", { mode = mode }) end
 function M.pick_integration_mode() pick_setting("integration.set", M.config.integration_modes or { "ask", "allowed" }, "Integration mode") end
 function M.cycle_integration_mode() cycle_setting("integration.set", M.config.integration_modes, state.integration_mode) end
-local function host_options(callback)
+host_options = function(callback)
 	if not hello or not job then notify("Connect to a host to read its model options."); return end
 	if not vim.tbl_contains(hello.capabilities or {}, "host.options") then unavailable("Pre-start model options"); return end
-	local captured = stamp()
-	request("host.options", { serviceEpoch = hello.serviceEpoch }, function(ok, data)
-		if ok and same_selection(captured) then callback(data, captured) end
+	local captured, cwd = stamp(), selected_cwd
+	request("host.options", { serviceEpoch = hello.serviceEpoch, cwd = cwd }, function(ok, data)
+		if not ok or not same_selection(captured) or cwd ~= selected_cwd then return end
+		startup_options = data
+		render()
+		if callback then callback(data, captured) end
 	end)
 end
 function M.pick_model()
@@ -1309,12 +1320,13 @@ end
 function M.pick_thinking()
 	if not session_id then
 		host_options(function(data, captured)
-			local model = pending_settings["model.set"]
+			local pending = pending_settings["model.set"]
+			local model = pending and { provider = pending.provider, id = pending.modelId } or (data.defaults or {}).model
 			if not model then notify("Choose a model before its pending thinking level."); return end
 			for _, option in ipairs(data.models) do
-				if option.provider == model.provider and option.id == model.modelId then
+				if option.provider == model.provider and option.id == model.id then
 					vim.ui.select(option.thinkingLevels, { prompt = "Pending thinking level" }, function(level)
-						if level and pending_settings["model.set"] == model then setting("thinking.set", { level = level }, captured) end
+						if level and pending_settings["model.set"] == pending then setting("thinking.set", { level = level }, captured) end
 					end)
 					return
 				end

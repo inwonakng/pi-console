@@ -149,9 +149,9 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
             return;
           }
           case "host.options":
-            exact(p, ["serviceEpoch"]);
+            exact(p, ["serviceEpoch", "cwd"]);
             if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host options owner changed");
-            result = await owner.optionsForHost(() => {
+            result = await owner.optionsForHost(p.cwd, () => {
               if (socket.destroyed) throw new CommandError("attachment_closed", "Host options reader disconnected");
               remoteAdmission?.();
             });

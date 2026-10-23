@@ -277,8 +277,10 @@ end
 local function integration_statusline_label(mode)
 	if mode == "allowed" then
 		return "✓"
+	elseif mode == "ask" then
+		return "?"
 	end
-	return "?"
+	return "--"
 end
 
 local function integration_highlight_group(mode)
@@ -348,7 +350,7 @@ function M.render(ctx)
 	local mode_suffix = ""
 	local mode_label = mode_prefix .. mode_text .. mode_suffix
 	local status_delimiter = "·"
-	local integration_mode = state.integration_mode or "ask"
+	local integration_mode = state.integration_mode
 	local integration_label = integration_statusline_label(integration_mode)
 	local integration_segment_label = status_delimiter .. integration_label
 	local notification_label = state.notification_status and notification_statusline_label(state.notification_status) or ""
