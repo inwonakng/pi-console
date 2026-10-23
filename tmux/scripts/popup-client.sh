@@ -5,7 +5,7 @@ set -eu
 prefix=@pi_console_popup_
 mode=${1-}
 case "$mode" in
-    --install-hooks|--owned|--changed) shift ;;
+    --install-hooks|--owned|--changed|--switch) shift ;;
     *) mode=attach ;;
 esac
 [ "$#" -ge 1 ] || { printf 'Missing tmux socket\n' >&2; exit 2; }
@@ -16,6 +16,9 @@ shift
 lookup_owned_client() {
     owned_pid=
     tracked_session=
+    host_pane=
+    parent_client=
+    parent_pid=
     [ -n "$1" ] || return 0
     local clients name pid terminal record owner
     clients=$(tmux -S "$socket_path" list-clients -F $'#{client_name}\t#{client_pid}\t#{client_tty}') || exit 1
@@ -23,13 +26,25 @@ lookup_owned_client() {
         [ "$name" = "$1" ] || continue
         case "$pid" in ''|*[!0-9]*) return 0 ;; esac
         record=$(tmux -S "$socket_path" show-options -gqv "$prefix$pid") || exit 1
-        read -r owner tracked_session <<< "$record"
+        read -r owner tracked_session host_pane parent_client parent_pid <<< "$record"
         if [ -n "$terminal" ] && [ "$owner" = "$terminal" ]; then
             owned_pid=$pid
             owned_terminal=$terminal
         fi
         return 0
     done <<< "$clients"
+}
+
+# Query membership rather than a cached session: the container can be moved,
+# and its window can be linked into more than one session.
+contains_popup() {
+    [[ "$host_pane" =~ ^%[0-9]+$ ]] || return 1
+    local panes pane
+    panes=$(tmux -S "$socket_path" list-panes -s -t "$1" -F '#{pane_id}') || exit 1
+    while read -r pane; do
+        [ "$pane" != "$host_pane" ] || return 0
+    done <<< "$panes"
+    return 1
 }
 
 case "$mode" in
@@ -52,6 +67,29 @@ case "$mode" in
         [ -z "$owned_pid" ] || printf '1\n'
         exit 0
         ;;
+    --switch)
+        [ "$#" -eq 2 ] || exit 2
+        client=$1
+        next_session=$(tmux -S "$socket_path" display-message -p -t "$2:" '#{session_id}')
+        lookup_owned_client "$client"
+        if [ -n "$owned_pid" ] && contains_popup "$next_session"; then
+            # Hand navigation back to the original client. Validate its PID so
+            # a reused terminal name cannot redirect an unrelated attachment.
+            clients=$(tmux -S "$socket_path" list-clients -F $'#{client_name}\t#{client_pid}')
+            while IFS=$'\t' read -r name pid; do
+                if [ "$name" = "$parent_client" ] && [ "$pid" = "$parent_pid" ]; then
+                    tmux -S "$socket_path" switch-client -c "$name" -t "$next_session" \; \
+                        detach-client -t "$client"
+                    exit 0
+                fi
+            done <<< "$clients"
+            # Still close the popup if its original client has disappeared.
+            tmux -S "$socket_path" detach-client -t "$client"
+            printf 'The original tmux client is no longer attached\n' >&2
+            exit 1
+        fi
+        exec tmux -S "$socket_path" switch-client -c "$client" -t "$next_session"
+        ;;
     --changed)
         [ "$#" -eq 3 ] || exit 2
         client=$1
@@ -62,13 +100,18 @@ case "$mode" in
         [[ "$next_session" =~ ^\$[0-9]+$ ]] || exit 0
         lookup_owned_client "$client"
         [ -n "$owned_pid" ] || exit 0
+        # Native tmux choosers bypass --switch. Break self-attachment even on
+        # the initial attach, before considering the tracked session marker.
+        if contains_popup "$next_session"; then
+            exec tmux -S "$socket_path" detach-client -t "$client"
+        fi
         # Old wrappers may still be alive during an upgrade, without a session ID.
         [[ "$tracked_session" =~ ^\$[0-9]+$ ]] || exit 0
         [ "$tracked_session" != "$next_session" ] || exit 0
         # Explicit switches retain old_session even if it is deleted before
         # this handler runs. Destruction clears it before assigning a fallback.
         if [ -n "$old_session" ]; then
-            tmux -S "$socket_path" set-option -g "$prefix$owned_pid" "$owned_terminal $next_session"
+            tmux -S "$socket_path" set-option -g "$prefix$owned_pid" "$owned_terminal $next_session $host_pane $parent_client $parent_pid"
         else
             tmux -S "$socket_path" detach-client -t "$client"
         fi
@@ -76,8 +119,11 @@ case "$mode" in
         ;;
 esac
 
-[ "$#" -eq 1 ] || { printf 'Usage: %s SOCKET SESSION\n' "${0##*/}" >&2; exit 2; }
+[ "$#" -eq 4 ] || { printf 'Usage: %s SOCKET SESSION HOST_PANE CLIENT_NAME CLIENT_PID\n' "${0##*/}" >&2; exit 2; }
 session=$1
+host_pane=$2
+parent_client=$3
+parent_pid=$4
 session_id=$(tmux -S "$socket_path" display-message -p -t "=$session:" '#{session_id}')
 terminal=$(tty)
 unset TMUX
@@ -86,12 +132,13 @@ unset TMUX
 # marker. exec preserves the child's PID as the tmux client's PID.
 bash -eu -c '
     socket=$1; session=$2; terminal=$3; prefix=$4
-    if ! error=$(tmux -S "$socket" set-option -g "$prefix$$" "$terminal $session" </dev/null 2>&1); then
+    host_pane=$5; parent_client=$6; parent_pid=$7
+    if ! error=$(tmux -S "$socket" set-option -g "$prefix$$" "$terminal $session $host_pane $parent_client $parent_pid" </dev/null 2>&1); then
         printf "%s\n" "$error" >&2
         exit 1
     fi
     exec tmux -S "$socket" attach-session -t "$session"
-' popup-client "$socket_path" "$session_id" "$terminal" "$prefix" <&0 &
+' popup-client "$socket_path" "$session_id" "$terminal" "$prefix" "$host_pane" "$parent_client" "$parent_pid" <&0 &
 attach_pid=$!
 cleanup() {
     local error

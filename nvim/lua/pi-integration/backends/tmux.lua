@@ -128,7 +128,12 @@ function M.focus(id)
 			return nil, context and "The initiating tmux client is no longer viewing this pane"
 				or "Cannot identify a unique tmux client to switch between sessions"
 		end
-		local switched, switch_err = command({ "switch-client", "-c", matches[1], "-t", session })
+		-- A popup must hand navigation back to its outer client when the
+		-- destination contains that popup, rather than displaying itself.
+		local switched, switch_err = command_result(vim.system({
+			"bash", vim.g.pi_console_root .. "/tmux/scripts/popup-client.sh", "--switch",
+			vim.env.TMUX:match("^(.*),%d+,%d+$"), matches[1], session,
+		}, { text = true }):wait(2000))
 		if not switched then
 			return nil, switch_err
 		end
