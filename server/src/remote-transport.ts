@@ -1,8 +1,11 @@
 import { createServer, type Server } from "node:http";
+import { readFileSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
+import { join } from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, createWebSocketStream } from "ws";
 import { MAX_REQUEST } from "./local-protocol.js";
+import type { Channel } from "./session-catalog.js";
 
 export const DEFAULT_PORT = 8443;
 export function listenerPort(value: string | number = DEFAULT_PORT): number {
@@ -28,11 +31,35 @@ export class RemoteListener {
   private readonly sockets = new Set<Duplex>();
   private readonly timer: NodeJS.Timeout;
   constructor(private readonly port: number,
-    connection: (stream: Duplex, onDetach: (detach: () => void) => void) => Promise<void>) {
+    connection: (stream: Duplex, onDetach: (detach: () => void) => void) => Promise<void>,
+    web?: { root: string; channel: Channel }) {
+    // Load the fixed asset set at startup; never resolve request paths on disk.
+    const assets = new Map<string, { body: Buffer; type: string }>();
+    if (web) {
+      for (const [path, file, type] of [
+        ["/", "index.html", "text/html; charset=utf-8"],
+        ["/app.js", "app.js", "text/javascript; charset=utf-8"],
+        ["/client.js", "client.js", "text/javascript; charset=utf-8"],
+        ["/style.css", "style.css", "text/css; charset=utf-8"],
+      ]) {
+        let body = readFileSync(join(web.root, file));
+        if (path === "/") body = Buffer.from(body.toString("utf8").replace("{{PI_CONSOLE_CHANNEL}}", web.channel));
+        assets.set(path, { body, type });
+      }
+    }
     this.server = createServer({ maxHeaderSize: 8192, requestTimeout: 10000,
-      headersTimeout: 10000, connectionsCheckingInterval: 1000 }, (_request, response) => {
-      // No web UI yet, and HTTP never exposes local administration.
-      response.writeHead(404, { Connection: "close" }); response.end();
+      headersTimeout: 10000, connectionsCheckingInterval: 1000 }, (request, response) => {
+      const asset = assets.get(request.url?.split("?", 1)[0] ?? "");
+      if (!asset) { response.writeHead(404, { Connection: "close" }); response.end(); return; }
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        response.writeHead(405, { Allow: "GET, HEAD", Connection: "close" }); response.end(); return;
+      }
+      response.writeHead(200, {
+        "Content-Type": asset.type, "Content-Length": asset.body.length,
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      });
+      response.end(request.method === "HEAD" ? undefined : asset.body);
     });
     // Remote capacity cannot consume the local IPC connection budget.
     this.server.maxConnections = 64;
@@ -42,8 +69,11 @@ export class RemoteListener {
       this.sockets.add(socket); socket.once("close", () => this.sockets.delete(socket));
     });
     this.server.on("upgrade", (request, socket, head) => {
-      // Refuse browser-origin connections until a browser interface is implemented.
-      if (request.headers.origin !== undefined || request.url !== "/v1/stream" || this.peers.size >= 32) {
+      // Non-browser clients retain trusted-network access. Browser clients must
+      // come from this HTTP origin, and only when the web frontend is enabled.
+      const origin = request.headers.origin;
+      if (origin !== undefined && (!web || origin !== `http://${request.headers.host}`)
+        || request.url !== "/v1/stream" || this.peers.size >= 32) {
         socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); return;
       }
       this.websocket.handleUpgrade(request, socket, head, (ws) => {

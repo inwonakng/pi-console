@@ -14,9 +14,8 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; height: 100dvh; display: flex; flex-direction: column; }
-button, input, textarea, select { font: inherit; color: inherit; }
-button, select { min-height: 44px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); padding: 7px 12px; }
-button { cursor: pointer; }
+button, input, textarea { font: inherit; color: inherit; }
+button { min-height: 44px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); padding: 7px 12px; cursor: pointer; }
 button:hover:not(:disabled), a.session-row:hover { background: #2b352e; }
 button:disabled { opacity: .45; cursor: default; }
 input, textarea { width: 100%; min-height: 44px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); padding: 10px 12px; }
@@ -104,8 +103,7 @@ dialog p { font-size: 11px; margin-top: 10px; }
   .app-header { padding: 8px 12px; gap: 8px; }
   .wordmark { font-size: 17px; }
   .connection-form { gap: 6px; }
-  .connection-form label, #connection-state { display: none; }
-  .connection-form select { padding: 6px; }
+  #connection-state { display: none; }
   .shell { display: block; }
   aside { height: 100%; border-right: 0; }
   main { display: none; height: 100%; }

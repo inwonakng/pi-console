@@ -19,9 +19,7 @@ install_progress() {
         i=$((i + 1))
     done
     if [ "$install_tty" = yes ]; then
-        printf '\r\033[K[%s] %3d%% %s' "$bar" "$percent" "$label" >&3
-    else
-        printf '[%s] %3d%% %s\n' "$bar" "$percent" "$label" >&3
+        printf '\r\033[K%s[%s] %3d%%%s %s' "$install_color" "$bar" "$percent" "$install_reset" "$label" >&3
     fi
 }
 
@@ -43,6 +41,10 @@ install_start() {
     install_log=$(mktemp "${TMPDIR:-/tmp}/pi-console-install-log.XXXXXX")
     install_tty=no
     if [ -t 3 ] && [ "${TERM:-}" != dumb ]; then install_tty=yes; fi
+    install_color= install_reset=
+    if [ "$install_tty" = yes ] && [ -z "${NO_COLOR:-}" ]; then
+        install_color=$'\033[1;36m' install_reset=$'\033[0m'
+    fi
     trap 'install_finish "$?"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -51,9 +53,13 @@ install_start() {
 }
 
 install_complete() {
-    install_progress 100 'Installation complete'
-    if [ "$install_tty" = yes ]; then printf '\n' >&3; fi
+    if [ "$install_tty" = yes ]; then printf '\r\033[K' >&3; fi
     exec 1>&4 2>&3
+    if [ -t 1 ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
+        printf '\033[1mSnapshot:\033[0m \033[1;36m%s\033[0m\n' "$1"
+    else
+        printf 'Snapshot: %s\n' "$1"
+    fi
 }
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
@@ -348,13 +354,4 @@ if [ "$legacy" = yes ] || [ -L "$install_root/pi" ]; then
     rm -- "$install_root/pi"
 fi
 
-install_complete
-printf '\nInstalled stable commands in %s.\nApplication: %s\n' "$bin_dir" "$install_root"
-printf '%s\n' 'To install another release, rerun install.sh --version <TAG>.'
-printf 'Mode: %s. Existing services/sessions were not restarted; old runtimes are retained.\n' "$mode"
-printf '%s\n' 'New frontends/TUIs use the selected runtime. Running services keep new conversations on their pinned build until an explicit guarded restart.'
-if [ "$mode" = full ]; then
-    printf '\nTmux selection was not changed. To select stable bindings, run: pi-console tmux setup\n'
-else
-    printf '%s\n' 'Headless commands: pi-console server ... and pi-stable. No supervisor was enabled.'
-fi
+install_complete "$release"

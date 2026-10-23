@@ -29,10 +29,10 @@ function requirePath(value, path) {
 
 // Read on demand so every extension sees edits without a watcher or reload cache.
 // Add each new extension's section and validation here as it adopts this file.
-export function readExtensionSettings() {
+export function readExtensionSettings(channel = process.env.PI_CONSOLE_CHANNEL) {
 	const root = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
 	if (!isAbsolute(root)) throw new Error("XDG_CONFIG_HOME must be absolute");
-	const filename = process.env.PI_CONSOLE_CHANNEL === "dev" ? "config-dev.yaml" : "config.yaml";
+	const filename = channel === "dev" ? "config-dev.yaml" : "config.yaml";
 	const path = join(root, "pi-console", filename);
 	let source;
 	try {

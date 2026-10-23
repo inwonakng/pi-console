@@ -12,9 +12,7 @@ install_progress() {
         i=$((i + 1))
     done
     if [ "$install_tty" = yes ]; then
-        printf '\r\033[K[%s] %3d%% %s' "$bar" "$percent" "$label" >&3
-    else
-        printf '[%s] %3d%% %s\n' "$bar" "$percent" "$label" >&3
+        printf '\r\033[K%s[%s] %3d%%%s %s' "$install_color" "$bar" "$percent" "$install_reset" "$label" >&3
     fi
 }
 
@@ -36,6 +34,10 @@ install_start() {
     install_log=$(mktemp "${TMPDIR:-/tmp}/pi-console-install-log.XXXXXX")
     install_tty=no
     if [ -t 3 ] && [ "${TERM:-}" != dumb ]; then install_tty=yes; fi
+    install_color= install_reset=
+    if [ "$install_tty" = yes ] && [ -z "${NO_COLOR:-}" ]; then
+        install_color=$'\033[1;36m' install_reset=$'\033[0m'
+    fi
     trap 'install_finish "$?"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -44,9 +46,13 @@ install_start() {
 }
 
 install_complete() {
-    install_progress 100 'Installation complete'
-    if [ "$install_tty" = yes ]; then printf '\n' >&3; fi
+    if [ "$install_tty" = yes ]; then printf '\r\033[K' >&3; fi
     exec 1>&4 2>&3
+    if [ -t 1 ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
+        printf '\033[1mSnapshot:\033[0m \033[1;36m%s\033[0m\n' "$1"
+    else
+        printf 'Snapshot: %s\n' "$1"
+    fi
 }
 
 validate_directory() {

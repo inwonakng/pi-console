@@ -17,6 +17,22 @@ import { managementLock, ServiceSupervisor } from "./service-supervisor.js";
 import type { Channel } from "./session-catalog.js";
 
 process.umask(0o077);
+
+function terminalText(text: string, style: string, stream: NodeJS.WriteStream): string {
+  return stream.isTTY && process.env.TERM !== "dumb" && !process.env.NO_COLOR
+    ? `\x1b[${style}m${text}\x1b[0m` : text;
+}
+
+async function reportStarted(hello: Record<string, unknown>): Promise<void> {
+  if (!object(hello.network) || typeof hello.network.port !== "number") throw new Error("Service did not report a listener port");
+  const selectedBuildId = await serviceBuild();
+  const url = `http://localhost:${listenerPort(hello.network.port)}`;
+  console.log(terminalText(url, "1;36", process.stdout));
+  if (hello.buildId !== selectedBuildId) {
+    console.error(terminalText("Warning: running build differs from the selected build. Use server restart to apply it.", "1;33", process.stderr));
+  }
+}
+
 async function main(): Promise<void> {
   requireNode();
   const args = process.argv.slice(2);
@@ -144,8 +160,7 @@ async function main(): Promise<void> {
         if (action !== "restart") { console.log(JSON.stringify({ running: false, enabled: action === "disable" ? false : !!supervisor, notice: "Live sessions suspended for frontend reconnect; history, workspaces and credentials retained." })); return; }
       } else if (existing) {
         existing.client.close();
-        const selectedBuildId = await serviceBuild();
-        console.log(JSON.stringify({ ...existing.hello, existing: true, selectedBuildId, restartRequired: existing.hello.buildId !== selectedBuildId })); return;
+        await reportStarted(existing.hello); return;
       }
       if (action !== "enable") {
         await requireNoClaim();
@@ -171,8 +186,7 @@ async function main(): Promise<void> {
         if (view) {
           view.client.close(); await assertManagementOwner(view.hello);
           if (view.hello.stopping) throw new Error("Discovered service is stopping; no replacement started");
-          const selectedBuildId = await serviceBuild();
-          console.log(JSON.stringify({ ...view.hello, selectedBuildId, restartRequired: view.hello.buildId !== selectedBuildId, startup: supervisor ? await supervisor.status() : { enabled: false } })); return;
+          await reportStarted(view.hello); return;
         }
         await delay(100);
       }

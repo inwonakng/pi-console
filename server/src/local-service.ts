@@ -10,6 +10,7 @@ import { identifier } from "./host-commands.js";
 import { object } from "./pi-records.js";
 import { CAPABILITIES, MAX_REQUEST, PROTOCOL, records, RecordWriter } from "./local-protocol.js";
 import { serviceBuild } from "./service-paths.js";
+import { readExtensionSettings } from "../../pi/extensions/shared/read-extension-settings.mjs";
 
 export const endpoint = (root: string): string => join(root, "service.sock");
 function exact(value: Record<string, unknown>, keys: string[]): void {
@@ -22,6 +23,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
   const path = endpoint(options.root);
   if (Buffer.byteLength(path) > 100) throw new Error("Unix endpoint path is too long; select a shorter private --root");
   const port = listenerPort(options.port);
+  const webRoot = readExtensionSettings(options.channel).server?.webui?.enabled ? join(options.appRoot, "web") : undefined;
   const buildId = await serviceBuild();
   const owner = await HostOwner.open(options);
   const clients = new Set<Socket>();
@@ -281,7 +283,8 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       server.listen(path, () => { server.off("error", reject); resolve(); });
     });
     await chmod(path, 0o600);
-    remote = new RemoteListener(port, (stream, onDetach) => connection(stream, true, onDetach));
+    remote = new RemoteListener(port, (stream, onDetach) => connection(stream, true, onDetach),
+      webRoot ? { root: webRoot, channel: options.channel } : undefined);
     await remote.listen();
     console.log(JSON.stringify({ network: listenerAddresses(port) }));
     startReady();

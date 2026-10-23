@@ -1,6 +1,3 @@
-import type { AccessMode } from "./access-state.js";
-import type { IntegrationMode } from "./integration-state.js";
-
 export interface ExtensionSettings {
 	server?: {
 		port?: number;
@@ -10,10 +7,10 @@ export interface ExtensionSettings {
 		default?: "enabled" | "disabled";
 	};
 	"integration-mode"?: {
-		default?: IntegrationMode;
+		default?: "ask" | "allowed";
 	};
 	"access-mode"?: {
-		default?: AccessMode;
+		default?: "readonly" | "ask" | "edit" | "full";
 		"read-paths"?: string[];
 		"write-paths"?: string[];
 		"temp-dir-prefix"?: string;
@@ -27,4 +24,4 @@ export interface ExtensionSettings {
 	};
 }
 
-export function readExtensionSettings(): ExtensionSettings;
+export function readExtensionSettings(channel?: "stable" | "dev"): ExtensionSettings;

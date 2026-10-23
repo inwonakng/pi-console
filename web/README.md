@@ -3,24 +3,40 @@
 Dependency-free browser assets for the pi-console host. No build step, external
 fonts, service worker, or separate production process.
 
-The host listener integration is intentionally separate from this draft. The
-current listener does not serve these files or accept browser connections yet.
+## Enable and connect
+
+Merge this into `${XDG_CONFIG_HOME:-~/.config}/pi-console/config.yaml`
+(`config-dev.yaml` for dev):
+
+```yaml
+server:
+  webui:
+    enabled: true
+```
+
+Restart the matching service with `pi-console server restart` (`pi-console-dev
+server restart` for dev), then open `http://HOST:8443/` in a browser. Use the configured
+port if different; `server status` reports candidate URLs. The page automatically
+connects using the serving host's stable/dev channel and displays it as a read-only
+label. The frontend is disabled by default; configuration and asset changes require
+a service restart.
+
+**Anyone who can reach the server port can view and control sessions as the
+host user. There is no authentication or encryption.** Use only trusted internal
+networks/VPNs and firewall rules.
 
 ## Listener integration
 
-- Read `server.webui.enabled` from `${XDG_CONFIG_HOME:-~/.config}/pi-console/config.yaml`
-  (`config-dev.yaml` for dev; default `false`).
-  The shared settings reader validates and returns this option; it does not
-  enable a listener itself.
-- When enabled, serve `index.html` at `/`, and `app.js`, `client.js`, and
-  `style.css` alongside it. Serve only these assets, not arbitrary host files.
-- Provide an authenticated, same-origin WebSocket at `/v1/stream`. Browser
-  authentication and origin checks belong to the listener; this frontend does
-  not put device secrets in URLs or browser storage.
+When enabled, the listener serves only `/` (`index.html`), `/app.js`, `/client.js`,
+and `/style.css`. Browser WebSockets at `/v1/stream` must have the same HTTP origin
+as the page; connections initiated by unrelated websites are rejected. Existing
+non-browser clients remain available regardless of the web frontend setting.
+Service administration stays on local IPC.
 
 `client.js` uses the existing protocol-1 LF-delimited JSON records, including
-binary WebSocket frames. The selected channel is sent in `hello`. No browser-only
-session operations or HTTP APIs are introduced. Session links use
+binary WebSocket frames. The listener embeds its channel in the served HTML; the
+browser sends that channel in `hello` and still validates the server response.
+No browser-only session operations or HTTP APIs are introduced. Session links use
 `/#sessions/<id>` so asset serving needs no deep-route fallback.
 
 ## Behavior

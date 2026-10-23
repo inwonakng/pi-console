@@ -1,6 +1,8 @@
 import { ServiceClient, requestId } from "./client.js";
 
 const $ = id => document.getElementById(id);
+const channel = document.documentElement.dataset.piChannel;
+$("channel").textContent = channel === "stable" || channel === "dev" ? channel : "Unknown channel";
 const text = (tag, value, className) => {
   const node = document.createElement(tag);
   node.textContent = value ?? "";
@@ -225,7 +227,6 @@ function renderList() {
 function renderControls() {
   const controlled = Boolean(controlsCurrent());
   $("connect").disabled = busy;
-  $("channel").disabled = busy || connected;
   $("new-session").disabled = !connected || busy;
   $("control").disabled = !connected || !snapshot || busy;
   $("control").textContent = controlled ? "Release control" : owner?.controller ? "Take over" : "Take control";
@@ -404,6 +405,7 @@ $("connection-form").addEventListener("submit", event => {
   event.preventDefault();
   run(async () => {
     if (connected) { client.close(); return; }
+    if (channel !== "stable" && channel !== "dev") throw new Error("Missing or invalid server channel. Reload the page from the pi-console server.");
     const next = new ServiceClient(record => { if (client === next) receive(record); });
     client = next;
     hello = null;
@@ -413,7 +415,7 @@ $("connection-form").addEventListener("submit", event => {
     $("session").hidden = true;
     $("welcome").hidden = false;
     $("connection-state").textContent = "Connecting...";
-    hello = await next.connect($("channel").value);
+    hello = await next.connect(channel);
     connected = true;
     notice();
     $("connection-state").textContent = "Connected";

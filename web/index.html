@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-pi-channel="{{PI_CONSOLE_CHANNEL}}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -12,8 +12,7 @@
   <header class="app-header">
     <a class="wordmark" href="#">pi<span>/</span>console</a>
     <form id="connection-form" class="connection-form">
-      <label for="channel">Channel</label>
-      <select id="channel"><option value="stable">stable</option><option value="dev">dev</option></select>
+      <span id="channel" aria-label="Server channel"></span>
       <span id="connection-state" role="status">Disconnected</span>
       <button id="connect" type="submit">Connect</button>
     </form>

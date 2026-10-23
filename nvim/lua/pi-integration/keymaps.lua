@@ -7,7 +7,7 @@ M.specs = {
 		{ modes = { "n", "i" }, lhs = "<C-CR>", action = "submit_prompt", desc = "Submit prompt" },
 	},
 	shared = {
-		{ lhs = "<leader>qk", action = "kill_session", desc = "Kill conversation and close frontend" },
+		{ lhs = "<leader>pk", action = "kill_session", desc = "Kill conversation and close frontend" },
 		{ lhs = "<leader>a", action = "cycle_access_mode", desc = "Cycle access mode" },
 		{ lhs = "<leader>i", action = "cycle_integration_mode", desc = "Cycle integration mode" },
 		{ lhs = "<leader>?", action = "show_help", desc = "Pi help" },

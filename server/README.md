@@ -189,9 +189,11 @@ No opt-in, device credential, TLS configuration or certificate is required.
 host's user. Traffic is unencrypted.** Use a trusted network/VPN and firewall rules;
 pi-console does not limit the listener to VPN interfaces or provide authentication.
 
-`server start` and `server status` report `network.bind`, `network.port` and candidate
-HTTP URLs using the machine hostname and IPv4 addresses. Use a hostname or VPN IP
-reachable from the client; hostname resolution and firewall access are external.
+`server start`, `restart` and `enable` print a localhost URL, with a warning if the
+running build differs from the selected build. `server status` retains the full JSON,
+including `network.bind`, `network.port` and candidate HTTP URLs using the machine
+hostname and IPv4 addresses. Use a hostname or VPN IP reachable from the client;
+hostname resolution and firewall access are external.
 
 ```sh
 bin/pi-console server start --binary /absolute/path/to/pi
@@ -208,10 +210,19 @@ A remote launch without an attachment opens the session selector rather than cre
 work using the frontend's local cwd. Saved host identities and protocol/channel checks
 remain in effect; these detect accidental replacements, not impersonation.
 
-The bridge uses WS `/v1/stream`. HTTP routes currently return 404; there is no web UI
-yet. Service shutdown remains local-only, and browser-origin WebSocket connections
-are refused. Reconnect starts as viewer and never replays mutations. Remote capacity
-is separate from local IPC; frames, output and subscriptions remain bounded, and a
+The bridge and browser frontend use WS `/v1/stream`. The optional web UI is disabled
+by default. Set `server.webui.enabled: true` in
+`${XDG_CONFIG_HOME:-~/.config}/pi-console/config.yaml` (`config-dev.yaml` for dev),
+restart the matching service, then open `http://HOST:8443/` (or its configured port).
+The page uses the serving host's channel automatically. The UI uses the same
+trusted-network access policy without authentication. Browser WebSockets require
+a matching HTTP origin and an enabled web UI; unrelated website origins are rejected. Only the
+frontend assets are served over HTTP; other routes return 404. See
+[web frontend usage and limitations](../web/README.md).
+
+Service shutdown remains local-only. Reconnect starts as viewer and never replays
+mutations. Remote capacity is separate from local IPC; frames, output and
+subscriptions remain bounded, and a
 dropped subscription destroys its transport even when its writer is backpressured.
 Neovim displays the endpoint, host/channel identity and control role.
 

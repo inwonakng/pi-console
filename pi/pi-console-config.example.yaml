@@ -5,7 +5,8 @@
 # Defaults apply on session start or tree navigation when no saved session
 # choice exists. Saved choices take precedence over these defaults.
 
-# Server settings. The web frontend is disabled by default.
+# Web frontend changes require restarting the matching service.
+# Disabled by default; anyone who can reach the port has access (no authentication).
 server:
   # Shared HTTP/WS port for host connections and the web frontend (1-65535).
   port: 8443

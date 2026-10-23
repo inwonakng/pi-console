@@ -65,6 +65,12 @@ Every service also listens on all IPv4 interfaces, port `8443` by default.
 authentication or encryption; restrict access with your VPN/network and firewall.**
 Connect with `pi-console --remote http://HOST:8443`; `pi-console server status`
 reports candidate URLs. Use `server start/restart/enable --port PORT` for another port.
+
+For browser access, set `server.webui.enabled: true` in the channel
+[configuration file](web/README.md#enable-and-connect), restart the service, and open
+`http://HOST:8443/`. The web UI is disabled by default and uses the same
+trusted-network access policy without authentication.
+
 `pi-console --overview` and `--sidebar` create no conversation. Use `--attach ID`
 for a live conversation or `--resume ID` for a saved service conversation.
 

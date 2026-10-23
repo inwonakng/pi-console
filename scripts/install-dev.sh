@@ -109,7 +109,7 @@ mkdir "$staging/source"
 # Copy current sources (including uncommitted edits), never live dependencies/builds.
 # Extract only after tar succeeds; a failed source copy must not be activated.
 tar -C "$project_root" --exclude=node_modules --exclude=dist --exclude=.DS_Store \
-    -cf "$staging/source.tar" bin nvim pi server tmux scripts
+    -cf "$staging/source.tar" bin nvim pi server tmux scripts web
 tar -C "$staging/source" -xf "$staging/source.tar"
 install_progress 50 "Building $mode runtime"
 bash "$staging/source/scripts/build-runtime.sh"
@@ -129,11 +129,4 @@ case "$(uname -s)" in
 esac
 for name in pi-console-dev pi-dev; do mv -f -- "$staging/$name" "$bin_dir/$name"; done
 remove_checkout_link "$bin_dir/pi-console" "$project_root/bin/pi-console"
-install_complete
-printf '\nDevelopment commands: %s/pi-console-dev and %s/pi-dev\n' "$bin_dir" "$bin_dir"
-printf 'Mode: %s. Snapshot: %s/versions/%s\n' "$mode" "$install_root" "$release"
-printf 'Rerun this installer after checkout edits. Old snapshots are retained; running services keep new conversations on their pinned build until an explicit guarded restart.\n'
-printf 'Stable commands, tmux selection and service startup were left unchanged.\n'
-if [ "$mode" = full ]; then
-    printf '\nTo select dev tmux bindings, run: pi-console-dev tmux setup\n'
-fi
+install_complete "$release"
