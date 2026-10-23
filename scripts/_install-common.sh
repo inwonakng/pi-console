@@ -3,6 +3,52 @@
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 
+# Keep these progress helpers identical in install.sh and _install-common.sh:
+# the stable installer must also work when piped directly to Bash.
+install_progress() {
+    local percent=$1 label=$2 bar= i=0
+    while [ "$i" -lt 20 ]; do
+        if [ "$i" -lt "$((percent / 5))" ]; then bar="$bar#"; else bar="$bar."; fi
+        i=$((i + 1))
+    done
+    if [ "$install_tty" = yes ]; then
+        printf '\r\033[K[%s] %3d%% %s' "$bar" "$percent" "$label" >&3
+    else
+        printf '[%s] %3d%% %s\n' "$bar" "$percent" "$label" >&3
+    fi
+}
+
+install_finish() {
+    local status=$1
+    if [ "$status" -ne 0 ]; then
+        if [ "$install_tty" = yes ]; then printf '\r\033[K' >&3; fi
+        printf 'Installation failed (exit %s). Recent output:\n' "$status" >&3
+        tail -n 40 "$install_log" >&3
+        printf '\nFull installation log: %s\n' "$install_log" >&3
+    else
+        rm -f -- "$install_log"
+    fi
+    exit "$status"
+}
+
+install_start() {
+    exec 3>&2 4>&1
+    install_log=$(mktemp "${TMPDIR:-/tmp}/pi-console-install-log.XXXXXX")
+    install_tty=no
+    if [ -t 3 ] && [ "${TERM:-}" != dumb ]; then install_tty=yes; fi
+    trap 'install_finish "$?"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    exec >"$install_log" 2>&1
+    install_progress 0 'Checking installation'
+}
+
+install_complete() {
+    install_progress 100 'Installation complete'
+    if [ "$install_tty" = yes ]; then printf '\n' >&3; fi
+    exec 1>&4 2>&3
+}
+
 validate_directory() {
     case "$1" in
         ''|/|"$HOME"|*/../*|*/..|*/./*|*/.|*//*|*$'\n'*|*$'\r'*)

@@ -10,6 +10,52 @@ bin_dir=${bin_dir%/}
 requested_version=
 requested_ref=
 requested_mode=
+# Keep these progress helpers identical in install.sh and _install-common.sh:
+# the stable installer must also work when piped directly to Bash.
+install_progress() {
+    local percent=$1 label=$2 bar= i=0
+    while [ "$i" -lt 20 ]; do
+        if [ "$i" -lt "$((percent / 5))" ]; then bar="$bar#"; else bar="$bar."; fi
+        i=$((i + 1))
+    done
+    if [ "$install_tty" = yes ]; then
+        printf '\r\033[K[%s] %3d%% %s' "$bar" "$percent" "$label" >&3
+    else
+        printf '[%s] %3d%% %s\n' "$bar" "$percent" "$label" >&3
+    fi
+}
+
+install_finish() {
+    local status=$1
+    if [ "$status" -ne 0 ]; then
+        if [ "$install_tty" = yes ]; then printf '\r\033[K' >&3; fi
+        printf 'Installation failed (exit %s). Recent output:\n' "$status" >&3
+        tail -n 40 "$install_log" >&3
+        printf '\nFull installation log: %s\n' "$install_log" >&3
+    else
+        rm -f -- "$install_log"
+    fi
+    exit "$status"
+}
+
+install_start() {
+    exec 3>&2 4>&1
+    install_log=$(mktemp "${TMPDIR:-/tmp}/pi-console-install-log.XXXXXX")
+    install_tty=no
+    if [ -t 3 ] && [ "${TERM:-}" != dumb ]; then install_tty=yes; fi
+    trap 'install_finish "$?"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    exec >"$install_log" 2>&1
+    install_progress 0 'Checking installation'
+}
+
+install_complete() {
+    install_progress 100 'Installation complete'
+    if [ "$install_tty" = yes ]; then printf '\n' >&3; fi
+    exec 1>&4 2>&3
+}
+
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' 'Usage: install.sh [--full | --server-only] [--version VERSION | --ref REF]' >&2
@@ -60,6 +106,7 @@ remove_registration() {
         esac
     fi
 }
+install_start
 validate_directory "$install_root"
 validate_directory "$bin_dir"
 [ "$install_root" != "$bin_dir" ] || fail 'Application and command directories must differ.'
@@ -69,7 +116,7 @@ case "$bin_dir/" in "$install_root/"*) fail 'Command directory must be outside t
 mkdir -p "$(dirname -- "$install_root")"
 install_lock="$install_root.install-lock"
 mkdir -- "$install_lock" 2>/dev/null || fail "Installer already running or stale lock: $install_lock (remove only after confirming no installer is running)."
-trap 'rmdir -- "$install_lock"' EXIT
+trap 'status=$?; rmdir -- "$install_lock" || status=$?; install_finish "$status"' EXIT
 legacy=no
 marker="$install_root/.pi-console-install"
 if [ -d "$install_root" ] && [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
@@ -120,6 +167,7 @@ if [ -z "$mode" ] && [ "$legacy" = no ] && [ -L "$install_root/current" ]; then
 fi
 mode=${mode:-full}
 case "$mode" in full|server-only) ;; *) fail "Unknown installation mode: $mode" ;; esac
+install_progress 10 'Checking prerequisites'
 missing=
 required_commands='curl git node npm pi realpath rg'
 if [ "$mode" = full ]; then required_commands="$required_commands nvim tmux fzf cargo cc tree-sitter curl tar"; fi
@@ -183,7 +231,7 @@ staging=$(mktemp -d "$(dirname -- "$install_root")/.pi-console-install.XXXXXX")
 migration_started=no
 activation_done=no
 cleanup() {
-    local status=$?
+    local status=$1
     if [ "$status" -ne 0 ] && [ "$migration_started" = yes ] && [ "$activation_done" = no ]; then
         # Restore the original tree AND command paths on any activation failure.
         # Its Pi registration has not been removed yet.
@@ -191,10 +239,10 @@ cleanup() {
             mv -- "$install_root/versions/$legacy_commit" "$staging/legacy" || return
         fi
         if [ -d "$staging/legacy" ]; then
-            rm -rf -- "$install_root"
+            rm -rf -- "$install_root" || return
             mv -- "$staging/legacy" "$install_root" || return
             for name in pi-console pi-stable; do
-                rm -f -- "$bin_dir/$name"
+                rm -f -- "$bin_dir/$name" || return
                 if [ -e "$staging/commands/$name" ] || [ -L "$staging/commands/$name" ]; then
                     cp -P -- "$staging/commands/$name" "$bin_dir/$name" || return
                 fi
@@ -204,10 +252,10 @@ cleanup() {
             return
         fi
     fi
-    rm -rf -- "$staging"
+    rm -rf -- "$staging" || return
     rmdir -- "$install_lock"
 }
-trap cleanup EXIT
+trap 'status=$?; cleanup "$status" || status=$?; install_finish "$status"' EXIT
 source_dir="$staging/source"
 
 # Generate stable wrappers now and preflight every destination before downloads.
@@ -249,6 +297,7 @@ for name in pi-console pi-stable; do
     fi
 done
 
+install_progress 20 'Selecting release'
 if [ -n "$requested_version" ]; then
     case "$requested_version" in v*) install_ref=$requested_version ;; *) install_ref="v$requested_version" ;; esac
 elif [ -n "$requested_ref" ]; then
@@ -266,20 +315,21 @@ NODE
 fi
 case "$install_ref" in ''|-*|*$'\n'*|*$'\r'*) fail 'Invalid installation ref.' ;; esac
 git check-ref-format --branch "$install_ref" >/dev/null || fail 'Invalid branch or tag name.'
-printf 'Downloading pi-console ref %s...\n' "$install_ref"
+install_progress 30 "Downloading $install_ref"
 git clone --quiet --depth 1 --branch "$install_ref" "$repository" "$source_dir"
 commit=$(git -C "$source_dir" rev-parse HEAD)
 valid_commit "$commit" || fail 'Git returned an invalid commit.'
 [ -f "$source_dir/bin/pi-console" ] && [ -f "$source_dir/bin/pi-shell" ] \
     && [ -f "$source_dir/bin/channel-env.sh" ] || fail 'Selected ref does not contain the channel-aware launchers.'
 [ -f "$source_dir/scripts/build-runtime.sh" ] || fail 'Selected ref predates service packaging; select a release with F1 packaging.'
-printf 'Building %s runtime with locked dependencies...\n' "$mode"
+install_progress 50 "Building $mode runtime"
 bash "$source_dir/scripts/build-runtime.sh"
 rm -rf -- "$source_dir/.git"
 printf 'ref=%s\ncommit=%s\nsource=%s\nchannel=stable\nmode=%s\n' "$install_ref" "$commit" "$repository" "$mode" >"$source_dir/.pi-console-install"
 # Every activation gets a fresh immutable directory, including same-commit mode changes.
 release="$commit-$mode-${staging##*.}"
 
+install_progress 90 'Activating runtime'
 # Keep legacy registrations intact until filesystem activation succeeds. During
 # migration the compatibility package link keeps ordinary Pi usable as well.
 if [ "$legacy" = yes ]; then
@@ -316,6 +366,7 @@ if [ "$legacy" = yes ] || [ -L "$install_root/pi" ]; then
     rm -- "$install_root/pi"
 fi
 
+install_complete
 printf '\nInstalled stable commands in %s.\nApplication: %s\n' "$bin_dir" "$install_root"
 printf '%s\n' 'To install another release, rerun install.sh --version <TAG>.'
 printf 'Mode: %s. Existing services/sessions were not restarted; old runtimes are retained.\n' "$mode"

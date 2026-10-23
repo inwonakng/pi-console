@@ -3,7 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 project_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
-. "$script_dir/install-common.sh"
+. "$script_dir/_install-common.sh"
 bin_dir=${PI_CONSOLE_BIN_DIR:-"$HOME/.local/bin"}
 bin_dir=${bin_dir%/}
 validate_directory "$bin_dir"
@@ -14,11 +14,12 @@ case "$#:${1-}" in
     1:--server-only) mode=server-only ;;
     *) fail 'Usage: install-dev.sh [--full | --server-only]' ;;
 esac
+install_start
 dev_install_root
 mkdir -p "$(dirname -- "$install_root")"
 install_lock="$install_root.install-lock"
 mkdir -- "$install_lock" 2>/dev/null || fail "Installer already running or stale lock: $install_lock"
-trap 'rmdir -- "$install_lock"' EXIT
+trap 'status=$?; rmdir -- "$install_lock" || status=$?; install_finish "$status"' EXIT
 # Recheck ownership after acquiring the installation lock.
 dev_install_root
 if [ -z "$mode" ] && [ -L "$install_root/current" ]; then
@@ -30,6 +31,7 @@ if [ -z "$mode" ] && [ -L "$install_root/current" ]; then
 fi
 mode=${mode:-full}
 case "$mode" in full|server-only) ;; *) fail "Unknown installation mode: $mode" ;; esac
+install_progress 10 'Checking prerequisites'
 missing=
 required_commands='pi node npm git realpath rg tar'
 if [ "$mode" = full ]; then required_commands="$required_commands nvim tmux fzf cargo cc tree-sitter curl tar"; fi
@@ -86,7 +88,8 @@ try {
 NODE
 
 staging=$(mktemp -d "$(dirname -- "$install_root")/.pi-console-dev.XXXXXX")
-trap 'rm -rf -- "$staging"; rmdir -- "$install_lock"' EXIT
+trap 'status=$?; rm -rf -- "$staging" && rmdir -- "$install_lock" || status=$?; install_finish "$status"' EXIT
+install_progress 20 'Checking development commands'
 for name in pi-console-dev pi-dev; do
     case "$name" in pi-console-dev) target=pi-console ;; pi-dev) target=pi-shell ;; esac
     dev_wrapper "$install_root/current/bin/$target" >"$staging/$name"
@@ -102,16 +105,19 @@ commit=$(git -C "$project_root" rev-parse HEAD)
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail 'Invalid checkout commit.'
 dirty=0
 [ -z "$(git --no-optional-locks -C "$project_root" status --porcelain)" ] || dirty=1
+install_progress 30 'Copying checkout snapshot'
 mkdir "$staging/source"
 # Copy current sources (including uncommitted edits), never live dependencies/builds.
 # Extract only after tar succeeds; a failed source copy must not be activated.
 tar -C "$project_root" --exclude=node_modules --exclude=dist --exclude=.DS_Store \
     -cf "$staging/source.tar" bin nvim pi server tmux scripts
 tar -C "$staging/source" -xf "$staging/source.tar"
+install_progress 50 "Building $mode runtime"
 bash "$staging/source/scripts/build-runtime.sh"
 printf 'channel=dev\nref=checkout\ncommit=%s\ndirty=%s\nmode=%s\ncheckout=%s\n' \
     "$commit" "$dirty" "$mode" "$project_root" >"$staging/source/.pi-console-install"
 release="$commit-$mode-${staging##*.}"
+install_progress 90 'Activating runtime'
 # Retire only the exact old registration after a successful build, before activation.
 remove_old_registration "$project_root/pi"
 mkdir -p "$install_root/versions" "$bin_dir"
@@ -126,7 +132,11 @@ case "$(uname -s)" in
 esac
 for name in pi-console-dev pi-dev; do mv -f -- "$staging/$name" "$bin_dir/$name"; done
 remove_checkout_link "$bin_dir/pi-console" "$project_root/bin/pi-console"
+install_complete
 printf '\nDevelopment commands: %s/pi-console-dev and %s/pi-dev\n' "$bin_dir" "$bin_dir"
 printf 'Mode: %s. Snapshot: %s/versions/%s\n' "$mode" "$install_root" "$release"
 printf 'Rerun this installer after checkout edits. Old snapshots are retained; running services keep new conversations on their pinned build until an explicit guarded restart.\n'
 printf 'Stable commands, tmux selection and service startup were left unchanged.\n'
+if [ "$mode" = full ]; then
+    printf '\nTo select dev tmux bindings, run: pi-console-dev tmux setup\n'
+fi

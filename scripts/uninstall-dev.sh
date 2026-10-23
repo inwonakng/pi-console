@@ -3,7 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 project_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
-. "$script_dir/install-common.sh"
+. "$script_dir/_install-common.sh"
 bin_dir=${PI_CONSOLE_BIN_DIR:-"$HOME/.local/bin"}
 bin_dir=${bin_dir%/}
 validate_directory "$bin_dir"
