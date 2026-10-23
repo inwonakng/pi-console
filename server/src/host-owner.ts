@@ -1864,7 +1864,7 @@ function sideInteraction(title: string): boolean {
 class QueueDeferred extends Error {}
 function queueError(error: unknown): { code: string; message: string } {
   if (error instanceof CommandError) return { code: error.code, message: error.message };
-  if (error instanceof PiCommandError && error.outcome === "rejected") return { code: "pi_rejected", message: "Pi rejected this prompt; edit to retry or remove it" };
+  if (error instanceof PiCommandError && error.outcome === "rejected") return { code: "pi_rejected", message: error.message };
   return { code: "delivery_uncertain", message: "Prompt delivery is uncertain; inspect the conversation before editing/resubmitting" };
 }
 
