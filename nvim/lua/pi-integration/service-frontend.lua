@@ -11,6 +11,7 @@ local state = require("pi-integration.state").new()
 local resources = require("pi-integration.service-resources")
 local pending_picker = require("pi-integration.pending-picker")
 local feedback_ui = require("pi-integration.service-feedback")
+local side_view = require("pi-integration.side")
 local feedback = {}
 state.show_nested_tools = true
 local session_id, attachment, snapshot, hello, grant, job
@@ -28,7 +29,7 @@ local pending_seen, pending_replies = {}, {}
 local ctx, sync_pending
 local recovery_id, backup_scheduled, restarting_frontend
 local render, refresh, connect, attach, recover_selection, tree_ctx, advance_start, host_options, backup
-local side_buf
+local side_buf, side_input_buf, side_context, side_id
 local owner_states, pending_settings = {}, {}
 local selected_cwd, starting, new_control_selection, startup_options
 local frontend_focused = false
@@ -336,14 +337,26 @@ local function command(operation, payload, callback, captured, terminal, submiss
 end
 local function draft_buffer(name, contents, on_save, on_hide)
 	local buf = layout.create_buffer(nil, name, "markdown", true)
-	vim.bo[buf].buftype = "acwrite"
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(contents or "", "\n", { plain = true }))
 	vim.bo[buf].modified = false
 	drafts[buf] = name
 	vim.api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = function()
 		if on_save then on_save(buf) else notify("Recovered inspect-only draft: copy/review it explicitly before submitting.") end
 	end })
-	if on_hide then vim.api.nvim_create_autocmd({ "BufHidden", "BufWipeout" }, { buffer = buf, once = true, callback = on_hide }) end
+	if on_save then
+		vim.keymap.set({ "n", "i" }, "<C-CR>", function()
+			vim.cmd("stopinsert")
+			on_save(buf)
+		end, { buffer = buf, desc = "Submit editor text" })
+	end
+	if on_hide then
+		local hidden = false
+		vim.api.nvim_create_autocmd({ "BufHidden", "BufUnload", "BufWipeout" }, { buffer = buf, callback = function()
+			if hidden then return end
+			hidden = true
+			on_hide()
+		end })
+	end
 	vim.cmd("botright split")
 	vim.api.nvim_win_set_buf(0, buf)
 	return buf
@@ -501,7 +514,14 @@ render = function()
 	local lines, items = messages.collect_message_lines(ctx, visible, conversation and conversation.tools)
 	if valid(side_buf) then
 		local side = status_data("pi-side")
-		local side_lines = { "# Side conversation on owner", "", "Local draft: :PiSidePrompt. :PiSideNew resets; :PiSideAbort stops.", "" }
+		if side and side.id and side.id ~= side_id then
+			if side_id and valid(side_input_buf) then
+				layout.set_buffer_lines(ctx, side_input_buf, { "" }, true)
+				vim.bo[side_input_buf].modified = false
+			end
+			side_id = side.id
+		end
+		local side_lines = { "# Side conversation", "", "Ctrl+Enter sends. :PiSideNew resets; :PiSideAbort stops.", "" }
 		if side then
 			table.insert(side_lines, side.running and "Working" or "Idle")
 			if side.error then
@@ -527,7 +547,7 @@ render = function()
 				for _, block in ipairs(side.partialMessage.content or {}) do vim.list_extend(side_lines, vim.split(block.text or block.thinking or "", "\n", { plain = true })) end
 			end
 		end
-		layout.set_buffer_lines(ctx, side_buf, side_lines, false)
+		side_view.render(side_buf, side_lines)
 	end
 	-- Every snapshot is a pure render; never invoke legacy event/effect handlers.
 	local split = {}
@@ -924,6 +944,8 @@ function M.select_owner(target, id, resume, cwd)
 		or target.service_root ~= M.config.service_root or target.service_remote ~= M.config.service_remote
 	if switching then
 		if not backup() then return end
+		side_view.hide()
+		side_buf, side_input_buf, side_context, side_id = nil, nil, nil, nil
 		state.pending_transcript_scroll = nil
 		-- The old selection's input must remain recoverable after new autosaves.
 		recovery_id = nil
@@ -1499,17 +1521,20 @@ function M.pick_thinking()
 		end)
 	end)
 end
+local function submit_draft(operation, buf, captured)
+	local submitted = text(buf)
+	if vim.trim(submitted) == "" then return end
+	for _, envelope in pairs(unresolved) do
+		if envelope.operation == operation and envelope.sessionId == captured.session and envelope.payload.text == submitted then
+			notify("This submission may already be accepted; inspect :PiSubmissions."); return
+		end
+	end
+	command(operation, { text = submitted }, nil, captured, nil, { input_buf = buf })
+end
 local function native_draft(operation, initial)
 	local captured = stamp()
 	local buf = draft_buffer(scratch_name(operation), initial or "", function(buf)
-		local submitted = text(buf)
-		if vim.trim(submitted) == "" then return end
-		for id, envelope in pairs(unresolved) do
-			if envelope.operation == operation and envelope.sessionId == captured.session and envelope.payload.text == submitted then
-				notify("This submission may already be accepted; inspect :PiSubmissions."); return
-			end
-		end
-		command(operation, { text = submitted }, nil, captured, nil, { input_buf = buf })
+		submit_draft(operation, buf, captured)
 	end)
 	owner_resources().bind(buf)
 end
@@ -1518,19 +1543,51 @@ function M.steer(initial)
 	native_draft("steering.submit", initial)
 end
 function M.follow_up() native_draft("followUp.submit") end
-function M.side_prompt() native_draft("side.prompt") end
-function M.toggle_side()
-	if not valid(side_buf) then side_buf = draft_buffer(scratch_name("side-owner"), "")
-	elseif vim.fn.bufwinid(side_buf) == -1 then
-		vim.cmd("botright split")
-		vim.api.nvim_win_set_buf(0, side_buf)
-	else vim.api.nvim_set_current_win(vim.fn.bufwinid(side_buf)) end
-	vim.bo[side_buf].buftype = "nofile"
+function M.side_prompt()
+	if not valid(side_buf) or not valid(side_input_buf) or not same_context(side_context)
+		or side_context.token ~= (grant and grant.token) then
+		side_view.hide()
+		side_context, side_id = stamp(), nil
+		side_buf = layout.create_buffer(ctx, scratch_name("side-transcript"), "markdown", false)
+		side_input_buf = layout.create_buffer(ctx, scratch_name("side-input"), "markdown", true)
+		drafts[side_input_buf] = vim.api.nvim_buf_get_name(side_input_buf)
+		local captured, input = side_context, side_input_buf
+		local function submit()
+			if not current(captured) then
+				notify("Stale editor/dialog; its text remains a local draft.", vim.log.levels.WARN); return
+			end
+			local side = status_data("pi-side")
+			if side and side.running then notify("The side conversation is working. Wait or use :PiSideAbort."); return end
+			submit_draft("side.prompt", input, captured)
+		end
+		vim.keymap.set({ "n", "i" }, "<C-CR>", submit, { buffer = input, desc = "Send side message" })
+		local resource = owner_resources()
+		for _, buf in ipairs({ side_buf, side_input_buf }) do
+			resource.bind(buf)
+			require("pi-integration.markdown-render").prepare_buffer(buf, { latex = buf == side_buf })
+			vim.keymap.set("n", "<leader>n", M.new_side, { buffer = buf, desc = "New side conversation" })
+			vim.keymap.set("n", "<leader>pa", M.restore_pending_action, { buffer = buf, desc = "Restore pending action" })
+		end
+	end
+	side_view.open(side_buf, side_input_buf)
 	render()
 end
+function M.toggle_side()
+	if side_view.visible() then side_view.hide() else M.side_prompt() end
+end
 function M.new_side()
-	local captured = stamp()
-	vim.ui.select({ "New side conversation", "Cancel" }, { prompt = "Stop and replace the side conversation on owner?" }, function(choice)
+	local captured, focus = stamp(), nil
+	local function release_focus()
+		if focus then focus:release(); focus = nil end
+	end
+	vim.ui.select({ "New side conversation", "Cancel" }, {
+		prompt = "Stop and replace the side conversation on owner?",
+		on_create = function(event)
+			if side_view.visible() then focus = require("pi-integration.floats").focus_group({ event.winid }) end
+		end,
+		on_close = release_focus,
+	}, function(choice)
+		release_focus()
 		if choice == "New side conversation" then command("side.reset", {}, nil, captured) end
 	end)
 end
@@ -1739,7 +1796,7 @@ function M.refresh_messages() refresh() end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; :write saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain outcomes; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (close frontend; conversation keeps running)\n:PiKill / <leader>pk (confirm kill conversation and close; preserves history and local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history use typed owner operations.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the original directory. First prompt creates the session.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nSlash commands run on the owner through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; Ctrl+Enter saves; pauses expire after 30s)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle / :PiOperations (typed outcomes and recovery text)\n:PiSubmissions / :PiHostRequest (uncertain outcomes; never replayed)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (close frontend; conversation keeps running)\n:PiKill / <leader>pk (confirm kill conversation and close; preserves history and local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history use typed owner operations.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the original directory. First prompt creates the session.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nSlash commands run on the owner through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()

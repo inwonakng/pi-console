@@ -194,7 +194,7 @@ function M.input(ctx, event, on_input)
 		input_sequence = input_sequence + 1
 		picker.buf, picker.win = require("pi-integration.utils.markdown-editor").open({
 			name = "pi://input/" .. input_sequence,
-			title = " " .. title:gsub("[\r\n]+", " ") .. " (:wq to submit) ",
+			title = " " .. title:gsub("[\r\n]+", " ") .. " (Ctrl+Enter to submit; :q to return) ",
 			footer = event.placeholder,
 			text = event.prefill or "",
 		}, function(text)

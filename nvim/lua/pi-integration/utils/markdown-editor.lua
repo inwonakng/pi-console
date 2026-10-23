@@ -2,12 +2,12 @@ local floats = require("pi-integration.floats")
 
 local M = {}
 
--- A write records the saved text; closing completes the edit with that text,
--- or nil if nothing was written. Editing keys and write/quit commands remain native.
+-- Ctrl+Enter submits the current text. Closing without submitting returns nil;
+-- nofile lets both :q and :q! dismiss even a modified scratch buffer.
 function M.open(opts, on_close)
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_name(buf, opts.name or ("pi://markdown-editor/" .. buf))
-	vim.bo[buf].buftype = "acwrite"
+	vim.bo[buf].buftype = "nofile"
 	vim.bo[buf].bufhidden = "wipe"
 	vim.bo[buf].swapfile = false
 	vim.bo[buf].filetype = "markdown"
@@ -31,29 +31,13 @@ function M.open(opts, on_close)
 	vim.wo[win].wrap = true
 	local focus = floats.focus_group({ win })
 
-	local saved_text
-	vim.api.nvim_create_autocmd("BufWriteCmd", {
-		buffer = buf,
-		callback = function()
-			local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-			if opts.prepare_text then
-				text = opts.prepare_text(text)
-			end
-			if text ~= nil then
-				saved_text = text
-				vim.bo[buf].modified = false
-			end
-		end,
-	})
-
 	local closed = false
-	local function finish()
+	local function finish(text)
 		if closed then
 			return
 		end
 		closed = true
 		focus:release()
-		local text = saved_text
 		vim.schedule(function()
 			floats.close_window(win)
 			if vim.api.nvim_buf_is_valid(buf) then
@@ -62,8 +46,19 @@ function M.open(opts, on_close)
 			on_close(text)
 		end)
 	end
-	vim.api.nvim_create_autocmd("WinClosed", { pattern = tostring(win), once = true, callback = finish })
-	vim.api.nvim_create_autocmd({ "BufHidden", "BufWipeout" }, { buffer = buf, once = true, callback = finish })
+	vim.keymap.set({ "n", "i" }, "<C-CR>", function()
+		local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+		if opts.prepare_text then
+			text = opts.prepare_text(text)
+		end
+		if text ~= nil then
+			vim.cmd("stopinsert")
+			finish(text)
+		end
+	end, { buffer = buf, desc = "Submit editor text" })
+	local function cancel() finish(nil) end
+	vim.api.nvim_create_autocmd("WinClosed", { pattern = tostring(win), once = true, callback = cancel })
+	vim.api.nvim_create_autocmd({ "BufHidden", "BufWipeout" }, { buffer = buf, once = true, callback = cancel })
 	return buf, win
 end
 

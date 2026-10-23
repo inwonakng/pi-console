@@ -53,7 +53,8 @@ normal mode; `<leader>?` opens context-sensitive help.
 
 Submitting a prompt while Pi is working adds it to a queue. Open the queue with
 `<leader>pq` to preview, edit, or delete messages. They run in order after the
-current turn finishes. In the message editor, `:wq` saves and `:q!` cancels.
+current turn finishes. In the message editor, Ctrl+Enter saves; `:q` or `:q!`
+closes without submitting further changes.
 
 Press Enter on a tool group in the transcript to expand it, or on an individual
 call to inspect its output. Tool groups expand while running and collapse when
@@ -68,8 +69,9 @@ To stop the current run, press Escape twice in the transcript buffer.
 ### Steering and side conversations
 
 Use `<leader>pS` or `:PiSteer` while Pi is working to open a steering editor.
-`:wq` sends the instruction after the current assistant turn's tool calls;
-`:q!` cancels. A visual selection followed by `:PiSteer` prefills the editor.
+Ctrl+Enter sends the instruction after the current assistant turn's tool calls;
+`:q` or `:q!` closes without submitting. A visual selection followed by
+`:PiSteer` prefills the editor.
 If Pi finishes first, the unsent instruction remains in the steer draft.
 
 Use `<leader>pb` or `:PiSide` to toggle an independent side conversation.
@@ -235,8 +237,9 @@ your own. If you need to reread the conversation first, you can hide the picker
 and come back to it later. The agent still waits for your answer, and other
 pickers stay unavailable until you resolve the question. `<Esc>` hides a pending
 choice/confirmation, `<leader>pa` reopens it, and `<C-q>` cancels its request.
-Freehand input uses a Markdown float: `:wq` submits; closing without writing
-(for example `:q!`) returns to the choices. This presentation also works for
+Freehand input uses a Markdown float: Ctrl+Enter submits in normal or insert
+mode; `:q` or `:q!` returns to the choices without submitting, even after editing.
+This presentation also works for
 standard dialogs from other extensions. The question tool itself is supplied by a
 separately installed extension.
 
