@@ -59,7 +59,7 @@ function titleModel(ctx: ExtensionContext) {
 		const model = available.find((candidate) => candidate.id === configuredId);
 		if (!model) {
 			throw new Error(
-				`Configured title model ${provider}/${configuredId} is not an available text model; check auto-title.provider-models in pi-console-config.yaml`,
+				`Configured title model ${provider}/${configuredId} is not an available text model; check auto-title.provider-models in your pi-console config file`,
 			);
 		}
 		return model;
@@ -76,7 +76,7 @@ function titleModel(ctx: ExtensionContext) {
 	const model = candidates[0];
 	if (!model) {
 		throw new Error(
-			`No available text model with catalog pricing for ${provider}; configure auto-title.provider-models in pi-console-config.yaml`,
+			`No available text model with catalog pricing for ${provider}; configure auto-title.provider-models in your pi-console config file`,
 		);
 	}
 	return model;

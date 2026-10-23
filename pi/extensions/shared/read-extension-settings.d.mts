@@ -27,4 +27,4 @@ export interface ExtensionSettings {
 	};
 }
 
-export function readExtensionSettings(agentDir: string): ExtensionSettings;
+export function readExtensionSettings(): ExtensionSettings;

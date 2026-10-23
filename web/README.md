@@ -8,7 +8,8 @@ current listener does not serve these files or accept browser connections yet.
 
 ## Listener integration
 
-- Read `server.webui.enabled` from `pi-console-config.yaml` (default `false`).
+- Read `server.webui.enabled` from `${XDG_CONFIG_HOME:-~/.config}/pi-console/config.yaml`
+  (`config-dev.yaml` for dev; default `false`).
   The shared settings reader validates and returns this option; it does not
   enable a listener itself.
 - When enabled, serve `index.html` at `/`, and `app.js`, `client.js`, and

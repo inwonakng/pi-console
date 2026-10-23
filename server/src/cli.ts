@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { checkPi } from "../../pi/scripts/check-pi.mjs";
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { resolve, join, isAbsolute } from "node:path";
@@ -78,7 +79,7 @@ async function main(): Promise<void> {
   }
   if (action === "run") {
     await managementIdentity(options.appRoot, channel);
-    if (!binary || !isAbsolute(binary)) throw new Error("server run/start requires an explicit absolute --binary Pi path (or PI_BINARY)");
+    if (!binary || !isAbsolute(binary)) throw new Error("Pi >=1.3.0 is required to run a local server. Install Pi and provide an absolute --binary path (or PI_BINARY).");
     await runService({ ...options, port }); return;
   }
   if (["start", "stop", "restart", "enable", "disable"].includes(action ?? "")) {
@@ -99,8 +100,12 @@ async function main(): Promise<void> {
         catch (error) { existing.client.close(); throw error; }
       }
       // Check start configuration before stopping a healthy owner.
-      if ((action === "enable" || action === "restart" || action === "start" && !existing) && !supervisor
-        && (!binary || !isAbsolute(binary))) { existing?.client.close(); throw new Error("Startup requires an explicit absolute --binary Pi path (or PI_BINARY)"); }
+      if ((action === "enable" || action === "restart" || action === "start" && !existing) && !supervisor) {
+        try {
+          if (!binary || !isAbsolute(binary)) throw new Error("Pi >=1.3.0 is required to start a local server. Install Pi and provide an absolute --binary path (or PI_BINARY).");
+          checkPi(binary);
+        } catch (error) { existing?.client.close(); throw error; }
+      }
       // A retained claim is ownership even when no endpoint is reachable. Fence
       // registration as well as launch; never let another checkout claim startup.
       if (action === "enable" && !existing) await requireNoClaim();

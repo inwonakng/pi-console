@@ -33,8 +33,10 @@ dependencies. `scripts/install.sh [--full|--server-only]` selects stable;
 `scripts/install-dev.sh [--full|--server-only]` selects an immutable dev snapshot.
 Mode is preserved when omitted. Old runtime trees remain unchanged across updates,
 including same-commit mode changes. Installation never starts/restarts services.
-The external Pi CLI must be 1.3.0; installers require Node >=22.19.0 and never modify
-those executables. Both installation modes require Git >=2.45.0 and verify
+Starting a local server requires an external Pi CLI >=1.3.0; startup checks it.
+Installers do not require Pi. Installing Pi later requires no pi-console reinstall,
+and remote clients need no local Pi. Installers require Node >=22.19.0 and never
+modify those executables. Both installation modes require Git >=2.45.0 and verify
 `merge-tree --write-tree --merge-base` with raw tree operands, as used by workspace
 integration. Full mode additionally checks Neovim >=0.12.0, `vim.pack.add`,
 Tree-sitter runtime ABI >=13 and Tree-sitter CLI >=0.26.1 (`generate`/`build`),

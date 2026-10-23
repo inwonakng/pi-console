@@ -37,11 +37,8 @@ local function outcome_label(receipt)
 	return table.concat(lines, "\n")
 end
 local function normalize(data)
-	assert(data.version == 1 and type(data.hosts) == "table", "Invalid saved hosts")
-	for _, target in ipairs(data.hosts) do
-		if target.remote then target.remote = target.remote:gsub("^https://", "http://") end
-		target.credential_file, target.ca_file = nil, nil
-	end
+	assert(type(data) == "table" and data.version == 1 and type(data.hosts) == "table" and vim.islist(data.hosts),
+		"Invalid hosts file: " .. store.path("hosts", "config"))
 	return data
 end
 local function config()
@@ -129,14 +126,16 @@ function M.refresh()
 	end
 	local explicit
 	if vim.env.PI_CONSOLE_SERVICE_REMOTE then
-		explicit = { key = "explicit:" .. vim.fn.sha256(vim.env.PI_CONSOLE_SERVICE_REMOTE), alias = "Explicit remote",
+		explicit = { key = "explicit:" .. vim.fn.sha256(vim.env.PI_CONSOLE_SERVICE_REMOTE), alias = "Unsaved host",
 			remote = vim.env.PI_CONSOLE_SERVICE_REMOTE, host_id = vim.env.PI_CONSOLE_SERVICE_EXPECTED_HOST, enabled = true }
 	elseif vim.env.PI_CONSOLE_SERVICE_ROOT then
 		explicit = { key = "profile:" .. vim.fn.sha256(vim.env.PI_CONSOLE_SERVICE_ROOT), alias = "Local profile", root = vim.env.PI_CONSOLE_SERVICE_ROOT, enabled = true }
 	end
 	if explicit and not forgotten_explicit[explicit.key] then
 		local found = false
-		for _, target in ipairs(desired) do if target.key == explicit.key then found = true end end
+		for _, target in ipairs(desired) do
+			if target.key == explicit.key or explicit.remote and target.remote == explicit.remote then found = true end
+		end
 		if not found then table.insert(desired, explicit) end
 	end
 	local retained = {}

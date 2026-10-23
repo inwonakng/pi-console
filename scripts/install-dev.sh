@@ -33,7 +33,7 @@ mode=${mode:-full}
 case "$mode" in full|server-only) ;; *) fail "Unknown installation mode: $mode" ;; esac
 install_progress 10 'Checking prerequisites'
 missing=
-required_commands='pi node npm git realpath rg tar'
+required_commands='node npm git realpath rg tar'
 if [ "$mode" = full ]; then required_commands="$required_commands nvim tmux fzf cargo cc tree-sitter curl tar"; fi
 if [ "$(uname -s)" = Linux ]; then required_commands="$required_commands bwrap socat"; fi
 for command in $required_commands; do
@@ -59,7 +59,6 @@ function version(bin, minimum, pattern) {
     throw new Error(bin + " >=" + minimum.join(".") + " is required; found " + output.split("\n")[0] + ". Upgrade it and retry.");
 }
 try {
-  version("pi", [1, 3, 0], /^(\d+)\.(\d+)\.(\d+)$/);
   version("git", [2, 45, 0], /^git version (\d+)\.(\d+)\.(\d+)/);
   try {
     run("git", ["init", "--bare", "--quiet", scratch]);
@@ -118,8 +117,6 @@ printf 'channel=dev\nref=checkout\ncommit=%s\ndirty=%s\nmode=%s\ncheckout=%s\n' 
     "$commit" "$dirty" "$mode" "$project_root" >"$staging/source/.pi-console-install"
 release="$commit-$mode-${staging##*.}"
 install_progress 90 'Activating runtime'
-# Retire only the exact old registration after a successful build, before activation.
-remove_old_registration "$project_root/pi"
 mkdir -p "$install_root/versions" "$bin_dir"
 [ ! -e "$install_root/versions/$release" ] && [ ! -L "$install_root/versions/$release" ] || fail 'Runtime already exists.'
 mv -- "$staging/source" "$install_root/versions/$release"

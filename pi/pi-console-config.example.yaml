@@ -1,6 +1,7 @@
 # Optional pi-console settings.
-# Copy this file to ~/.pi/agent/pi-console-config.yaml and change only the
-# values you want to override. Extension changes are read on demand.
+# Copy to ${XDG_CONFIG_HOME:-~/.config}/pi-console/config.yaml for stable,
+# or config-dev.yaml in the same directory for dev. Change only the values
+# you want to override. Extension changes are read on demand.
 # Defaults apply on session start or tree navigation when no saved session
 # choice exists. Saved choices take precedence over these defaults.
 

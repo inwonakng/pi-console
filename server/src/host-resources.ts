@@ -1,4 +1,5 @@
 import { createHash, type Hash } from "node:crypto";
+import { checkPi } from "../../pi/scripts/check-pi.mjs";
 import { constants } from "node:fs";
 import { access, lstat, mkdir, open, readFile, readdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -52,7 +53,9 @@ export async function prepareHostResources(options: HostResourcesOptions): Promi
   const channel = options.channel;
   if (channel !== "stable" && channel !== "dev") throw new Error("Unknown service channel");
   const environment = hostEnvironment(options.environment ?? process.env);
+  environment.PI_CONSOLE_CHANNEL = channel;
   const appRoot = await realpath(resolve(options.appRoot));
+  checkPi(options.binary, environment);
   const binary = await resolveManagedLauncher(await realpath(resolve(options.binary)), environment);
   if (!(await lstat(appRoot)).isDirectory()) throw new Error("Application root must be a host directory");
   if (!(await lstat(binary)).isFile()) throw new Error("Pi binary must be a host file");

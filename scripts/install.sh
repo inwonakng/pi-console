@@ -97,15 +97,6 @@ valid_release() {
     valid_commit "$1" && return 0
     [[ "$1" =~ ^[0-9a-f]{40}-(full|server-only)-[a-zA-Z0-9]{6}$ ]]
 }
-remove_registration() {
-    local output
-    if ! output=$(pi remove "$1" 2>&1); then
-        case "$output" in
-            *"No matching package found"*) ;;
-            *) fail "Could not remove legacy Pi registration for $1: $output" ;;
-        esac
-    fi
-}
 install_start
 validate_directory "$install_root"
 validate_directory "$bin_dir"
@@ -169,7 +160,7 @@ mode=${mode:-full}
 case "$mode" in full|server-only) ;; *) fail "Unknown installation mode: $mode" ;; esac
 install_progress 10 'Checking prerequisites'
 missing=
-required_commands='curl git node npm pi realpath rg'
+required_commands='curl git node npm realpath rg'
 if [ "$mode" = full ]; then required_commands="$required_commands nvim tmux fzf cargo cc tree-sitter curl tar"; fi
 if [ "$(uname -s)" = Linux ]; then required_commands="$required_commands bwrap socat"; fi
 for command in $required_commands; do
@@ -195,7 +186,6 @@ function version(bin, minimum, pattern) {
     throw new Error(bin + " >=" + minimum.join(".") + " is required; found " + output.split("\n")[0] + ". Upgrade it and retry.");
 }
 try {
-  version("pi", [1, 3, 0], /^(\d+)\.(\d+)\.(\d+)$/);
   version("git", [2, 45, 0], /^git version (\d+)\.(\d+)\.(\d+)/);
   try {
     run("git", ["init", "--bare", "--quiet", scratch]);
@@ -259,7 +249,6 @@ trap 'status=$?; cleanup "$status" || status=$?; install_finish "$status"' EXIT
 source_dir="$staging/source"
 
 # Generate stable wrappers now and preflight every destination before downloads.
-legacy_checkout=
 for name in pi-console pi-stable; do
     case "$name" in
         pi-console) target='current/bin/pi-console' ;;
@@ -286,7 +275,6 @@ for name in pi-console pi-stable; do
             checkout=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
             if [ "$(readlink "$path")" = "$checkout/bin/pi-console" ]; then
                 owned=yes
-                legacy_checkout=$checkout
             fi
         fi
         [ "$owned" = yes ] || fail "Refusing to replace an unrelated command: $path"
@@ -330,8 +318,6 @@ printf 'ref=%s\ncommit=%s\nsource=%s\nchannel=stable\nmode=%s\n' "$install_ref" 
 release="$commit-$mode-${staging##*.}"
 
 install_progress 90 'Activating runtime'
-# Keep legacy registrations intact until filesystem activation succeeds. During
-# migration the compatibility package link keeps ordinary Pi usable as well.
 if [ "$legacy" = yes ]; then
     mv -- "$install_root" "$staging/legacy"
     migration_started=yes
@@ -357,12 +343,8 @@ for name in pi-console pi-stable; do
     mv -f -- "$staging/$name" "$bin_dir/$name"
 done
 activation_done=yes
-# Remove only known old registrations, not other user packages. If this fails,
-# the selected release and compatibility package remain usable; retry migration.
-if [ -n "$legacy_checkout" ]; then remove_registration "$legacy_checkout/pi"; fi
 if [ "$legacy" = yes ] || [ -L "$install_root/pi" ]; then
     [ "$(readlink "$install_root/pi")" = current/pi ] || fail 'Unmanaged compatibility package link.'
-    remove_registration "$install_root/pi"
     rm -- "$install_root/pi"
 fi
 

@@ -338,9 +338,28 @@ time, detach and reattach existing tmux clients. Graphics need the
 
 ## Configuration
 
+Client-local hosts are saved in `${XDG_CONFIG_HOME:-~/.config}/pi-console/hosts.yaml`.
+Dev uses `hosts-dev.yaml` in the same directory. Use `:PiHosts` to add and manage
+connections. Each file has its own host list:
+
+```yaml
+version: 1
+hosts: []
+```
+
+Each entry retains its key, alias, endpoint (`remote` HTTP origin or absolute local
+`root`), confirmed `host_id`, and `enabled` status. The Hosts picker saves these
+fields after confirming the server identity. Existing per-channel `hosts.json`
+files are no longer read; re-add connections through the picker. Runtime state
+and conversation history are unchanged.
+
 Copy [the example configuration](../pi/pi-console-config.example.yaml) to
-`~/.pi/agent/pi-console-config.yaml` and change only the settings you need.
-The main defaults are:
+`${XDG_CONFIG_HOME:-~/.config}/pi-console/config.yaml` for stable or `config-dev.yaml`
+in the same directory for dev, and change only the settings you need. Dev does not
+fall back to the stable file. Existing `~/.pi/agent/pi-console-config.yaml` files are no longer read;
+move your settings to the new location manually. Pi-owned settings remain in Pi's
+agent directory. Execution settings apply on the server machine, not the remote
+client. The main defaults are:
 
 ```yaml
 notifications:

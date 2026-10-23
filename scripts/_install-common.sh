@@ -100,16 +100,6 @@ dev_install_root() {
     fi
 }
 
-remove_old_registration() {
-    local output
-    if ! output=$(pi remove "$1" 2>&1); then
-        case "$output" in
-            *"No matching package found"*) ;;
-            *) fail "Could not remove legacy Pi registration for $1: $output" ;;
-        esac
-    fi
-}
-
 remove_checkout_link() {
     local path=$1 target=$2
     if [ -L "$path" ] && [ "$(readlink "$path")" = "$target" ]; then

@@ -13,4 +13,5 @@ if [ "$#" -eq 1 ] && [ "$1" = --version ]; then
 fi
 # Console startup flags are not applicable to the terminal interface.
 unset PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR PI_CONSOLE_SESSION PI_CONSOLE_RESTART_FILE PI_CONSOLE_SESSION_FILE
+node "$PI_CONSOLE_APP_ROOT/pi/scripts/check-pi.mjs" "${PI_BINARY:-pi}"
 exec "${PI_BINARY:-pi}" -e "$PI_CONSOLE_APP_ROOT/pi" "$@"
