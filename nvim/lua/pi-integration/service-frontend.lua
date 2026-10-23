@@ -432,11 +432,13 @@ local function update_status_state()
 	if not state.notification_status and defaults.notificationsEnabled ~= nil then
 		state.notification_status = defaults.notificationsEnabled and "notify on" or "notify off"
 	end
-	state.workspace = snapshot and snapshot.workspace
+	state.workspace = snapshot and snapshot.workspace or (not session_id and { localCheckout = true, cwd = selected_cwd } or nil)
 	local model = pi_state.model or defaults.model
 	state.provider = model and model.provider
 	state.model_id = model and model.id
 	state.thinking_level = pi_state.thinkingLevel or defaults.thinkingLevel
+	state.model_status = not session_id and (defaults.modelStatus or (not startup_options and "loading" or nil)) or nil
+	local context_window = defaults.contextWindow
 	if pending_settings["access.set"] then state.access_mode = pending_settings["access.set"].mode end
 	if pending_settings["integration.set"] then state.integration_mode = pending_settings["integration.set"].mode end
 	if pending_settings["notifications.set"] then state.notification_status = pending_settings["notifications.set"].enabled and "notify on" or "notify off" end
@@ -444,9 +446,21 @@ local function update_status_state()
 		local pending = pending_settings["model.set"]
 		if pending.provider ~= state.provider or pending.modelId ~= state.model_id then state.thinking_level = nil end
 		state.provider, state.model_id = pending.provider, pending.modelId
+		state.model_status = nil
+		context_window = nil
+		for _, option in ipairs(startup_options and startup_options.models or {}) do
+			if option.provider == pending.provider and option.id == pending.modelId then
+				context_window = option.contextWindow
+				break
+			end
+		end
 	end
 	if pending_settings["thinking.set"] then state.thinking_level = pending_settings["thinking.set"].level end
 	state.session_stats = conversation and conversation.stats
+	if not session_id then
+		state.session_stats = { tokens = { input = 0, output = 0 }, cost = 0,
+			contextUsage = { tokens = 0, contextWindow = context_window or vim.NIL } }
+	end
 	state.codex_usage = status_data("pi-codex-usage")
 	local spawns = status_data("pi-spawn-runs")
 	state.spawn_running_count = spawns and spawns.running or 0
@@ -529,10 +543,10 @@ render = function()
 		end
 		layout.set_buffer_lines(ctx, side_buf, side_lines, false)
 	end
-	-- Every replacement is a pure render; never invoke legacy event/effect handlers.
+	-- Every snapshot is a pure render; never invoke legacy event/effect handlers.
 	local split = {}
 	for _, line in ipairs(lines) do vim.list_extend(split, vim.split(line, "\n", { plain = true })) end
-	transcript.preserve_view(ctx, function() layout.set_buffer_lines(ctx, state.transcript_buf, split, false) end)
+	transcript.preserve_view(ctx, function() buffer.update_lines(state.transcript_buf, split) end)
 	transcript.apply_collected_transcript_items(ctx, items)
 	transcript.render(ctx)
 	statusline.update(ctx)
@@ -1394,7 +1408,12 @@ host_options = function(callback)
 	if not vim.tbl_contains(hello.capabilities or {}, "host.options") then unavailable("Pre-start model options"); return end
 	local captured, cwd = stamp(), selected_cwd
 	request("host.options", { serviceEpoch = hello.serviceEpoch, cwd = cwd }, function(ok, data)
-		if not ok or not same_selection(captured) or cwd ~= selected_cwd then return end
+		if not same_selection(captured) or cwd ~= selected_cwd then return end
+		if not ok then
+			if not startup_options then startup_options = { defaults = { modelStatus = "unavailable" }, models = {} } end
+			render()
+			return
+		end
 		startup_options = data
 		render()
 		if callback then callback(data, captured) end
@@ -1422,6 +1441,7 @@ function M.pick_thinking()
 					return
 				end
 			end
+			notify("Thinking options are unavailable until this model's provider loads.")
 		end)
 		return
 	end

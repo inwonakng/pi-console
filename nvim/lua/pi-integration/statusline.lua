@@ -173,18 +173,21 @@ local function current_model_statusline_label(ctx)
 	local model = ctx.state.model_id or ctx.config.model
 	local provider = ctx.state.provider or ctx.config.provider
 	if type(model) ~= "string" or model == "" then
-		return "--"
+		local labels = { loading = "model loading", ["trust-required"] = "model needs trust",
+			unavailable = "model unavailable", ["directory-required"] = "choose directory" }
+		return labels[ctx.state.model_status] or "--"
 	end
+	local suffix = ctx.state.model_status == "configured" and " (configured)" or ""
 	if model:find("openai-codex/", 1, true) == 1 then
-		return "codex/" .. model:sub(#"openai-codex/" + 1)
+		return "codex/" .. model:sub(#"openai-codex/" + 1) .. suffix
 	end
 	if provider == "openai-codex" then
 		provider = "codex"
 	end
 	if type(provider) == "string" and provider ~= "" and not model:find("/", 1, true) then
-		return provider .. "/" .. model
+		return provider .. "/" .. model .. suffix
 	end
-	return model
+	return model .. suffix
 end
 
 local function codex_limits_statusline_label(state)

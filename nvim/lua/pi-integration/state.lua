@@ -74,6 +74,7 @@ function M.new()
 		conversation_history_loaded = false,
 		provider = nil,
 		model_id = nil,
+		model_status = nil,
 		thinking_level = nil,
 		spawn_runs = {},
 		spawn_runs_session_file = nil,

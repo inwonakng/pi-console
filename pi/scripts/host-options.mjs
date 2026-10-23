@@ -49,7 +49,7 @@ try {
   const available = await runtime.getAvailable();
   if (runtime.getError()) throw new Error("Host model configuration is unavailable");
   if (available.length > 10_000) throw new Error("Model count exceeds limit");
-  const defaults = {};
+  const defaults = { modelStatus: input.cwd ? "unavailable" : "directory-required" };
   let startupModel;
   try {
     const settings = readExtensionSettings(agentDir);
@@ -87,7 +87,8 @@ try {
       }
       // A pending trust prompt can change project model settings. Leave them
       // unknown until the user decides, rather than previewing global guesses.
-      if (trusted !== undefined) {
+      if (trusted === undefined) defaults.modelStatus = "trust-required";
+      else {
         if (trusted) project = await readText(join(cwd, CONFIG_DIR_NAME, "settings.json"));
         settings.setProjectTrusted(trusted);
         if (settings.drainErrors().length) throw new Error("Invalid settings");
@@ -100,14 +101,25 @@ try {
           const patterns = settings.getEnabledModels();
           const scoped = patterns?.length ? resolver.resolveModelScopeFromModels(patterns, available).scopedModels : [];
           const saved = scoped.find(item => item.model.provider === settings.getDefaultProvider() && item.model.id === settings.getDefaultModel());
+          const provider = settings.getDefaultProvider();
+          const id = settings.getDefaultModel();
           if (scoped.length) ({ model, thinkingLevel } = saved ?? scoped[0]);
-          else ({ model } = await resolver.findInitialModel({ scopedModels: [], isContinuing: false,
-            defaultProvider: settings.getDefaultProvider(), defaultModelId: settings.getDefaultModel(), modelRuntime: runtime }));
+          else if (provider && id && !runtime.getModel(provider, id)) {
+            // Extensions may register this provider only when a session starts.
+            // Show the saved choice without inventing capabilities or loading code.
+            defaults.model = { provider, id };
+            defaults.thinkingLevel = settings.getModelThinkingLevel(provider, id) ?? settings.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+            defaults.modelStatus = "configured";
+          } else ({ model } = await resolver.findInitialModel({ scopedModels: [], isContinuing: false,
+            defaultProvider: provider, defaultModelId: id, modelRuntime: runtime }));
         }
         if (model) {
           thinkingLevel ??= settings.getModelThinkingLevel(model.provider, model.id) ?? settings.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+          const level = clampThinkingLevel(model, thinkingLevel);
           defaults.model = { provider: model.provider, id: model.id };
-          defaults.thinkingLevel = clampThinkingLevel(model, thinkingLevel);
+          defaults.thinkingLevel = level;
+          defaults.contextWindow = model.contextWindow;
+          delete defaults.modelStatus;
           startupModel = model;
         }
       }
@@ -119,7 +131,7 @@ try {
     ? [...available, startupModel] : available;
   if (models.length > 10_000) throw new Error("Model count exceeds limit");
   const result = { models: models.map(model => ({
-    provider: model.provider, id: model.id, thinkingLevels: getSupportedThinkingLevels(model),
+    provider: model.provider, id: model.id, contextWindow: model.contextWindow, thinkingLevels: getSupportedThinkingLevels(model),
   })), defaults };
   const output = JSON.stringify(result);
   if (Buffer.byteLength(output) > MAX_BYTES) throw new Error("Model metadata exceeds limit");

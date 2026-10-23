@@ -9,18 +9,23 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 type ThinkingLevel = typeof THINKING_LEVELS[number];
 type ModelIdentity = { provider: string; id: string };
 export type HostOptions = {
-  models: (ModelIdentity & { thinkingLevels: ThinkingLevel[] })[];
+  models: (ModelIdentity & { contextWindow: number; thinkingLevels: ThinkingLevel[] })[];
   defaults: {
     accessMode?: "readonly" | "ask" | "edit" | "full";
     integrationMode?: "ask" | "allowed";
     notificationsEnabled?: boolean;
     model?: ModelIdentity;
     thinkingLevel?: ThinkingLevel;
+    contextWindow?: number;
+    modelStatus?: "configured" | "trust-required" | "unavailable" | "directory-required";
   };
 };
 function modelIdentity(value: unknown): value is ModelIdentity & Record<string, unknown> {
   return object(value) && typeof value.provider === "string" && value.provider.length > 0 && Buffer.byteLength(value.provider) <= 1024
     && typeof value.id === "string" && value.id.length > 0 && Buffer.byteLength(value.id) <= 1024;
+}
+function validContextWindow(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 export class OptionsHelperUnresolved extends Error {}
 
@@ -68,26 +73,31 @@ export async function readHostOptions(resources: HostResources, environment: Nod
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))); }
   catch { throw new CommandError("resource_unavailable", "Invalid host model options"); }
   if (!object(value) || Object.keys(value).length !== 2 || !object(value.defaults)
-    || Object.keys(value.defaults).some(key => !["accessMode", "integrationMode", "notificationsEnabled", "model", "thinkingLevel"].includes(key))
+    || Object.keys(value.defaults).some(key => !["accessMode", "integrationMode", "notificationsEnabled", "model", "thinkingLevel", "contextWindow", "modelStatus"].includes(key))
     || (value.defaults.accessMode !== undefined && (typeof value.defaults.accessMode !== "string" || !["readonly", "ask", "edit", "full"].includes(value.defaults.accessMode)))
     || (value.defaults.integrationMode !== undefined && (typeof value.defaults.integrationMode !== "string" || !["ask", "allowed"].includes(value.defaults.integrationMode)))
     || (value.defaults.notificationsEnabled !== undefined && typeof value.defaults.notificationsEnabled !== "boolean")
     || (value.defaults.model !== undefined && (!modelIdentity(value.defaults.model) || Object.keys(value.defaults.model).length !== 2))
     || (value.defaults.thinkingLevel !== undefined && (!value.defaults.model || !THINKING_LEVELS.includes(value.defaults.thinkingLevel as ThinkingLevel)))
+    || (value.defaults.contextWindow !== undefined && (!value.defaults.model || !validContextWindow(value.defaults.contextWindow)))
+    || (value.defaults.modelStatus !== undefined && (typeof value.defaults.modelStatus !== "string"
+      || !["configured", "trust-required", "unavailable", "directory-required"].includes(value.defaults.modelStatus)))
     || !Array.isArray(value.models) || value.models.length > 10_000
-    || !value.models.every(model => modelIdentity(model) && Object.keys(model).length === 3
+    || !value.models.every(model => modelIdentity(model) && Object.keys(model).length === 4 && validContextWindow(model.contextWindow)
       && Array.isArray(model.thinkingLevels) && model.thinkingLevels.length > 0 && model.thinkingLevels.length <= THINKING_LEVELS.length
       && model.thinkingLevels.every(level => typeof level === "string" && THINKING_LEVELS.includes(level as ThinkingLevel)))) {
     throw new CommandError("resource_unavailable", "Invalid host model options");
   }
   // Project only the declared metadata fields, even from the pinned helper.
   const defaults = value.defaults as HostOptions["defaults"];
-  return { models: value.models.map(model => ({ provider: model.provider, id: model.id, thinkingLevels: model.thinkingLevels })),
+  return { models: value.models.map(model => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow, thinkingLevels: model.thinkingLevels })),
     defaults: {
       ...(defaults.accessMode !== undefined && { accessMode: defaults.accessMode }),
       ...(defaults.integrationMode !== undefined && { integrationMode: defaults.integrationMode }),
       ...(defaults.notificationsEnabled !== undefined && { notificationsEnabled: defaults.notificationsEnabled }),
       ...(defaults.model && { model: { provider: defaults.model.provider, id: defaults.model.id } }),
       ...(defaults.thinkingLevel !== undefined && { thinkingLevel: defaults.thinkingLevel }),
+      ...(defaults.contextWindow !== undefined && { contextWindow: defaults.contextWindow }),
+      ...(defaults.modelStatus !== undefined && { modelStatus: defaults.modelStatus }),
     } };
 }
