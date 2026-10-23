@@ -416,7 +416,10 @@ function M.history_picker(identity)
 		local connection = host.connection
 		connection.request("sessions", {}, function(ok, result)
 			if not ok or not host.connected or host.connection ~= connection then return end
-			vim.ui.select(result.sessions, { prompt = "History on " .. host.alias, format_item = function(row) return session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " (" .. row.state .. (row.archived and ", archived" or "") .. ")" end }, function(row)
+			require("pi-integration.history-picker").pick(host, result.sessions, function(row)
+				return session_title(row) .. (row.cwd and (" | " .. row.cwd) or "")
+					.. " (" .. row.state .. (row.archived and ", archived" or "") .. ")"
+			end, function(row)
 				if not row or not host.connected or host.connection ~= connection then return end
 				if row.state == "open" then
 					M.open({ host_id = host.host_id, session_id = row.id, status = "Idle" }); return

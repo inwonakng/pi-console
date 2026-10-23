@@ -222,6 +222,34 @@ export class HostOwner {
       version: createHash("sha256").update(JSON.stringify([record, result.version])).digest("hex") };
   }
 
+  /** Catalog history is readable without attaching to or resuming a worker. */
+  history(id: string, query: { offset?: unknown; version?: unknown }, admission: () => void): Promise<unknown> {
+    if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");
+    this.hostAdmitting++;
+    const task = this.hostAdmission.then(async () => {
+      this.assertOpen(); admission();
+      const record = this.catalog.get(id);
+      const check = () => {
+        this.assertOpen(); admission();
+        const current = this.catalog.get(id);
+        if (current.deleted || current.piSessionId !== record.piSessionId || current.lifecycleRevision !== record.lifecycleRevision) {
+          throw new CommandError("resource_conflict", "Session history context changed; select the session again");
+        }
+      };
+      check();
+      this.savedMutations.add(id);
+      try {
+        await this.catalog.validateSessionFile(id);
+        check();
+        return await readResource({ sessionFile: this.catalog.sessionFile(id), cwd: record.cwd, workspaceRoot: record.cwd,
+          workspacesRoot: join(this.catalog.root, "workspaces"), tempRoot: tmpdir(), skillPaths: [], liveOutputPaths: [], check },
+          { ...query, kind: "history" });
+      } finally { this.savedMutations.delete(id); }
+    });
+    this.hostAdmission = task.then(() => undefined, () => undefined);
+    return task.finally(() => { this.hostAdmitting--; });
+  }
+
   /** Read preview shares the lifecycle admission lane; no runtime is resumed. */
   saved(id: string, check: () => void): Promise<unknown> {
     if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");

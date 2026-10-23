@@ -163,6 +163,17 @@ export async function runService(options: HostOwnerOptions & { root: string; por
             });
             break;
           }
+          case "host.history": {
+            exact(p, ["serviceEpoch", "sessionId", "offset", "version"]);
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "History owner changed");
+            if (!identifier(p.sessionId)) throw new CommandError("invalid_command", "Invalid history session identity");
+            const { serviceEpoch: _epoch, sessionId, ...query } = p;
+            result = await owner.history(sessionId, query, () => {
+              if (socket.destroyed) throw new CommandError("attachment_closed", "History reader disconnected");
+              remoteAdmission?.();
+            });
+            break;
+          }
           case "host.saved":
             exact(p, ["serviceEpoch", "sessionId"]);
             if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Saved-session owner changed");
