@@ -525,7 +525,9 @@ local function apply_snapshot(value)
 		end
 	end
 	render()
-	if same_runtime and previous.conversation.execution.running and not snapshot.conversation.execution.running then
+	-- History may arrive after the initial attachment snapshot.
+	local initial_history = snapshot.conversation.hydrated and (not previous or not previous.conversation.hydrated)
+	if initial_history or same_runtime and previous.conversation.execution.running and not snapshot.conversation.execution.running then
 		transcript.scroll_to_bottom_unless_focused(ctx)
 	end
 	tree.update(tree_ctx)
