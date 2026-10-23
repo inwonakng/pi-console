@@ -4,7 +4,7 @@ import { NATIVE_OPERATIONS } from "./session-operations.js";
 import { BUNDLED_SOURCES } from "./session-bundled.js";
 
 export const PROTOCOL = 1;
-export const CAPABILITIES = ["snapshot", "updates", "sessions.subscribe", "host.create", "host.resume", "host.saved", "host.archive", "host.delete", "control.acquire", "control.takeover", "control.release",
+export const CAPABILITIES = ["snapshot", "updates", "sessions.subscribe", "host.create", "host.resume", "host.recover", "host.saved", "host.archive", "host.delete", "control.acquire", "control.takeover", "control.release",
   "interaction.respond", "interaction.cancel", "prompt.submit", "turn.abort", "queue.edit", "queue.remove", "queue.reserve", "queue.release",
   "session.rename", "workspace.review.save", "workspace.review.stage", "workspace.review.unstage", "workspace.review.restore", "session.read", "resource.read", "resource.complete", "host.directories", "session.restart", "session.kill", ...Object.keys(BUNDLED_SOURCES), ...NATIVE_OPERATIONS, "command.status", "effect.inspect", "service.stop"] as const;
 export const MAX_RESPONSE = 80 * 1024 * 1024;

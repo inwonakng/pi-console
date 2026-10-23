@@ -18,7 +18,7 @@ export type CatalogSession = {
   archived?: boolean;
   deleted?: boolean;
   lifecycleRevision?: number;
-  state: "saved" | "open" | "interrupted";
+  state: "saved" | "open" | "suspended" | "stopped" | "interrupted";
   ownerEpoch?: string;
   acceptedQueue?: AcceptedQueueItem[];
 };

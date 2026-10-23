@@ -13,6 +13,7 @@ local pending_picker = require("pi-integration.pending-picker")
 state.show_nested_tools = true
 local session_id, attachment, snapshot, hello, grant, job
 local authority
+local session_status, session_error, recovery_requested
 local callbacks, unresolved, offers, drafts = {}, {}, {}, {}
 local outcomes = {}
 local submission_status = {}
@@ -24,7 +25,7 @@ local approval_context, pending_context
 local pending_seen, pending_replies = {}, {}
 local ctx, sync_pending
 local recovery_id, backup_scheduled
-local render, refresh, connect, attach, tree_ctx
+local render, refresh, connect, attach, recover_selection, tree_ctx
 local side_buf
 local owner_states, create_requested = {}, nil
 local conversation_tab, picker_tab
@@ -36,6 +37,10 @@ local function publish_attachment()
 	local identity = M.config.expected_host or "unknown"
 	local status = "Loading"
 	if not job then status = "Disconnected"
+	elseif not attachment then status = hello and (session_status or "Unattached") or "Connecting"
+	elseif snapshot and snapshot.phase == "stopped" then status = "Stopped"
+	elseif snapshot and snapshot.phase == "failed" then status = "Error"
+	elseif snapshot and snapshot.phase == "stopping" then status = "Stopping"
 	elseif snapshot then
 		local pending = false
 		for _, item in ipairs(snapshot.interactions.pending) do if not item.submitted then pending = true end end
@@ -296,8 +301,10 @@ local function update_status_state()
 	state.session_id = session_id
 	state.session_cwd = snapshot and snapshot.interactions.runtime and snapshot.interactions.runtime.cwd
 	state.host_name = host and host.alias or M.config.service_remote or hello and hello.hostId or M.config.expected_host or "local"
-	state.connection_status = job and (attachment and "connected" or "connecting") or "disconnected"
-	state.client_status = control_current() and "active" or "view only"
+	state.connection_status = job and (hello and "connected" or "connecting") or "disconnected"
+	local terminal = snapshot and (snapshot.phase == "stopped" or snapshot.phase == "failed") and snapshot.phase
+	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active" or "view only")
+		or ("session " .. (session_status or "unattached"))
 	state.access_mode = (statuses["pi-access-mode"] or ""):match("^Mode: (%w+)$")
 	state.integration_mode = (statuses["pi-integration-mode"] or ""):match("^Integration: (%w+)$")
 	state.notification_status = statuses["pi-notifications"]
@@ -309,10 +316,11 @@ local function update_status_state()
 	state.codex_usage = status_data("pi-codex-usage")
 	local spawns = status_data("pi-spawn-runs")
 	state.spawn_running_count = spawns and spawns.running or 0
-	state.is_loading = job ~= nil and (not snapshot or snapshot.phase == "initializing")
-	state.is_agent_running = job ~= nil and (execution.running == true or pi_state.isCompacting == true)
-	state.is_streaming = job ~= nil and pi_state.isStreaming == true
-	state.is_retrying = job ~= nil and execution.retry and execution.retry.type == "auto_retry_start" or false
+	state.is_loading = job ~= nil and (not hello or session_status == "checking" or session_status == "attaching"
+		or session_status == "restoring" or attachment ~= nil and snapshot and snapshot.phase == "initializing")
+	state.is_agent_running = attachment ~= nil and (execution.running == true or pi_state.isCompacting == true)
+	state.is_streaming = attachment ~= nil and pi_state.isStreaming == true
+	state.is_retrying = attachment ~= nil and execution.retry and execution.retry.type == "auto_retry_start" or false
 	state.activity_label = pi_state.isCompacting and "compacting" or "work"
 	state.pending_user_messages = snapshot and snapshot.acceptedQueue.items or {}
 	local previous = state.pending_ui_requests
@@ -353,6 +361,7 @@ render = function()
 	if snapshot and snapshot.error then
 		vim.list_extend(lines, { "", "Error: " .. snapshot.error })
 	end
+	if not attachment and session_error then vim.list_extend(lines, { "", session_error }) end
 	if conversation then
 		for _, work in ipairs(conversation.work or {}) do
 			if work.kind == "bash" then
@@ -448,7 +457,8 @@ local function disconnected()
 	offers = {}
 	resources.invalidate()
 	generation = generation + 1
-	job, attachment, grant, authority = nil, nil, nil, nil
+	job, attachment, grant, authority, hello = nil, nil, nil, nil, nil
+	session_status, session_error = "unattached", nil
 	callbacks, outcomes, selection_ready, new_control_selection = {}, {}, nil, nil
 	refreshing, refresh_scheduled, dirty = false, false, false
 	close_approval()
@@ -462,8 +472,17 @@ attach = function(id, acquire_control)
 	resources.invalidate()
 	selection = selection + 1
 	local gen, selected = generation, selection
+	session_status, session_error = "attaching", nil
+	render()
 	request("attach", { sessionId = id, label = "Neovim " .. vim.fn.getpid() }, function(ok, value)
-		if not ok or gen ~= generation or selected ~= selection then return end
+		if gen ~= generation or selected ~= selection then return end
+		if not ok then
+			session_status, session_error = "unavailable", value.message .. " Use :PiReconnect to retry or :PiSessions to explicitly reopen."
+			selection_ready = nil
+			render()
+			return
+		end
+		session_status, session_error = nil, nil
 		close_approval()
 		session_id, attachment, grant, snapshot, authority = id, value.attachmentId, nil, nil, nil
 		-- Only an explicitly completed New may acquire; attach/reconnect stays a viewer.
@@ -502,17 +521,57 @@ local function host_operation(operation, payload)
 	local captured = stamp()
 	local envelope = { id = uid(), serviceEpoch = hello.serviceEpoch, operation = operation, payload = payload }
 	pending_host, pending_host_select = envelope, true
+	session_status, session_error = "restoring", nil
+	render()
 	request("host.command", envelope, function(ok, receipt)
+		if not ok and pending_host == envelope then
+			if same_selection(captured) then
+				session_status, session_error = "unavailable", "Host request outcome unresolved. Inspect :PiHostRequest before retrying."
+				render()
+			end
+			return
+		end
 		if ok and pending_host == envelope then
 			pending_host, pending_host_select = nil, nil
 			if receipt.result then
 				if same_selection(captured) then attach(receipt.result.sessionId, operation == "host.create")
 				else notify("Host request completed for " .. receipt.result.sessionId .. "; current view was not changed.") end
-			elseif receipt.error then notify("Host request " .. receipt.status .. ": " .. receipt.error.message, vim.log.levels.WARN) end
+			elseif receipt.error then
+				notify("Host request " .. receipt.status .. ": " .. receipt.error.message, vim.log.levels.WARN)
+				if same_selection(captured) then
+					session_status, session_error = "unavailable", receipt.error.message .. " Use :PiReconnect to retry or :PiSessions to explicitly reopen."
+					selection_ready = nil
+					render()
+				end
+			end
 		end
 	end)
 end
-local function recover_host()
+recover_selection = function(allow_restore)
+	local captured = stamp()
+	session_status, session_error = "checking", nil
+	render()
+	request("sessions", {}, function(ok, value)
+		if not same_selection(captured) then return end
+		if not ok then
+			session_status, session_error = "unavailable", value.message .. " Use :PiReconnect to retry."
+		else
+			local row
+			for _, entry in ipairs(value.sessions or {}) do if entry.id == session_id then row = entry; break end end
+			if row and not row.archived and not row.deleted then
+				if row.state == "open" then attach(session_id); return end
+				if row.state == "suspended" and allow_restore and vim.tbl_contains(hello.capabilities, "host.recover") then
+					host_operation("host.recover", { sessionId = session_id }); return
+				end
+			end
+			session_status = not row and "unavailable" or row.archived and "archived" or row.deleted and "deleted" or row.state
+			session_error = "Session " .. session_status .. ". Use :PiSessions to inspect or explicitly reopen it."
+		end
+		selection_ready = nil
+		render()
+	end)
+end
+local function recover_host(allow_restore)
 	if not pending_host then return false end
 	local envelope, captured = pending_host, stamp()
 	request("host.status", { serviceEpoch = envelope.serviceEpoch, commandId = envelope.id }, function(ok, receipt)
@@ -520,11 +579,22 @@ local function recover_host()
 		local select_result = pending_host_select == true
 		if ok and receipt.result then
 			pending_host, pending_host_select = nil, nil
-			if select_result and same_selection(captured) then attach(receipt.result.sessionId) end
-		else notify("Host request outcome unresolved. Inspect its ID before explicitly creating/resuming; no replay occurred.", vim.log.levels.WARN) end
+			if select_result and same_selection(captured) then
+				session_id = receipt.result.sessionId
+				recover_selection(allow_restore)
+			end
+		else
+			notify("Host request outcome unresolved. Inspect its ID before explicitly creating/resuming; no replay occurred.", vim.log.levels.WARN)
+			if same_selection(captured) then
+				session_status, session_error = "unavailable", "Host request outcome unresolved. Inspect :PiHostRequest; no work was replayed."
+				render()
+			end
+		end
 		-- Recovery can resolve an ID after another selection, never revive its
 		-- original right to select. Reattach the user's selected view instead.
-		if not select_result and same_selection(captured) and not attachment and session_id then attach(session_id) end
+		if not select_result and same_selection(captured) and not attachment and session_id then
+			recover_selection(allow_restore and pending_host == nil)
+		end
 	end)
 	return true
 end
@@ -562,13 +632,14 @@ connect = function()
 			hello = result
 			M.config.expected_host = result.hostId
 			render()
-			if recover_host() then return end
+			local restore = recovery_requested; recovery_requested = false
+			if recover_host(restore) then return end
 			if create_requested then
 				local cwd = create_requested; create_requested = nil
 				host_operation("host.create", { cwd = cwd })
 			elseif session_id then
 				if resume_requested then resume_requested = false; host_operation("host.resume", { sessionId = session_id })
-				else attach(session_id) end
+				else recover_selection(restore) end
 			elseif not initial_attempted then
 				initial_attempted = true
 				if M.config.service_remote then M.pick_session()
@@ -660,7 +731,7 @@ function M.detach()
 	disconnected()
 	if old then vim.fn.jobstop(old) end -- Only the relay, never a Pi worker.
 end
-function M.reconnect() M.detach(); connect() end
+function M.reconnect() M.detach(); recovery_requested = true; connect() end
 function M.host_disconnected(identity, target)
 	local source = identity and require("pi-integration.service-hosts").find(identity)
 	local endpoint_match = not identity and target and target.service_remote == M.config.service_remote and target.service_root == M.config.service_root
@@ -683,7 +754,7 @@ function M.select_owner(target, id, resume, cwd, on_ready)
 		unresolved, submission_status = saved.unresolved or {}, saved.submission_status or {}
 		pending_host, pending_host_select = saved.pending_host, false
 		if cwd and pending_host then notify("Owner has an unresolved create/resume. Inspect :PiHostRequest; no new request was sent."); cwd = nil end
-		session_id, resume_requested, create_requested = id, resume, cwd
+		session_id, resume_requested, create_requested, recovery_requested = id, resume, cwd, false
 		snapshot, hello, initial_attempted = nil, nil, true
 		selection = selection + 1
 		if valid(state.input_buf) then layout.set_buffer_lines(ctx, state.input_buf, { "" }, true) end
@@ -1320,6 +1391,7 @@ function M.open(_, restore)
 			M.config.service_remote, M.config.credential_file, M.config.ca_file = restore.service_remote, restore.credential_file, restore.ca_file
 		end
 		session_id, pending_host = restore.service_session, restore.pending_host
+		recovery_requested = true
 		pending_host_select = restore.pending_host_select == true
 		unresolved, initial_attempted = restore.unresolved or {}, restore.initial_attempted
 		submission_status = restore.submission_status or {}

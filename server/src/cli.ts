@@ -129,7 +129,7 @@ async function main(): Promise<void> {
         } else await supervisor?.assertStopped();
         await requireNoClaim();
         if (action === "disable") await supervisor?.disable();
-        if (action !== "restart") { console.log(JSON.stringify({ running: false, enabled: action === "disable" ? false : !!supervisor, notice: "Idle sessions stopped/saved; history, workspaces and credentials retained." })); return; }
+        if (action !== "restart") { console.log(JSON.stringify({ running: false, enabled: action === "disable" ? false : !!supervisor, notice: "Live sessions suspended for frontend reconnect; history, workspaces and credentials retained." })); return; }
       } else if (existing) {
         existing.client.close();
         const selectedBuildId = await serviceBuild();
@@ -172,7 +172,7 @@ async function main(): Promise<void> {
     }
     try { console.log(JSON.stringify({ ...view.hello, running: true, state: await view.client.request("sessions"), selectedBuildId,
       restartRequired: view.hello.buildId !== selectedBuildId, startup: supervisor ? await supervisor.status() : { enabled: false },
-      stopNotice: "Normal stop saves/stops idle sessions; active work refuses unless --force is intentional." })); }
+      stopNotice: "Normal stop suspends idle sessions for frontend reconnect; active work refuses unless --force is intentional." })); }
     finally { view.client.close(); }
     return;
   }

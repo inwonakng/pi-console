@@ -78,9 +78,10 @@ export class SessionCatalog {
           db.exec("BEGIN IMMEDIATE");
           for (const row of db.prepare("SELECT id,metadata FROM sessions WHERE owner_epoch=?").all(epoch)) {
             const session = JSON.parse(String(row.metadata)) as CatalogSession;
-            session.state = "interrupted";
+            // An accepted kill remains an explicit stop even if the owner crashed.
+            if (session.state !== "stopped") session.state = "interrupted";
             delete session.ownerEpoch;
-            db.prepare("UPDATE sessions SET state='interrupted',owner_epoch=NULL,metadata=? WHERE id=?").run(JSON.stringify(session), row.id);
+            db.prepare("UPDATE sessions SET state=?,owner_epoch=NULL,metadata=? WHERE id=?").run(session.state, JSON.stringify(session), row.id);
           }
           db.exec("COMMIT");
           if (db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()?.busy !== 0) throw new Error("Recovery checkpoint blocked; retain original claim");
@@ -260,11 +261,11 @@ export class SessionCatalog {
     });
   }
 
-  async markStopped(id: string, interrupted: boolean): Promise<void> {
+  async markStopped(id: string, interrupted: boolean, suspended = false): Promise<void> {
     await this.change(() => {
       const session = this.get(id);
-      if (session.state !== "open" || session.ownerEpoch !== this.epoch) throw new Error("Session ownership changed before recording its exit");
-      session.state = interrupted ? "interrupted" : "saved";
+      if (!["open", "stopped"].includes(session.state) || session.ownerEpoch !== this.epoch) throw new Error("Session ownership changed before recording its exit");
+      if (session.state !== "stopped") session.state = interrupted ? "interrupted" : suspended ? "suspended" : "saved";
       delete session.ownerEpoch;
       this.updateSession(session);
     });
@@ -346,6 +347,15 @@ export class SessionCatalog {
       return this.transaction(() => {
         admission?.();
         if (items) this.setQueue(copy.receipt.sessionId, items);
+        if (copy.receipt.operation === "session.kill") {
+          const session = this.get(copy.receipt.sessionId);
+          if (session.ownerEpoch !== this.epoch || session.state !== "open") throw new CommandError("session_unavailable", "Session is no longer live");
+          // Persist intent atomically with acceptance, retaining the ownership
+          // fence until worker cleanup (or explicit reconciliation) completes.
+          session.state = "stopped";
+          session.lifecycleRevision = (session.lifecycleRevision ?? 0) + 1;
+          this.updateSession(session);
+        }
         insertCommand(this.db, copy);
         this.transactionBytes += commandBytes(copy);
         return copy.receipt;

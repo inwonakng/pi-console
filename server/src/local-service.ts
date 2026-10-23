@@ -176,7 +176,7 @@ export async function runService(options: HostOwnerOptions & { root: string; tls
             exact(p, ["sessionId", "label"]);
             if (!identifier(p.sessionId) || typeof p.label !== "string") throw new CommandError("invalid_command", "Invalid attachment");
             const target = owner.lookup(p.sessionId);
-            if (!target) throw new CommandError("session_unavailable", "Session is saved, not live; explicitly resume it first");
+            if (!target) throw new CommandError("session_unavailable", "Session is not live; reconnect to restore a suspended session, or explicitly reopen it");
             detach();
             session = target;
             const view = target.subscribe(p.label);

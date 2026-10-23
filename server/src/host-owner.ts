@@ -216,15 +216,19 @@ export class HostOwner {
   }
 
   /** Register synchronously, before any file checks, commits or child startup. */
-  resume(id: string): OwnedSession {
+  resume(id: string, recoverOnly = false): OwnedSession {
     this.assertOpen();
     this.catalog.assertExecutionAllowed();
     if (this.savedMutations.has(id)) throw new CommandError("session_busy", "Saved-session operation in progress; resume explicitly after inspecting its outcome");
-    const previous = this.sessions.get(id);
-    if (previous && !previous.finished) return previous;
     const record = this.catalog.get(id);
     if (record.archived || record.deleted) throw new CommandError("session_unavailable", "Explicitly unarchive before resuming; deleted sessions cannot resume");
-    if (record.state === "open") throw new Error("Session has unresolved ownership; recovery is required");
+    const previous = this.sessions.get(id);
+    if (previous && !previous.finished) {
+      if (recoverOnly && (record.state === "stopped" || !previous.recoverable)) throw new CommandError("session_unavailable", "Session is stopping or failed; explicitly reopen it after cleanup");
+      return previous;
+    }
+    if (record.ownerEpoch || record.state === "open") throw new Error("Session has unresolved ownership; recovery is required");
+    if (recoverOnly && record.state !== "suspended") throw new CommandError("session_unavailable", `Session is ${record.state}; explicitly reopen it first`);
     const previousState = previous?.snapshot();
     const session = new OwnedSession(this.catalog, record, this.options, previousState?.runtimeRevision ?? 0, previousState?.sequence ?? 0, () => {
       if (this.savedMutations.size) throw new CommandError("session_busy", "Saved-session lifecycle operation in progress; retry workspace changes explicitly after inspecting its outcome");
@@ -235,7 +239,7 @@ export class HostOwner {
 
   hostStatus(epoch: string, id: string): HostReceipt | { status: "unknown" } {
     const receipt = this.catalog.hostRecord(epoch, id)?.receipt;
-    return receipt && ["host.create", "host.resume", "host.archive", "host.delete"].includes(receipt.operation) ? receipt : { status: "unknown" };
+    return receipt && ["host.create", "host.resume", "host.recover", "host.archive", "host.delete"].includes(receipt.operation) ? receipt : { status: "unknown" };
   }
 
   /** Host IDs are disk identities, not connection IDs. Duplicate lookups never
@@ -301,7 +305,7 @@ export class HostOwner {
       this.catalog.get(command.payload.sessionId);
       await this.catalog.reserveHost(fingerprint, receipt, admission);
       try {
-        sessionId = this.resume(command.payload.sessionId).id;
+        sessionId = this.resume(command.payload.sessionId, command.operation === "host.recover").id;
         receipt.status = "completed";
         receipt.result = { sessionId };
       } catch (error) {
@@ -411,6 +415,7 @@ export class OwnedSession {
   private cleanupError?: Error;
   private exit?: PiExit;
   private stopRequested = false;
+  private serviceStopping = false;
   private restartRequested = false;
   private lifecyclePending = false;
   private lifecycle?: Promise<void>;
@@ -433,6 +438,7 @@ export class OwnedSession {
 
   get id(): string { return this.record.id; }
   get finished(): boolean { return this.done && !this.lifecyclePending; }
+  get recoverable(): boolean { return !this.stopRequested && !this.error && !this.done; }
   ready(): Promise<void> { return this.initialized; }
 
   snapshot(): OwnedSessionSnapshot {
@@ -1319,6 +1325,7 @@ export class OwnedSession {
   async stop(): Promise<void> {
     if (!this.done) {
       // Administrative shutdown supersedes a pending session restart.
+      this.serviceStopping = true;
       this.restartRequested = false;
       this.requestStop();
     }
@@ -1418,7 +1425,7 @@ export class OwnedSession {
         await Promise.allSettled([...this.commands]);
         await this.admission;
         await this.interruptQueue("session_stopped", "Session stopped; review accepted work before explicitly editing/resubmitting");
-        if (owned) await this.catalog.markStopped(this.id, !!this.error);
+        if (owned) await this.catalog.markStopped(this.id, !!this.error, this.serviceStopping);
       } catch (error) {
         this.cleanupError = asError(error);
         this.error = new Error("Session ownership cleanup failed; recovery is required", { cause: error });
