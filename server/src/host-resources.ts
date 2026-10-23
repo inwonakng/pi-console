@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Channel } from "./session-catalog.js";
-import { assertResourceManifest, type ResourceManifest, type ResourceStamp } from "../../pi/scripts/managed-process.mjs";
+import type { ResourceManifest, ResourceStamp } from "../../pi/scripts/managed-process.mjs";
 export type { ResourceStamp } from "../../pi/scripts/managed-process.mjs";
 
 const DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -34,9 +34,6 @@ export type HostResources = ResourceManifest & {
   readonly appRoot: string;
   readonly binary: string;
   readonly environment: NodeJS.ProcessEnv;
-  /** Await before every future runtime/helper launch. Metadata/dependency changes
-   * latch a refusal until service restart. No content rehashing or hot reload. */
-  assertUnchanged(): Promise<void>;
 };
 
 type Manifest = {
@@ -77,19 +74,7 @@ export async function prepareHostResources(options: HostResourcesOptions): Promi
     buildId: `sha256:${resources.digest()}`, files: Object.freeze(resources.files),
     resolutions: Object.freeze(resources.resolutions), lookup: Object.freeze(resources.lookup),
   });
-  let refusal: Error | undefined;
-  return Object.freeze({
-    channel, root, appRoot, binary, environment: Object.freeze(environment), ...manifest,
-    async assertUnchanged(): Promise<void> {
-      if (refusal) throw refusal;
-      try {
-        assertResourceManifest(manifest);
-      } catch (cause) {
-        refusal ??= new Error("Host runtime resources changed or became unreadable; restart the service before launching more managed work", { cause });
-        throw refusal;
-      }
-    },
-  });
+  return Object.freeze({ channel, root, appRoot, binary, environment: Object.freeze(environment), ...manifest });
 }
 
 function hostEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

@@ -156,8 +156,7 @@ export class HostOwner {
   }
 
   private async savedHelper(sessionId: string, payload: { action: "preview" | "delete"; expectedVersion?: string; mode?: string; confirmed?: true }): Promise<SavedResult> {
-    await this.resources.assertUnchanged();
-    this.catalog.assertExecutionAllowed();
+    this.catalog.assertLaunchAllowed();
     try {
       return await savedSessionHelper({ binary: this.options.binary, appRoot: this.options.appRoot,
         sessionDirectory: join(this.catalog.root, "sessions"), workspaceRoot: join(this.catalog.root, "workspaces"),
@@ -210,7 +209,7 @@ export class HostOwner {
 
   async create(cwd: string): Promise<OwnedSession> {
     this.assertOpen();
-    this.catalog.assertExecutionAllowed();
+    this.catalog.assertLaunchAllowed();
     this.creating++;
     try { return this.resume((await this.catalog.create(cwd)).id); }
     finally { this.creating--; }
@@ -227,7 +226,7 @@ export class HostOwner {
     if (record.archived || record.deleted) throw new CommandError("session_unavailable", "Explicitly unarchive before resuming; deleted sessions cannot resume");
     if (record.state === "open") throw new Error("Session has unresolved ownership; recovery is required");
     const previousState = previous?.snapshot();
-    const session = new OwnedSession(this.catalog, record, this.options, this.resources, previousState?.runtimeRevision ?? 0, previousState?.sequence ?? 0, () => {
+    const session = new OwnedSession(this.catalog, record, this.options, previousState?.runtimeRevision ?? 0, previousState?.sequence ?? 0, () => {
       if (this.savedMutations.size) throw new CommandError("session_busy", "Saved-session lifecycle operation in progress; retry workspace changes explicitly after inspecting its outcome");
     });
     this.sessions.set(id, session);
@@ -260,6 +259,7 @@ export class HostOwner {
       const receipt: HostReceipt = { id: command.id, serviceEpoch: this.serviceEpoch, operation: command.operation, status: "accepted" };
       let sessionId: string;
       if (command.operation === "host.create") {
+        this.catalog.assertLaunchAllowed();
         const record = await this.catalog.create(command.payload.cwd, { fingerprint, receipt }, admission);
         sessionId = record.id;
         // The allocation receipt is already committed before any worker launch.
@@ -422,7 +422,7 @@ export class OwnedSession {
   private resolveReady!: () => void;
   private rejectReady!: (error: Error) => void;
 
-  constructor(private readonly catalog: SessionCatalog, private readonly record: CatalogSession, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, private readonly resources: HostResources, revision: number, sequence = 0, private readonly assertSavedIdle: () => void = () => {}) {
+  constructor(private readonly catalog: SessionCatalog, private readonly record: CatalogSession, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, revision: number, sequence = 0, private readonly assertSavedIdle: () => void = () => {}) {
     this.runtimeRevision = revision;
     this.sequence = sequence;
     this.initialized = new Promise<void>((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
@@ -1357,8 +1357,7 @@ export class OwnedSession {
       for (let replacement = 0; ; replacement++) {
         await this.catalog.validateSessionFile(this.id);
         this.checkRunning();
-        await this.resources.assertUnchanged();
-        this.checkRunning();
+        this.catalog.assertLaunchAllowed();
         this.workerRevision = 0;
         this.trust = undefined;
         this.workspace = undefined;

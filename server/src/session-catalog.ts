@@ -5,7 +5,7 @@ import { isAbsolute, join, basename, dirname } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { type DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { object } from "./pi-records.js";
-import { beginEpoch, ownerLease, registry, sealEpoch, inspectEpoch } from "../../pi/scripts/managed-process.mjs";
+import { assertManagedLaunchAllowed, beginEpoch, ownerLease, registry, sealEpoch, inspectEpoch } from "../../pi/scripts/managed-process.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { CommandError, type CommandReceipt, type StoredCommand } from "./session-commands.js";
 import { validQueueItem, type AcceptedQueueItem } from "./session-queue.js";
@@ -151,6 +151,12 @@ export class SessionCatalog {
   assertExecutionAllowed(): void {
     if (this.failure) throw this.failure;
     if (this.closing || this.released) throw new Error("Service catalog is closing or closed");
+  }
+
+  /** Resource refusal fences new workers/helpers, never RPCs to existing workers. */
+  assertLaunchAllowed(): void {
+    this.assertExecutionAllowed();
+    assertManagedLaunchAllowed(this.processRegistry, this.epoch);
   }
 
   list(): CatalogSession[] {

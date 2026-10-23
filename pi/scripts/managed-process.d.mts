@@ -14,6 +14,7 @@ export function assertManagedResources(environment?: NodeJS.ProcessEnv): void;
 export function ownerLease(root: string): { close(): void };
 export function registry(path: string): DatabaseSync;
 export function beginEpoch(path: string, epoch: string): void;
+export function assertManagedLaunchAllowed(path: string, epoch: string): void;
 export function sealEpoch(path: string, epoch: string): void;
 export function inspectEpoch(path: string, epoch: string): ManagedJob[];
 export function managedSpawn(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"] }): ChildProcessWithoutNullStreams;

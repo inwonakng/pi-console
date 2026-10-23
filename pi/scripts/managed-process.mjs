@@ -88,8 +88,22 @@ function transaction(db, f) {
   catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
+function assertLaunchAllowed(db, epoch) {
+  const state = db.prepare('SELECT state FROM epochs WHERE id=?').get(epoch)?.state;
+  if (state === 'restart-required') throw new Error('Host runtime resources changed or became unreadable; restart the service before launching more managed work');
+  if (state !== 'active') throw new Error('Managed launch admission is sealed');
+}
+
+export function assertManagedLaunchAllowed(path, epoch) {
+  const db = registry(path);
+  try { assertLaunchAllowed(db, epoch); }
+  finally { db.close(); }
+}
+
 function ancestorsOpen(db, job) {
-  if (db.prepare('SELECT state FROM epochs WHERE id=?').get(job.epoch)?.state !== 'active') return false;
+  const state = db.prepare('SELECT state FROM epochs WHERE id=?').get(job.epoch)?.state;
+  // Resource changes fence new launches, but must not stop existing workloads.
+  if (state !== 'active' && state !== 'restart-required') return false;
   let parent = job.parent;
   while (parent) {
     const row = db.prepare('SELECT parent,status,launch_open FROM jobs WHERE id=?').get(parent);
@@ -138,6 +152,7 @@ export function managedSpawn(command, args, options) {
   const id = randomUUID();
   try { transaction(db, () => {
     const job = { epoch, parent: env.PI_CONSOLE_PROCESS_JOB || null };
+    assertLaunchAllowed(db, epoch);
     if (!ancestorsOpen(db, job)) throw new Error('Managed launch admission is sealed');
     db.prepare("INSERT INTO jobs VALUES(?,?,?,?,'intent',1,NULL)").run(id, epoch, job.parent, command);
   }); } finally { db.close(); }
@@ -203,6 +218,7 @@ async function supervise(path, id) {
   let finished = false;
   let directUnresolved = false;
   let sealed = false;
+  let pendingRefusalEpoch;
   const known = new Map();
   const stop = () => { stopAt ??= performance.now(); };
   // Install death handling BEFORE waiting for initialization/launch.
@@ -214,10 +230,19 @@ async function supervise(path, id) {
     if (message?.type !== 'launch' || launched || finished) return;
     launched = true;
     try {
-      assertManagedResources(message.env);
+      const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+      if (!job) throw new Error('Managed launch has no registered intent');
+      assertLaunchAllowed(db, job.epoch);
+      try { assertManagedResources(message.env); }
+      catch (error) {
+        // The loop must persist this refusal before starting terminal cleanup.
+        pendingRefusalEpoch = job.epoch;
+        throw new Error('Host runtime resources changed or became unreadable; restart the service before launching more managed work', { cause: error });
+      }
       transaction(db, () => {
-        const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
-        if (stopAt || !job || job.status !== 'intent' || !ancestorsOpen(db, job)) throw new Error('Managed launch was cancelled before execution');
+        const current = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+        assertLaunchAllowed(db, job.epoch);
+        if (stopAt || !current || current.status !== 'intent' || !ancestorsOpen(db, current)) throw new Error('Managed launch was cancelled before execution');
         db.prepare("UPDATE jobs SET status='running' WHERE id=?").run(id);
       });
       // Durable grant precedes fork. Death in this window is known uncertainty,
@@ -238,6 +263,18 @@ async function supervise(path, id) {
     db = registry(path);
     const currentJob = db.prepare('SELECT * FROM jobs WHERE id=?');
     while (!finished) {
+      if (pendingRefusalEpoch) {
+        try {
+          transaction(db, () => db.prepare("UPDATE epochs SET state='restart-required' WHERE id=? AND state='active'").run(pendingRefusalEpoch));
+          pendingRefusalEpoch = undefined;
+        } catch (error) {
+          // Retry within the existing cleanup grace; never publish cancelled/done
+          // with a lost refusal. Persistent storage failure leaves ownership unproven.
+          if (performance.now() - stopAt > 8000) throw error;
+          await delay(50);
+          continue;
+        }
+      }
       const job = currentJob.get(id);
       if (!job || !job.launch_open || !ancestorsOpen(db, job)) stop();
       // Registry admission still observes ancestor cancellation/reconciliation,
