@@ -253,7 +253,61 @@ local function append_assistant_blocks(ctx, lines, items, message, has_body, opt
 	return appended, last_rendered_kind
 end
 
-function M.collect_message_lines(ctx, messages)
+local function with_tool_executions(messages, tools)
+	if not tools or #tools == 0 then return messages or {} end
+	local calls, results, ambiguous, by_id, at_message = {}, {}, {}, {}, {}
+	for index, message in ipairs(messages or {}) do
+		if message.role == "assistant" and type(message.content) == "table" then
+			for _, block in ipairs(message.content) do
+				if type(block) == "table" and (block.type == "toolCall" or block.type == "tool_call") then
+					local id = message_utils.tool_call_id(block)
+					if id then
+						if calls[id] then ambiguous[id] = true end
+						calls[id] = index
+					end
+				end
+			end
+		elseif message.role == "toolResult" and message.toolCallId then
+			if results[message.toolCallId] then ambiguous[message.toolCallId] = true end
+			results[message.toolCallId] = index
+		end
+	end
+	for _, tool in ipairs(tools) do by_id[tool.toolCallId] = tool end
+	for _, tool in ipairs(tools) do
+		local root, seen = tool, {}
+		while root and root.parentToolCallId do
+			local parent = root.parentToolCallId
+			if seen[parent] then root = nil; break end
+			seen[parent] = true
+			root = by_id[parent] or { toolCallId = parent }
+		end
+		local id = root and root.toolCallId
+		local at = id and not ambiguous[id] and (calls[id] or results[id])
+		-- A reused ID cannot identify which occurrence owns a retained execution.
+		if at and calls[id] and results[id] and results[id] < calls[id] then at = nil end
+		if at and not results[tool.toolCallId] then
+			at_message[at] = at_message[at] or {}
+			table.insert(at_message[at], tool)
+		end
+	end
+	local visible = {}
+	for index, message in ipairs(messages or {}) do
+		table.insert(visible, message)
+		-- Nested calls have no standalone history message. Keep their live records
+		-- beside the root call, and omit records whose history anchor is gone.
+		for _, tool in ipairs(at_message[index] or {}) do
+			table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_start" }))
+			if tool.result then
+				table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_end" }))
+			elseif tool.partialResult then
+				table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_update" }))
+			end
+		end
+	end
+	return visible
+end
+
+function M.collect_message_lines(ctx, messages, tools)
 	local lines = ctx.transcript.metadata_lines()
 	local items = {}
 	ctx.state.tool_items_by_output = {}
@@ -282,7 +336,7 @@ function M.collect_message_lines(ctx, messages)
 		assistant_block_open = false
 	end
 
-	for _, message in ipairs(messages or {}) do
+	for _, message in ipairs(with_tool_executions(messages, tools)) do
 		local role = message.role or message.type
 		local appended = false
 		local rendered_kind = nil
@@ -301,7 +355,8 @@ function M.collect_message_lines(ctx, messages)
 		end
 		if role == "tool_execution_start" or role == "tool_execution_update" then
 			if role == "tool_execution_start" then
-				pi_tool_output.record_execution_call(ctx.state, message.toolName, message.toolCallId, message.args, "running", message.parentToolCallId)
+				pi_tool_output.record_execution_call(ctx.state, message.toolName, message.toolCallId, message.args,
+					message.state == "interrupted" and "interrupted" or "running", message.parentToolCallId)
 			end
 			if not pi_skills.tool_result_skill_name(ctx.state, message) then
 				local partial = type(message.partialResult) == "table" and message.partialResult or {}

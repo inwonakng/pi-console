@@ -434,22 +434,11 @@ render = function()
 	update_status_state()
 	layout.update_input_sidebar(ctx)
 	local visible = vim.deepcopy(conversation and conversation.messages or {})
-	if conversation then
-		if conversation.partialAssistant then table.insert(visible, conversation.partialAssistant.message) end
-		local represented = {}
-		for _, message in ipairs(visible) do if message.toolCallId then represented[message.toolCallId] = true end end
-		for _, tool in ipairs(conversation.tools or {}) do
-			if not represented[tool.toolCallId] then
-				table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_start" }))
-				if tool.result then table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_end" }))
-				elseif tool.partialResult then table.insert(visible, vim.tbl_extend("force", tool, { role = "tool_execution_update" })) end
-			end
-		end
-	end
+	if conversation and conversation.partialAssistant then table.insert(visible, conversation.partialAssistant.message) end
 	require("pi-integration.tool-output").reset(state)
 	require("pi-integration.thinking-output").reset(state)
 	require("pi-integration.skills").reset(state)
-	local lines, items = messages.collect_message_lines(ctx, visible)
+	local lines, items = messages.collect_message_lines(ctx, visible, conversation and conversation.tools)
 	if snapshot and snapshot.error then
 		vim.list_extend(lines, { "", "Error: " .. snapshot.error })
 	end
