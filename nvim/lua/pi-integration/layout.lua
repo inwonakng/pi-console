@@ -21,7 +21,7 @@ function M.set_buffer_lines(ctx, buf, lines, modifiable)
 end
 
 function M.apply_window_padding(_, win)
-	vim.api.nvim_set_option_value("winbar", " ", { win = win })
+	vim.api.nvim_set_option_value("winbar", "", { win = win })
 	vim.api.nvim_set_option_value("fillchars", "stl:─,stlnc:─", { win = win })
 	vim.api.nvim_set_option_value("statusline", "%#PiPaneBorder#%=", { win = win })
 	vim.api.nvim_set_option_value("statuscolumn", "", { win = win })
@@ -62,7 +62,6 @@ end
 
 function M.apply_input_window_options(ctx, win)
 	M.apply_window_padding(ctx, win)
-	vim.api.nvim_set_option_value("winbar", "", { win = win })
 	M.update_input_sidebar(ctx)
 end
 

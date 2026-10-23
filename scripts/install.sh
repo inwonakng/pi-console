@@ -147,6 +147,7 @@ function version(bin, minimum, pattern) {
     throw new Error(bin + " >=" + minimum.join(".") + " is required; found " + output.split("\n")[0] + ". Upgrade it and retry.");
 }
 try {
+  version("pi", [1, 3, 0], /^(\d+)\.(\d+)\.(\d+)$/);
   version("git", [2, 45, 0], /^git version (\d+)\.(\d+)\.(\d+)/);
   try {
     run("git", ["init", "--bare", "--quiet", scratch]);
@@ -173,7 +174,6 @@ try {
   process.exitCode = 1;
 } finally { rmSync(scratch, { recursive: true, force: true }); }
 NODE
-[ "$(pi --version)" = 1.3.0 ] || fail 'Pi 1.3.0 is required by this build. Select that Pi version and retry; the installer does not modify Pi.'
 if [ -e "$install_root/pi" ] || [ -L "$install_root/pi" ]; then
     [ "$legacy" = yes ] || { [ -L "$install_root/pi" ] && [ "$(readlink "$install_root/pi")" = current/pi ]; } \
         || fail 'Unmanaged compatibility package link.'

@@ -29,7 +29,7 @@ integration supports **tmux 3.4+**.
 
 Install these before starting (both installers check versions and required capabilities):
 
-- Pi 1.3.0, Node.js >=22.19.0, Git >=2.45.0, Bash, curl, tar, npm, `realpath`, and `ripgrep`.
+- Pi >=1.3.0, Node.js >=22.19.0, Git >=2.45.0, Bash, curl, tar, npm, `realpath`, and `ripgrep`.
   Git must support `merge-tree --write-tree --merge-base` with raw tree operands.
 - For a full client: Neovim >=0.12.0 with `vim.pack.add` and Tree-sitter runtime ABI >=13,
   tmux, `fzf`, Rust/Cargo, a C compiler, and Tree-sitter CLI >=0.26.1
