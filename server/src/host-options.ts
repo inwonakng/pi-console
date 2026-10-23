@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { managedSpawn, managedResult, stopManaged } from "../../pi/scripts/managed-process.mjs";
+import { PiProcess, type PiExit } from "./pi-process.js";
 import type { HostResources } from "./host-resources.js";
 import { object } from "./pi-records.js";
 import { CommandError } from "./session-commands.js";
@@ -17,7 +17,7 @@ export type HostOptions = {
     model?: ModelIdentity;
     thinkingLevel?: ThinkingLevel;
     contextWindow?: number;
-    modelStatus?: "configured" | "trust-required" | "unavailable" | "directory-required";
+    modelStatus?: "trust-required" | "unavailable" | "directory-required";
   };
 };
 function modelIdentity(value: unknown): value is ModelIdentity & Record<string, unknown> {
@@ -29,49 +29,52 @@ function validContextWindow(value: unknown): value is number {
 }
 export class OptionsHelperUnresolved extends Error {}
 
-/** Fixed read-only helper under the pinned host environment and resource fence.
- * No Pi worker, conversation, controller or project resources are allocated. */
+/** Ask a normally initialized, unsaved Pi worker under the host resource fence.
+ * The fixed command reads metadata only; no prompt is sent to a model. */
 export async function readHostOptions(resources: HostResources, environment: NodeJS.ProcessEnv,
-  input: { cwd?: string; provider?: string; model?: string }): Promise<HostOptions> {
-  const ai = resources.resolutions.find(dependency => dependency.from === join(resources.packageRoot, "package.json")
-    && dependency.name === "@earendil-works/pi-ai")?.target;
-  if (!ai) throw new Error("Pinned host Pi AI dependency is unavailable");
-  const child = managedSpawn(process.execPath, [join(resources.appRoot, "pi", "scripts", "host-options.mjs"), resources.packageRoot, ai, JSON.stringify(input)],
-    { cwd: resources.root, env: { ...environment, PI_OFFLINE: "1" }, stdio: ["pipe", "pipe", "pipe"] });
-  let bytes = 0;
-  const chunks: Buffer[] = [];
-  let failure = false;
-  const stop = () => {
-    if (failure) return;
-    failure = true;
-    if (!stopManaged(child)) child.kill("SIGTERM");
-  };
-  const deadline = setTimeout(stop, 30_000);
-  child.stdin.on("error", stop);
-  child.stdout.on("error", stop);
-  child.stderr.on("error", stop);
-  child.stdout.on("data", (chunk: Buffer) => {
-    bytes += chunk.length;
-    if (bytes > MAX_BYTES + 1) stop();
-    else if (!failure) chunks.push(chunk);
-  });
-  // SDK/provider diagnostics can contain credentials. Drain without retaining them.
-  child.stderr.resume();
-  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
-    child.once("error", () => { failure = true; });
-    child.once("close", (code, signal) => resolve({ code, signal }));
-  });
-  clearTimeout(deadline);
-  let evidence;
-  try { evidence = managedResult(child); }
-  catch { throw new OptionsHelperUnresolved("Host options helper cleanup is unproven; explicitly reconcile before further execution"); }
-  if (evidence?.managedUnresolved) throw new OptionsHelperUnresolved("Host options helper cleanup is unresolved; explicitly reconcile before further execution");
-  if (failure || (evidence ?? exit).code !== 0 || (evidence ?? exit).signal || evidence?.error) {
-    throw new CommandError("resource_unavailable", "Host model options are unavailable");
-  }
+  input: { cwd?: string; provider?: string; model?: string }, assertExecutionAllowed: () => void): Promise<HostOptions> {
+  let worker: PiProcess | undefined;
   let value: unknown;
-  try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))); }
-  catch { throw new CommandError("resource_unavailable", "Invalid host model options"); }
+  let received = false;
+  let deadline: NodeJS.Timeout | undefined;
+  try {
+    worker = new PiProcess({ binary: resources.binary, appRoot: resources.appRoot, cwd: input.cwd ?? resources.root,
+      sessionDirectory: join(resources.root, "sessions"), workspaceRoot: join(resources.root, "workspaces"),
+      session: { id: "host-options" }, environment, provider: input.provider, model: input.model, hostOptionsHelper: true,
+      assertExecutionAllowed, onExit: () => {}, onEvent: event => {
+        if (event.type !== "extension_ui_request" || event.method !== "setStatus" || event.statusKey !== "pi-host-options-result") return;
+        if (received || typeof event.statusText !== "string" || Buffer.byteLength(event.statusText) > MAX_BYTES) {
+          throw new Error("Invalid host model options");
+        }
+        received = true;
+        value = JSON.parse(event.statusText);
+      } });
+    const helper = worker;
+    deadline = setTimeout(() => { void helper.stop(); }, 30_000);
+    await worker.ready();
+    const commands = await worker.request({ type: "get_commands" });
+    if (commands.command !== "get_commands" || !commands.data.commands.some(command => command.name === "pi-host-options"
+      && command.source === "extension" && command.sourceInfo?.path === join(resources.appRoot, "pi", "scripts", "host-options.ts"))) {
+      throw new Error("Missing fixed host options helper capability");
+    }
+    const response = await worker.request({ type: "prompt", message: "/pi-host-options " + (input.cwd ? "directory-selected" : "directory-required") });
+    if (response.command !== "prompt" || response.data.disposition !== "handled" || !received) throw new Error("Missing host options result");
+  } catch {
+    // Never forward SDK/provider diagnostics or credential-bearing model objects.
+    throw new CommandError("resource_unavailable", "Host model options are unavailable");
+  } finally {
+    if (deadline) clearTimeout(deadline);
+    if (worker) {
+      let exit: PiExit;
+      try {
+        exit = await worker.stop();
+        if (exit.descendantsUnresolved) throw new Error("Unresolved descendants");
+      } catch {
+        throw new OptionsHelperUnresolved("Host options helper cleanup is unresolved; explicitly reconcile before further execution");
+      }
+      if (exit.error) throw new CommandError("resource_unavailable", "Host model options are unavailable");
+    }
+  }
   if (!object(value) || Object.keys(value).length !== 2 || !object(value.defaults)
     || Object.keys(value.defaults).some(key => !["accessMode", "integrationMode", "notificationsEnabled", "model", "thinkingLevel", "contextWindow", "modelStatus"].includes(key))
     || (value.defaults.accessMode !== undefined && (typeof value.defaults.accessMode !== "string" || !["readonly", "ask", "edit", "full"].includes(value.defaults.accessMode)))
@@ -81,7 +84,7 @@ export async function readHostOptions(resources: HostResources, environment: Nod
     || (value.defaults.thinkingLevel !== undefined && (!value.defaults.model || !THINKING_LEVELS.includes(value.defaults.thinkingLevel as ThinkingLevel)))
     || (value.defaults.contextWindow !== undefined && (!value.defaults.model || !validContextWindow(value.defaults.contextWindow)))
     || (value.defaults.modelStatus !== undefined && (typeof value.defaults.modelStatus !== "string"
-      || !["configured", "trust-required", "unavailable", "directory-required"].includes(value.defaults.modelStatus)))
+      || !["trust-required", "unavailable", "directory-required"].includes(value.defaults.modelStatus)))
     || !Array.isArray(value.models) || value.models.length > 10_000
     || !value.models.every(model => modelIdentity(model) && Object.keys(model).length === 4 && validContextWindow(model.contextWindow)
       && Array.isArray(model.thinkingLevels) && model.thinkingLevels.length > 0 && model.thinkingLevels.length <= THINKING_LEVELS.length

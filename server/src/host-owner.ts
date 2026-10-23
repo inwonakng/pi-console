@@ -155,7 +155,8 @@ export class HostOwner {
       this.catalog.assertLaunchAllowed();
       try {
         const result = await readHostOptions(this.resources, this.options.environment,
-          { cwd: cwd as string | undefined, provider: this.options.provider, model: this.options.model });
+          { cwd: cwd as string | undefined, provider: this.options.provider, model: this.options.model },
+          () => { this.assertOpen(); check(); this.catalog.assertExecutionAllowed(); });
         this.assertOpen(); check();
         this.catalog.assertExecutionAllowed();
         return result;

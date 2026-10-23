@@ -1441,6 +1441,7 @@ end
 function M.pick_model()
 	local read = not session_id and host_options or function(callback) owner_read("models", callback) end
 	read(function(data, captured)
+		if #data.models == 0 then notify("Pi found no available models on this host.", vim.log.levels.WARN); return end
 		vim.ui.select(data.models, { prompt = "Owner model", format_item = function(model) return model.provider .. "/" .. model.id end }, function(model)
 			if model then setting("model.set", { provider = model.provider, modelId = model.id }, captured) end
 		end)

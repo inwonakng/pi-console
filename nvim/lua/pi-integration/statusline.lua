@@ -177,17 +177,16 @@ local function current_model_statusline_label(ctx)
 			unavailable = "model unavailable", ["directory-required"] = "choose directory" }
 		return labels[ctx.state.model_status] or "--"
 	end
-	local suffix = ctx.state.model_status == "configured" and " (configured)" or ""
 	if model:find("openai-codex/", 1, true) == 1 then
-		return "codex/" .. model:sub(#"openai-codex/" + 1) .. suffix
+		return "codex/" .. model:sub(#"openai-codex/" + 1)
 	end
 	if provider == "openai-codex" then
 		provider = "codex"
 	end
 	if type(provider) == "string" and provider ~= "" and not model:find("/", 1, true) then
-		return provider .. "/" .. model .. suffix
+		return provider .. "/" .. model
 	end
-	return model .. suffix
+	return model
 end
 
 local function codex_limits_statusline_label(state)

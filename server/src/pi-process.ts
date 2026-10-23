@@ -27,6 +27,8 @@ export type PiProcessOptions = {
   model?: string;
   /** Fixed, unsaved owner-side workspace cleanup helper; never client-selected. */
   savedSessionHelper?: boolean;
+  /** Fixed unsaved model-discovery helper with normal provider initialization. */
+  hostOptionsHelper?: boolean;
   /** Shared owner authority, checked before spawn and every actual pipe write. */
   assertExecutionAllowed: () => void;
   onEvent: (event: PiEvent) => void;
@@ -67,7 +69,8 @@ export class PiProcess {
     const args = options.savedSessionHelper
       ? ["--mode", "rpc", "--no-session", "--no-extensions", "--no-tools", "-e", join(appRoot, "pi", "scripts", "saved-sessions.ts")]
       : ["--mode", "rpc", "-e", join(appRoot, "pi"), "--pi-console-trust-ui", "--session-dir", options.sessionDirectory];
-    if (!options.savedSessionHelper) {
+    if (options.hostOptionsHelper) args.push("--no-session", "-e", join(appRoot, "pi", "scripts", "host-options.ts"));
+    else if (!options.savedSessionHelper) {
       if ("file" in options.session) args.push("--session", options.session.file);
       else args.push("--session-id", options.session.id);
     }
@@ -126,7 +129,10 @@ export class PiProcess {
       this.read(text);
     });
     this.process.stdout.on("end", () => this.endOutput());
-    this.process.stderr.on("data", (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-8192); });
+    // Provider diagnostics may contain credentials; discovery never retains them.
+    this.process.stderr.on("data", (chunk: string) => {
+      if (!options.hostOptionsHelper) this.stderr = (this.stderr + chunk).slice(-8192);
+    });
     this.process.stdin.on("error", (error) => this.fail(error));
     this.process.stdout.on("error", (error) => this.fail(error));
     this.process.stderr.on("error", (error) => this.fail(error));
