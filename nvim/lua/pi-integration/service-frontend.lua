@@ -549,6 +549,7 @@ render = function()
 	transcript.preserve_view(ctx, function() buffer.update_lines(state.transcript_buf, split) end)
 	transcript.apply_collected_transcript_items(ctx, items)
 	transcript.render(ctx)
+	transcript.scroll_to_bottom_unless_focused(ctx)
 	statusline.update(ctx)
 	publish_attachment()
 	if sync_pending then vim.schedule(sync_pending) end
