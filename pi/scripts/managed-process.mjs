@@ -19,6 +19,11 @@ export function assertManagedResources(env = process.env) {
   privateFile(env.PI_CONSOLE_RESOURCE_MANIFEST);
   const manifest = JSON.parse(readFileSync(env.PI_CONSOLE_RESOURCE_MANIFEST, 'utf8'));
   if (manifest.buildId !== env.PI_CONSOLE_BUILD_ID || !Array.isArray(manifest.files)) throw new Error('Invalid host resource manifest');
+  assertResourceManifest(manifest);
+}
+
+// Reuse the startup snapshot; launch checks inspect metadata, never file contents.
+export function assertResourceManifest(manifest) {
   for (const candidate of manifest.lookup ?? []) {
     let target = null;
     try { target = realpathSync(candidate.path); }
@@ -127,7 +132,8 @@ export function managedSpawn(command, args, options) {
   const path = env.PI_CONSOLE_PROCESS_REGISTRY;
   const epoch = env.PI_CONSOLE_OWNER_EPOCH;
   if (!path || !epoch) return spawn(command, args, options);
-  assertManagedResources(env);
+  // The supervisor validates resources immediately before granting execution,
+  // including nested launches. Do not repeat its full scan in the caller.
   const db = registry(path);
   const id = randomUUID();
   try { transaction(db, () => {

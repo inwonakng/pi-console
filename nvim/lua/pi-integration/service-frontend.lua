@@ -283,6 +283,7 @@ ctx.transcript.refresh_ui = function()
 		approval_request, approval_context = nil, nil
 	end
 	statusline.update(ctx)
+	transcript.render(ctx)
 	if sync_pending then vim.schedule(sync_pending) end
 end
 local function update_status_state()
@@ -389,14 +390,18 @@ render = function()
 	for _, line in ipairs(lines) do vim.list_extend(split, vim.split(line, "\n", { plain = true })) end
 	transcript.preserve_view(ctx, function() layout.set_buffer_lines(ctx, state.transcript_buf, split, false) end)
 	transcript.apply_collected_transcript_items(ctx, items)
-	require("pi-integration.tool-groups").apply_folds(state, state.transcript_win)
+	transcript.render(ctx)
 	statusline.update(ctx)
 	if sync_pending then vim.schedule(sync_pending) end
 end
 local function apply_snapshot(value)
 	if value.sessionId ~= session_id then return end
 	observe_authority(value, true)
+	local previous = snapshot
 	if not snapshot or value.serviceEpoch ~= snapshot.serviceEpoch or value.sequence >= snapshot.sequence then snapshot = value end
+	local same_runtime = previous and previous.serviceEpoch == snapshot.serviceEpoch
+		and previous.runtimeRevision == snapshot.runtimeRevision
+	if not same_runtime then state.pending_transcript_scroll = nil end
 	if grant and not control_current() then grant = nil; close_approval() end
 	if approval_request then
 		local live = false
@@ -416,6 +421,9 @@ local function apply_snapshot(value)
 		end
 	end
 	render()
+	if same_runtime and previous.conversation.execution.running and not snapshot.conversation.execution.running then
+		transcript.scroll_to_bottom_unless_focused(ctx)
+	end
 	tree.update(tree_ctx)
 end
 refresh = function()
@@ -1289,7 +1297,9 @@ end
 function M.show_logs() require("pi-integration.logs").show(ctx) end
 function M.restore_status_footer() statusline.update(ctx) end
 function M.get_commands(callback) callback({}) end
-function M.on_transcript_rendered() end
+function M.on_transcript_rendered(buf)
+	if buf == state.transcript_buf then transcript.finish_pending_scroll(ctx) end
+end
 function M.maybe_prompt_session_archive() end
 function M.setup(config)
 	M.config = vim.tbl_extend("force", M.config, config or {}, { service_root = vim.env.PI_CONSOLE_SERVICE_ROOT,

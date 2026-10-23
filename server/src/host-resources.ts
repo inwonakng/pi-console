@@ -5,6 +5,8 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Channel } from "./session-catalog.js";
+import { assertResourceManifest, type ResourceManifest, type ResourceStamp } from "../../pi/scripts/managed-process.mjs";
+export type { ResourceStamp } from "../../pi/scripts/managed-process.mjs";
 
 const DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -24,7 +26,7 @@ export type HostResourcesOptions = {
   environment?: NodeJS.ProcessEnv;
 };
 
-export type HostResources = {
+export type HostResources = ResourceManifest & {
   readonly channel: Channel;
   /** Canonical private profile; defaults to HOME/.local/state/pi-console/service/<channel>
    * on both Linux and macOS, independent of release directories and XDG overrides. */
@@ -32,17 +34,10 @@ export type HostResources = {
   readonly appRoot: string;
   readonly binary: string;
   readonly environment: NodeJS.ProcessEnv;
-  readonly buildId: string;
-  /** Stat/realpath change detector inherited by nested managed launchers. */
-  readonly files: readonly ResourceStamp[];
-  readonly resolutions: readonly { from: string; name: string; target: string | null }[];
-  readonly lookup: readonly { path: string; target: string | null }[];
-  /** Await before every future runtime/helper launch. A refusal latches until service restart.
-   * This is a change detector, not atomic filesystem isolation or hot reload. */
+  /** Await before every future runtime/helper launch. Metadata/dependency changes
+   * latch a refusal until service restart. No content rehashing or hot reload. */
   assertUnchanged(): Promise<void>;
 };
-
-export type ResourceStamp = { path: string; target: string; ino: string; mode: string; size: string; mtimeNs: string; ctimeNs: string };
 
 type Manifest = {
   name?: string;
@@ -73,34 +68,26 @@ export async function prepareHostResources(options: HostResourcesOptions): Promi
     throw new Error(`Service profile must be owned by this user with mode 0700: ${rootPath}`);
   }
   const root = await realpath(rootPath);
-  let files: ResourceStamp[] = [];
-  let resolutions: ResourceFingerprint["resolutions"] = [];
-  let lookup: ResourceFingerprint["lookup"] = [];
-  const fingerprint = async (): Promise<string> => {
-    const resources = new ResourceFingerprint();
-    resources.record(["host-resources-v1", channel, appRoot, binary, packageRoot]);
-    await resources.tree(binary);
-    await resources.package(packageRoot);
-    await resources.package(bundledRoot);
-    files = resources.files;
-    resolutions = resources.resolutions;
-    lookup = resources.lookup;
-    return `sha256:${resources.digest()}`;
-  };
-  const buildId = await fingerprint();
+  const resources = new ResourceFingerprint();
+  resources.record(["host-resources-v1", channel, appRoot, binary, packageRoot]);
+  await resources.tree(binary);
+  await resources.package(packageRoot);
+  await resources.package(bundledRoot);
+  const manifest: ResourceManifest = Object.freeze({
+    buildId: `sha256:${resources.digest()}`, files: Object.freeze(resources.files),
+    resolutions: Object.freeze(resources.resolutions), lookup: Object.freeze(resources.lookup),
+  });
   let refusal: Error | undefined;
   return Object.freeze({
-    channel, root, appRoot, binary, environment: Object.freeze(environment), buildId, files: Object.freeze(files), resolutions: Object.freeze(resolutions), lookup: Object.freeze(lookup),
+    channel, root, appRoot, binary, environment: Object.freeze(environment), ...manifest,
     async assertUnchanged(): Promise<void> {
       if (refusal) throw refusal;
       try {
-        if (await fingerprint() !== buildId) throw new Error("Resource fingerprint changed");
+        assertResourceManifest(manifest);
       } catch (cause) {
         refusal ??= new Error("Host runtime resources changed or became unreadable; restart the service before launching more managed work", { cause });
         throw refusal;
       }
-      // Another concurrent check may have failed while this one was reading.
-      if (refusal) throw refusal;
     },
   });
 }

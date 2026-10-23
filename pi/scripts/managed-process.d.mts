@@ -2,6 +2,14 @@ import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_pr
 import type { DatabaseSync } from "node:sqlite";
 export type ManagedExit = { code: number | null; signal: NodeJS.Signals | null; error?: string; managedUnresolved: boolean; survivors?: number[]; nested?: {id: string; status: string}[] };
 export type ManagedJob = { id: string; parent: string | null; label: string; status: "intent" | "running" | "cancelled" | "done" | "unresolved"; launch_open: number; result?: ManagedExit };
+export type ResourceStamp = { path: string; target: string; ino: string; mode: string; size: string; mtimeNs: string; ctimeNs: string };
+export type ResourceManifest = {
+  readonly buildId: string;
+  readonly files: readonly ResourceStamp[];
+  readonly resolutions: readonly { from: string; name: string; target: string | null }[];
+  readonly lookup: readonly { path: string; target: string | null }[];
+};
+export function assertResourceManifest(manifest: ResourceManifest): void;
 export function assertManagedResources(environment?: NodeJS.ProcessEnv): void;
 export function ownerLease(root: string): { close(): void };
 export function registry(path: string): DatabaseSync;
