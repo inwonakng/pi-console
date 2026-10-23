@@ -933,6 +933,7 @@ function M.select_owner(target, id, resume, cwd)
 		or target.credential_file ~= M.config.credential_file or target.ca_file ~= M.config.ca_file
 	if switching then
 		if not backup() then return end
+		state.pending_transcript_scroll = nil
 		-- The old selection's input must remain recoverable after new autosaves.
 		recovery_id = nil
 		owner_states[owner_key()] = { unresolved = unresolved, submission_status = submission_status, feedback = feedback,
@@ -950,6 +951,15 @@ function M.select_owner(target, id, resume, cwd)
 	end
 	layout.open(ctx)
 	render()
+	if switching then
+		for _, win in ipairs(vim.api.nvim_list_wins()) do
+			if buffer.window_matches(win, state.transcript_buf) then
+				vim.api.nvim_win_call(win, function()
+					vim.fn.winrestview({ lnum = 1, col = 0, curswant = 0, topline = 1, topfill = 0, leftcol = 0, skipcol = 0 })
+				end)
+			end
+		end
+	end
 	if not job then connect()
 	elseif id and not attachment then attach(id)
 	end
