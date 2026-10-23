@@ -640,8 +640,23 @@ function createConversation(host, row) {
     const follow = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
     const scrollTop = target.scrollTop;
     const expanded = new Set([...target.querySelectorAll("details[open]")].map(node => node.dataset.key));
-    const messages = [...conversation.messages];
-    if (conversation.partialAssistant) messages.push(conversation.partialAssistant.message);
+    const diagnostics = conversation.diagnostics || [];
+    const diagnosticMessages = items => items.map(item => ({ role: "error", content: item.message }));
+    const keys = conversation.messageKeys || [];
+    const messages = diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp == null
+      && item.afterMessage == null && !conversation.omittedMessages));
+    conversation.messages.forEach((message, index) => {
+      messages.push(message);
+      const anchor = keys[index];
+      if (anchor && keys.indexOf(anchor) === keys.lastIndexOf(anchor)) {
+        messages.push(...diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp == null && item.afterMessage === anchor)));
+      }
+    });
+    if (conversation.partialAssistant) {
+      const partial = conversation.partialAssistant.message;
+      messages.push(partial, ...diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp != null
+        && item.assistantTimestamp === partial.timestamp)));
+    }
     const nodes = messages.filter(visibleMessage).map((message, index) => {
       const article = text("article", "", "message");
       article.dataset.role = message.role;

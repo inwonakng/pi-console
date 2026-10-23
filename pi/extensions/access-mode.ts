@@ -27,6 +27,7 @@ import {
 } from "./shared/permissions";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 import { loadExtensionSettings } from "./shared/extension-settings";
+import { workspaceToolBlock } from "./shared/workspace-policy";
 
 const READONLY_TOOLS = new Set(["web_search", "web_fetch", "todowrite", "question"]);
 const PATH_READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -269,6 +270,8 @@ export default function accessModeExtension(pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event, ctx) => {
     setStatus(ctx);
+    const blocked = workspaceToolBlock(event.toolName, event.input as Record<string, unknown>, ctx);
+    if (blocked) return blocked;
     const mode = getAccessMode();
     // Codemode's nested tool calls pass through this hook and enforce their own permissions.
     if (mode === "full" || event.toolName === "bash" || event.toolName === "codemode") return undefined;
@@ -285,11 +288,14 @@ export default function accessModeExtension(pi: ExtensionAPI) {
         const path = canonicalPath(resolveToolPath(typeof input.path === "string" ? input.path : ".", ctx.cwd));
         // Execute against the same target that was approved, not a retargeted alias.
         input.path = path;
+        const canonicalBlock = workspaceToolBlock(event.toolName, input, ctx);
+        if (canonicalBlock) return canonicalBlock;
         const writing = MUTATION_TOOLS.has(event.toolName);
         const scope = writing && pathInside(canonicalPath(ctx.cwd), path)
           && !hasPermission({ kind: "write", scope: path }, ctx.cwd) ? canonicalPath(ctx.cwd) : path;
         await requestPermission(ctx, { kind: writing ? "write" : "read", scope }, event.toolName,
           () => previewForTool(event, ctx), () => saveAccessState(pi));
+        return workspaceToolBlock(event.toolName, input, ctx);
       } catch (error) {
         return { block: true, reason: error instanceof Error ? error.message : String(error) };
       }

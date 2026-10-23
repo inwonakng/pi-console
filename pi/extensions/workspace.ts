@@ -11,10 +11,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAccessMode } from "./shared/access-state";
+import { workspaceToolBlock } from "./shared/workspace-policy";
 import { projectTrustReady } from "./shared/project-trust";
 import { hasRunningSubagents } from "./shared/subagent-state";
-import { resolveToolPath } from "./shared/paths";
 import {
   getIntegrationMode,
   parseIntegrationMode,
@@ -38,7 +37,6 @@ import {
   taskWorkspacesForSession,
   listWorkspaces,
   loadWorkspace,
-  pathInside,
   prepareWorkspaceDiscard,
   previewWorkspaceIntegration,
   removeWorkspace,
@@ -243,72 +241,6 @@ function workspaceList(offset = 0, limit = 20) {
   return { text: lines.join("\n"), details: { records, total: all.length, offset, limit, nextOffset } };
 }
 
-function managedRepositoryPath(path: string): boolean {
-  return listWorkspaces().some((record) =>
-    record.retained
-    && (pathInside(record.worktreePath, path) || pathInside(record.destinationRoot, path))
-  );
-}
-
-function hasMixedWorkspaceTransition(ctx: ExtensionContext): boolean {
-  const branch = ctx.sessionManager.getBranch();
-  for (let index = branch.length - 1; index >= 0; index--) {
-    const entry = branch[index];
-    if (entry.type !== "message" || entry.message.role !== "assistant") {
-      continue;
-    }
-    const content = Array.isArray(entry.message.content) ? entry.message.content : [];
-    const calls = content.filter((item) => item.type === "toolCall");
-    return calls.length > 1 && calls.some((call) => {
-      if (call.name !== "workspace" || typeof call.arguments !== "object" || !call.arguments) {
-        return false;
-      }
-      const action = (call.arguments as Record<string, unknown>).action;
-      return typeof action === "string" && TRANSITION_ACTIONS.has(action as WorkspaceAction);
-    });
-  }
-  return false;
-}
-
-function workspaceBlockReason(
-  toolName: string,
-  input: Record<string, unknown>,
-  ctx: ExtensionContext,
-): string | undefined {
-  let repositoryEdit = false;
-  let mutationPath: string | undefined;
-  if (toolName === "edit" || toolName === "write") {
-    const gitRoot = findGitRoot(ctx.cwd);
-    mutationPath = typeof input.path === "string" ? resolveToolPath(input.path, ctx.cwd) : undefined;
-    repositoryEdit = !mutationPath
-      || (!!gitRoot && pathInside(gitRoot, mutationPath))
-      || managedRepositoryPath(mutationPath);
-  }
-  if (!repositoryEdit) {
-    return undefined;
-  }
-
-  const active = workspaceForContext(ctx.cwd, sessionFile(ctx));
-  if (active && existsSync(active.worktreePath)) {
-    if (active.kind === "task" && !sameSessionFile(active.sourceSessionFile, sessionFile(ctx))) {
-      return `Workspace ${active.id} belongs to a different Pi session; edits in this worktree are blocked.`;
-    }
-    if (isWorkspaceFinalized(active)) {
-      return `Workspace ${active.id} has a finalized contribution and is retained only for cleanup; it cannot be edited.`;
-    }
-    if (mutationPath && !pathInside(active.worktreePath, mutationPath)) {
-      return `Repository mutations for workspace ${active.id} must target its worktree. Use a path relative to ${active.workspaceCwd}.`;
-    }
-    return undefined;
-  }
-
-  const missing = getExpectedWorkspaceMissing();
-  if (missing) {
-    return `Expected Pi workspace ${missing} is missing. Inspect or discard the retained workspace record before editing.`;
-  }
-  return undefined;
-}
-
 async function confirmDestructive(
   ctx: ExtensionContext,
   title: string,
@@ -389,24 +321,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", (event, ctx) => {
-    const input = event.input as Record<string, unknown>;
-    if (hasMixedWorkspaceTransition(ctx)) {
-      return {
-        block: true,
-        reason: "Workspace transition actions must be the only tool call in their assistant response. Retry the transition by itself.",
-      };
-    }
-    const pendingWorkspaceId = getPendingWorkspaceId();
-    if (pendingWorkspaceId) {
-      return {
-        block: true,
-        reason: `Workspace transition to ${pendingWorkspaceId} is queued. Wait for the cwd switch before using more tools.`,
-        terminate: true,
-      };
-    }
-    if (getAccessMode() === "full") return undefined;
-    const reason = workspaceBlockReason(event.toolName, input, ctx);
-    return reason ? { block: true, reason } : undefined;
+    return workspaceToolBlock(event.toolName, event.input as Record<string, unknown>, ctx);
   });
 
   const enterWorkspace = async (args: string, ctx: ExtensionCommandContext) => {

@@ -40,6 +40,13 @@ export type WorkState = {
   result?: Success<"bash">["data"];
   error?: string;
 };
+export type ConversationDiagnostic = {
+  id: number;
+  message: string;
+  afterMessage: string | null;
+  /** Keep diagnostics with the in-flight response until its final key is known. */
+  assistantTimestamp?: number;
+};
 export type ConversationSnapshot = {
   /** Current Pi projection, not the full session tree. Older messages are separate history. */
   messages: PiMessage[];
@@ -49,6 +56,7 @@ export type ConversationSnapshot = {
   hydrated: boolean;
   partialAssistant?: { message: Assistant; toolArguments: Record<number, string>; interrupted: boolean };
   tools: ToolState[];
+  diagnostics: ConversationDiagnostic[];
   work: WorkState[];
   queue: { steering: readonly string[]; followUp: readonly string[] };
   execution: {
@@ -77,6 +85,7 @@ export type FrontendEffect =
 export type ConversationChange =
   | { type: "event"; event: JsonAgentSessionEvent }
   | { type: "history"; messages: PiMessage[] }
+  | { type: "diagnostic"; message: string }
   | { type: "pi_state"; state: RpcSessionState }
   | { type: "session_stats"; stats: SessionStats }
   | { type: "status"; key: string; value?: string }
@@ -96,7 +105,7 @@ const LIFECYCLE_STATUSES = new Set(["pi-console-runtime", "pi-console-dialog"]);
 export class PiConversation {
   private state: ConversationSnapshot = {
     messages: [], messageKeys: [], omittedMessages: 0, historyRevision: 0, hydrated: false,
-    tools: [], work: [], queue: { steering: [], followUp: [] },
+    tools: [], diagnostics: [], work: [], queue: { steering: [], followUp: [] },
     execution: { running: false, interrupted: false }, statuses: {}, widgets: {},
   };
   private historyBytes = 0;
@@ -105,6 +114,7 @@ export class PiConversation {
   private unsettled = false;
   private pendingOutcome?: ConversationSnapshot["execution"]["outcome"];
   private completionSeq = 0;
+  private diagnosticSeq = 0;
   private readonly liveSizes = new Map<string, number>();
   private liveBytes = 0;
 
@@ -166,7 +176,10 @@ export class PiConversation {
 
   /** Separate effects before retention. Closure is consumed by PiInteractions. */
   event(event: PiEvent): ConversationChange | FrontendEffect | undefined {
-    if (event.type === "extension_error") return;
+    if (event.type === "extension_error") {
+      return event.event === "command" ? undefined
+        : { type: "diagnostic", message: `${event.extensionPath} (${event.event}): ${event.error}` };
+    }
     if (event.type !== "extension_ui_request") return { type: "event", event };
     switch (event.method) {
       case "notify": return { type: "notification", message: event.message, level: event.notifyType ?? "info" };
@@ -199,6 +212,21 @@ export class PiConversation {
 
   apply(change: ConversationChange): void {
     switch (change.type) {
+      case "diagnostic": {
+        if (this.state.diagnostics.length >= 128) {
+          const removed = this.state.diagnostics.shift()!;
+          this.reserve(`diagnostic:${removed.id}`, undefined);
+        }
+        const diagnostic: ConversationDiagnostic = {
+          id: ++this.diagnosticSeq, message: change.message.slice(0, 8192),
+          afterMessage: this.state.messageKeys.at(-1) ?? null,
+          assistantTimestamp: this.state.partialAssistant?.message.timestamp,
+        };
+        this.reserve(`diagnostic:${diagnostic.id}`, diagnostic);
+        this.state.diagnostics.push(diagnostic);
+        this.version++;
+        break;
+      }
       case "history":
         this.state.messages = [];
         this.state.messageKeys = [];
@@ -211,6 +239,14 @@ export class PiConversation {
         this.state.historyRevision++;
         this.state.hydrated = true;
         if (this.state.partialAssistant?.interrupted) {
+          for (const diagnostic of this.state.diagnostics) {
+            if (diagnostic.assistantTimestamp === this.state.partialAssistant.message.timestamp) {
+              // An interrupted response may never have reached Pi's saved history.
+              // Keep the last finalized boundary instead of orphaning its diagnostic.
+              delete diagnostic.assistantTimestamp;
+              this.reserve(`diagnostic:${diagnostic.id}`, diagnostic);
+            }
+          }
           this.state.partialAssistant = undefined;
           this.reserve("partial", undefined);
         }
@@ -289,6 +325,13 @@ export class PiConversation {
     if (message.role === "assistant") {
       this.cacheRead = Math.max(this.cacheRead, message.usage.cacheRead);
       this.cacheWrite = Math.max(this.cacheWrite, message.usage.cacheWrite);
+      for (const diagnostic of this.state.diagnostics) {
+        if (diagnostic.assistantTimestamp !== undefined && diagnostic.assistantTimestamp === message.timestamp) {
+          diagnostic.afterMessage = messageKey(message);
+          delete diagnostic.assistantTimestamp;
+          this.reserve(`diagnostic:${diagnostic.id}`, diagnostic);
+        }
+      }
     }
     const bytes = size(message);
     if (bytes > HISTORY_BYTES) throw new Error("Pi conversation message exceeds 16 MiB");

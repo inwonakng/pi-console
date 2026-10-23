@@ -13,7 +13,7 @@ local function message_role_title(message)
 		return "Tool"
 	end
 	if role == "user" or role == "You" then
-		return message.submissionStatus and ("User (" .. message.submissionStatus .. ")") or "User"
+		return "User"
 	end
 	return role:gsub("^%l", string.upper)
 end

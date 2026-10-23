@@ -80,7 +80,7 @@ function M.timeline_messages(entries, session, snapshot)
 		positions[key] = index
 	end
 	local buckets, unmatched, queued = {}, {}, {}
-	local function place(text, status, error, timeline)
+	local function place(text, error, timeline)
 		local observed_key = timeline and timeline.observedMessage
 		local observed = positions[observed_key]
 		local at
@@ -97,7 +97,7 @@ function M.timeline_messages(entries, session, snapshot)
 		end
 		local messages = {}
 		if not observed or ambiguous[observed_key] then
-			table.insert(messages, { role = "user", content = { { type = "text", text = text } }, submissionStatus = status })
+			table.insert(messages, { role = "user", content = { { type = "text", text = text } } })
 		end
 		if error and error ~= "" then
 			table.insert(messages, { role = "error", content = { { type = "text", text = error } } })
@@ -105,17 +105,34 @@ function M.timeline_messages(entries, session, snapshot)
 		if at then
 			buckets[at] = buckets[at] or {}
 			vim.list_extend(buckets[at], messages)
-		else vim.list_extend(unmatched, messages) end
+		else table.insert(unmatched, { text = text, status = status, error = error }) end
 	end
 	local queue = snapshot and snapshot.acceptedQueue.items or {}
 	for _, item in ipairs(queue) do
 		queued[item.id] = true
-		local status = ({ queued = "Queued", sending = "Sending", failed = "Failed" })[item.status]
-		place(item.text, status, item.error and item.error.message, item.timeline)
+		place(item.text, item.error and item.error.message, item.timeline)
 	end
 	for _, entry in ipairs(entries) do
 		if entry.sessionId == session and entry.operation == "prompt.submit" and not queued[queue_id(entry)] then
-			place(entry.payload.text, entry.status, entry.error, entry.timeline)
+			place(entry.payload.text, entry.error, entry.timeline)
+		end
+	end
+	local partial_diagnostics = {}
+	for _, diagnostic in ipairs(conversation.diagnostics or {}) do
+		local message = { role = "error", content = { { type = "text", text = diagnostic.message } } }
+		if diagnostic.assistantTimestamp and diagnostic.assistantTimestamp ~= vim.NIL then
+			local partial = conversation.partialAssistant
+			if partial and partial.message.timestamp == diagnostic.assistantTimestamp then
+				table.insert(partial_diagnostics, message)
+			end
+		else
+			local anchor = diagnostic.afterMessage
+			local at = anchor == vim.NIL and (conversation.omittedMessages or 0) == 0 and 0
+				or (not ambiguous[anchor] and positions[anchor])
+			if at then
+				buckets[at] = buckets[at] or {}
+				table.insert(buckets[at], message)
+			end
 		end
 	end
 	local visible = {}
@@ -125,8 +142,8 @@ function M.timeline_messages(entries, session, snapshot)
 		vim.list_extend(visible, buckets[index] or {})
 	end
 	if conversation.partialAssistant then table.insert(visible, vim.deepcopy(conversation.partialAssistant.message)) end
-	-- Unavailable anchors fall back to the end, keeping local text and errors together.
-	vim.list_extend(visible, unmatched)
-	return visible
+	vim.list_extend(visible, partial_diagnostics)
+	-- Unknown chronology belongs in :PiSubmissions, never below a newer response.
+	return visible, unmatched
 end
 return M

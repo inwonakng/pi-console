@@ -304,9 +304,6 @@ export default function sideExtension(pi: ExtensionAPI) {
         }
         g.messages.push(message);
       }
-      if (message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-        g.error = message.errorMessage || (message.stopReason === "error" ? "Side model request failed." : undefined);
-      }
       publish(g);
       void drain(g).then(() => publish(g), () => undefined);
     } else if (data.type === "tool_execution_start") {

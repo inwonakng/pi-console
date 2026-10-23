@@ -422,6 +422,9 @@ local function update_status_state()
 	state.session_cwd = snapshot and snapshot.interactions.runtime and snapshot.interactions.runtime.cwd or selected_cwd
 	state.host_name = current_owner_label()
 	state.connection_status = job and (hello and "connected" or "connecting") or "disconnected"
+	local status_error = snapshot and snapshot.error or not attachment and session_error or nil
+	if status_error and state.status_error ~= status_error then notify(status_error, vim.log.levels.ERROR) end
+	state.status_error = status_error
 	local terminal = snapshot and (snapshot.phase == "stopped" or snapshot.phase == "failed") and snapshot.phase
 	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active" or "view only")
 		or (session_id and ("session " .. (session_status or "unattached")) or starting and "starting" or "unstarted")
@@ -488,20 +491,20 @@ render = function()
 	local conversation = snapshot and snapshot.conversation
 	update_status_state()
 	layout.update_input_sidebar(ctx)
-	local visible = feedback_ui.timeline_messages(feedback, session_id, snapshot)
+	local visible, unplaced = feedback_ui.timeline_messages(feedback, session_id, snapshot)
+	state.unplaced_submissions = #unplaced
 	require("pi-integration.tool-output").reset(state)
 	require("pi-integration.thinking-output").reset(state)
 	require("pi-integration.skills").reset(state)
 	local lines, items = messages.collect_message_lines(ctx, visible, conversation and conversation.tools)
-	if snapshot and snapshot.error then
-		messages.append_error(lines, snapshot.error, true)
-	end
-	if not attachment and session_error then messages.append_error(lines, session_error, true) end
 	if valid(side_buf) then
 		local side = status_data("pi-side")
 		local side_lines = { "# Side conversation on owner", "", "Local draft: :PiSidePrompt. :PiSideNew resets; :PiSideAbort stops.", "" }
 		if side then
 			table.insert(side_lines, side.running and "Working" or "Idle")
+			if side.error then
+				table.insert(side_lines, "Side status: " .. tostring(side.error))
+			end
 			for _, message in ipairs(side.messages or {}) do
 				table.insert(side_lines, "## " .. tostring(message.role))
 				if type(message.content) == "string" then vim.list_extend(side_lines, vim.split(message.content, "\n", { plain = true }))
@@ -521,7 +524,6 @@ render = function()
 			if side.partialMessage then
 				for _, block in ipairs(side.partialMessage.content or {}) do vim.list_extend(side_lines, vim.split(block.text or block.thinking or "", "\n", { plain = true })) end
 			end
-			if side.error then messages.append_error(side_lines, side.error, true) end
 		end
 		layout.set_buffer_lines(ctx, side_buf, side_lines, false)
 	end
@@ -1098,13 +1100,25 @@ function M.show_operations()
 end
 function M.show_submissions()
 	local choices = {}
+	local _, unplaced = feedback_ui.timeline_messages(feedback, session_id, snapshot)
+	if #unplaced > 0 then table.insert(choices, { unplaced = unplaced }) end
 	for id, envelope in pairs(unresolved) do
 		if text_submission(envelope.operation) and envelope.sessionId == session_id then table.insert(choices, id) end
 	end
 	vim.ui.select(choices, { prompt = "Protected submissions (never replayed)", format_item = function(id)
+		if type(id) == "table" then return "Submissions with unavailable timeline positions (inspect only)" end
 		local envelope = unresolved[id]
 		return operation_label({ id = id, operation = envelope.operation, status = submission_status[id] })
 	end }, function(id)
+		if type(id) == "table" then
+			local lines = { "# Submissions with unavailable timeline positions", "", "Inspect only. No work is replayed.", "" }
+			for _, item in ipairs(id.unplaced) do
+				fields(lines, item, { { "status", "Status" }, { "text", "Text" }, { "error", "Error" } })
+				table.insert(lines, "")
+			end
+			draft_buffer(scratch_name("unpositioned-submissions"), table.concat(lines, "\n"))
+			return
+		end
 		local envelope = id and unresolved[id]
 		if not envelope then return end
 		request("command.status", { serviceEpoch = envelope.serviceEpoch, commandId = id }, function(ok, receipt)
