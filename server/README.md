@@ -189,8 +189,10 @@ No opt-in, device credential, TLS configuration or certificate is required.
 host's user. Traffic is unencrypted.** Use a trusted network/VPN and firewall rules;
 pi-console does not limit the listener to VPN interfaces or provide authentication.
 
-`server start`, `restart` and `enable` print a localhost URL, with a warning if the
-running build differs from the selected build. `server status` retains the full JSON,
+`server start`, `restart` and `enable` confirm the running version and print a
+localhost URL, with a warning if the running build differs from the selected build.
+`server stop` confirms successful shutdown, or reports that the server is already
+stopped. `server status` retains the full JSON,
 including `network.bind`, `network.port` and candidate HTTP URLs using the machine
 hostname and IPv4 addresses. Use a hostname or VPN IP reachable from the client;
 hostname resolution and firewall access are external.
@@ -216,8 +218,12 @@ by default. Set `server.webui.enabled: true` in
 restart the matching service, then open `http://HOST:8443/` (or its configured port).
 The page uses the serving host's channel automatically. The UI uses the same
 trusted-network access policy without authentication. Browser WebSockets require
-a matching HTTP origin and an enabled web UI; unrelated website origins are rejected. Only the
-frontend assets are served over HTTP; other routes return 404. See
+a matching HTTP origin and an enabled web UI; unrelated website origins are rejected.
+The web Overview combines open sessions across registered hosts through the read-only
+`/v1/hosts` registry and same-origin `/v1/hosts/<key>/stream` relays. Relay targets come
+only from enabled host registrations; saved identities and channel checks apply.
+Relayed local profiles cannot perform local-only service administration. Session
+history and explicit resume are separate from the overview. See
 [web frontend usage and limitations](../web/README.md).
 
 Service shutdown remains local-only. Reconnect starts as viewer and never replays

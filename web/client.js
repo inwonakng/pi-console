@@ -13,8 +13,11 @@ export class ServiceClient {
     this.closed = false;
   }
 
-  async connect(channel) {
-    const url = new URL("/v1/stream", location.href);
+  async connect(channel, path = "/v1/stream", expectedHostId) {
+    const url = new URL(path, location.href);
+    if (url.origin !== location.origin || !/^\/v1\/(?:stream|hosts\/[\w-]+\/stream)$/.test(url.pathname) || url.search || url.hash) {
+      throw new Error("Invalid same-origin host stream");
+    }
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     const socket = this.socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
@@ -35,7 +38,9 @@ export class ServiceClient {
             clearTimeout(pending.timer);
             this.pending.delete(record.id);
             if (record.success === true) pending.resolve(record.result);
-            else pending.reject(Object.assign(new Error(record.error?.message || "Service request failed"), { delivery: "rejected" }));
+            else pending.reject(Object.assign(new Error(record.error?.message || "Service request failed"), {
+              delivery: record.error?.delivery || (record.error?.code === "service_disconnected" ? "uncertain" : "rejected"),
+            }));
           } else {
             // Preserve response/event ordering when several records share a frame.
             queueMicrotask(() => { if (!this.closed) this.onEvent(record); });
@@ -56,6 +61,7 @@ export class ServiceClient {
         || !["snapshot", "updates", "sessions.subscribe", "control.acquire"].every(value => hello.capabilities.includes(value))) {
         throw new Error("Incompatible host protocol or channel");
       }
+      if (expectedHostId && hello.hostId !== expectedHostId) throw new Error("Host identity changed. Review its registration in pi-console Hosts before reconnecting.");
       return hello;
     } catch (error) { this.close(error.message); throw error; }
     finally { clearTimeout(deadline); }

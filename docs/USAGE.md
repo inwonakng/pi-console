@@ -339,19 +339,30 @@ time, detach and reattach existing tmux clients. Graphics need the
 ## Configuration
 
 Client-local hosts are saved in `${XDG_CONFIG_HOME:-~/.config}/pi-console/hosts.yaml`.
-Dev uses `hosts-dev.yaml` in the same directory. Use `:PiHosts` to add and manage
-connections. Each file has its own host list:
+Dev uses `hosts-dev.yaml` in the same directory. Add hosts directly in the file
+or use `:PiHosts` to manage connections. Saved file changes are picked up automatically:
 
 ```yaml
 version: 1
-hosts: []
+hosts:
+  - alias: workstation
+    remote: http://workstation:8443
 ```
 
-Each entry retains its key, alias, endpoint (`remote` HTTP origin or absolute local
-`root`), confirmed `host_id`, and `enabled` status. The Hosts picker saves these
-fields after confirming the server identity. Existing per-channel `hosts.json`
-files are no longer read; re-add connections through the picker. Runtime state
-and conversation history are unchanged.
+Only an endpoint is needed: `remote` for an HTTP origin or `root` for an absolute
+local service directory. `alias` is optional and defaults to the endpoint;
+`enabled: false` disables automatic connection. An entry without an endpoint
+configures the built-in local source, for example `{alias: localhost, enabled: false}`.
+Duplicate endpoints are rejected.
+
+Entry keys are derived internally. The server identity is remembered on first
+connection in `${XDG_STATE_HOME:-~/.local/state}/pi-console/frontend/<channel>/host-identities.json`,
+without rewriting the YAML. A changed identity blocks reconnection until explicitly
+confirmed through `:PiHosts` -> `Edit / confirm identity`. These checks detect
+accidental replacements, not impersonation. Existing YAML `key` and `host_id` fields
+are no longer needed; legacy identity pins are retained when the picker next saves
+the file. Existing per-channel `hosts.json` files are not read. Runtime state and
+conversation history are unchanged.
 
 Copy [the example configuration](../pi/pi-console-config.example.yaml) to
 `${XDG_CONFIG_HOME:-~/.config}/pi-console/config.yaml` for stable or `config-dev.yaml`

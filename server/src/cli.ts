@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { checkPi } from "../../pi/scripts/check-pi.mjs";
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import { resolve, join, isAbsolute } from "node:path";
+import { resolve, join, isAbsolute, basename, dirname } from "node:path";
 import { listenerPort } from "./remote-transport.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -23,10 +23,14 @@ function terminalText(text: string, style: string, stream: NodeJS.WriteStream): 
     ? `\x1b[${style}m${text}\x1b[0m` : text;
 }
 
-async function reportStarted(hello: Record<string, unknown>): Promise<void> {
+async function reportStarted(hello: Record<string, unknown>, alreadyRunning = false): Promise<void> {
   if (!object(hello.network) || typeof hello.network.port !== "number") throw new Error("Service did not report a listener port");
   const selectedBuildId = await serviceBuild();
   const url = `http://localhost:${listenerPort(hello.network.port)}`;
+  const version = typeof hello.appRoot === "string" && basename(dirname(hello.appRoot)) === "versions"
+    ? basename(hello.appRoot) : hello.buildId;
+  const message = alreadyRunning ? "Server is already running" : "Server started successfully";
+  console.log(terminalText(`${message} (version ${version}).`, "1;32", process.stdout));
   console.log(terminalText(url, "1;36", process.stdout));
   if (hello.buildId !== selectedBuildId) {
     console.error(terminalText("Warning: running build differs from the selected build. Use server restart to apply it.", "1;33", process.stderr));
@@ -157,10 +161,14 @@ async function main(): Promise<void> {
         } else await supervisor?.assertStopped();
         await requireNoClaim();
         if (action === "disable") await supervisor?.disable();
-        if (action !== "restart") { console.log(JSON.stringify({ running: false, enabled: action === "disable" ? false : !!supervisor, notice: "Live sessions suspended for frontend reconnect; history, workspaces and credentials retained." })); return; }
+        if (action !== "restart") {
+          const message = action === "disable" ? "Server shut down successfully; startup disabled."
+            : existing ? "Server shut down successfully." : "Server is already stopped.";
+          console.log(terminalText(message, "1;32", process.stdout)); return;
+        }
       } else if (existing) {
         existing.client.close();
-        await reportStarted(existing.hello); return;
+        await reportStarted(existing.hello, true); return;
       }
       if (action !== "enable") {
         await requireNoClaim();
@@ -186,7 +194,7 @@ async function main(): Promise<void> {
         if (view) {
           view.client.close(); await assertManagementOwner(view.hello);
           if (view.hello.stopping) throw new Error("Discovered service is stopping; no replacement started");
-          await reportStarted(view.hello); return;
+          await reportStarted(view.hello, action === "enable" && !!existing); return;
         }
         await delay(100);
       }

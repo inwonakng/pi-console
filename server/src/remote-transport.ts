@@ -5,6 +5,8 @@ import { join } from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, createWebSocketStream } from "ws";
 import { MAX_REQUEST } from "./local-protocol.js";
+import { readHostRegistry, type RegisteredHost } from "../../pi/extensions/shared/read-host-registry.mjs";
+import { webRelay } from "./web-relay.js";
 import type { Channel } from "./session-catalog.js";
 
 export const DEFAULT_PORT = 8443;
@@ -32,7 +34,7 @@ export class RemoteListener {
   private readonly timer: NodeJS.Timeout;
   constructor(private readonly port: number,
     connection: (stream: Duplex, onDetach: (detach: () => void) => void) => Promise<void>,
-    web?: { root: string; channel: Channel }) {
+    web?: { root: string; channel: Channel; hostId: string }) {
     // Load the fixed asset set at startup; never resolve request paths on disk.
     const assets = new Map<string, { body: Buffer; type: string }>();
     if (web) {
@@ -49,6 +51,23 @@ export class RemoteListener {
     }
     this.server = createServer({ maxHeaderSize: 8192, requestTimeout: 10000,
       headersTimeout: 10000, connectionsCheckingInterval: 1000 }, (request, response) => {
+      if (web && request.url === "/v1/hosts") {
+        if (request.method !== "GET") {
+          response.writeHead(405, { Allow: "GET", Connection: "close" }); response.end(); return;
+        }
+        try {
+          const hosts = [{ key: "local", alias: "localhost", enabled: true, hostId: web.hostId, stream: "/v1/stream" },
+            ...readHostRegistry(web.channel).map(({ key, alias, enabled, hostId }) =>
+              ({ key, alias, enabled, hostId, stream: `/v1/hosts/${key}/stream` }))];
+          const body = JSON.stringify({ channel: web.channel, hosts });
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(body),
+            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+          response.end(body);
+        } catch {
+          response.writeHead(503, { "Cache-Control": "no-store", Connection: "close" }); response.end();
+        }
+        return;
+      }
       const asset = assets.get(request.url?.split("?", 1)[0] ?? "");
       if (!asset) { response.writeHead(404, { Connection: "close" }); response.end(); return; }
       if (request.method !== "GET" && request.method !== "HEAD") {
@@ -72,28 +91,44 @@ export class RemoteListener {
       // Non-browser clients retain trusted-network access. Browser clients must
       // come from this HTTP origin, and only when the web frontend is enabled.
       const origin = request.headers.origin;
+      let target: RegisteredHost | undefined;
+      const relayKey = /^\/v1\/hosts\/(host-[a-f0-9]{64})\/stream$/.exec(request.url ?? "")?.[1];
+      if (web && relayKey) {
+        try { target = readHostRegistry(web.channel).find((host) => host.key === relayKey && host.enabled); }
+        catch { /* Invalid or inaccessible configuration fails closed. */ }
+      }
       if (origin !== undefined && (!web || origin !== `http://${request.headers.host}`)
-        || request.url !== "/v1/stream" || this.peers.size >= 32) {
+        || request.url !== "/v1/stream" && !target || this.peers.size + this.upgrading >= 32) {
         socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); return;
       }
-      this.websocket.handleUpgrade(request, socket, head, (ws) => {
+      // Reserve admission before any upstream handshake can suspend.
+      this.upgrading++;
+      let reserved = true;
+      const release = () => { if (reserved) { reserved = false; this.upgrading--; } };
+      socket.once("close", release);
+      try { this.websocket.handleUpgrade(request, socket, head, (ws) => {
+        release(); socket.off("close", release);
         request.socket.setTimeout(0);
         const stream = createWebSocketStream(ws, { highWaterMark: 64 * 1024 });
         stream.on("error", () => undefined); ws.on("error", () => undefined);
         const peer = { detach: () => undefined as void };
         this.peers.set(stream, peer);
-        void connection(stream, (detach) => { peer.detach = detach; })
+        const connected = target && web
+          ? webRelay(stream, target, web.channel, (detach) => { peer.detach = detach; })
+          : connection(stream, (detach) => { peer.detach = detach; });
+        void connected
           .catch(() => stream.destroy()).finally(() => { peer.detach(); this.peers.delete(stream); ws.terminate(); });
         // Detect dead connections, including half-open controllers. No reconnect/replay.
         let alive = true;
         ws.on("pong", () => { alive = true; });
         const ping = () => { if (!alive) { peer.detach(); stream.destroy(); ws.terminate(); } else { alive = false; ws.ping(); } };
         this.pings.add(ping); ws.once("close", () => { peer.detach(); this.pings.delete(ping); });
-      });
+      }); } catch { release(); socket.destroy(); }
     });
     this.timer = setInterval(() => { for (const ping of this.pings) ping(); }, 15000);
     this.timer.unref();
   }
+  private upgrading = 0;
   private readonly pings = new Set<() => void>();
   async listen(): Promise<void> {
     await new Promise<void>((resolve, reject) => {

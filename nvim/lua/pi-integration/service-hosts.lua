@@ -36,31 +36,87 @@ local function outcome_label(receipt)
 	if result.changed ~= nil then table.insert(lines, result.changed and "Changed" or "Unchanged") end
 	return table.concat(lines, "\n")
 end
+local function target_key(target)
+	if not target.remote and not target.root then return "local" end
+	return "endpoint:" .. vim.fn.sha256(vim.json.encode({ target.remote or "", target.root or "" }))
+end
+local function identities()
+	local data = store.load("host-identities", vim.empty_dict())
+	assert(type(data) == "table", "Invalid saved host identities")
+	for key, identity in pairs(data) do
+		assert(type(key) == "string" and type(identity) == "string" and identity ~= "", "Invalid saved host identity")
+	end
+	return data
+end
 local function normalize(data)
 	assert(type(data) == "table" and data.version == 1 and type(data.hosts) == "table" and vim.islist(data.hosts),
 		"Invalid hosts file: " .. store.path("hosts", "config"))
-	return data
+	local saved, seen = identities(), {}
+	for i, target in ipairs(data.hosts) do
+		local prefix = "Invalid host entry " .. i .. ": "
+		assert(type(target) == "table", prefix .. "expected a mapping")
+		assert(target.remote == nil or type(target.remote) == "string" and target.remote:match("%S"), prefix .. "remote must be an HTTP origin")
+		assert(target.root == nil or type(target.root) == "string" and target.root:sub(1, 1) == "/", prefix .. "root must be absolute")
+		assert(not (target.remote and target.root), prefix .. "choose remote or root")
+		assert(target.alias == nil or type(target.alias) == "string" and not target.alias:find("%c"), prefix .. "alias must be text")
+		assert(target.enabled == nil or type(target.enabled) == "boolean", prefix .. "enabled must be boolean")
+		assert(target.host_id == nil or type(target.host_id) == "string" and target.host_id ~= "", prefix .. "invalid legacy host_id")
+		target.key = target_key(target)
+		assert(not seen[target.key], prefix .. "duplicate endpoint")
+		seen[target.key] = true
+		target.alias = target.alias and target.alias:match("%S") and target.alias or target.remote or target.root or "localhost"
+		target.host_id = saved[target.key] or target.host_id
+	end
+	return data, saved
 end
 local function config()
 	return normalize(store.load("hosts", initial, "config"))
 end
+local function public_target(target)
+	return { alias = target.alias, remote = target.remote, root = target.root, enabled = target.enabled }
+end
 local function update(callback)
-	local ok, err = store.update("hosts", initial, function(data) return callback(normalize(data)) end, "config")
+	local ok, err = store.update("hosts", initial, function(data)
+		normalize(data)
+		-- Retain legacy pins before removing their fields from the YAML.
+		local saved, err = store.update("host-identities", vim.empty_dict(), function(pins)
+			for _, target in ipairs(data.hosts) do
+				if target.host_id and not pins[target.key] then pins[target.key] = target.host_id end
+			end
+			return true
+		end)
+		if not saved then return nil, err end
+		local answer, failure = callback(data)
+		if not answer then return nil, failure end
+		normalize(data)
+		for i, target in ipairs(data.hosts) do data.hosts[i] = public_target(target) end
+		return answer
+	end, "config")
 	if not ok then notify(err) end
 	return ok
 end
-local function persist(target)
+local function persist(target, previous_key)
 	return update(function(data)
 		local index
-		for i, saved in ipairs(data.hosts) do if saved.key == target.key then index = i end end
+		for i, saved in ipairs(data.hosts) do
+			if saved.key == (previous_key or target_key(target)) then index = i end
+		end
 		data.hosts[index or (#data.hosts + 1)] = vim.deepcopy(target)
 		return true
 	end)
 end
-local function save_local_identity(host)
-	if host.remote or host.saved_identity or not host.host_id then return end
-	local target = vim.deepcopy(host.target); target.host_id = host.host_id
-	host.saved_identity = persist(target) == true
+local function save_identity(target, identity, replace)
+	local ok, err = store.update("host-identities", vim.empty_dict(), function(data)
+		local key = target_key(target)
+		local previous = data[key] or target.host_id
+		if previous and previous ~= identity and not replace then
+			return nil, "Endpoint service identity changed; confirm the replacement in Hosts before attaching"
+		end
+		data[key] = identity
+		return true
+	end)
+	if not ok then notify(err) end
+	return ok, err
 end
 local function cache(host, rows)
 	host.rows = rows
@@ -91,11 +147,13 @@ local function connect(host)
 			if hello.channel ~= channel or not vim.tbl_contains(hello.capabilities or {}, "sessions.subscribe") then
 				host.error = "Incompatible discovery protocol/channel"; host.retry_at = vim.uv.now() + 30000; stop(host); return
 			end
+			local saved, err = save_identity(host, hello.hostId)
+			if not saved then host.error = err; host.retry_at = vim.uv.now() + 30000; stop(host); return end
 			host.host_id, host.hello, host.connected, host.connecting = hello.hostId, hello, true, false
+			host.target.host_id = hello.hostId
 			host.attempts, host.retry_at = 0, nil
 			local waiters = host.waiters or {}; host.waiters = nil
 			for _, callback in ipairs(waiters) do callback(true) end
-			save_local_identity(host)
 			connection.request("sessions.subscribe", {}, function(ok, result)
 				if host.connection ~= connection then return end
 				if ok and result.hostId == host.host_id then cache(host, result.sessions)
@@ -115,7 +173,7 @@ local function local_target()
 	return { key = "local", alias = "localhost", enabled = true }
 end
 function M.refresh()
-	local ok, data = pcall(config)
+	local ok, data, saved = pcall(config)
 	if not ok then notify(data); return end
 	local desired = { local_target() }
 	for _, target in ipairs(data.hosts) do
@@ -126,11 +184,12 @@ function M.refresh()
 	end
 	local explicit
 	if vim.env.PI_CONSOLE_SERVICE_REMOTE then
-		explicit = { key = "explicit:" .. vim.fn.sha256(vim.env.PI_CONSOLE_SERVICE_REMOTE), alias = "Unsaved host",
+		explicit = { alias = "Unsaved host",
 			remote = vim.env.PI_CONSOLE_SERVICE_REMOTE, host_id = vim.env.PI_CONSOLE_SERVICE_EXPECTED_HOST, enabled = true }
 	elseif vim.env.PI_CONSOLE_SERVICE_ROOT then
-		explicit = { key = "profile:" .. vim.fn.sha256(vim.env.PI_CONSOLE_SERVICE_ROOT), alias = "Local profile", root = vim.env.PI_CONSOLE_SERVICE_ROOT, enabled = true }
+		explicit = { alias = "Local profile", root = vim.env.PI_CONSOLE_SERVICE_ROOT, enabled = true }
 	end
+	if explicit then explicit.key = target_key(explicit) end
 	if explicit and not forgotten_explicit[explicit.key] then
 		local found = false
 		for _, target in ipairs(desired) do
@@ -140,14 +199,15 @@ function M.refresh()
 	end
 	local retained = {}
 	for _, target in ipairs(desired) do
+		target.host_id = target.host_id or saved[target.key]
 		local host = hosts[target.key]
 		if host and not vim.deep_equal(host.target, target) then
 			if host.root == target.root and host.remote == target.remote and host.host_id == target.host_id and host.target.enabled == target.enabled then
-				host.alias, host.target, host.saved_identity = target.alias, vim.deepcopy(target), true
+				host.alias, host.target = target.alias, vim.deepcopy(target)
 			else stop(host); host = nil end
 		end
 		if not host then
-			host = vim.deepcopy(target); host.target = vim.deepcopy(target); host.saved_identity = target.host_id ~= nil
+			host = vim.deepcopy(target); host.target = vim.deepcopy(target)
 			local loaded, rows = pcall(store.load, "discovery", vim.empty_dict())
 			host.rows = loaded and rows[target.host_id] or {}
 			hosts[target.key] = host
@@ -155,7 +215,6 @@ function M.refresh()
 		retained[target.key] = true
 		if target.enabled ~= false then connect(host) else stop(host) end
 		if host.cache_dirty and host.host_id then cache(host, host.rows) end
-		if host.connected then save_local_identity(host) end
 	end
 	for key, host in pairs(hosts) do if not retained[key] then stop(host); hosts[key] = nil end end
 end
@@ -213,8 +272,9 @@ function M.list()
 	return entries
 end
 function M.expected_identity(target)
-	local identity
-	for _, saved in ipairs(config().hosts) do
+	local data, saved_identities = config()
+	local identity = saved_identities[target_key({ remote = target.service_remote, root = target.service_root })]
+	for _, saved in ipairs(data.hosts) do
 		local matches = target.service_remote and saved.remote == target.service_remote
 			or not target.service_remote and not saved.remote and saved.root == target.service_root
 		if matches and saved.host_id then
@@ -513,12 +573,12 @@ local function confirm_target(target, previous)
 		vim.ui.select({ "Cancel", "Save confirmed identity" }, { prompt = (changed and "REPLACEMENT service. Old pins remain separate. " or "") .. host_label(target) .. " / " .. hello.channel }, function(choice)
 			if choice ~= "Save confirmed identity" then return end
 			target.host_id, target.enabled = hello.hostId, true
-			if persist(target) then M.refresh() end
+			if save_identity(target, hello.hostId, true) and persist(target, previous and previous.key) then M.refresh() end
 		end)
 	end)
 end
 local function edit(previous)
-	local target = previous and vim.deepcopy(previous.target) or { key = uid() }
+	local target = previous and vim.deepcopy(previous.target) or {}
 	vim.ui.input({ prompt = "Host alias (optional): ", default = target.alias or "" }, function(alias)
 		if not alias or alias:find("%c") then return end
 		target.alias = vim.trim(alias)
@@ -568,7 +628,7 @@ function M.picker(on_attach)
 					for _, source in pairs(hosts) do
 						if (source == host or host.host_id and source.host_id == host.host_id) and not saved_keys[source.key] then
 							local target = vim.deepcopy(source.target); target.host_id, target.enabled = source.host_id, false
-							table.insert(data.hosts, target)
+							table.insert(data.hosts, public_target(target))
 						end
 					end
 					return true
@@ -577,7 +637,6 @@ function M.picker(on_attach)
 					M.refresh()
 				end
 			elseif action == "Edit alias" then
-				if not host.target.host_id then notify("Confirm this service in Edit / confirm identity before saving it"); return end
 				vim.ui.input({ prompt = "Host alias: ", default = host.alias }, function(alias)
 					if not alias or vim.trim(alias) == "" or alias:find("%c") then return end
 					local target = vim.deepcopy(host.target); target.alias = vim.trim(alias)

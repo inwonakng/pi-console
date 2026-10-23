@@ -19,32 +19,44 @@ export class LocalClient {
     socket.on("error", () => undefined);
     void this.read().catch((error) => this.failed(error)).finally(() => this.failed(Object.assign(new Error("Service disconnected; accepted mutations were not replayed. Reconnect and inspect command status."), { code: "service_disconnected" })));
   }
-  static async open(root: string, channel: Channel, event: (record: Record<string, unknown>) => void = () => undefined): Promise<{ client: LocalClient; hello: Record<string, unknown> }> {
+  static async open(root: string, channel: Channel, event: (record: Record<string, unknown>) => void = () => undefined,
+    signal?: AbortSignal): Promise<{ client: LocalClient; hello: Record<string, unknown> }> {
     const path = endpoint(root);
     const directory = await lstat(dirname(path));
     const socketStat = await lstat(path);
     if (!directory.isDirectory() || directory.uid !== process.getuid?.() || (directory.mode & 0o077)
       || !socketStat.isSocket() || socketStat.uid !== process.getuid?.() || (socketStat.mode & 0o077)) throw new Error("Endpoint must be a private same-user Unix socket in a 0700 directory");
-    const socket = connect(path);
-    await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
-    const client = new LocalClient(socket, event);
+    signal?.throwIfAborted();
+    const socket = connect({ path, signal });
+    socket.on("error", () => undefined);
+    const deadline = setTimeout(() => socket.destroy(new Error("Service handshake timed out")), 10000);
     try {
-      const hello = await client.request("hello", { version: PROTOCOL, channel });
-      if (!object(hello) || hello.version !== PROTOCOL || hello.channel !== channel || !Array.isArray(hello.capabilities)) throw new Error("Incompatible service handshake");
-      return { client, hello };
-    } catch (error) { client.close(); throw error; }
+      await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+      const client = new LocalClient(socket, event);
+      try {
+        const hello = await client.request("hello", { version: PROTOCOL, channel });
+        if (!object(hello) || hello.version !== PROTOCOL || hello.channel !== channel || !Array.isArray(hello.capabilities)) throw new Error("Incompatible service handshake");
+        return { client, hello };
+      } catch (error) { client.close(); throw error; }
+    } catch (error) { socket.destroy(); throw error; }
+    finally { clearTimeout(deadline); }
   }
   static async openRemote(endpoint: string, channel: Channel,
-    event: (record: Record<string, unknown>) => void = () => undefined): Promise<{ client: LocalClient; hello: Record<string, unknown> }> {
+    event: (record: Record<string, unknown>) => void = () => undefined,
+    signal?: AbortSignal): Promise<{ client: LocalClient; hello: Record<string, unknown> }> {
     let url: URL;
     try { url = new URL(endpoint); } catch { throw new Error("Invalid remote HTTP endpoint"); }
     if (url.protocol !== "http:" || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("Remote endpoint must be an HTTP origin without user info, path, query or fragment");
     const origin = url.origin;
     url.protocol = "ws:"; url.pathname = "/v1/stream";
+    signal?.throwIfAborted();
     const ws = new WebSocket(url, {
       followRedirects: false, handshakeTimeout: 10000, perMessageDeflate: false, maxPayload: MAX_RESPONSE,
       allowSynchronousEvents: false });
     ws.on("error", () => undefined);
+    const abort = () => ws.terminate();
+    signal?.addEventListener("abort", abort, { once: true });
+    ws.once("close", () => signal?.removeEventListener("abort", abort));
     try {
       await new Promise<void>((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
     } catch (error) { ws.terminate(); throw error; }
@@ -76,7 +88,7 @@ export class LocalClient {
       this.pending.delete(record.id as string);
       if (record.success === true) request.resolve(record.result);
       else request.reject(Object.assign(new Error(object(record.error) ? String(record.error.message) : "Service request failed"),
-        { code: object(record.error) ? record.error.code : "service_error" }));
+        object(record.error) ? record.error : { code: "service_error" }));
     }
   }
   private failed(error: Error): void {

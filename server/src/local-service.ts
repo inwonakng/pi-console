@@ -8,7 +8,7 @@ import type { SessionSubscription } from "./session-subscription.js";
 import { CommandError } from "./session-commands.js";
 import { identifier } from "./host-commands.js";
 import { object } from "./pi-records.js";
-import { CAPABILITIES, MAX_REQUEST, PROTOCOL, records, RecordWriter } from "./local-protocol.js";
+import { CAPABILITIES, MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWriter } from "./local-protocol.js";
 import { serviceBuild } from "./service-paths.js";
 import { readExtensionSettings } from "../../pi/extensions/shared/read-extension-settings.mjs";
 
@@ -113,7 +113,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
         if (!identifier(record.id) || typeof record.method !== "string" || !object(record.payload)) throw new CommandError("invalid_command", "Invalid IPC request");
         const p = record.payload;
         if (socket.destroyed) throw new CommandError("attachment_closed", "Connection closed");
-        if (isRemote && !["hello", "health", "sessions", "sessions.subscribe", "host.command", "host.status", "session.manage", "session.manage.status", "attach", "detach", "snapshot", "session.read", "resource.read", "resource.complete", "host.directories", "host.options", "host.saved", "command", "grant", "heartbeat", "command.status", "effect.inspect"].includes(record.method)) {
+        if (isRemote && !REMOTE_METHODS.has(record.method)) {
           throw new CommandError("unsupported_command", "Method is not available on remote transport");
         }
         let result: unknown;
@@ -284,7 +284,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
     });
     await chmod(path, 0o600);
     remote = new RemoteListener(port, (stream, onDetach) => connection(stream, true, onDetach),
-      webRoot ? { root: webRoot, channel: options.channel } : undefined);
+      webRoot ? { root: webRoot, channel: options.channel, hostId: owner.hostId } : undefined);
     await remote.listen();
     console.log(JSON.stringify({ network: listenerAddresses(port) }));
     startReady();

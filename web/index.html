@@ -15,53 +15,67 @@
       <span id="channel" aria-label="Server channel"></span>
       <span id="connection-state" role="status">Disconnected</span>
       <button id="connect" type="submit">Connect</button>
+      <button id="help" type="button" aria-label="Keyboard shortcuts">?</button>
     </form>
   </header>
   <div id="notice" class="notice" role="alert" hidden></div>
-  <div class="shell">
-    <aside id="overview" aria-label="Session overview">
-      <div class="overview-heading"><h1>Sessions <span id="session-count">0</span></h1><button id="new-session" disabled>+ New</button></div>
-      <label class="search-label" for="search">Find a session</label>
-      <input id="search" type="search" placeholder="Search title or directory" autocomplete="off">
-      <nav id="session-list" aria-label="Sessions"><p class="empty">Connect to see this host's sessions.</p></nav>
-      <footer id="host-info">Execution stays on the host.</footer>
-    </aside>
-    <main id="session-panel" tabindex="-1">
-      <section id="welcome" class="welcome">
-        <span class="eyebrow">pi-console / web</span>
-        <h2>Your sessions,<br>one place.</h2>
-        <p>Select a session to read its conversation, or start one in a directory on the host.</p>
-        <p class="muted">Closing this page leaves your work running.</p>
-      </section>
-      <section id="session" hidden aria-label="Selected session">
-        <header class="session-header">
-          <button id="back" class="mobile-only" aria-label="Back to sessions">Sessions</button>
-          <div class="session-heading"><h2 id="session-title"></h2><p id="session-directory"></p></div>
-          <span id="session-status" class="status"></span>
-          <button id="rename" disabled>Rename</button>
-        </header>
-        <div class="control-bar"><span id="controller" role="status">Read only</span><button id="control" disabled>Take control</button><button id="abort" disabled>Stop turn</button></div>
-        <div id="transcript" tabindex="0" aria-label="Conversation"></div>
-        <button id="latest" hidden>Jump to latest</button>
-        <section id="interactions" aria-label="Questions and approvals" hidden></section>
-        <details id="queue-panel" hidden><summary id="queue-summary">Queued prompts</summary><div id="queue"></div></details>
-        <form id="composer">
-          <label for="prompt">Prompt</label>
-          <textarea id="prompt" rows="3" placeholder="Write a prompt..." disabled></textarea>
-          <div class="composer-footer"><span id="composer-hint">Take control to send a prompt.</span><button id="send" type="submit" disabled>Send</button></div>
-        </form>
-        <p id="command-status" role="status"></p>
-      </section>
-    </main>
-  </div>
+  <nav id="tabs" aria-label="Open conversations"><a id="overview-tab" href="#" aria-current="page">Overview</a><div id="conversation-tabs"></div></nav>
+  <main id="panels">
+    <section id="overview" aria-label="Session overview" tabindex="-1">
+      <div class="overview-heading"><h1>Open sessions <span id="session-count">0</span></h1><div class="actions"><button id="history">History</button><button id="new-session" disabled>+ New</button></div></div>
+      <div class="filters">
+        <label for="search">Filter sessions<input id="search" type="search" placeholder="Title, directory or host" autocomplete="off"></label>
+        <label for="host-filter">Host<select id="host-filter"><option value="">All hosts</option></select></label>
+      </div>
+      <div id="hosts" aria-label="Registered hosts"></div>
+      <nav id="session-list" aria-label="Open sessions"><p class="empty">Connect to see sessions across registered hosts.</p></nav>
+      <footer>Enter open &middot; j/k move &middot; / filter &middot; Space s history &middot; Space pn new &middot; ? keys</footer>
+    </section>
+  </main>
+  <template id="conversation-template">
+    <section class="conversation" aria-label="Conversation" tabindex="-1" hidden>
+      <div data-id="notice" class="notice" role="alert" hidden></div>
+      <header class="session-header">
+        <div class="session-heading"><h2 data-id="session-title"></h2><p data-id="session-directory"></p></div>
+        <span data-id="session-status" class="status"></span>
+        <button data-id="reconnect" hidden>Reconnect</button>
+        <button data-id="rename" disabled>Rename</button>
+        <button data-id="stop" disabled>Stop session</button>
+      </header>
+      <div class="control-bar"><span data-id="controller" role="status">Read only</span><button data-id="control" disabled>Take control</button><button data-id="abort" disabled>Stop turn</button></div>
+      <div data-id="transcript" class="transcript" tabindex="0" aria-label="Conversation transcript"></div>
+      <button data-id="latest" class="latest" hidden>Jump to latest</button>
+      <section data-id="interactions" class="interactions" aria-label="Questions and approvals" hidden></section>
+      <details data-id="queue-panel" class="queue-panel" hidden><summary data-id="queue-summary">Queued prompts</summary><div data-id="queue"></div></details>
+      <form data-id="composer" class="composer">
+        <label data-id="prompt-label">Prompt</label>
+        <textarea data-id="prompt" rows="3" placeholder="Write a prompt..." disabled></textarea>
+        <div class="composer-footer"><span data-id="composer-hint">Take control to send a prompt.</span><button data-id="send" type="submit" disabled>Send</button></div>
+      </form>
+      <p data-id="command-status" class="command-status" role="status"></p>
+    </section>
+  </template>
   <dialog id="create-dialog">
     <form id="create-form">
       <h2>New session</h2>
+      <label for="create-host">Execution host</label><select id="create-host" required></select>
       <label for="cwd">Directory on the host</label>
       <input id="cwd" placeholder="/absolute/project/path" required autocomplete="off">
       <p class="muted">Use the execution host's path, not this device's.</p>
       <div class="dialog-actions"><button id="cancel-create" type="button">Cancel</button><button type="submit">Create session</button></div>
     </form>
+  </dialog>
+  <dialog id="history-dialog">
+    <header class="dialog-heading"><h2>Session history</h2><button id="close-history">Close</button></header>
+    <div class="filters"><label for="history-search">Filter history<input id="history-search" type="search" autocomplete="off"></label><label for="history-host">Host<select id="history-host"><option value="">All hosts</option></select></label></div>
+    <p class="muted">Stopped sessions stay here until you explicitly resume them.</p>
+    <div id="history-list"></div>
+  </dialog>
+  <dialog id="help-dialog">
+    <h2>Keyboard shortcuts</h2>
+    <p>Outside text fields, Space starts a Neovim-style leader shortcut.</p>
+    <dl><dt>Space o</dt><dd>Overview</dd><dt>Space s</dt><dd>Session history</dd><dt>Space pn / Space pN</dt><dd>New session / new in current workspace</dd><dt>Space pc</dt><dd>Take or release control</dd><dt>Space R</dt><dd>Rename conversation</dd><dt>Space pk</dt><dd>Stop session (confirmation required)</dd><dt>Space qq</dt><dd>Close tab, leaving session running</dd><dt>Space pq</dt><dd>Queued prompts</dd><dt>Space pi / Space pt</dt><dd>Focus prompt / transcript</dd><dt>j/k, Enter, /, H</dt><dd>Overview: move, open, filter, host filter</dd><dt>Escape Escape</dt><dd>Stop current turn outside text fields</dd><dt>Ctrl/Cmd+Enter</dt><dd>Send prompt</dd><dt>Left/Right, Home/End</dt><dd>Navigate the focused tab bar</dd><dt>?</dt><dd>This help</dd></dl>
+    <div class="dialog-actions"><button id="close-help">Close</button></div>
   </dialog>
   <noscript>This frontend needs JavaScript to connect to pi-console.</noscript>
   <script type="module" src="./app.js"></script>
