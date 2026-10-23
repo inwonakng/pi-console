@@ -362,7 +362,7 @@ local function can_close_frontend()
 end
 ctx = { state = state, config = M.config,
 	ui = { notify = notify }, logs = { add = function(_, message, details) notify(message .. ": " .. tostring(details), vim.log.levels.ERROR) end },
-	notices = { empty_session = "Submit a prompt or shell command to start a session." },
+	notices = { empty_session = "Send a message to begin. This session will be saved after the first response." },
 	buffer = { valid = valid, set_modifiable = function(buf, value) vim.bo[buf].modifiable = value end },
 	session = { setup_keymaps = function() end }, transcript = {} }
 ctx.transcript.win_valid = function()
@@ -453,10 +453,8 @@ render = function()
 	if snapshot and snapshot.error then
 		vim.list_extend(lines, { "", "Error: " .. snapshot.error })
 	end
-	if not session_id then
-		vim.list_extend(lines, { "", starting and "Starting session..." or "Unstarted frontend",
-			"Host: " .. current_owner_label(), "Directory: " .. (selected_cwd or "Choose with :PiCd"),
-			"The first prompt or shell command creates the session." })
+	if not session_id and starting then
+		vim.list_extend(lines, { "", "Starting session..." })
 	end
 	if not attachment and session_error then vim.list_extend(lines, { "", session_error }) end
 	if conversation then
