@@ -31,6 +31,7 @@ local render, refresh, connect, attach, recover_selection, tree_ctx, advance_sta
 local side_buf
 local owner_states, pending_settings = {}, {}
 local selected_cwd, starting, new_control_selection, startup_options
+local frontend_focused = false
 local function status_data(key)
 	local raw = snapshot and snapshot.conversation.statuses[key]
 	local ok, value = pcall(vim.json.decode, raw or "")
@@ -39,6 +40,7 @@ end
 local function publish_attachment()
 	local tmux = require("pi-integration.backends.tmux")
 	if M.config.role ~= "conversation" or not tmux.available() then return end
+	if frontend_focused then state.seen_seq = state.completion_seq end
 	local pi_state = snapshot and snapshot.piState or {}
 	local name = pi_state.sessionName ~= "" and pi_state.sessionName or "New Session"
 	local label = status_data("pi-session-label")
@@ -57,7 +59,8 @@ local function publish_attachment()
 		for _, item in ipairs(snapshot.interactions.pending) do if not item.submitted then pending = true end end
 		status = snapshot.error and "Error" or pending and "Waiting"
 			or snapshot.piState and snapshot.piState.isCompacting and "Compacting"
-			or snapshot.conversation.execution.running and "Working" or snapshot.phase == "ready" and "Idle" or "Loading"
+			or snapshot.conversation.execution.running and "Working"
+			or snapshot.phase == "ready" and (state.completion_seq > state.seen_seq and "Done" or "Idle") or "Loading"
 	end
 	tmux.publish({ version = 1, frontend_attachment = true, host_id = identity, session_id = session_id,
 		pid = vim.uv.os_getpid(), updated = os.time(), cwd = vim.fn.getcwd(),
@@ -561,7 +564,12 @@ local function apply_snapshot(value)
 	if not snapshot or value.serviceEpoch ~= snapshot.serviceEpoch or value.sequence >= snapshot.sequence then snapshot = value end
 	local same_runtime = previous and previous.serviceEpoch == snapshot.serviceEpoch
 		and previous.runtimeRevision == snapshot.runtimeRevision
-	if not same_runtime then state.pending_transcript_scroll = nil end
+	state.completion_seq = snapshot.conversation.execution.completionSeq or 0
+	if not same_runtime then
+		state.pending_transcript_scroll = nil
+		-- Existing history on attach/reconnect or a replacement runtime is already seen.
+		state.seen_seq = state.completion_seq
+	end
 	if grant and not control_current() then grant = nil; close_approval() end
 	if approval_request then
 		local live = false
@@ -1793,9 +1801,13 @@ function M.open(restore)
 		state.last_focused_at = seconds * 1000000 + microseconds
 		publish_attachment()
 	end
-	vim.api.nvim_create_autocmd("FocusGained", { callback = record_focus })
+	vim.api.nvim_create_autocmd({ "FocusGained", "FocusLost" }, { callback = function(event)
+		frontend_focused = event.event == "FocusGained"
+		if frontend_focused then record_focus() end
+	end })
 	local backend = require("pi-integration.backends.tmux")
-	if backend.available() and backend.is_focused() then record_focus() end
+	frontend_focused = backend.available() and backend.is_focused() == true
+	if frontend_focused then record_focus() end
 	layout.open(ctx)
 	if restore then
 		layout.set_buffer_lines(ctx, state.input_buf, restore.input_lines or { "" }, true)
