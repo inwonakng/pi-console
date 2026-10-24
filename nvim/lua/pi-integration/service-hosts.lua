@@ -778,15 +778,13 @@ function M.picker(on_attach)
 	M.start()
 	local choices = {}
 	for _, host in pairs(hosts) do table.insert(choices, host) end
-	table.sort(choices, function(a, b) return a.alias < b.alias end)
+	table.sort(choices, function(a, b)
+		if (a.key == "local") ~= (b.key == "local") then return a.key == "local" end
+		return a.alias < b.alias
+	end)
 	table.insert(choices, { alias = "+ Add host", add = true })
 	vim.ui.select(choices, { prompt = "Hosts", format_item = function(host)
-		if host.add then return host.alias end
-		local label = host.alias .. " | " .. (host.remote or host.root or "Local service") .. " | " .. connection_status(host)
-		if host.error then label = label .. " | " .. host.error end
-		if host.cache_dirty then label = label .. " | Discovery cache pending: " .. tostring(host.cache_error or "waiting to refresh") end
-		if host.pins_dirty then label = label .. " | Pins cache pending: " .. tostring(host.pins_error or "waiting to refresh") end
-		return label
+		return host.alias
 	end }, function(host)
 		if not host then return end
 		if host.add then edit(); return end
