@@ -121,15 +121,24 @@ local function save_identity(target, identity, replace)
 	if not ok then notify(err) end
 	return ok, err
 end
+local function flush_cache(host)
+	if host.cache_dirty and (not host.cache_retry_at or vim.uv.hrtime() / 1e6 >= host.cache_retry_at) then
+		local ok, err = store.update("discovery", vim.empty_dict(), function(data)
+			data[host.host_id] = host.rows
+			return true
+		end)
+		host.cache_dirty, host.cache_error = not ok, not ok and err or nil
+		host.cache_retry_at = not ok and vim.uv.hrtime() / 1e6 + 1000 or nil
+	end
+	if host.pins_dirty and (not host.pins_retry_at or vim.uv.hrtime() / 1e6 >= host.pins_retry_at) then
+		local ok, err = require("pi-integration.service-pins").refresh(host.host_id, host.rows, host_label(host))
+		host.pins_dirty, host.pins_error = not ok, not ok and err or nil
+		host.pins_retry_at = not ok and vim.uv.hrtime() / 1e6 + 1000 or nil
+	end
+end
 local function cache(host, rows)
-	host.rows = rows
-	local ok, err = store.update("discovery", vim.empty_dict(), function(data)
-		data[host.host_id] = rows
-		return true
-	end)
-	host.cache_dirty, host.cache_error = not ok, not ok and err or nil
-	local refreshed, failure = require("pi-integration.service-pins").refresh(host.host_id, rows, host_label(host))
-	if not refreshed then notify("Could not refresh pinned session metadata: " .. tostring(failure)) end
+	host.rows, host.cache_dirty, host.pins_dirty = rows, true, true
+	flush_cache(host)
 end
 local function stop(host, force)
 	local was_connected = host.connected
@@ -211,6 +220,7 @@ function M.refresh()
 		if host and not vim.deep_equal(host.target, target) then
 			if host.root == target.root and host.remote == target.remote and host.host_id == target.host_id and host.target.enabled == target.enabled then
 				host.alias, host.target = target.alias, vim.deepcopy(target)
+				host.pins_dirty = true
 			else stop(host); host = nil end
 		end
 		if not host then
@@ -221,7 +231,7 @@ function M.refresh()
 		end
 		retained[target.key] = true
 		if target.enabled ~= false then connect(host) else stop(host) end
-		if host.cache_dirty and host.host_id then cache(host, host.rows) end
+		if host.host_id then flush_cache(host) end
 	end
 	for key, host in pairs(hosts) do if not retained[key] then stop(host); hosts[key] = nil end end
 end
@@ -771,7 +781,12 @@ function M.picker(on_attach)
 	table.sort(choices, function(a, b) return a.alias < b.alias end)
 	table.insert(choices, { alias = "+ Add host", add = true })
 	vim.ui.select(choices, { prompt = "Hosts", format_item = function(host)
-		return host.add and host.alias or host.alias .. " | " .. (host.remote or host.root or "Local service") .. " | " .. connection_status(host) .. (host.error and " | " .. host.error or "")
+		if host.add then return host.alias end
+		local label = host.alias .. " | " .. (host.remote or host.root or "Local service") .. " | " .. connection_status(host)
+		if host.error then label = label .. " | " .. host.error end
+		if host.cache_dirty then label = label .. " | Discovery cache pending: " .. tostring(host.cache_error or "waiting to refresh") end
+		if host.pins_dirty then label = label .. " | Pins cache pending: " .. tostring(host.pins_error or "waiting to refresh") end
+		return label
 	end }, function(host)
 		if not host then return end
 		if host.add then edit(); return end

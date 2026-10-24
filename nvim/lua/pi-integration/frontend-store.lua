@@ -43,13 +43,16 @@ function M.load(name, initial, kind)
 end
 function M.update(name, initial, callback, kind)
 	local path = M.path(name, kind)
-	local ok, result, message = pcall(function()
+	local ok, result, message, code = pcall(function()
 		-- Save through config symlinks, preserving the links themselves.
 		if kind == "config" and uv.fs_lstat(path) then path = assert(uv.fs_realpath(path)) end
 		M.prepare(vim.fs.dirname(path), kind)
 		local lock = path .. ".lock"
-		local fd, err = uv.fs_open(lock, "wx", 384)
-		assert(fd, "Frontend store is busy; retry shortly: " .. tostring(err))
+		local fd, err, open_code = uv.fs_open(lock, "wx", 384)
+		if not fd then
+			if open_code == "EEXIST" then return nil, "Frontend store is busy; retry shortly: " .. tostring(err), "busy" end
+			return nil, tostring(err), open_code
+		end
 		local temporary = path .. "." .. uv.os_getpid() .. ".tmp"
 		local updated, value, detail = pcall(function()
 			local data = M.load(name, initial, kind)
@@ -74,6 +77,6 @@ function M.update(name, initial, callback, kind)
 		return value, detail
 	end)
 	if not ok then return nil, tostring(result) end
-	return result, message
+	return result, message, code
 end
 return M
