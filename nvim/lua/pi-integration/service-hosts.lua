@@ -14,11 +14,6 @@ local function host_label(host)
 	local endpoint = host.remote or host.service_remote or host.root or host.service_root
 	return (host.alias or "Saved host") .. (endpoint and (" (" .. endpoint .. ")") or "")
 end
-local function connection_status(host)
-	if host.connected then return "Connected" end
-	if host.target.enabled == false then return "Disconnected" end
-	return host.connecting and "Connecting" or "Unreachable"
-end
 local function session_title(row)
 	return type(row.name) == "string" and row.name:match("%S") and row.name or "Untitled session"
 end
@@ -644,16 +639,6 @@ local function sorted_hosts()
 	end)
 	return choices
 end
-function M.select_host(callback)
-	M.start()
-	local choices = sorted_hosts()
-	vim.ui.select(choices, { prompt = "Host", format_item = function(host)
-		return host_label(host) .. " | " .. connection_status(host)
-	end }, function(host)
-		if not host then return end
-		with_connected_host(host, callback)
-	end)
-end
 function M.new_conversation()
 	M.select_host(function(host)
 		local connection = host.connection
@@ -801,7 +786,7 @@ local function edit(previous)
 		end)
 	end)
 end
-function M.picker(on_attach)
+local function pick_host(callback)
 	M.start()
 	local choices = sorted_hosts()
 	table.insert(choices, { alias = "+ Add host", add = true })
@@ -810,6 +795,14 @@ function M.picker(on_attach)
 	end }, function(host)
 		if not host then return end
 		if host.add then edit(); return end
+		callback(host)
+	end)
+end
+function M.select_host(callback)
+	pick_host(function(host) with_connected_host(host, callback) end)
+end
+function M.picker(on_attach)
+	pick_host(function(host)
 		local actions = { "Connect/retry", "Disconnect", "Edit alias", "Edit / confirm identity", "Forget" }
 		if on_attach then table.insert(actions, 1, "Attach current frontend") end
 		vim.ui.select(actions, { prompt = host.alias }, function(action)
