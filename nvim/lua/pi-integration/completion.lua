@@ -30,7 +30,7 @@ function source:get_completions(ctx, callback)
 	}
 	require("pi-integration").get_commands(function(commands, err, captured)
 		if query ~= self.query then callback({ items = {}, is_incomplete_forward = true, is_incomplete_backward = true }); return end
-		if err and err ~= self.last_error then require("pi-integration.logs").notify("Owner command completion: " .. err, vim.log.levels.WARN) end
+		if err and err ~= self.last_error then require("pi-integration.logs").notify("Command completion: " .. err, vim.log.levels.WARN) end
 		self.last_error = err
 		local items = {}
 		for _, command in ipairs(commands) do
@@ -42,7 +42,7 @@ function source:get_completions(ctx, callback)
 			table.insert(items, {
 				label = label,
 				kind = require("blink.cmp.types").CompletionItemKind.Text,
-				detail = "owner " .. command.source .. (info.scope and (" (" .. info.scope .. ")") or ""),
+				detail = command.source .. (info.scope and (" (" .. info.scope .. ")") or ""),
 				filterText = skill and (label .. " /" .. skill .. " " .. skill) or label,
 				sortText = ({ skill = "0", prompt = "1", extension = "2" })[command.source] .. label,
 				textEdit = { newText = label .. " ", range = range },
@@ -58,7 +58,7 @@ function source:execute(_, item, callback, default_implementation)
 	if require("pi-integration").command_context_current(item.data.pi_command_context) then
 		default_implementation()
 	else
-		require("pi-integration.logs").notify("Owner context changed; complete the command again.", vim.log.levels.WARN)
+		require("pi-integration.logs").notify("Session context changed; complete the command again.", vim.log.levels.WARN)
 	end
 	callback()
 end

@@ -33,7 +33,7 @@ function M.refresh(host_id, rows, host_name)
 	return result, message, code
 end
 function M.toggle(entry)
-	if not entry.host_id or not entry.session_id then return nil, "Session has no owner identity" end
+	if not entry.host_id or not entry.session_id then return nil, "Session has no host identity" end
 	return store.update("pins", vim.empty_dict(), function(pins)
 		local id = key(entry)
 		if pins[id] then pins[id] = nil else

@@ -148,7 +148,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
           }
           case "host.options":
             exact(p, ["serviceEpoch", "cwd", "refresh"]);
-            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host options owner changed");
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host service changed; refresh model options");
             result = await owner.optionsForHost(p.cwd, () => {
               if (socket.destroyed) throw new CommandError("attachment_closed", "Host options reader disconnected");
               remoteAdmission?.();
@@ -156,7 +156,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
             break;
           case "host.complete": {
             exact(p, ["serviceEpoch", "cwd", "prefix", "offset"]);
-            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host completion owner changed");
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host service changed; retry completion");
             const { serviceEpoch: _epoch, cwd, ...query } = p;
             result = await owner.completeForHost(cwd, query, () => {
               if (socket.destroyed) throw new CommandError("attachment_closed", "Host completion reader disconnected");
@@ -166,7 +166,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
           }
           case "host.directories": {
             exact(p, ["serviceEpoch", "path", "offset"]);
-            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Owner directory context changed");
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host service changed; select a directory again");
             const { serviceEpoch: _epoch, ...query } = p;
             result = await owner.directories(query, () => {
               if (socket.destroyed) throw new CommandError("attachment_closed", "Directory reader disconnected");
@@ -176,7 +176,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
           }
           case "host.history": {
             exact(p, ["serviceEpoch", "sessionId", "offset", "version"]);
-            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "History owner changed");
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host service changed; reopen history");
             if (!identifier(p.sessionId)) throw new CommandError("invalid_command", "Invalid history session identity");
             const { serviceEpoch: _epoch, sessionId, ...query } = p;
             result = await owner.history(sessionId, query, () => {
@@ -187,7 +187,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
           }
           case "host.saved":
             exact(p, ["serviceEpoch", "sessionId"]);
-            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Saved-session owner changed");
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host service changed; select the saved session again");
             if (!identifier(p.sessionId)) throw new CommandError("invalid_command", "Invalid saved session identity");
             result = await owner.saved(p.sessionId, () => {
               if (socket.destroyed) throw new CommandError("attachment_closed", "Saved-session reader disconnected");
@@ -316,5 +316,5 @@ export async function runService(options: HostOwnerOptions & { root: string; por
   process.once("SIGTERM", signal); process.once("SIGINT", signal);
   try { await stopped; }
   finally { process.off("SIGTERM", signal); process.off("SIGINT", signal); }
-  if (shutdownFailure) throw new Error("Shutdown cleanup failed; owner claim retained. Inspect and explicitly reconcile before restarting", { cause: shutdownFailure });
+  if (shutdownFailure) throw new Error("Shutdown cleanup failed; service lock retained. Inspect and explicitly reconcile before restarting", { cause: shutdownFailure });
 }

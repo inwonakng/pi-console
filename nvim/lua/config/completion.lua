@@ -87,7 +87,7 @@ cmp.setup({
 			},
 			cmdline = { enabled = function() return not is_owner_directory_prompt() end },
 			pi_directories = {
-				name = "Owner directories",
+				name = "Directories",
 				module = "pi-integration.directory-completion",
 				timeout_ms = 5000,
 			},

@@ -122,7 +122,7 @@ local function open_item(ctx, state, parent_win)
 end
 
 function M.open(ctx, path, title, query, contents)
-	assert(ctx.resources, "Owner resources required")
+	assert(ctx.resources, "Session resources required")
 	if not contents then
 		query = query or { kind = "spawn", runId = path and path:match("/runs/([^/]+)/"), artifact = "transcript" }
 		ctx.resources.document(query, function(text, page) M.open(ctx, page.path, title, query, text) end)

@@ -38,7 +38,7 @@ function M.owner_input(opts, on_choice)
 	local browse, input
 	local function current()
 		if opts.current() then return true end
-		require("pi-integration.logs").notify("Owner connection changed; directory selection cancelled", vim.log.levels.WARN)
+		require("pi-integration.logs").notify("Host connection changed; directory selection cancelled", vim.log.levels.WARN)
 		return false
 	end
 	local function choose(path)
@@ -87,7 +87,7 @@ function M.owner_input(opts, on_choice)
 			opts.request({ path = path, offset = 0 }, function(valid, page)
 				if not current() then return end
 				if valid then choose(page.path)
-				else require("pi-integration.logs").notify(page.message or "Owner directory unavailable", vim.log.levels.WARN); input(path) end
+				else require("pi-integration.logs").notify(page.message or "Directory unavailable", vim.log.levels.WARN); input(path) end
 			end)
 		end)
 		if not ok then cleanup(); error(err) end
@@ -96,7 +96,7 @@ function M.owner_input(opts, on_choice)
 		if not current() then return end
 		opts.request({ path = path, offset = offset }, function(ok, page)
 			if not current() then return end
-			if not ok then require("pi-integration.logs").notify(page.message or "Owner directory unavailable", vim.log.levels.WARN); input(path); return end
+			if not ok then require("pi-integration.logs").notify(page.message or "Directory unavailable", vim.log.levels.WARN); input(path); return end
 			local choices = { { label = "Use " .. page.path, use = true }, { label = "Enter another path", input = true } }
 			if page.path ~= "/" then table.insert(choices, { label = "Parent directory", path = page.path:match("^(.*)/[^/]+$") == "" and "/" or page.path:match("^(.*)/[^/]+$") }) end
 			for _, directory in ipairs(page.entries or {}) do table.insert(choices, { label = directory, path = directory }) end

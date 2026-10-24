@@ -69,7 +69,7 @@ type Payloads = { [O in BundledOperation as O["operation"]]: O["payload"] };
 export function registerServiceOperation<O extends keyof Payloads>(pi: ExtensionAPI, operation: O,
   run: (payload: Payloads[O], ctx: ExtensionCommandContext) => Promise<OperationData | undefined>): void {
   if (process.env.PI_CONSOLE_SERVICE !== "1") return;
-  pi.registerCommand(operationCommand(operation), { description: "Internal typed owner operation", handler: async (args, ctx) => {
+  pi.registerCommand(operationCommand(operation), { description: "Internal typed service operation", handler: async (args, ctx) => {
     const v: unknown = JSON.parse(args);
     if (!serviceManaged(ctx) || !object(v) || !exact(v, ["version", "invocationId", "runtimeId", "sessionId", "sessionFile", "payload"])
       || v.version !== 1 || ![v.invocationId, v.runtimeId, v.sessionId, v.sessionFile].every((part) => typeof part === "string" && !!part)

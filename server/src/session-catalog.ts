@@ -49,7 +49,7 @@ export class SessionCatalog {
       const path = join(root, "owner.lock");
       const claim = await privateJson(path, 16384);
       if (!object(claim) || claim.schemaVersion !== 3 || typeof claim.epoch !== "string") {
-        throw new Error("Legacy or invalid owner claim lacks managed execution evidence; manual inspection required");
+        throw new Error("Legacy or invalid service lock lacks managed execution evidence; manual inspection required");
       }
       const epoch = claim.epoch;
       const processes = join(root, "processes.sqlite");
@@ -86,7 +86,7 @@ export class SessionCatalog {
           db.exec("COMMIT");
           if (db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()?.busy !== 0) throw new Error("Recovery checkpoint blocked; retain original claim");
         } finally { db.close(); }
-        if (JSON.stringify(await privateJson(path, 16384)) !== JSON.stringify(claim)) throw new Error("Owner claim changed during recovery");
+        if (JSON.stringify(await privateJson(path, 16384)) !== JSON.stringify(claim)) throw new Error("Service lock changed during recovery");
         await unlink(path);
         await syncDirectory(root);
       } finally { evidence.close(); }
@@ -108,7 +108,7 @@ export class SessionCatalog {
         let owner = "unknown checkout";
         try { const value = await privateJson(lockPath, 16384); if (object(value) && typeof value.appRoot === "string") owner = value.appRoot; }
         catch { /* Unreadable claims still block replacement. */ }
-        throw new Error(`Service profile is owned or requires recovery (${owner}); refusing a second owner`);
+        throw new Error(`Service profile is in use or requires recovery (${owner}); refusing to start another service process`);
       }
       throw error;
     }
@@ -132,14 +132,14 @@ export class SessionCatalog {
       lifetime.close();
       if (retainClaim) {
         await lock.close();
-        throw new Error("Catalog initialization did not finish; retain the owner claim for inspection/recovery", { cause: error });
+        throw new Error("Catalog initialization did not finish; retain the service lock for inspection/recovery", { cause: error });
       }
       let cleanupError: unknown;
       try {
         const owned = await lock.stat();
         const current = await lstat(lockPath);
         const claim = await privateJson(lockPath, 16384);
-        if (owned.dev !== current.dev || owned.ino !== current.ino || !object(claim) || claim.epoch !== epoch) throw new Error("Service owner claim changed during initialization");
+        if (owned.dev !== current.dev || owned.ino !== current.ino || !object(claim) || claim.epoch !== epoch) throw new Error("Service lock changed during initialization");
         await unlink(lockPath);
         await syncDirectory(root);
       } catch (failure) { cleanupError = failure; }
@@ -408,7 +408,7 @@ export class SessionCatalog {
   async cloneRecord(file: string, cwd: string): Promise<CatalogSession> {
     const directory = join(this.root, "sessions");
     const id = basename(file, ".jsonl");
-    if (dirname(file) !== directory || file !== join(directory, `${id}.jsonl`) || !/^[0-9a-f-]{36}$/.test(id)) throw new Error("Clone is not an owner-managed session file");
+    if (dirname(file) !== directory || file !== join(directory, `${id}.jsonl`) || !/^[0-9a-f-]{36}$/.test(id)) throw new Error("Clone is not a service-managed session file");
     const record: CatalogSession = { id, piSessionId: id, cwd, createdAt: new Date().toISOString() };
     const header = await validateManagedFile(this.root, record);
     if (header.cwd !== cwd) throw new Error("Clone cwd does not match its header");
@@ -465,14 +465,14 @@ export class SessionCatalog {
       // Indexed bulk transition, no historical receipt hydration. Recovery blobs
       // are separate and unchanged. Old envelopes never regain admission authority.
       this.db.prepare(`UPDATE commands SET status='uncertain', receipt=json_set(receipt, '$.status','uncertain',
-        '$.error',json_object('code','owner_interrupted','message','Owner ended before a durable command outcome; review, do not replay')) WHERE status='accepted'`).run();
+        '$.error',json_object('code','owner_interrupted','message','Service stopped before a durable command outcome; review, do not replay')) WHERE status='accepted'`).run();
       const sessions = this.db.prepare("SELECT DISTINCT session_id FROM queue").all();
       for (const row of sessions) {
         const items = this.queue(String(row.session_id));
         for (const item of items) if (item.status !== "failed") {
           item.status = "failed";
           item.revision++;
-          item.error = { code: "owner_interrupted", message: "Owner ended before queue delivery completed; review before explicitly editing/resubmitting" };
+          item.error = { code: "owner_interrupted", message: "Service stopped before queue delivery completed; review before explicitly editing/resubmitting" };
         }
         this.setQueue(String(row.session_id), items);
       }
@@ -499,7 +499,7 @@ export class SessionCatalog {
       const owner = await privateJson(path, 16384);
       const original = await this.lock.stat();
       const current = await lstat(path);
-      if (!object(owner) || owner.epoch !== this.epoch || original.dev !== current.dev || original.ino !== current.ino) throw new Error("Service owner claim changed; refusing to remove it");
+      if (!object(owner) || owner.epoch !== this.epoch || original.dev !== current.dev || original.ino !== current.ino) throw new Error("Service lock changed; refusing to remove it");
       await unlink(path);
       this.released = true;
       try { await syncDirectory(this.root); }
@@ -573,7 +573,7 @@ export class SessionCatalog {
 
   private fence(error: unknown): Error {
     if (!this.failure) {
-      this.failure = new Error("SQLite storage unavailable or commit uncertain; further mutations fenced, retain owner claim for recovery", { cause: error });
+      this.failure = new Error("SQLite storage unavailable or commit uncertain; further mutations fenced, retain service lock for recovery", { cause: error });
       this.resolveFailure(this.failure);
     }
     return this.failure;

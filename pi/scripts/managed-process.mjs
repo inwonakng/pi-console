@@ -59,7 +59,7 @@ export function ownerLease(root) {
   // leaving no winner with a zero busy timeout. Wait briefly at this boundary;
   // exhaustion still refuses ownership, without touching claims or recovery.
   try { db.exec('PRAGMA busy_timeout=50; BEGIN EXCLUSIVE'); }
-  catch (e) { db.close(); throw new Error('Service owner is still alive or its lifetime lease is unavailable', { cause: e }); }
+  catch (e) { db.close(); throw new Error('Service process is still alive or its lifetime lease is unavailable', { cause: e }); }
   return { close() { db.close(); } };
 }
 
@@ -335,7 +335,7 @@ async function supervise(path, id) {
         // The idle anchor is a trusted launch-fenced helper, not a workload.
         if (exit && known.size === 1 && known.has(anchor?.pid) && nested.length === 0 && anchor.connected) anchor.send({ type: 'finish' }, () => {});
         if (known.size === 0 && workloadClosed && nested.length === 0 && !directUnresolved) {
-          exit ??= { code: null, signal: null, error: 'Owner ended before launch' };
+          exit ??= { code: null, signal: null, error: 'Managing process ended before launch' };
           transaction(db, () => db.prepare("UPDATE jobs SET status='done',launch_open=0,result=? WHERE id=?").run(JSON.stringify({ ...exit, managedUnresolved: false }), id));
           finished = true;
         } else if ((elapsed > 8000 && (known.size > 0 || directUnresolved)) || elapsed > 12000) {

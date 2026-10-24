@@ -1317,7 +1317,7 @@ export function formatWorkspaceRecord(record: WorkspaceRecord): string {
     `- result patch: ${record.resultPatchPath}`,
     `- application patch: ${record.applicationPatchPath}`,
   ];
-  if (record.sourceSessionFile) lines.push(`- owner session: ${record.sourceSessionFile}`);
+  if (record.sourceSessionFile) lines.push(`- source session: ${record.sourceSessionFile}`);
   if (record.targetSessionFile) lines.push(`- child session: ${record.targetSessionFile}`);
   if (record.changedFiles.length > 0) lines.push(`- changed files: ${record.changedFiles.join(", ")}`);
   if (record.includedIgnoredFiles?.length) {

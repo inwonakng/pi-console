@@ -188,7 +188,7 @@ function M.open_float(ctx, output_id, resolved)
 	local buf = buffer_utils.create_scratch({
 		name = "pi://skill/" .. output_id .. "/" .. sanitize_buf_name_part(output.name),
 		filetype = output.filetype or "markdown",
-		lines = vim.split(text .. (ctx.resources and output.path and not resolved and "\n\n[f] Inspect the current owner skill file (above is recorded content)." or ""), "\n", { plain = true }),
+		lines = vim.split(text .. (ctx.resources and output.path and not resolved and "\n\n[f] Inspect the current skill file (above is recorded content)." or ""), "\n", { plain = true }),
 		treesitter = "markdown",
 	})
 
@@ -201,7 +201,7 @@ function M.open_float(ctx, output_id, resolved)
 		col = col,
 		style = "minimal",
 		border = "rounded",
-		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "Skill: " .. tostring(output.name or "unknown") .. (ctx.resources and (resolved and " (current owner file)" or " (recorded)") or "") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "Skill: " .. tostring(output.name or "unknown") .. (ctx.resources and (resolved and " (current file)" or " (recorded)") or "") .. " ",
 		title_pos = "left",
 	})
 
@@ -218,7 +218,7 @@ function M.open_float(ctx, output_id, resolved)
 				floats.close_window(win)
 				M.open_float(ctx, output_id, captured)
 			end)
-		end, { buffer = buf, silent = true, desc = "Inspect current owner skill file" })
+		end, { buffer = buf, silent = true, desc = "Inspect current skill file" })
 	end
 	local close_skill_win = function()
 		floats.close_window(win)

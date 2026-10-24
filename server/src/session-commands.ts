@@ -59,7 +59,7 @@ export type ControlGrant = Controller & { token: string; heartbeatMs: 5000; expi
 
 const identifier = (value: unknown): value is string => typeof value === "string" && /^[\w-]{1,128}$/.test(value);
 const exact = (value: Record<string, unknown>, keys: string[]): boolean => Object.keys(value).every((key) => keys.includes(key));
-function invalid(): never { throw new CommandError("invalid_command", "Invalid owner command or payload"); }
+function invalid(): never { throw new CommandError("invalid_command", "Invalid session command or payload"); }
 
 /** Pi expands templates/skills and dispatches registered slash commands. */
 export function validPromptText(value: unknown): value is string {

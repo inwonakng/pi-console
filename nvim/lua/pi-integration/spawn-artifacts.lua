@@ -79,7 +79,7 @@ local function artifact_choices(artifacts, transcript_first)
 end
 
 local function open_text(ctx, title, path, filetype, is_output, page, query, anchor)
-	assert(ctx.resources and page, "Owner artifact page required")
+	assert(ctx.resources and page, "Artifact page required")
 	local text = page.text
 	local state = ctx.state
 	floats.close_window(state.spawn_win)
@@ -128,14 +128,14 @@ local function open_text(ctx, title, path, filetype, is_output, page, query, anc
 			ctx.resources.open(vim.tbl_extend("force", query, { offset = offset, version = page.version }), title, filetype)
 		end
 		vim.keymap.set("n", "n", function()
-			if page.nextOffset and page.nextOffset ~= vim.NIL then navigate(page.nextOffset) else ctx.ui.notify("End of owner resource") end
-		end, { buffer = buf, desc = "Next owner resource chunk" })
-		vim.keymap.set("n", "p", function() navigate(0) end, { buffer = buf, desc = "First owner resource chunk" })
+			if page.nextOffset and page.nextOffset ~= vim.NIL then navigate(page.nextOffset) else ctx.ui.notify("End of document") end
+		end, { buffer = buf, desc = "Next document chunk" })
+		vim.keymap.set("n", "p", function() navigate(0) end, { buffer = buf, desc = "First document chunk" })
 		vim.keymap.set("n", "r", function()
 			local fresh = vim.tbl_extend("force", query, { offset = 0 }); fresh.version = nil
 			ctx.resources.open(fresh, title, filetype)
-		end, { buffer = buf, desc = "Reload owner resource" })
-		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, ctx.resources) end, { buffer = buf, desc = "Follow owner link" })
+		end, { buffer = buf, desc = "Reload document" })
+		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, ctx.resources) end, { buffer = buf, desc = "Follow link" })
 		if anchor then pcall(require("pi-integration.utils.markdown-links").jump_to_heading, anchor) end
 	end
 	local description = is_output and "spawn output" or "spawn artifact"

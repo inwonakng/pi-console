@@ -954,7 +954,7 @@ function M.summary_text(state, output_id)
 end
 
 local function codemode_output(output)
-	return output.owner_full_text or output.text or "", output.owner_full_text and "Owner-retained full output" or nil
+	return output.owner_full_text or output.text or "", output.owner_full_text and "Full output" or nil
 end
 
 local function highlight_codemode(buf, source_end, output_start, text)
@@ -1059,7 +1059,7 @@ function M.open_float(ctx, output_id, resolved)
 	local owner_review = ctx.resources and output.name == "workspace" and not pending and not output.is_error
 		and type(output.details) == "table" and type(output.details.id) == "string"
 	if workspace_review or owner_review then
-		vim.list_extend(content_lines, { "", workspace_review and "[d] Full diff (read-only snapshots)" or "[d] Owner workspace review" })
+		vim.list_extend(content_lines, { "", workspace_review and "[d] Full diff (read-only snapshots)" or "[d] Workspace review" })
 	end
 	local path = output_path(output)
 	local source_end, output_start
@@ -1114,7 +1114,7 @@ function M.open_float(ctx, output_id, resolved)
 	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 	if ctx.resources then
 		ctx.resources.qualify(buf, "tool-" .. tostring(output.name))
-		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, ctx.resources) end, { buffer = buf, desc = "Follow owner link" })
+		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, ctx.resources) end, { buffer = buf, desc = "Follow link" })
 	end
 
 	local title = permission and ("Permission · " .. permission.status_label)

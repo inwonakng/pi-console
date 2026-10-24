@@ -44,13 +44,13 @@ function M.new(options)
 		resource.bind(buf, path)
 	end
 	function resource.read(query, callback)
-		if not alive() then options.notify("Owner resource context changed; reopen the resource."); return end
+		if not alive() then options.notify("Session context changed; reopen the resource."); return end
 		viewer_sequence = viewer_sequence + 1
 		local ticket = viewer_sequence
 		local function fetch(payload)
 			options.request("resource.read", vim.tbl_extend("force", payload, { runtimeRevision = captured.revision }), function(ok, result)
 				if not alive() or ticket ~= viewer_sequence then return end
-				if not ok then options.notify(result.message or "Owner resource read failed"); return end
+				if not ok then options.notify(result.message or "Could not read resource"); return end
 				callback(result.data)
 			end)
 		end
@@ -58,22 +58,22 @@ function M.new(options)
 	end
 	-- Small complete documents preserve existing renderers. Large text uses explicit pages.
 	function resource.document(query, callback, on_error)
-		if not alive() then options.notify("Owner resource context changed; reopen the resource."); return end
+		if not alive() then options.notify("Session context changed; reopen the resource."); return end
 		viewer_sequence = viewer_sequence + 1
 		local ticket, parts, bytes = viewer_sequence, {}, 0
 		local function fetch(payload)
 			options.request("resource.read", vim.tbl_extend("force", payload, { runtimeRevision = captured.revision }), function(ok, result)
 				if not alive() or ticket ~= viewer_sequence then return end
 				if not ok then
-					if on_error then on_error(result.message or "Owner resource read failed")
-					else options.notify(result.message or "Owner resource read failed") end
+					if on_error then on_error(result.message or "Could not read resource")
+					else options.notify(result.message or "Could not read resource") end
 					return
 				end
 				local page = result.data
 				bytes = bytes + #page.text
 				if bytes > MAX_VIEW_BYTES then
 					options.notify("Document exceeds the 4 MiB rendered-view limit; opening paged text instead.")
-					resource.open(query, "Large owner document", "text")
+					resource.open(query, "Large document", "text")
 					return
 				end
 				table.insert(parts, page.text)
@@ -97,13 +97,13 @@ function M.new(options)
 	end
 	function resource.follow(destination, base)
 		resource.select()
-		if not alive() then options.notify("Owner resource context changed; reopen the resource."); return true end
+		if not alive() then options.notify("Session context changed; reopen the resource."); return true end
 		local scheme = destination:match("^(%a[%w+.-]*):")
 		if scheme and scheme ~= "file" then
 			if scheme == "https" or scheme == "http" or scheme == "mailto" or scheme == "zotero" then
 				local _, err = vim.ui.open(destination)
 				if err then options.notify(tostring(err)) end
-			else options.notify("Owner URI scheme is unavailable: " .. scheme) end
+			else options.notify("Unsupported link scheme: " .. scheme) end
 			return true
 		end
 		if destination:sub(1, 2) == "//" then
@@ -113,7 +113,7 @@ function M.new(options)
 		end
 		if scheme == "file" then
 			-- Only an empty authority is a path on this owner. Never invoke the OS file opener.
-			if not destination:match("^file:///") then options.notify("Owner file URI authority is unavailable."); return true end
+			if not destination:match("^file:///") then options.notify("File links with a host name are not supported."); return true end
 			destination = destination:sub(8)
 		end
 		local path, anchor = destination:match("^([^#]*)#(.*)$")
@@ -122,7 +122,7 @@ function M.new(options)
 		if path == "" then return false end
 		if base and path:sub(1, 1) ~= "/" then path = (base:match("^(.*)/[^/]*$") or "") .. "/" .. path end
 		path = vim.fs.normalize(path, { expand_env = false })
-		resource.open({ kind = "file", path = path }, "Owner file " .. path, M.filetype(path), anchor)
+		resource.open({ kind = "file", path = path }, "File " .. path, M.filetype(path), anchor)
 		return true
 	end
 	return resource
@@ -150,14 +150,14 @@ function M.edit(options, resource, query, title, filetype, anchor)
 				version, resource_id = receipt.result.resourceVersion, receipt.result.resourceId
 				if vim.api.nvim_buf_is_valid(buf) and contents() == submitted then vim.bo[buf].modified = false end
 				save_id = nil
-				options.notify("Owner file saved. Later local edits remain unsaved.")
+				options.notify("Workspace file saved. Later local edits remain unsaved.")
 			elseif receipt.status == "failed" then
 				save_id = nil
 			end
 		end
 		local function lookup()
 			if not save_id then return end
-			if not alive() then options.notify("Old owner context; inspect the original command via :PiLogs / :PiDrafts."); return end
+			if not alive() then options.notify("Session context changed; inspect the original command via :PiLogs / :PiDrafts."); return end
 			options.request("command.status", { commandId = save_id, serviceEpoch = captured.epoch }, function(ok, receipt)
 				if not alive() then return end
 				if ok then status(receipt) else options.notify("Save status unavailable; draft and original ID retained.") end
@@ -165,7 +165,7 @@ function M.edit(options, resource, query, title, filetype, anchor)
 		end
 		local function save()
 			if save_id then options.notify("Unresolved save; checking the original request only."); lookup(); return end
-			if not alive() then options.notify("Old owner context cannot save; local draft retained."); return end
+			if not alive() then options.notify("Session context changed; cannot save. Local draft retained."); return end
 			submitted = contents()
 			save_id = options.command("workspace.review.save", { resourceId = resource_id, expectedVersion = version, text = submitted }, function(ok, receipt)
 				if not alive() then return end
@@ -187,13 +187,13 @@ function M.edit(options, resource, query, title, filetype, anchor)
 		vim.b[buf].pi_review_path = page.reviewPath
 		vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel
 		resource.bind(buf, page.path)
-		vim.keymap.set("n", "gS", lookup, { buffer = buf, desc = "Look up original owner save" })
+		vim.keymap.set("n", "gS", lookup, { buffer = buf, desc = "Look up original save" })
 		vim.keymap.set("n", "gO", function()
 			-- Separate owner view: no refresh ever replaces the user's draft.
-			resource.open_readonly(query, "Current owner file " .. page.path, filetype)
-		end, { buffer = buf, desc = "Inspect current owner content (preserve draft)" })
+			resource.open_readonly(query, "Saved file " .. page.path, filetype)
+		end, { buffer = buf, desc = "Inspect saved file content (preserve draft)" })
 		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, resource) end,
-			{ buffer = buf, desc = "Follow owner link" })
+			{ buffer = buf, desc = "Follow link" })
 		if anchor then pcall(require("pi-integration.utils.markdown-links").jump_to_heading, anchor) end
 	end)
 end

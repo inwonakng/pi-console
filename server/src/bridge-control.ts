@@ -49,7 +49,7 @@ export class BridgeControl {
       && typeof owner.controller.grantId === "string" && typeof owner.controller.label === "string"
       ? owner.controller as Controller : undefined;
     if (controller?.grantId === attachment.controller?.grantId) return;
-    this.lose(controller ? `Control taken over by ${controller.label}` : "Owner revoked or expired the control grant");
+    this.lose(controller ? `Control taken over by ${controller.label}` : "Control was revoked or expired");
     attachment.controller = controller;
     if (controller?.attachmentId !== attachment.attachmentId) return;
     const lease: Lease = { attachment, grantId: controller.grantId, pending: false };
@@ -87,7 +87,7 @@ export class BridgeControl {
           || typeof grant.token !== "string" || !grant.token || typeof grant.heartbeatMs !== "number"
           || !Number.isFinite(grant.heartbeatMs) || grant.heartbeatMs <= 0 || typeof grant.expiresAfterMs !== "number"
           || !Number.isFinite(grant.expiresAfterMs) || grant.expiresAfterMs <= grant.heartbeatMs) {
-          this.lose("Owner no longer supplies this attachment's control grant"); return;
+          this.lose("Control is no longer available for this connection"); return;
         }
         lease.grant = grant as ControlGrant;
         // Renew immediately: a grant lookup alone does not extend its deadline.
@@ -102,7 +102,7 @@ export class BridgeControl {
       if (this.lease !== lease) return;
       const code = object(error) ? error.code : undefined;
       if (code === "control_revoked" || code === "control_required" || code === "attachment_closed") {
-        this.lose(error instanceof Error ? error.message : "Owner rejected the control grant");
+        this.lose(error instanceof Error ? error.message : "Service rejected the control grant");
       }
       // Transient failures retain the existing deadline; never reacquire control.
     } finally {

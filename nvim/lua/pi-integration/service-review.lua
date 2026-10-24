@@ -35,7 +35,7 @@ function M.open(options, workspace_id, pinned)
 		if not alive() then options.notify("Review context changed; reopen it. Local drafts are unchanged."); return end
 		options.request("resource.read", vim.tbl_extend("force", payload, { runtimeRevision = captured.revision }), function(ok, result)
 			if not alive() then return end
-			if not ok then options.notify(result.message or "Owner review unavailable"); return end
+			if not ok then options.notify(result.message or "Workspace review unavailable"); return end
 			callback(result.data)
 		end)
 	end
@@ -59,7 +59,7 @@ function M.open(options, workspace_id, pinned)
 			for _, candidate in ipairs(vim.api.nvim_list_bufs()) do
 				if vim.bo[candidate].modified and vim.b[candidate].pi_review_path == path
 					and vim.b[candidate].pi_review_host == options.owner and vim.b[candidate].pi_review_session == captured.session then
-					options.notify("A local review buffer has unsaved edits for this file; preserve/close it before restoring owner content."); return true
+					options.notify("A local review buffer has unsaved edits for this file; preserve/close it before restoring the workspace file."); return true
 				end
 			end
 			return false
@@ -76,7 +76,7 @@ function M.open(options, workspace_id, pinned)
 				if receipt.status == "completed" or receipt.status == "failed" then
 					action.pending = nil
 					action.used = receipt.status == "completed"
-					if receipt.status == "completed" then options.notify("Owner review action completed. Reopen the review for fresh versions; local drafts are unchanged. Restore recovery is in :PiLogs.") end
+					if receipt.status == "completed" then options.notify("Review action completed. Reopen the review for fresh versions; local drafts are unchanged. Restore recovery is in :PiLogs.") end
 				end
 			end
 			action.pending = options.command("workspace.review." .. operation, { actionId = reference, confirmed = operation == "restore" and true or nil }, function(ok, receipt)
@@ -86,7 +86,7 @@ function M.open(options, workspace_id, pinned)
 			if action.pending then vim.b[buf].pi_review_command_id, vim.b[buf].pi_review_command_epoch = action.pending, captured.epoch end
 		end
 		if operation == "restore" then
-			vim.ui.select({ "Restore baseline", "Cancel" }, { prompt = "Restore " .. path .. " on owner? Restores baseline bytes/index, or removes an added file while keeping its index entry. Original bytes remain in the receipt; local drafts stay unchanged." }, function(choice)
+			vim.ui.select({ "Restore baseline", "Cancel" }, { prompt = "Restore " .. path .. " in the workspace? Restores baseline bytes/index, or removes an added file while keeping its index entry. Original bytes remain in the receipt; local drafts stay unchanged." }, function(choice)
 				if choice == "Restore baseline" then send() end
 			end)
 		else send() end
@@ -104,7 +104,7 @@ function M.open(options, workspace_id, pinned)
 					version, resource_id = receipt.result.resourceVersion, receipt.result.resourceId
 					if vim.api.nvim_buf_is_valid(buf) and contents(buf) == submitted then vim.bo[buf].modified = false end
 					save_id = nil
-					options.notify("Owner edit saved. Later local edits remain unsaved.")
+					options.notify("Workspace file saved. Later local edits remain unsaved.")
 				elseif receipt.status == "failed" then
 					save_id = nil
 				end
@@ -147,23 +147,23 @@ function M.open(options, workspace_id, pinned)
 				query(vim.tbl_extend("force", payload, { resourceId = resource_id }), function(latest)
 					readonly(options, scratch_name("current/" .. path), latest.after, resources.filetype(path))
 				end)
-			end, { buffer = buf, desc = "Inspect current owner content (preserve draft)" })
+			end, { buffer = buf, desc = "Inspect saved file content (preserve draft)" })
 			vim.keymap.set("n", "gS", function() if not lookup_action(buf) then lookup() end end, { buffer = buf, desc = "Look up original review command" })
 			if present(page.actionId) and not page.historical then
 				for key, operation in pairs({ s = "stage", u = "unstage", X = "restore" }) do
 					vim.keymap.set("n", key, function()
 						if save_id then options.notify("Resolve the original save before an index/restore action."); lookup(); return end
 						mutate(buf, page.actionId, operation, path)
-					end, { buffer = buf, desc = "Owner review " .. operation })
+					end, { buffer = buf, desc = "Workspace review " .. operation })
 				end
 			end
-			vim.keymap.set("n", "gD", function() readonly(options, scratch_name("patch/" .. path), page.diff, "diff") end, { buffer = buf, desc = "Inspect owner diff" })
+			vim.keymap.set("n", "gD", function() readonly(options, scratch_name("patch/" .. path), page.diff, "diff") end, { buffer = buf, desc = "Inspect workspace diff" })
 			if present(page.unsupported) then options.notify(page.unsupported) end
 			if present(page.actionUnsupported) then options.notify(page.actionUnsupported) end
 		end)
 	end
 	query({ kind = "workspaceReview", workspaceId = workspace_id, before = pinned and pinned.before, after = pinned and pinned.after }, function(review)
-		local output = { "# Owner workspace review", resource.label,
+		local output = { "# Workspace review", resource.label,
 			review.historical and "Historical (read-only)" or "Current (text :write requires control)", "", review.notice,
 			review.partial and "Partial integration: comparison is the intended Git merge, not a captured post-failure tree." or "", "" }
 		local entries = {}
@@ -175,17 +175,17 @@ function M.open(options, workspace_id, pinned)
 		for _, path in ipairs(review.ignoredFiles or {}) do table.insert(output, path); if not review.historical then entries[#output] = path end end
 		table.insert(output, ""); table.insert(output, "Other ignored files not preserved by workspace cleanup:")
 		for _, path in ipairs(review.unpreservedFiles or {}) do table.insert(output, path) end
-		table.insert(output, ""); table.insert(output, "Enter opens a file diff: s stages, u unstages, X confirms baseline restore. S stages reviewed working files; U resets the entire owner index to HEAD. r opens a fresh review without replacing drafts.")
-		table.insert(output, ":write saves only text. gO inspects owner content; gS looks up the original command; gD shows the patch. = denotes an index-only difference against HEAD.")
+		table.insert(output, ""); table.insert(output, "Enter opens a file diff: s stages, u unstages, X confirms baseline restore. S stages reviewed working files; U resets the entire workspace index to HEAD. r opens a fresh review without replacing drafts.")
+		table.insert(output, ":write saves only text. gO inspects saved file content; gS looks up the original command; gD shows the patch. = denotes an index-only difference against HEAD.")
 		if present(review.stageUnsupported) then table.insert(output, "Stage all: " .. review.stageUnsupported) end
 		if present(review.unstageUnsupported) then table.insert(output, "Unstage all: " .. review.unstageUnsupported) end
 		local buf = readonly(options, scratch_name("summary"), table.concat(output, "\n"), "markdown")
 		require("pi-integration.workspace-summary").highlight(buf)
-		vim.keymap.set("n", "<CR>", function() local path = entries[vim.api.nvim_win_get_cursor(0)[1]]; if path then show_file(review, path) end end, { buffer = buf, desc = "Open owner review file" })
+		vim.keymap.set("n", "<CR>", function() local path = entries[vim.api.nvim_win_get_cursor(0)[1]]; if path then show_file(review, path) end end, { buffer = buf, desc = "Open workspace review file" })
 		vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel
 		if not review.historical then
-			vim.keymap.set("n", "S", function() mutate(buf, review.stageId, "stage") end, { buffer = buf, desc = "Stage all reviewed owner files" })
-			vim.keymap.set("n", "U", function() mutate(buf, review.unstageId, "unstage") end, { buffer = buf, desc = "Reset entire owner index to HEAD" })
+			vim.keymap.set("n", "S", function() mutate(buf, review.stageId, "stage") end, { buffer = buf, desc = "Stage all reviewed workspace files" })
+			vim.keymap.set("n", "U", function() mutate(buf, review.unstageId, "unstage") end, { buffer = buf, desc = "Reset entire workspace index to HEAD" })
 		end
 		vim.keymap.set("n", "gS", function() lookup_action(buf) end, { buffer = buf, desc = "Look up original review action" })
 		vim.keymap.set("n", "r", function()

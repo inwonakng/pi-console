@@ -154,14 +154,14 @@ export class ServiceSupervisor {
     return this.config.platform === "darwin" ? /^\s*pid = \d+/m.test(stdout) : !["inactive", "failed"].includes(stdout.trim());
   }
   async assertStopped(): Promise<void> {
-    if (await this.running()) throw new Error("Supervisor startup/shutdown is in progress without a reachable owner; wait and retry explicitly. No service was interrupted.");
+    if (await this.running()) throw new Error("Supervisor startup/shutdown is in progress without a reachable service; wait and retry explicitly. No service was interrupted.");
   }
   async waitStopped(): Promise<void> {
     for (let attempt = 0; attempt < 600; attempt++) {
       if (!await this.running()) return;
       await new Promise((done) => setTimeout(done, 100));
     }
-    throw new Error("Supervisor still tracks the departing owner; refusing teardown/replacement");
+    throw new Error("Supervisor still tracks the departing service process; refusing teardown/replacement");
   }
   /** Change listener arguments only after guarded shutdown, preserving the captured environment. */
   async configurePort(port?: number): Promise<void> {

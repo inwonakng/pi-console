@@ -101,7 +101,7 @@ local function follow_link(cwd, resources)
 		if anchor then jump_to_heading(percent_decode(anchor)); return true end
 		return true
 	end
-	if vim.api.nvim_buf_get_name(0):match("^pi://") then error("Owner link unavailable: no resource context", 0) end
+	if vim.api.nvim_buf_get_name(0):match("^pi://") then error("Link unavailable: no resource context", 0) end
 	if destination:match("^%a[%w+.-]*:") or destination:match("^//") then
 		local _, err = vim.ui.open(destination:match("^//") and "https:" .. destination or destination)
 		if err then

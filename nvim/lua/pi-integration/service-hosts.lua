@@ -168,7 +168,7 @@ local function connect(host)
 				if ok and result.hostId == host.host_id then
 					cache(host, result.sessions)
 					M.maybe_prompt_archive(host.host_id)
-				else host.error = result.message or "Invalid owner summaries"; host.retry_at = vim.uv.now() + 30000; stop(host) end
+				else host.error = result.message or "Invalid session summaries"; host.retry_at = vim.uv.now() + 30000; stop(host) end
 			end)
 		elseif record.type == "summaries" then
 			if record.result.hostId == host.host_id and record.result.channel == channel then cache(host, record.result.sessions) end
@@ -343,7 +343,7 @@ function M.open(entry, in_place)
 	end
 	local connection = host.connection
 	local function select(resume)
-		if not host.connected or host.connection ~= connection then notify("Owner connection changed; select the session again"); return end
+		if not host.connected or host.connection ~= connection then notify("Host connection changed; select the session again"); return end
 		local frontend = require("pi-integration.service-frontend")
 		if in_place == nil then in_place = frontend.config.role == "conversation" end
 		if in_place then frontend.select_owner(M.target(host), entry.session_id, resume); return end
@@ -419,7 +419,7 @@ function M.saved_operations()
 	end }, function(item)
 		if not item then return end
 		local host = M.find(item.host_id)
-		if not host or not host.connected then notify("Connect to that owner before looking up its outcome"); return end
+		if not host or not host.connected then notify("Connect to that host before looking up its outcome"); return end
 		host.connection.request("host.status", { serviceEpoch = item.envelope.serviceEpoch, commandId = item.envelope.id }, function(ok, receipt)
 			if ok then
 				store.update("saved-requests", vim.empty_dict(), function(records)
@@ -429,7 +429,7 @@ function M.saved_operations()
 				end)
 				require("pi-integration.logs").notify(item.envelope.operation .. ": " .. outcome_label(receipt), vim.log.levels.INFO, { title = "Saved-session outcome" })
 				if receipt.status == "unknown" or receipt.status == "uncertain" then
-					vim.ui.select({ "Allow a new saved-session request", "Keep protected" }, { prompt = "Original work may have partially or fully run. Inspect owner session/workspace state first. This does not replay it." }, function(choice)
+					vim.ui.select({ "Allow a new saved-session request", "Keep protected" }, { prompt = "Original work may have partially or fully run. Inspect the session/workspace state on that host first. This does not replay it." }, function(choice)
 						if choice ~= "Allow a new saved-session request" then return end
 						local saved, err = store.update("saved-requests", vim.empty_dict(), function(records)
 							local entry = records[item.host_id .. "/" .. item.envelope.id]
@@ -458,7 +458,7 @@ local function saved_actions(host, rows, operation, archived, done)
 	end
 	local function confirm()
 		if not current() then
-			for _, item in ipairs(allowed) do failed(item.row, "Owner changed; not sent") end
+			for _, item in ipairs(allowed) do failed(item.row, "Host connection changed; not sent") end
 			finish(); return
 		end
 		if #allowed == 0 then finish(); return end
@@ -467,14 +467,14 @@ local function saved_actions(host, rows, operation, archived, done)
 			table.insert(lines, session_title(item.row) .. (item.row.cwd and (" | " .. item.row.cwd) or ""))
 			local preview = item.preview
 			if operation == "host.delete" then
-				table.insert(lines, preview.mode == "trash" and "Move to owner trash" or "PERMANENT deletion")
+				table.insert(lines, preview.mode == "trash" and "Move to trash on this host" or "PERMANENT deletion")
 				if #(preview.workspaces or {}) > 0 then
 					table.insert(lines, "Remaining worktrees will be removed and unintegrated changes discarded; existing destination changes will not be reverted.")
 					for _, workspace in ipairs(preview.workspaces) do
 						table.insert(lines, "Workspace: " .. workspace.worktreePath .. (workspace.retained and "" or " (retry incomplete cleanup)"))
 						table.insert(lines, "Recovery patch: " .. workspace.resultPatchPath)
 					end
-					table.insert(lines, "Recovery patches are prepared after confirmation. Ignored untracked files, including copied ignored files, are NOT in patches and will be removed with worktrees. Patches and workspace records are kept on the owner.")
+					table.insert(lines, "Recovery patches are prepared after confirmation. Ignored untracked files, including copied ignored files, are NOT in patches and will be removed with worktrees. Patches and workspace records are kept on this host.")
 				end
 			end
 		end
@@ -484,7 +484,7 @@ local function saved_actions(host, rows, operation, archived, done)
 				local item = allowed[index]
 				if not item then finish(); return end
 				if not current() then
-					for remaining = index, #allowed do failed(allowed[remaining].row, "Owner changed; not sent") end
+					for remaining = index, #allowed do failed(allowed[remaining].row, "Host connection changed; not sent") end
 					finish(); return
 				end
 				local payload = { sessionId = item.row.id, expectedVersion = item.preview.version, confirmed = true }
@@ -502,8 +502,8 @@ local function saved_actions(host, rows, operation, archived, done)
 		local row = rows[index]
 		if not row then confirm(); return end
 		if not current() then
-			for _, item in ipairs(allowed) do failed(item.row, "Owner changed; not sent") end
-			for remaining = index, #rows do failed(rows[remaining], "Owner changed; not sent") end
+			for _, item in ipairs(allowed) do failed(item.row, "Host connection changed; not sent") end
+			for remaining = index, #rows do failed(rows[remaining], "Host connection changed; not sent") end
 			finish(); return
 		end
 		connection.request("host.saved", { serviceEpoch = epoch, sessionId = row.id }, function(ok, result)
@@ -544,7 +544,7 @@ function M.history_picker(identity, opts)
 						local in_place
 						if #chosen > 1 then in_place = false end
 						for _, row in ipairs(chosen) do
-							if not current() then notify("Owner changed; remaining sessions were not opened"); return end
+							if not current() then notify("Host connection changed; remaining sessions were not opened"); return end
 							local ok, err = M.open({ host_id = host.host_id, session_id = row.id,
 								status = row.live and "Idle" or "Inactive" }, in_place)
 							if not ok then notify(err) end
@@ -659,7 +659,7 @@ function M.new_in_project(entry)
 	local host = M.find(entry.host_id or entry.frontend_host_id)
 	if not host or not host.connected then return nil, "Host disconnected" end
 	local cwd = entry.directory or entry.cwd
-	if type(cwd) ~= "string" or cwd == "" then return nil, "Choose an owner directory in this frontend first" end
+	if type(cwd) ~= "string" or cwd == "" then return nil, "Choose a directory on the selected host first" end
 	local opened, err = require("pi-integration.backends.tmux").launch_service(
 		require("pi-integration.service-frontend").config.launcher, M.target(host), nil, cwd)
 	return opened, err
@@ -690,7 +690,7 @@ function M.management_operations()
 	end)
 end
 function M.manage(entry, action, argument)
-	if not entry.session_id then return nil, "Frontend has no owner session yet" end
+	if not entry.session_id then return nil, "Frontend has no session yet" end
 	if entry.status == "Inactive" then return nil, "Session is inactive" end
 	local host = M.find(entry.host_id)
 	if not host or not host.connected then return nil, "Host disconnected; mutations disabled" end

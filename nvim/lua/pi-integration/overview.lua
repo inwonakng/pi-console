@@ -408,7 +408,7 @@ function M.open(config)
 		control_selected("toggle_notifications")
 	end, "Toggle selected conversation notifications")
 	map("<leader>s", function() require("pi-integration.service-hosts").history_picker() end, "Pick session")
-	map("<leader>pn", function() require("pi-integration.service-hosts").new_conversation() end, "New conversation with chosen owner/project")
+	map("<leader>pn", function() require("pi-integration.service-hosts").new_conversation() end, "New conversation with chosen host/project")
 	map("<leader>pN", function()
 		local entry = require_selected()
 		if entry then report(require("pi-integration.service-hosts").new_in_project(entry)) end

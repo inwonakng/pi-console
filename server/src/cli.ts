@@ -75,7 +75,7 @@ async function main(): Promise<void> {
   const requireNoClaim = async (): Promise<void> => {
     try { await lstat(join(root, "owner.lock")); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-    throw new Error("Owner claim remains without a reachable service. Inspect startup/cleanup and explicitly reconcile if appropriate; no supervisor teardown or automatic recovery occurred.");
+    throw new Error("Service lock remains without a reachable service. Inspect startup/cleanup and explicitly reconcile if appropriate; no supervisor teardown or automatic recovery occurred.");
   };
   const privateLog = async () => {
     const file = await open(join(root, "service.log"), constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
@@ -153,7 +153,7 @@ async function main(): Promise<void> {
             }
             if (!view) { closed = true; break; }
             view.client.close();
-            if (view.hello.serviceEpoch !== existing.hello.serviceEpoch) throw new Error("Owner changed during shutdown; refusing further management");
+            if (view.hello.serviceEpoch !== existing.hello.serviceEpoch) throw new Error("Service instance changed during shutdown; refusing further management");
             await delay(100);
           }
           if (!closed) throw new Error("Old service endpoint remains; refusing supervisor teardown/replacement");

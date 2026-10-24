@@ -86,7 +86,7 @@ end
 local function owner_key() return M.config.expected_host or M.config.service_remote or M.config.service_root or "local" end
 local function owner_label(identity, remote, root)
 	local host = identity and require("pi-integration.service-hosts").find(identity)
-	return host and host.alias or remote or root or "Local owner"
+	return host and host.alias or remote or root or "Local host"
 end
 local function current_owner_label()
 	return owner_label(M.config.expected_host, M.config.service_remote, M.config.service_root)
@@ -148,8 +148,8 @@ local function operation_summary(envelope, receipt)
 		{ "resourcePath", "File" }, { "submittedText", "Submitted text" },
 		{ "queueItemText", "Queue text" }, { "editorText", "Recovered editor text" },
 	})
-	if result and result.sessionId then table.insert(lines, "Session available on owner; select it in :PiSessions.") end
-	if result and result.resourceId then table.insert(lines, "Owner file version saved.") end
+	if result and result.sessionId then table.insert(lines, "Session available; select it in :PiSessions.") end
+	if result and result.resourceId then table.insert(lines, "File version saved.") end
 	for _, kind in ipairs({ "steering", "followUp" }) do
 		for _, value in ipairs(result and result.cleared and result.cleared[kind] or {}) do
 			fields(lines, { text = value }, { { "text", "Cleared " .. kind .. " text" } })
@@ -1040,7 +1040,7 @@ connect = function()
 				notify("Incompatible service handshake; no fallback.", vim.log.levels.ERROR); M.detach(); return
 			end
 			if M.config.expected_host and result.hostId ~= M.config.expected_host then
-				notify("Owner identity changed; confirm in Hosts before selecting."); M.detach(); return
+				notify("Host identity changed; confirm in Hosts before selecting."); M.detach(); return
 			end
 			hello = result
 			M.config.expected_host = result.hostId
@@ -1182,7 +1182,7 @@ function M.host_disconnected(identity, target)
 	if endpoint_match or identity and M.config.expected_host == identity and not (source and source.connected) then M.detach() end
 end
 function M.select_owner(target, id, resume, cwd)
-	assert(M.config.role == "conversation", "Only conversation frontends can select an owner")
+	assert(M.config.role == "conversation", "Only conversation frontends can select a host")
 	local host_changed = target.expected_host ~= M.config.expected_host or target.service_root ~= M.config.service_root
 		or target.service_remote ~= M.config.service_remote
 	local settings = not host_changed and not session_id and not id and pending_settings or {}
@@ -1446,7 +1446,7 @@ local function dialog_preview(value, lines, label)
 	end
 end
 local function effect_summary(effect)
-	local lines = { "# Owner offer", "" }
+	local lines = { "# Offer", "" }
 	fields(lines, effect, { { "type", "Type" }, { "text", "Editor text" }, { "message", "Message" }, { "level", "Level" }, { "key", "Signal" } })
 	if effect.type == "extension_signal" then
 		if effect.key == "pi-desktop-notification" or effect.key == "pi-spawn-notification" then
@@ -1610,7 +1610,7 @@ function M.change_cwd(path)
 		request("host.directories", { serviceEpoch = epoch, path = path, offset = 0 }, function(ok, page)
 			if not hello or hello.serviceEpoch ~= epoch or not same_selection(captured) then return end
 			if ok then M.select_owner(M.config, nil, false, page.path)
-			else notify(page.message or "Owner directory unavailable", vim.log.levels.WARN) end
+			else notify(page.message or "Directory unavailable", vim.log.levels.WARN) end
 		end)
 		return
 	end
@@ -1625,7 +1625,7 @@ function M.change_cwd(path)
 end
 function M.restart()
 	local captured, label = stamp(), "Restart session"
-	vim.ui.select({ label, "Cancel" }, { prompt = label .. " on owner? Active work is interrupted; history/workspaces and recovery text remain." }, function(choice)
+	vim.ui.select({ label, "Cancel" }, { prompt = label .. "? Active work is interrupted; history/workspaces and recovery text remain." }, function(choice)
 		if choice == label then command("session.restart", { confirmed = true }, nil, captured) end
 	end)
 end
@@ -1692,7 +1692,7 @@ local function setting(operation, payload, captured)
 end
 local function pick_setting(operation, values, label)
 	local captured = stamp()
-	vim.ui.select(values, { prompt = label .. (session_id and " (owner)" or " (pending)") }, function(value)
+	vim.ui.select(values, { prompt = label .. (session_id and "" or " (pending)") }, function(value)
 		if value then setting(operation, { mode = value }, captured) end
 	end)
 end
@@ -1766,7 +1766,7 @@ function M.pick_model()
 	read(function(data, captured)
 		if not data then return end
 		if #data.models == 0 then notify("Pi found no available models on this host.", vim.log.levels.WARN); return end
-		vim.ui.select(data.models, { prompt = "Owner model", format_item = function(model) return model.provider .. "/" .. model.id end }, function(model)
+		vim.ui.select(data.models, { prompt = "Model", format_item = function(model) return model.provider .. "/" .. model.id end }, function(model)
 			if model then setting("model.set", { provider = model.provider, modelId = model.id }, captured) end
 		end)
 	end)
@@ -1791,7 +1791,7 @@ function M.pick_thinking()
 		return
 	end
 	owner_read("thinking", function(data, captured)
-		vim.ui.select(data.levels, { prompt = "Owner thinking level" }, function(level)
+		vim.ui.select(data.levels, { prompt = "Thinking level" }, function(level)
 			if level then setting("thinking.set", { level = level }, captured) end
 		end)
 	end)
@@ -1914,7 +1914,7 @@ function M.new_side()
 		if focus then focus:release(); focus = nil end
 	end
 	vim.ui.select({ "New side conversation", "Cancel" }, {
-		prompt = "Stop and replace the side conversation on owner?",
+		prompt = "Stop and replace the side conversation?",
 		on_create = function(event)
 			if side_view.visible() then focus = require("pi-integration.floats").focus_group({ event.winid }) end
 		end,
@@ -1973,9 +1973,9 @@ end
 function M.retitle() command("title.generate", {}) end
 function M.pick_workspace()
 	local captured = stamp()
-	vim.ui.select({ "Inspect state", "Enter", "Integrate and return", "Discard" }, { prompt = "Workspace on owner (confirmation remains owner-side)" }, function(action)
+	vim.ui.select({ "Inspect state", "Enter", "Integrate and return", "Discard" }, { prompt = "Workspace" }, function(action)
 		if action == "Inspect state" then
-			local lines = { "# Owner workspace", "" }
+			local lines = { "# Workspace", "" }
 			fields(lines, snapshot and snapshot.workspace, { { "kind", "Kind" }, { "lifecycle", "Status" },
 				{ "branch", "Branch" }, { "cwd", "Current directory" }, { "path", "Workspace path" },
 				{ "directory", "Destination directory" }, { "project", "Project" },
@@ -2008,8 +2008,8 @@ function M.pick_workspace_reviews()
 	local captured = stamp()
 	request("resource.read", { kind = "workspaceReviews", runtimeRevision = captured.revision }, function(ok, result)
 		if not job or not same_context(captured) then return end
-		if not ok then notify(result.message or "Owner workspace reviews unavailable"); return end
-		vim.ui.select(result.data.entries or {}, { prompt = "Owner workspace reviews", format_item = function(item)
+		if not ok then notify(result.message or "Workspace reviews unavailable"); return end
+		vim.ui.select(result.data.entries or {}, { prompt = "Workspace reviews", format_item = function(item)
 			local label = item.label
 			if not label or label == item.id or label == "task-" .. item.id:sub(-8) then label = "Task workspace" end
 			return label .. " (" .. tostring(item.lifecycle) .. ")"
@@ -2020,7 +2020,7 @@ function M.pick_workspace_reviews()
 end
 function M.show_usage()
 	local function inspect() owner_read("stats", function(data)
-		local lines = { "# Owner usage", "" }
+		local lines = { "# Usage", "" }
 		fields(lines, data, { { "userMessages", "User messages" }, { "assistantMessages", "Assistant messages" },
 			{ "toolCalls", "Tool calls" }, { "toolResults", "Tool results" }, { "totalMessages", "Total messages" },
 			{ "sessionFile", "Session file" }, { "cost", "Cost" } })
@@ -2061,7 +2061,7 @@ tree_ctx.tree = {
 		local captured = stamp()
 		request("session.read", { kind = "entries", runtimeRevision = captured.revision }, function(ok, result)
 			if not job or not same_context(captured) then done(nil); return end
-			if not ok then notify(result.message or "Owner history unavailable", vim.log.levels.WARN); done(nil); return end
+			if not ok then notify(result.message or "History unavailable", vim.log.levels.WARN); done(nil); return end
 			done(result.data, captured)
 		end)
 	end,
@@ -2086,7 +2086,7 @@ tree_ctx.tree = {
 		history_command("history.clone", { entryId = id }, captured, function(result)
 			if not result.sessionId then return end
 			local opened, err = require("pi-integration.backends.tmux").launch_service(M.config.launcher, M.config, result.sessionId, nil, true)
-			if not opened then notify((err or "Could not open clone") .. "\nClone saved on owner; select it in :PiSessions.", vim.log.levels.ERROR) end
+			if not opened then notify((err or "Could not open clone") .. "\nClone saved; select it in :PiSessions.", vim.log.levels.ERROR) end
 		end)
 	end,
 	delete = function(id, captured, position)
@@ -2131,7 +2131,7 @@ function M.get_commands(callback)
 			callback({})
 			return
 		end
-		if not ok then callback({}, result.message or "Could not read owner commands"); return end
+		if not ok then callback({}, result.message or "Could not read session commands"); return end
 		callback(result.data.commands or {}, nil, captured)
 	end)
 end
@@ -2150,7 +2150,7 @@ function M.pick_command()
 		}, function(choice)
 			if not choice then return end
 			if not M.command_context_current(captured) then
-				notify("Owner context changed; select a command again.", vim.log.levels.WARN)
+				notify("Session context changed; select a command again.", vim.log.levels.WARN)
 				return
 			end
 			M.show_input()
@@ -2164,7 +2164,7 @@ function M.refresh_messages() refresh(true) end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; Ctrl+Enter saves; editing pauses dispatch while connected)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle (generate session title)\n:PiLogs / <leader>pl (notifications, action outcomes and recovery text; Enter inspects details)\n:PiHostRequest (unresolved session creation/resume)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (close frontend; conversation keeps running)\n:PiKill / <leader>pk (confirm kill conversation and close; preserves history and local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history use typed owner operations.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the original directory. First prompt creates the session.\n:PiRefreshOptions: refresh cached pre-start models, defaults, and commands (otherwise expire after 60 seconds).\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nSlash commands run on the owner through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; Ctrl+Enter saves; editing pauses dispatch while connected)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (workspace diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects saved file content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle (generate session title)\n:PiLogs / <leader>pl (notifications, action outcomes and recovery text; Enter inspects details)\n:PiHostRequest (unresolved session creation/resume)\n:PiSessions (archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (close frontend; conversation keeps running)\n:PiKill / <leader>pk (confirm kill conversation and close; preserves history and local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the session.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history apply to the attached session.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the original directory. First prompt creates the session.\n:PiRefreshOptions: refresh cached pre-start models, defaults, and commands (otherwise expire after 60 seconds).\n:PiTranscript: session history (all branches, read-only).\nTranscript Enter inspects thinking/tools/skills/artifacts and file links; @ completion uses the session directory.\nPaged text: n next / p first / r reload. Skill f reads the current skill file.\nSlash commands run on the session host through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()
@@ -2180,7 +2180,7 @@ function M.open_transcript_item()
 	else unavailable("This transcript action") end
 end
 function M.show_owner_transcript()
-	require("pi-integration.spawn-transcript").open({ state = state, ui = { notify = notify }, window = { parent = state.transcript_win }, resources = owner_resources() }, nil, "Owner history (all branches)", { kind = "history" })
+	require("pi-integration.spawn-transcript").open({ state = state, ui = { notify = notify }, window = { parent = state.transcript_win }, resources = owner_resources() }, nil, "History (all branches)", { kind = "history" })
 end
 function M.show_drafts()
 	local values = { { value = local_snapshot(), current = true } }

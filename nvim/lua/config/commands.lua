@@ -19,7 +19,7 @@ local function file_path(relative)
 		if resource or review_path or vim.b[buf].pi_review_host or vim.api.nvim_buf_get_name(buf):match("^pi://") then
 			local path = resource and resource.path or review_path
 			if type(path) ~= "string" or path == "" then
-				require("pi-integration.logs").notify("This owner buffer has no source path to copy.", vim.log.levels.WARN, { title = "pi-console" })
+				require("pi-integration.logs").notify("This buffer has no source path to copy.", vim.log.levels.WARN, { title = "pi-console" })
 				return nil
 			end
 			return path
@@ -81,7 +81,7 @@ end, { desc = "Pick a Pi slash command/template/skill" })
 
 vim.api.nvim_create_user_command("PiCd", function(opts)
 	require("pi-integration").change_cwd(opts.args ~= "" and opts.args or nil)
-end, { nargs = "?", desc = "Start a new conversation in an owner directory" })
+end, { nargs = "?", desc = "Start a new conversation in a directory on the selected host" })
 
 vim.api.nvim_create_user_command("PiRestart", function()
 	require("pi-integration").restart()

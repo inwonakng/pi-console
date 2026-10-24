@@ -23,7 +23,7 @@ type ActionReference = Binding & { action: { version: string; mode: "file" | "st
 type FileChange = { path: string; status: string; additions: number | null; deletions: number | null; staged?: boolean };
 
 function deny(message: string): never { throw new CommandError("resource_denied", message); }
-function conflict(): never { throw new CommandError("resource_conflict", "Owner resource changed; inspect current owner content. Your draft was not saved."); }
+function conflict(): never { throw new CommandError("resource_conflict", "Workspace changed; refresh the review. Your draft was not saved."); }
 function unavailable(message: string): never { throw new CommandError("resource_unavailable", message); }
 function limit(message: string): never { throw new CommandError("resource_limit", message); }
 function exact(value: unknown, keys: string[]): value is Record<string, unknown> { return object(value) && Object.keys(value).every((key) => keys.includes(key)); }
@@ -87,7 +87,7 @@ export class WorkspaceReviews {
     const expected = createHmac("sha256", this.secret).update(body).digest();
     if (extra || !signature || !/^[a-f0-9]{64}$/.test(signature) || !timingSafeEqual(expected, Buffer.from(signature, "hex"))) deny("Review resource substitution refused");
     const decoded: unknown = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-    if (!object(decoded) || decoded.scope !== this.scope()) throw new CommandError("stale_runtime", "Review belongs to an old owner/session/runtime context");
+    if (!object(decoded) || decoded.scope !== this.scope()) throw new CommandError("stale_runtime", "Session context changed; reopen the review");
     const { scope: _scope, ...binding } = decoded;
     return binding as Binding & Partial<Edit> & Partial<ActionReference>;
   }
@@ -128,17 +128,17 @@ export class WorkspaceReviews {
       && input.path.length > 0 && Buffer.byteLength(input.path) <= 4096 && !/[\x00-\x1f\x7f]/.test(input.path) && !input.path.split(/[\\/]/).includes("..")) {
       // Ordinary file links may edit only the same active task tree as reviews.
       // Local checkouts, historical workspaces and other resource roots stay read-only.
-      if (!context.workspaceId) return { unsupported: "Only files in the current active task workspace support owner text editing" };
+      if (!context.workspaceId) return { unsupported: "Only files in the current active task workspace support text editing" };
       try {
         const { binding } = await this.binding(context, context.workspaceId);
         if (binding.historical) unavailable("Historical workspace files are read-only");
         const target = await canonical({ root: binding.root, path: resolve(context.cwd, input.path) }, context.check);
         const file = relative(binding.root, target).split(sep).join("/");
-        if (!path(file) || file.split("/").some((part) => part.toLowerCase() === ".git")) deny("Git metadata is not an editable owner file");
+        if (!path(file) || file.split("/").some((part) => part.toLowerCase() === ".git")) deny("Git metadata cannot be edited");
         const editable = await this.editableFile(context, binding, file);
         await this.revalidate(context, binding);
         const result = { path: target, reviewPath: file, ...editable };
-        if (Buffer.byteLength(JSON.stringify(result)) > REVIEW_BYTES) limit("Editable owner response exceeds 4 MiB");
+        if (Buffer.byteLength(JSON.stringify(result)) > REVIEW_BYTES) limit("Editable file response exceeds 4 MiB");
         return result;
       } catch (error) {
         if (!(error instanceof CommandError) || !["resource_unavailable", "resource_denied", "resource_limit"].includes(error.code)) throw error;
@@ -187,7 +187,7 @@ export class WorkspaceReviews {
       return { reviewId: this.seal(binding), workspaceId, historical: binding.historical, before: binding.before, after: binding.after,
         files: changes, ignoredFiles: ignored, unpreservedFiles: unpreserved,
         stageId: stage.actionId, stageUnsupported: stage.actionUnsupported, unstageId: unstage.actionId, unstageUnsupported: unstage.actionUnsupported,
-        notice: "Ignored files are outside the Git diff. Historical ignored-file bytes are not retained. Stage/unstage act on reviewed owner files; confirmed restore returns an existing baseline file and its index entry to that baseline, or removes an added working file without changing its index entry. Binary files support index actions and baseline restore, but not text editing. Stage/restore of symlink/submodule resources is unsupported. Unstage resets only the index. Text saves never stage files.",
+        notice: "Ignored files are outside the Git diff. Historical ignored-file bytes are not retained. Stage/unstage act on reviewed workspace files; confirmed restore returns an existing baseline file and its index entry to that baseline, or removes an added working file without changing its index entry. Binary files support index actions and baseline restore, but not text editing. Stage/restore of symlink/submodule resources is unsupported. Unstage resets only the index. Text saves never stage files.",
         partial: record.integration === "failed" };
     }
     if (input.kind === "workspaceReviewFile" && exact(input, ["kind", "reviewId", "path", "resourceId"]) && path(input.path)) {
@@ -245,7 +245,7 @@ export class WorkspaceReviews {
     const parts: string[] = [];
     for (;;) {
       const page = await readResource({ ...context, workspaceRoot: binding.root, cwd: binding.root }, { kind: "file", path: file, offset, ...(version ? { version } : {}) });
-      if (page.size > TEXT_BYTES) limit("Editable owner text exceeds 1 MiB");
+      if (page.size > TEXT_BYTES) limit("Editable file text exceeds 1 MiB");
       version = page.version; parts.push(page.text);
       if (page.nextOffset === null) break;
       offset = page.nextOffset;
@@ -376,7 +376,7 @@ export class WorkspaceReviews {
       return { actionId: this.seal({ ...binding, action: { version: snapshot.version, mode, ...(mode === "file" ? { path: paths[0] } : {}) } }) };
     } catch (error) {
       if (error instanceof CommandError && !["resource_denied", "resource_unavailable", "resource_limit"].includes(error.code)) throw error;
-      return { actionUnsupported: error instanceof Error ? error.message : "Owner review actions are unavailable" };
+      return { actionUnsupported: error instanceof Error ? error.message : "Workspace review actions are unavailable" };
     }
   }
   private recheckAction(context: ResourceContext, binding: Binding, reference: string | undefined, paths: string[]): void {
@@ -434,7 +434,7 @@ export class WorkspaceReviews {
       const resourceVersion = fingerprint(fstatSync(fd, { bigint: true }));
       return { resourceVersion, resourceId: this.seal({ ...binding, path: file, version: resourceVersion, hash: hash(bytes) }) };
     } catch (error) {
-      if (mutated) throw new Error("Review save outcome is uncertain; inspect the original command receipt and current owner content", { cause: error });
+      if (mutated) throw new Error("Review save outcome is uncertain; inspect the original command receipt and saved file content", { cause: error });
       if (error instanceof CommandError) throw error;
       return deny("Review resource could not be validated for saving");
     } finally { if (fd !== undefined) closeSync(fd); }

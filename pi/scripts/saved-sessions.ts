@@ -36,7 +36,7 @@ function preview(path: string) {
 export default function savedSessions(pi: ExtensionAPI) {
   if (process.env.PI_CONSOLE_SERVICE !== "1") return;
   pi.registerCommand("pi-saved-session", {
-    description: "Owner-only saved session preview and confirmed deletion",
+    description: "Saved session preview and confirmed deletion",
     handler: async (args, ctx) => {
       let mutated = false;
       try {

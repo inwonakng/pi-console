@@ -142,7 +142,7 @@ export function publishWorkspaceCommit(root: string, plan: WorkspaceCommit, pers
   }
   let fd: number;
   try { fd = openSync(lock, "wx", 0o600); }
-  catch (error) { throw new Error(`Destination Git index is locked at ${lock}. An unknown or live lock is never removed automatically; have the user verify its owner before removing it and retrying.`, { cause: error }); }
+  catch (error) { throw new Error(`Destination Git index is locked at ${lock}. An unknown or live lock is never removed automatically; identify the process holding it before removing it and retrying.`, { cause: error }); }
   try {
     const stat = fstatSync(fd);
     plan.publicationLock = { pid: process.pid, device: stat.dev, inode: stat.ino };

@@ -118,7 +118,7 @@ export class HostOwner {
   }
 
   static async open(options: HostOwnerOptions): Promise<HostOwner> {
-    if (!isAbsolute(options.binary) || !isAbsolute(options.appRoot)) throw new Error("Owner launch paths must be absolute");
+    if (!isAbsolute(options.binary) || !isAbsolute(options.appRoot)) throw new Error("Service launch paths must be absolute");
     if (options.provider && !options.model) throw new Error("Selecting a Pi provider also requires a model");
     const resources = await prepareHostResources(options);
     const pinned = { ...options, root: resources.root, binary: resources.binary, appRoot: resources.appRoot, environment: { ...resources.environment } };
@@ -265,7 +265,7 @@ export class HostOwner {
       if (state.phase !== "ready" || session.workspaceTransitionPending || ids.includes(String(state.workspace?.id))
         || result.workspaces.some(workspace => state.interactions.runtime?.cwd === workspace.worktreePath
           || state.interactions.runtime?.cwd.startsWith(workspace.worktreePath + "/"))) {
-        throw new CommandError("session_busy", "A linked workspace is in use or another owner context is transitioning; session/workspaces kept");
+        throw new CommandError("session_busy", "A linked workspace is in use or another session is transitioning; session/workspaces kept");
       }
     }
     return { ...result, helperVersion: result.version, archived: record.archived === true,
@@ -406,7 +406,7 @@ export class HostOwner {
           const preview = await this.savedPreview(id);
           if (preview.version !== command.payload.expectedVersion) throw new CommandError("resource_conflict", "Saved session or linked workspaces changed while confirming; select it again");
           if (command.operation === "host.archive" && preview.archiveBlocked) throw new CommandError("session_busy", "Retained source/child workspace protects this session from archival; finish its workspace lifecycle first");
-          if (command.operation === "host.delete" && preview.mode !== command.payload.mode) throw new CommandError("resource_conflict", "Owner trash availability changed; confirm the new deletion mode");
+          if (command.operation === "host.delete" && preview.mode !== command.payload.mode) throw new CommandError("resource_conflict", "Host trash availability changed; confirm the new deletion mode");
           await this.catalog.reserveHost(fingerprint, receipt, admission);
           if (command.operation === "host.archive") {
             receipt.status = "completed";
@@ -476,7 +476,7 @@ export class HostOwner {
   /** Closing a view must not call this or OwnedSession.stop(). */
   async close(): Promise<void> {
     if (this.creating || [...this.sessions.values()].some((session) => !session.finished)) {
-      throw new Error("Stop owned sessions before closing the host owner");
+      throw new Error("Stop sessions before closing the host service");
     }
     this.assertOpen();
     this.closing = true;
@@ -485,7 +485,7 @@ export class HostOwner {
 
   private assertOpen(): void {
     if (this.helperUnresolved) throw this.helperUnresolved;
-    if (this.closing) throw new Error("Host owner is closing or closed");
+    if (this.closing) throw new Error("Host service is closing or closed");
   }
 }
 
@@ -706,7 +706,7 @@ export class OwnedSession {
     const command = sessionCommand(input);
     if (command.sessionId !== this.id) return Promise.reject(new CommandError("invalid_command", "Command targets another session"));
     if (command.serviceEpoch !== this.catalog.epoch) return Promise.reject(new CommandError("stale_epoch", "Command belongs to another service epoch"));
-    if (this.admitting >= 128) return Promise.reject(new CommandError("command_limit", "Owner command admission limit exceeded"));
+    if (this.admitting >= 128) return Promise.reject(new CommandError("command_limit", "Service command admission limit exceeded"));
     this.admitting++;
     const task = this.admission.then(async () => {
       admission?.();
@@ -803,8 +803,8 @@ export class OwnedSession {
   manage(input: ManagementCommand, admission?: () => void): Promise<CommandReceipt> {
     const command = managementCommand(input);
     if (command.sessionId !== this.id) throw new CommandError("invalid_command", "Management targets another session");
-    if (command.serviceEpoch !== this.catalog.epoch) throw new CommandError("stale_epoch", "Management owner changed");
-    if (this.admitting >= 128) throw new CommandError("command_limit", "Owner command admission limit exceeded");
+    if (command.serviceEpoch !== this.catalog.epoch) throw new CommandError("stale_epoch", "Host service changed");
+    if (this.admitting >= 128) throw new CommandError("command_limit", "Service command admission limit exceeded");
     this.admitting++;
     const task = this.admission.then(async () => {
       admission?.();
@@ -999,7 +999,7 @@ export class OwnedSession {
   }
 
   private prepareRename(command: SessionCommand & { operation: "session.rename" }, worker: PiProcess): RenameFlight {
-    if (this.rename || this.nativePending || this.bundled || this.bundledInterrupt) throw new CommandError("session_busy", "An owner operation is already pending");
+    if (this.rename || this.nativePending || this.bundled || this.bundledInterrupt) throw new CommandError("session_busy", "A session operation is already pending");
     this.assertRenameReady();
     const runtimeId = worker.interactionSnapshot().runtime!.id;
     const invocationId = randomUUID();
@@ -1088,7 +1088,7 @@ export class OwnedSession {
   private prepareBundled(command: { runtimeRevision: number } & BundledOperation, worker: PiProcess): BundledFlight {
     if (contextOperation(command.operation)) this.assertSavedIdle();
     const interruptingJoin = command.operation === "spawn.stop" && this.bundled?.operation === "spawn.join" && !this.bundledInterrupt;
-    if (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another owner operation is pending");
+    if (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another session operation is pending");
     if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
     if (command.operation.startsWith("history.") || command.operation.startsWith("workspace.") || command.operation === "title.generate") this.assertRenameReady();
     const runtimeId = worker.interactionSnapshot().runtime!.id;
@@ -1284,7 +1284,7 @@ export class OwnedSession {
   private assertNativeReady(command: NativeOperation): void {
     if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
     if (command.operation === "retry.abort" || command.operation === "shell.abort") return;
-    if (this.rename || this.bundled || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another owner operation is pending");
+    if (this.rename || this.bundled || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another session operation is pending");
     if (command.operation === "steering.submit") this.assertSteeringActive();
     if (command.operation === "compaction.run" && (!this.conversation.settled || this.queueFlight || this.queueRunPending)) {
       throw new CommandError("session_busy", "Manual compaction requires settled execution");
@@ -1774,7 +1774,7 @@ export class OwnedSession {
     if (event.type === "extension_error") {
       if (event.event === "command") {
         this.offerEffect({ type: "notification", level: "error", message: `${event.extensionPath}: ${event.error}` });
-      } else this.error ??= new Error(`Pi extension failed during owner execution: ${event.error}`);
+      } else this.error ??= new Error(`Pi extension failed during session execution: ${event.error}`);
     }
     if (event.type === "extension_ui_request" && event.method === "setStatus") {
       if (event.statusKey === "pi-project-trust" || event.statusKey === "pi-workspace") {

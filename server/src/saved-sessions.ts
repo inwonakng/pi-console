@@ -44,7 +44,7 @@ export async function savedSessionHelper(options: Omit<PiProcessOptions, "onEven
     if (worker) {
       try {
         const exit = await worker.stop();
-        if (exit.descendantsUnresolved) throw new SavedHelperUnresolved("Saved-session helper cleanup is unresolved; retain the owner claim and explicitly reconcile before further execution");
+        if (exit.descendantsUnresolved) throw new SavedHelperUnresolved("Saved-session helper cleanup is unresolved; retain the service lock and explicitly reconcile before further execution");
       } catch (error) { throw new SavedHelperUnresolved("Saved-session helper execution/cleanup is unresolved", { cause: error }); }
     }
     await rm(directory, { recursive: true, force: true });

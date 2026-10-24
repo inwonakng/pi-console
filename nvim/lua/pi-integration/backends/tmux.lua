@@ -224,7 +224,7 @@ function M.launch_service(launcher, target, session_id, cwd, resume)
 	local args = { "bash", launcher }
 	if session_id then vim.list_extend(args, { resume and "--resume" or "--attach", session_id })
 	else
-		if not cwd or cwd == "" then return nil, "New conversation requires an owner directory" end
+		if not cwd or cwd == "" then return nil, "New conversation requires a directory on the selected host" end
 		vim.list_extend(args, { "--new", "--cwd", cwd })
 	end
 	if target.expected_host then vim.list_extend(args, { "--expected-host", target.expected_host }) end
