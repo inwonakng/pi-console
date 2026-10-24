@@ -57,14 +57,18 @@ function M.new(options)
 		fetch(query)
 	end
 	-- Small complete documents preserve existing renderers. Large text uses explicit pages.
-	function resource.document(query, callback)
+	function resource.document(query, callback, on_error)
 		if not alive() then options.notify("Owner resource context changed; reopen the resource."); return end
 		viewer_sequence = viewer_sequence + 1
 		local ticket, parts, bytes = viewer_sequence, {}, 0
 		local function fetch(payload)
 			options.request("resource.read", vim.tbl_extend("force", payload, { runtimeRevision = captured.revision }), function(ok, result)
 				if not alive() or ticket ~= viewer_sequence then return end
-				if not ok then options.notify(result.message or "Owner resource read failed"); return end
+				if not ok then
+					if on_error then on_error(result.message or "Owner resource read failed")
+					else options.notify(result.message or "Owner resource read failed") end
+					return
+				end
 				local page = result.data
 				bytes = bytes + #page.text
 				if bytes > MAX_VIEW_BYTES then
@@ -80,24 +84,33 @@ function M.new(options)
 		end
 		fetch(query)
 	end
-	function resource.open(query, title, filetype, anchor)
+	function resource.open_readonly(query, title, filetype, anchor)
 		resource.read(query, function(page)
 			require("pi-integration.spawn-artifacts").open_resource({ state = options.state, ui = { notify = options.notify },
 				window = { parent = options.state.transcript_win }, resources = resource }, query, title, filetype, page, anchor)
 		end)
+	end
+	function resource.open(query, title, filetype, anchor)
+		if query.kind == "file" and query.offset == nil and query.version == nil and resource.edit then
+			resource.edit(query, title, filetype, anchor)
+		else resource.open_readonly(query, title, filetype, anchor) end
 	end
 	function resource.follow(destination, base)
 		resource.select()
 		if not alive() then options.notify("Owner resource context changed; reopen the resource."); return true end
 		local scheme = destination:match("^(%a[%w+.-]*):")
 		if scheme and scheme ~= "file" then
-			if scheme == "https" or scheme == "http" then
+			if scheme == "https" or scheme == "http" or scheme == "mailto" or scheme == "zotero" then
 				local _, err = vim.ui.open(destination)
 				if err then options.notify(tostring(err)) end
 			else options.notify("Owner URI scheme is unavailable: " .. scheme) end
 			return true
 		end
-		if destination:sub(1, 2) == "//" then options.notify("Owner network-path links are unavailable."); return true end
+		if destination:sub(1, 2) == "//" then
+			local _, err = vim.ui.open("https:" .. destination)
+			if err then options.notify(tostring(err)) end
+			return true
+		end
 		if scheme == "file" then
 			-- Only an empty authority is a path on this owner. Never invoke the OS file opener.
 			if not destination:match("^file:///") then options.notify("Owner file URI authority is unavailable."); return true end
@@ -108,10 +121,83 @@ function M.new(options)
 		path = path:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end)
 		if path == "" then return false end
 		if base and path:sub(1, 1) ~= "/" then path = (base:match("^(.*)/[^/]*$") or "") .. "/" .. path end
+		path = vim.fs.normalize(path, { expand_env = false })
 		resource.open({ kind = "file", path = path }, "Owner file " .. path, M.filetype(path), anchor)
 		return true
 	end
 	return resource
+end
+
+-- Draft buffers and commands come from the frontend's existing recovery/receipt path.
+-- A file path is only display/link metadata; it never names a frontend file to write.
+function M.edit(options, resource, query, title, filetype, anchor)
+	local captured = options.stamp()
+	local function alive() return options.current(captured) end
+	resource.read({ kind = "workspaceFile", path = query.path }, function(page)
+		if not page.resourceId or page.resourceId == vim.NIL then
+			if page.unsupported and page.unsupported ~= vim.NIL then options.notify(page.unsupported .. "; opening read-only text.") end
+			resource.open_readonly(query, title, filetype, anchor)
+			return
+		end
+		local version, resource_id, save_id, submitted = page.version, page.resourceId, nil, nil
+		local buf
+		local function contents()
+			return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") .. (vim.bo[buf].endofline and "\n" or "")
+		end
+		local function status(receipt)
+			if not receipt or receipt.id ~= save_id or receipt.status == "accepted" then return end
+			if receipt.status == "completed" and receipt.result and receipt.result.resourceId then
+				version, resource_id = receipt.result.resourceVersion, receipt.result.resourceId
+				if vim.api.nvim_buf_is_valid(buf) and contents() == submitted then vim.bo[buf].modified = false end
+				save_id = nil
+				options.notify("Owner file saved. Later local edits remain unsaved.")
+			elseif receipt.status == "failed" then
+				save_id = nil
+				options.notify((receipt.error and receipt.error.message or "Save refused") .. " Local draft retained; gO inspects current owner content.")
+			else options.notify("Save is " .. tostring(receipt.status) .. "; retain the draft and original ID. Use gS / :PiOperations, never resubmit automatically.") end
+		end
+		local function lookup()
+			if not save_id then return end
+			if not alive() then options.notify("Old owner context; inspect the original command via :PiOperations / :PiDrafts."); return end
+			options.request("command.status", { commandId = save_id, serviceEpoch = captured.epoch }, function(ok, receipt)
+				if not alive() then return end
+				if ok then status(receipt) else options.notify("Save status unavailable; draft and original ID retained.") end
+			end)
+		end
+		local function save()
+			if save_id then options.notify("Unresolved save; checking the original request only."); lookup(); return end
+			if not alive() then options.notify("Old owner context cannot save; local draft retained."); return end
+			submitted = contents()
+			save_id = options.command("workspace.review.save", { resourceId = resource_id, expectedVersion = version, text = submitted }, function(ok, receipt)
+				if not alive() then return end
+				if ok then status(receipt)
+				elseif receipt.delivery == "not_sent" then save_id = nil; options.notify("Save was not sent; local draft retained.")
+				else options.notify((receipt.message or "Save outcome unknown") .. "; draft and original ID retained.") end
+			end, options.control_stamp(), status)
+			if save_id then vim.b[buf].pi_review_command_id, vim.b[buf].pi_review_command_epoch = save_id, captured.epoch end
+		end
+		buffer_sequence = buffer_sequence + 1
+		buf = options.draft("pi://owner-file/" .. buffer_sequence .. "/" .. (title or page.path):gsub("[^%w._-]", "-"), page.text, save)
+		local value = vim.split(page.text, "\n", { plain = true })
+		local eol = #value > 1 and value[#value] == ""
+		if eol then table.remove(value) end
+		vim.bo[buf].modeline, vim.bo[buf].swapfile = false, false
+		vim.bo[buf].buftype, vim.bo[buf].modifiable, vim.bo[buf].readonly = "acwrite", true, false
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, value)
+		vim.bo[buf].filetype = filetype or M.filetype(page.path)
+		vim.bo[buf].endofline, vim.bo[buf].fixendofline, vim.bo[buf].modified = eol, false, false
+		vim.b[buf].pi_review_path = page.reviewPath
+		vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel
+		resource.bind(buf, page.path)
+		vim.keymap.set("n", "gS", lookup, { buffer = buf, desc = "Look up original owner save" })
+		vim.keymap.set("n", "gO", function()
+			-- Separate owner view: no refresh ever replaces the user's draft.
+			resource.open_readonly(query, "Current owner file " .. page.path, filetype)
+		end, { buffer = buf, desc = "Inspect current owner content (preserve draft)" })
+		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, resource) end,
+			{ buffer = buf, desc = "Follow owner link" })
+		if anchor then pcall(require("pi-integration.utils.markdown-links").jump_to_heading, anchor) end
+	end)
 end
 
 function M.complete(options, prefix, callback)

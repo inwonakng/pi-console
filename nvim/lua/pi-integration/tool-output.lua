@@ -1015,6 +1015,9 @@ function M.open_float(ctx, output_id, resolved)
 		ctx.resources.document({ kind = "output", path = output.details.fullOutputPath }, function(text)
 			captured.owner_full_text = text
 			M.open_float(ctx, output_id, captured)
+		end, function(message)
+			captured.owner_full_error = "Full output unavailable; showing the recorded result.\n" .. tostring(message)
+			M.open_float(ctx, output_id, captured)
 		end)
 		return true
 	end
@@ -1066,8 +1069,8 @@ function M.open_float(ctx, output_id, resolved)
 		vim.list_extend(rendered, vim.split(code, "\n", { plain = true }))
 		source_end = #rendered
 		vim.list_extend(rendered, { "", "Output" })
-		if full_output_note then
-			vim.list_extend(rendered, vim.split(full_output_note, "\n", { plain = true }))
+		if full_output_note or output.owner_full_error then
+			vim.list_extend(rendered, vim.split(full_output_note or output.owner_full_error, "\n", { plain = true }))
 		end
 		table.insert(rendered, "")
 		output_start = #rendered + 1
@@ -1090,6 +1093,12 @@ function M.open_float(ctx, output_id, resolved)
 		table.insert(rendered, "")
 		vim.list_extend(rendered, content_lines)
 		content_lines = rendered
+	end
+	if output.owner_full_error and output.name ~= "codemode" then
+		local fallback = vim.split(output.owner_full_error, "\n", { plain = true })
+		table.insert(fallback, "")
+		vim.list_extend(fallback, content_lines)
+		content_lines = fallback
 	end
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, content_lines)
 	if workspace_review then require("pi-integration.workspace-summary").highlight(buf) end

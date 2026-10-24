@@ -1,6 +1,22 @@
 local store = require("pi-integration.frontend-store")
 local M = {}
-local function key(entry) return vim.json.encode({ entry.host_id, entry.session_id }) end
+local function key(entry)
+	if entry.host_id and entry.session_id then return vim.json.encode({ entry.host_id, entry.session_id }) end
+end
+function M.refresh(host_id, rows, host_name)
+	local by_id = {}
+	for _, row in ipairs(rows) do by_id[row.id] = row end
+	return store.update("pins", vim.empty_dict(), function(pins)
+		for _, pin in pairs(pins) do
+			local row = pin.host_id == host_id and by_id[pin.session_id]
+			if row then
+				pin.title = type(row.name) == "string" and row.name:match("%S") and row.name or "Untitled session"
+				pin.cwd, pin.directory, pin.host_name = row.cwd, row.cwd, host_name
+			end
+		end
+		return true
+	end)
+end
 function M.toggle(entry)
 	if not entry.host_id or not entry.session_id then return nil, "Session has no owner identity" end
 	return store.update("pins", vim.empty_dict(), function(pins)
@@ -19,8 +35,8 @@ function M.merge(instances)
 	for _, instance in ipairs(instances) do
 		local entry = vim.deepcopy(instance)
 		local id = key(entry)
-		entry.pinned = pins[id] ~= nil
-		seen[id] = true
+		entry.pinned = id ~= nil and pins[id] ~= nil
+		if id then seen[id] = true end
 		table.insert(entries, entry)
 	end
 	local ids = vim.tbl_keys(pins); table.sort(ids)

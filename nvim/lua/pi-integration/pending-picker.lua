@@ -180,6 +180,7 @@ function M.input(ctx, event, on_input)
 		return
 	end
 	local request = ctx.state.pending_ui_requests[event.id]
+	request.dismiss_on_close = false
 	local picker = { ctx = ctx, id = event.id, request = request, on_choice = on_input, input = true }
 	active = picker
 	if request.expires then
@@ -194,12 +195,15 @@ function M.input(ctx, event, on_input)
 		input_sequence = input_sequence + 1
 		picker.buf, picker.win = require("pi-integration.utils.markdown-editor").open({
 			name = "pi://input/" .. input_sequence,
-			title = " " .. title:gsub("[\r\n]+", " ") .. " (Ctrl+Enter to submit; :q to return) ",
+			title = " " .. title:gsub("[\r\n]+", " ") .. " (Ctrl+Enter submits; Ctrl+Q cancels) ",
 			footer = event.placeholder,
 			text = event.prefill or "",
 		}, function(text)
 			finish(picker, text, true)
 		end)
+		vim.keymap.set({ "n", "i" }, "<C-q>", function()
+			finish(picker, nil, true, true)
+		end, { buffer = picker.buf, desc = "Cancel pending Pi input" })
 		vim.cmd("startinsert")
 	end)
 	if not ok then

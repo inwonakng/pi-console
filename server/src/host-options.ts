@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import { PiProcess, type PiExit } from "./pi-process.js";
 import type { HostResources } from "./host-resources.js";
 import { object } from "./pi-records.js";
@@ -9,6 +10,7 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 type ThinkingLevel = typeof THINKING_LEVELS[number];
 type ModelIdentity = { provider: string; id: string };
 export type HostOptions = {
+  commands: SlashCommandInfo[];
   models: (ModelIdentity & { contextWindow: number; thinkingLevels: ThinkingLevel[] })[];
   defaults: {
     accessMode?: "readonly" | "ask" | "edit" | "full";
@@ -27,6 +29,23 @@ function modelIdentity(value: unknown): value is ModelIdentity & Record<string, 
 function validContextWindow(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
+function boundedText(value: unknown, bytes: number): value is string {
+  return typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= bytes
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+function commandInfo(value: unknown): value is SlashCommandInfo {
+  if (!object(value) || Object.keys(value).some(key => !["name", "description", "source", "sourceInfo"].includes(key))
+    || !boundedText(value.name, 1024) || /\s/.test(value.name)
+    || value.name === "pi-host-options"
+    || (value.description !== undefined && (typeof value.description !== "string" || Buffer.byteLength(value.description) > 16 * 1024))
+    || typeof value.source !== "string" || !["extension", "prompt", "skill"].includes(value.source) || !object(value.sourceInfo)) return false;
+  const info = value.sourceInfo;
+  return Object.keys(info).every(key => ["path", "source", "scope", "origin", "baseDir"].includes(key))
+    && boundedText(info.path, 4096) && boundedText(info.source, 1024)
+    && typeof info.scope === "string" && ["user", "project", "temporary"].includes(info.scope)
+    && typeof info.origin === "string" && ["top-level", "package"].includes(info.origin)
+    && (info.baseDir === undefined || boundedText(info.baseDir, 4096));
+}
 export class OptionsHelperUnresolved extends Error {}
 
 /** Ask a normally initialized, unsaved Pi worker under the host resource fence.
@@ -44,7 +63,7 @@ export async function readHostOptions(resources: HostResources, environment: Nod
       assertExecutionAllowed, onExit: () => {}, onEvent: event => {
         if (event.type !== "extension_ui_request" || event.method !== "setStatus" || event.statusKey !== "pi-host-options-result") return;
         if (received || typeof event.statusText !== "string" || Buffer.byteLength(event.statusText) > MAX_BYTES) {
-          throw new Error("Invalid host model options");
+          throw new Error("Invalid host options");
         }
         received = true;
         value = JSON.parse(event.statusText);
@@ -61,7 +80,7 @@ export async function readHostOptions(resources: HostResources, environment: Nod
     if (response.command !== "prompt" || response.data.disposition !== "handled" || !received) throw new Error("Missing host options result");
   } catch {
     // Never forward SDK/provider diagnostics or credential-bearing model objects.
-    throw new CommandError("resource_unavailable", "Host model options are unavailable");
+    throw new CommandError("resource_unavailable", "Host options are unavailable");
   } finally {
     if (deadline) clearTimeout(deadline);
     if (worker) {
@@ -72,10 +91,11 @@ export async function readHostOptions(resources: HostResources, environment: Nod
       } catch {
         throw new OptionsHelperUnresolved("Host options helper cleanup is unresolved; explicitly reconcile before further execution");
       }
-      if (exit.error) throw new CommandError("resource_unavailable", "Host model options are unavailable");
+      if (exit.error) throw new CommandError("resource_unavailable", "Host options are unavailable");
     }
   }
-  if (!object(value) || Object.keys(value).length !== 2 || !object(value.defaults)
+  if (!object(value) || Object.keys(value).length !== 3 || !object(value.defaults)
+    || !Array.isArray(value.commands) || value.commands.length > 10_000 || !value.commands.every(commandInfo)
     || Object.keys(value.defaults).some(key => !["accessMode", "integrationMode", "notificationsEnabled", "model", "thinkingLevel", "contextWindow", "modelStatus"].includes(key))
     || (value.defaults.accessMode !== undefined && (typeof value.defaults.accessMode !== "string" || !["readonly", "ask", "edit", "full"].includes(value.defaults.accessMode)))
     || (value.defaults.integrationMode !== undefined && (typeof value.defaults.integrationMode !== "string" || !["ask", "allowed"].includes(value.defaults.integrationMode)))
@@ -89,11 +109,16 @@ export async function readHostOptions(resources: HostResources, environment: Nod
     || !value.models.every(model => modelIdentity(model) && Object.keys(model).length === 4 && validContextWindow(model.contextWindow)
       && Array.isArray(model.thinkingLevels) && model.thinkingLevels.length > 0 && model.thinkingLevels.length <= THINKING_LEVELS.length
       && model.thinkingLevels.every(level => typeof level === "string" && THINKING_LEVELS.includes(level as ThinkingLevel)))) {
-    throw new CommandError("resource_unavailable", "Invalid host model options");
+    throw new CommandError("resource_unavailable", "Invalid host options");
   }
   // Project only the declared metadata fields, even from the pinned helper.
   const defaults = value.defaults as HostOptions["defaults"];
-  return { models: value.models.map(model => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow, thinkingLevels: model.thinkingLevels })),
+  return { commands: value.commands.map(command => ({ name: command.name, source: command.source,
+      ...(command.description !== undefined && { description: command.description }),
+      sourceInfo: { path: command.sourceInfo.path, source: command.sourceInfo.source,
+        scope: command.sourceInfo.scope, origin: command.sourceInfo.origin,
+        ...(command.sourceInfo.baseDir !== undefined && { baseDir: command.sourceInfo.baseDir }) } })),
+    models: value.models.map(model => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow, thinkingLevels: model.thinkingLevels })),
     defaults: {
       ...(defaults.accessMode !== undefined && { accessMode: defaults.accessMode }),
       ...(defaults.integrationMode !== undefined && { integrationMode: defaults.integrationMode }),

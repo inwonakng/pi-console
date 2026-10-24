@@ -153,6 +153,16 @@ export async function runService(options: HostOwnerOptions & { root: string; por
               remoteAdmission?.();
             });
             break;
+          case "host.complete": {
+            exact(p, ["serviceEpoch", "cwd", "prefix", "offset"]);
+            if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host completion owner changed");
+            const { serviceEpoch: _epoch, cwd, ...query } = p;
+            result = await owner.completeForHost(cwd, query, () => {
+              if (socket.destroyed) throw new CommandError("attachment_closed", "Host completion reader disconnected");
+              remoteAdmission?.();
+            });
+            break;
+          }
           case "host.directories": {
             exact(p, ["serviceEpoch", "path", "offset"]);
             if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Owner directory context changed");
@@ -242,9 +252,9 @@ export async function runService(options: HostOwnerOptions & { root: string; por
                 break;
               case "grant": exact(p, []); result = target.controlGrant(view.attachmentId) ?? null; break;
               case "heartbeat":
-                exact(p, ["controlToken"]);
-                if (typeof p.controlToken !== "string") throw new CommandError("invalid_command", "Missing control token");
-                target.heartbeat(view.attachmentId, p.controlToken); result = {}; break;
+                exact(p, ["controlToken", "reservationId"]);
+                if (typeof p.controlToken !== "string" || p.reservationId !== undefined && !identifier(p.reservationId)) throw new CommandError("invalid_command", "Invalid heartbeat");
+                result = target.heartbeat(view.attachmentId, p.controlToken, p.reservationId as string | undefined); break;
               case "command.status":
                 exact(p, ["serviceEpoch", "commandId"]);
                 if (!identifier(p.serviceEpoch) || !identifier(p.commandId)) throw new CommandError("invalid_command", "Invalid command lookup");

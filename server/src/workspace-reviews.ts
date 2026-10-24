@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHmac, randomBytes, timingSafeEqual, createHash } from "node:crypto";
 import { constants, closeSync, fstatSync, ftruncateSync, lstatSync, openSync, readFileSync, realpathSync, writeSync, fsyncSync } from "node:fs";
-import { readdir, lstat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readdir, lstat, chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { canonical, fingerprint, metadata, readResource, historicalWorkspaceReview, type ResourceContext } from "./resource-reads.js";
 import { object } from "./pi-records.js";
 import { CommandError } from "./session-commands.js";
@@ -11,6 +12,7 @@ import { actionSnapshot, applyReviewAction, type ReviewAction, type ReviewRecove
 const TEXT_BYTES = 1024 * 1024;
 const REVIEW_BYTES = 4 * 1024 * 1024;
 const FILES = 512;
+const STATISTICS_BYTES = 256 * 1024 * 1024;
 type Binding = { workspaceId: string; recordVersion: string; root: string; repositoryRoot: string; before: string; after?: string; historical: boolean; pinned?: true };
 type Edit = Binding & { path: string; version: string; hash: string };
 export type ReviewSave = { operation: "workspace.review.save"; payload: { resourceId: string; expectedVersion: string; text: string } };
@@ -64,7 +66,7 @@ async function git(root: string, args: string[], check: () => void, bytes = REVI
     // locks disabled. Reads must not invalidate the index versions they issue.
     execFile("git", ["--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false", "-c", "core.hooksPath=/dev/null", ...overrides, "-C", root, ...args],
       { encoding: "buffer", maxBuffer: bytes, timeout: 10_000, env: { ...environment, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", ...(index ? { GIT_INDEX_FILE: index } : {}) } }, (error, stdout) => {
-        try { check(); if (error) { if (stdout.length >= bytes || "code" in error && error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") limit("Review Git output exceeds limit"); unavailable("Review Git object or worktree is unavailable"); } done(stdout); }
+        try { check(); if (error && !(args[0] === "diff" && args.includes("--no-index") && error.code === 1)) { if (stdout.length >= bytes || "code" in error && error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") limit("Review Git output exceeds limit"); unavailable("Review Git object or worktree is unavailable"); } done(stdout); }
         catch (failure) { reject(failure); }
       });
   });
@@ -122,6 +124,35 @@ export class WorkspaceReviews {
   }
   async read(context: ResourceContext, input: unknown): Promise<unknown> {
     if (!object(input)) deny("Invalid review query");
+    if (input.kind === "workspaceFile" && exact(input, ["kind", "path"]) && typeof input.path === "string"
+      && input.path.length > 0 && Buffer.byteLength(input.path) <= 4096 && !/[\x00-\x1f\x7f]/.test(input.path) && !input.path.split(/[\\/]/).includes("..")) {
+      // Ordinary file links may edit only the same active task tree as reviews.
+      // Local checkouts, historical workspaces and other resource roots stay read-only.
+      if (!context.workspaceId) return { unsupported: "Only files in the current active task workspace support owner text editing" };
+      try {
+        const { binding } = await this.binding(context, context.workspaceId);
+        if (binding.historical) unavailable("Historical workspace files are read-only");
+        const target = await canonical({ root: binding.root, path: resolve(context.cwd, input.path) }, context.check);
+        const file = relative(binding.root, target).split(sep).join("/");
+        if (!path(file) || file.split("/").some((part) => part.toLowerCase() === ".git")) deny("Git metadata is not an editable owner file");
+        const editable = await this.editableFile(context, binding, file);
+        await this.revalidate(context, binding);
+        const result = { path: target, reviewPath: file, ...editable };
+        if (Buffer.byteLength(JSON.stringify(result)) > REVIEW_BYTES) limit("Editable owner response exceeds 4 MiB");
+        return result;
+      } catch (error) {
+        if (!(error instanceof CommandError) || !["resource_unavailable", "resource_denied", "resource_limit"].includes(error.code)) throw error;
+        return { unsupported: error.message };
+      }
+    }
+    if (input.kind === "workspaceStats" && exact(input, ["kind"])) {
+      if (!context.workspaceId) return null;
+      const { binding } = await this.binding(context, context.workspaceId);
+      if (binding.historical) return null;
+      const statistics = await this.statistics(context, binding);
+      await this.revalidate(context, binding);
+      return statistics;
+    }
     if (input.kind === "workspaceReviews" && exact(input, ["kind"])) {
       const directory = join(context.workspacesRoot, "records");
       const names = await readdir(directory); context.check();
@@ -180,20 +211,8 @@ export class WorkspaceReviews {
         if (currentBinding.historical) after = change?.status !== "D" ? await this.blob(context, currentBinding, currentBinding.after!, input.path) : "";
         else if (change?.status === "D") unsupported = "Deleted file: text :write is unavailable; use confirmed baseline restore (X)";
         else {
-          let offset = 0; const parts: string[] = [];
-          for (;;) {
-            const page = await readResource({ ...context, workspaceRoot: binding.root, cwd: binding.root }, { kind: "file", path: input.path, offset, ...(version ? { version } : {}) });
-            if (page.size > TEXT_BYTES) limit("Editable review text exceeds 1 MiB");
-            version = page.version; parts.push(page.text);
-            if (page.nextOffset === null) break;
-            offset = page.nextOffset;
-          }
-          after = parts.join("");
-          const stamp = await lstat(await canonical({ root: binding.root, path: join(binding.root, input.path) }, context.check), { bigint: true });
-          context.check();
-          if (fingerprint(stamp) !== version) conflict();
-          if (stamp.nlink !== 1n || process.getuid === undefined || stamp.uid !== BigInt(process.getuid())) unavailable("Editable resources must be single-linked and owned by the service user");
-          resourceId = this.seal({ ...currentBinding, path: input.path, version: version!, hash: hash(after) });
+          const editable = await this.editableFile(context, currentBinding, input.path);
+          after = editable.text; version = editable.version; resourceId = editable.resourceId; unsupported = editable.unsupported;
         }
       } catch (error) {
         if (!(error instanceof CommandError) || !["resource_unavailable", "resource_denied", "resource_limit"].includes(error.code)) throw error;
@@ -220,6 +239,91 @@ export class WorkspaceReviews {
       return { path: input.path, before, after, diff, version, resourceId, historical: binding.historical, unsupported, ...actions };
     }
     throw new CommandError("invalid_command", "Invalid workspace review query");
+  }
+  private async editableFile(context: ResourceContext, binding: Binding, file: string): Promise<{ text: string; version: string; resourceId?: string; unsupported?: string }> {
+    let offset = 0, version: string | undefined;
+    const parts: string[] = [];
+    for (;;) {
+      const page = await readResource({ ...context, workspaceRoot: binding.root, cwd: binding.root }, { kind: "file", path: file, offset, ...(version ? { version } : {}) });
+      if (page.size > TEXT_BYTES) limit("Editable owner text exceeds 1 MiB");
+      version = page.version; parts.push(page.text);
+      if (page.nextOffset === null) break;
+      offset = page.nextOffset;
+    }
+    const value = parts.join("");
+    const stamp = await lstat(await canonical({ root: binding.root, path: join(binding.root, file) }, context.check), { bigint: true });
+    context.check();
+    if (fingerprint(stamp) !== version) conflict();
+    if (stamp.nlink !== 1n || process.getuid === undefined || stamp.uid !== BigInt(process.getuid())) return { text: value, version: version!, unsupported: "Editable resources must be single-linked and owned by the service user" };
+    return { text: value, version: version!, resourceId: this.seal({ ...binding, path: file, version: version!, hash: hash(value) }) };
+  }
+  private async statistics(context: ResourceContext, binding: Binding): Promise<{ added: number; removed: number; files: number }> {
+    const options = ["--no-ext-diff", "--no-textconv", "--find-renames", "--numstat", "-z"];
+    const files = new Map<string, { added: number; removed: number }>(), renames = new Map<string, string>();
+    const parse = (output: Buffer, replacement?: string) => {
+      const entries = text(output, true).split("\0");
+      for (let i = 0; i < entries.length - 1; i++) {
+        const entry = entries[i].match(/^([^\t]+)\t([^\t]+)\t(.*)$/s);
+        if (!entry) unavailable("Invalid Git statistics");
+        let name = entry[3];
+        if (!name) {
+          const source = entries[++i]; name = entries[++i];
+          if (!replacement) {
+            if (!path(source)) deny("Statistics contain an unsupported path");
+            renames.set(source, name);
+          }
+        }
+        name = replacement ?? name;
+        if (!path(name)) deny("Statistics contain an unsupported path");
+        files.set(name, { added: Number(entry[1]) || 0, removed: Number(entry[2]) || 0 });
+      }
+    };
+    parse(await git(binding.root, ["diff", ...options, binding.before, "--"], context.check));
+    if (files.size > FILES) limit("Statistics exceed 512 changed files");
+    const untracked = text(await git(binding.root, ["ls-files", "--others", "--exclude-standard", "-z"], context.check), true).split("\0").filter(Boolean);
+    if (untracked.length > FILES) limit("Statistics exceed 512 untracked files");
+    for (const name of untracked) if (!path(name)) deny("Statistics contain an unsupported path");
+    // A recreated rename source is an independent working path. Split its
+    // rename before replacing the deletion with a baseline/worktree comparison.
+    const recreated = untracked.filter((name) => renames.has(name)).flatMap((name) => [name, renames.get(name)!]);
+    if (recreated.length) parse(await git(binding.root, ["diff", ...options, "--no-renames", binding.before, "--", ...recreated], context.check));
+    let temporary: string | undefined, scanned = 0;
+    const charge = (size: number) => {
+      scanned += size;
+      if (scanned > STATISTICS_BYTES) limit("Workspace statistics exceed the aggregate 256 MiB scan limit");
+    };
+    try {
+      for (let i = 0; i < untracked.length; i++) {
+        const name = untracked[i], target = join(binding.root, name);
+        // Git compares the final symlink itself; never allow a symlink parent
+        // or a directory/special file to turn this into an unbounded scan.
+        const parent = await canonical({ root: binding.root, path: dirname(target) }, context.check);
+        const stamp = await lstat(target, { bigint: true }); context.check();
+        if (!stamp.isFile() && !stamp.isSymbolicLink()) unavailable("Statistics require regular files or symlinks");
+        charge(Number(stamp.size));
+        let before = "/dev/null";
+        if (files.has(name)) {
+          const entry = text(await git(binding.root, ["ls-tree", "-z", binding.before, "--", name], context.check), true).match(/^(100644|100755|120000) blob ([a-f0-9]{40,64})\t/);
+          if (!entry) unavailable("Baseline statistics require a file or symlink blob");
+          const size = Number(text(await git(binding.root, ["cat-file", "-s", entry[2]], context.check)));
+          charge(size);
+          const content = await git(binding.root, ["cat-file", "blob", entry[2]], context.check, size + 1);
+          temporary ??= await mkdtemp(join(tmpdir(), "pi-workspace-stats-"));
+          before = join(temporary, String(i));
+          if (entry[1] === "120000") await symlink(content, before);
+          else { await writeFile(before, content); await chmod(before, parseInt(entry[1].slice(-3), 8)); }
+        }
+        const output = await git(binding.root, ["diff", "--no-index", ...options, "--", before, target], context.check);
+        if (await canonical({ root: binding.root, path: dirname(target) }, context.check) !== parent
+          || fingerprint(await lstat(target, { bigint: true })) !== fingerprint(stamp)) conflict();
+        files.delete(name);
+        parse(output, name);
+      }
+      if (files.size > FILES) limit("Statistics exceed 512 changed files");
+      let added = 0, removed = 0;
+      for (const counts of files.values()) { added += counts.added; removed += counts.removed; }
+      return { added, removed, files: files.size };
+    } finally { if (temporary) await rm(temporary, { recursive: true, force: true }); }
   }
   private async changes(context: ResourceContext, binding: Binding): Promise<FileChange[]> {
     const args = ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", binding.before, ...(binding.after ? [binding.after] : [])];

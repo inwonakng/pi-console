@@ -59,6 +59,16 @@ export class QueueReservations {
     // The receipt still identifies the reservation that was created, not a revival.
     return { ...reservation };
   }
+  renew(id: string, controller: Controller): void {
+    this.assertCurrent(id);
+    if (this.reservation!.attachmentId !== controller.attachmentId || this.reservation!.grantId !== controller.grantId) {
+      throw new CommandError("control_revoked", "Queue editor belongs to another controller");
+    }
+    this.deadline = performance.now() + 30000;
+    this.reservation!.expiresAt = Date.now() + 30000;
+    if (this.timer) clearTimeout(this.timer);
+    this.arm();
+  }
   assertCurrent(id: string): void {
     this.expire();
     if (this.reservation?.id !== id) throw new CommandError("reservation_expired", "Queue edit reservation expired or was released");

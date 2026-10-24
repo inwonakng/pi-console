@@ -1,4 +1,5 @@
 import { open } from "node:fs/promises";
+import { completeHostFiles } from "./host-discovery.js";
 import { tmpdir } from "node:os";
 import { WorkspaceReviews, type ReviewMutation } from "./workspace-reviews.js";
 import { readResource, completeFiles, completeDirectory, type ResourceContext } from "./resource-reads.js";
@@ -147,6 +148,11 @@ export class HostOwner {
   async directories(input: unknown, check: () => void): Promise<unknown> {
     this.assertOpen();
     return completeDirectory(input, () => { this.assertOpen(); check(); });
+  }
+
+  async completeForHost(cwd: unknown, input: unknown, check: () => void): Promise<unknown> {
+    this.assertOpen();
+    return completeHostFiles(cwd, input, () => { this.assertOpen(); check(); });
   }
 
   /** Host metadata shares bounded lifecycle admission, without creating a session. */
@@ -636,7 +642,17 @@ export class OwnedSession {
   controlGrant(attachmentId: string): ControlGrant | undefined { return this.control.grantFor(attachmentId); }
 
   /** Connection liveness only: never a durable command or a grant acquisition. */
-  heartbeat(attachmentId: string, controlToken: string): void { this.control.heartbeat(attachmentId, controlToken); }
+  heartbeat(attachmentId: string, controlToken: string, reservationId?: string): { reservationCurrent: boolean } {
+    this.control.heartbeat(attachmentId, controlToken);
+    if (reservationId) {
+      try { this.reservations.renew(reservationId, this.control.current()!); }
+      catch (error) {
+        if (error instanceof CommandError && error.code === "reservation_expired") return { reservationCurrent: false };
+        throw error;
+      }
+    }
+    return { reservationCurrent: true };
+  }
 
   commandStatus(serviceEpoch: string, id: string): CommandReceipt | { status: "unknown" } {
     const receipt = this.catalog.commandStatus(serviceEpoch, id);
@@ -705,7 +721,7 @@ export class OwnedSession {
         let error: unknown;
         try {
           if (queue) {
-            if (command.operation === "queue.edit" || command.operation === "queue.remove") this.reservations.releaseItem(command.payload.itemId);
+            if (command.operation === "queue.remove") this.reservations.releaseItem(command.payload.itemId);
             this.queueChanged();
           } else {
             // Reservations are ephemeral authority, unlike already accepted text.
@@ -1204,7 +1220,8 @@ export class OwnedSession {
       }
     }
     const context: ResourceContext = { ...this.reviewContext(worker, check), skillPaths };
-    const review = method === "resource.read" && typeof payload.kind === "string" && payload.kind.startsWith("workspaceReview");
+    const review = method === "resource.read" && typeof payload.kind === "string"
+      && (payload.kind.startsWith("workspaceReview") || ["workspaceFile", "workspaceStats"].includes(payload.kind));
     const data = await (review ? this.reviews.read(context, payload) : method === "resource.read" ? readResource(context, payload) : completeFiles(context, payload));
     check();
     if (review && Buffer.byteLength(JSON.stringify(data)) > 4 * 1024 * 1024) throw new CommandError("resource_limit", "Review response exceeds 4 MiB");

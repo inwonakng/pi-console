@@ -53,15 +53,17 @@ local function render(row, contents, truncated)
 	return { cache_key = row.id, content = lines, filetype = "markdown", pi_state = state }
 end
 
-function M.pick(host, rows, format_item, on_choice)
+function M.pick(host, rows, format_item, on_choice, opts)
+	opts = opts or {}
 	local connection, epoch = host.connection, host.hello.serviceEpoch
-	local entries, by_id = {}, {}
+	local entries, labels, by_id = {}, {}, {}
 	local closed, sequence = false, 0
 	local cache, cache_order = {}, {}
 	for index, row in ipairs(rows) do
 		local id = string.format("%06d", index)
 		by_id[id] = row
-		table.insert(entries, id .. "\t" .. format_item(row):gsub("[\r\n]", " "))
+		labels[index] = format_item(row):gsub("[\r\n]", " ")
+		table.insert(entries, id .. "\t" .. labels[index])
 	end
 	local function current()
 		return not closed and host.connected and host.connection == connection and host.hello.serviceEpoch == epoch
@@ -117,22 +119,47 @@ function M.pick(host, rows, format_item, on_choice)
 		end
 		return base
 	end
-	require("fzf-lua").fzf_exec(entries, {
-		prompt = "History on " .. host.alias .. " > ",
+	local function action(callback)
+		return function(items)
+			-- on_close runs before fzf dispatches actions.
+			if not host.connected or host.connection ~= connection or host.hello.serviceEpoch ~= epoch then return end
+			local chosen, seen = {}, {}
+			for _, item in ipairs(items) do
+				local row = selected(item)
+				if row and not seen[row.id] then table.insert(chosen, row); seen[row.id] = true end
+			end
+			callback(chosen)
+		end
+	end
+	local keymap = { ["ctrl-f"] = "preview-page-down", ["ctrl-b"] = "preview-page-up", ["ctrl-a"] = "toggle-all" }
+	if opts.select_all then keymap.load = "select-all+unbind(load)" end
+	require("fzf-lua").fzf_live(function(args)
+		local query = args[1] or ""
+		if query == "" then return entries end
+		local result = vim.system({ "rg", "--no-config", "--color=never", "--smart-case", "--line-number", "--", query },
+			{ stdin = labels, text = true }):wait()
+		if result.code == 1 then return {} end
+		if result.code ~= 0 then return { "\t" .. vim.trim(result.stderr):gsub("\n", " ") } end
+		local matches = {}
+		for line in result.stdout:gmatch("[^\n]+") do
+			local index = tonumber(line:match("^(%d+):"))
+			if index and entries[index] then table.insert(matches, entries[index]) end
+		end
+		return matches
+	end, {
+		prompt = (opts.archived and "Archived" or "Sessions") .. " on " .. host.alias .. " (regex) > ",
 		previewer = { _ctor = previewer },
 		winopts = { height = 1.0, width = 1.0, preview = { layout = "vertical", vertical = "up:60%", hidden = false, wrap = true },
 			on_close = function() closed = true end },
-		fzf_opts = { ["--delimiter"] = "[\t]", ["--with-nth"] = "2..", ["--no-multi"] = true, ["--no-sort"] = true,
-			["--header"] = "Ctrl-f / Ctrl-b: scroll transcript preview" },
-		keymap = { builtin = { ["<C-f>"] = "preview-page-down", ["<C-b>"] = "preview-page-up" },
-			fzf = { ["ctrl-f"] = "preview-page-down", ["ctrl-b"] = "preview-page-up" } },
-		actions = { enter = function(items)
-			-- on_close has run by the time fzf dispatches the selection.
-			if host.connected and host.connection == connection and host.hello.serviceEpoch == epoch then
-				local row = selected(items[1])
-				if row then on_choice(row) end
-			end
-		end },
+		fzf_opts = { ["--delimiter"] = "[\t]", ["--with-nth"] = "2..", ["--multi"] = true, ["--no-sort"] = true,
+			["--header"] = "Tab: select / Ctrl-a: all / Ctrl-f, Ctrl-b: scroll preview" },
+		keymap = { builtin = { ["<C-f>"] = "preview-page-down", ["<C-b>"] = "preview-page-up" }, fzf = keymap },
+		actions = {
+			enter = { fn = action(function(chosen) if chosen[1] then on_choice(chosen[1]) end end), header = "open" },
+			["ctrl-r"] = opts.on_archive and { fn = action(opts.on_archive), header = opts.archived and "unarchive" or "archive" } or nil,
+			["ctrl-x"] = opts.on_delete and { fn = action(opts.on_delete), header = "delete" } or nil,
+			["ctrl-g"] = opts.on_toggle_view and { fn = action(opts.on_toggle_view), header = opts.archived and "show regular" or "show archived" } or nil,
+		},
 	})
 end
 

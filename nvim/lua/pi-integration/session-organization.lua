@@ -11,11 +11,19 @@ local function entry_key(entry)
 		return nil
 	end
 	if entry.host_id and entry.session_id then return "service:" .. json.encode({ entry.host_id, entry.session_id }) end
+	if entry.frontend_id then return "frontend:" .. entry.frontend_id end
 end
 
 local function valid_key(key)
 	if type(key) ~= "string" then
 		return false
+	end
+	if key:sub(1, 9) == "frontend:" then
+		local tuple = json.decode(key:sub(10))
+		return type(tuple) == "table" and vim.islist(tuple) and #tuple == 2
+			and type(tuple[1]) == "string" and tuple[1]:match("^%%%d+$") ~= nil
+			and type(tuple[2]) == "number" and tuple[2] > 0 and tuple[2] % 1 == 0
+			and "frontend:" .. json.encode(tuple) == key
 	end
 	if key:sub(1, 8) == "service:" then
 		local tuple = json.decode(key:sub(9))
@@ -108,18 +116,38 @@ local function resolve_entry(state, entry)
 	if not key then
 		return nil, "Session has no saved path or live identity"
 	end
+	for _, frontend in ipairs(entry.frontend_keys or {}) do
+		local keys, index = locate(state, frontend)
+		if keys then
+			local previous, position = locate(state, key)
+			if previous == state.ungrouped and keys ~= state.ungrouped then
+				table.remove(previous, position)
+				keys[index] = key
+			elseif previous then table.remove(keys, index)
+			else keys[index] = key end
+		end
+	end
 	entry.organization_key = key
 	return key
 end
 
 local function sync(state, entries)
+	local visible = {}
 	for _, entry in ipairs(entries) do
 		local key, err = resolve_entry(state, entry)
 		if not key then
 			return nil, err
 		end
+		visible[key] = true
 		if not locate(state, key) then
 			table.insert(state.ungrouped, key)
+		end
+	end
+	local lists = { state.ungrouped }
+	for _, group in ipairs(state.groups) do table.insert(lists, group.keys) end
+	for _, keys in ipairs(lists) do
+		for index = #keys, 1, -1 do
+			if keys[index]:sub(1, 9) == "frontend:" and not visible[keys[index]] then table.remove(keys, index) end
 		end
 	end
 	return true

@@ -79,9 +79,9 @@ vim.api.nvim_create_user_command("PiCommand", function()
 	require("pi-integration").pick_command()
 end, { desc = "Pick a Pi slash command/template/skill" })
 
-vim.api.nvim_create_user_command("PiCd", function()
-	require("pi-integration").change_cwd()
-end, { desc = "Start a new conversation: choose owner and owner directory" })
+vim.api.nvim_create_user_command("PiCd", function(opts)
+	require("pi-integration").change_cwd(opts.args ~= "" and opts.args or nil)
+end, { nargs = "?", desc = "Start a new conversation in an owner directory" })
 
 vim.api.nvim_create_user_command("PiRestart", function()
 	require("pi-integration").restart()

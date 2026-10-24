@@ -506,15 +506,16 @@ export default function sideExtension(pi: ExtensionAPI) {
       if (request.action === "open") { publish(g); return reply(true); }
       if (transition) { reject("Side conversation is stopping or starting a new chat."); return; }
       if (request.action === "draft") {
-        if (typeof request.draft !== "string") { reject("Side draft must be a string."); return; }
+        if (typeof request.draft !== "string" || Buffer.byteLength(request.draft) > 1024 * 1024) {
+          reject("Side draft must be a string no larger than 1 MiB."); return;
+        }
         if (g.draft !== request.draft) {
           g.draft = request.draft;
           startJournal(g);
           record(g, { kind: "draft", draft: g.draft });
         }
         publish(g);
-        reply(true);
-        return;
+        return reply(true);
       }
       if (!existsSync(g.parentSessionFile)) {
         reject("Send a main prompt first so the side conversation has a saved parent session.");
@@ -585,9 +586,11 @@ export default function sideExtension(pi: ExtensionAPI) {
   };
   pi.registerCommand("pi-side", { description: "Control the independent ask-mode side conversation (JSON: open, prompt, reset, abort, draft).",
     handler: async (args, ctx) => { await sideAction(args, ctx); } });
-  for (const operation of ["side.open", "side.prompt", "side.reset", "side.abort"] as const) {
+  for (const operation of ["side.open", "side.prompt", "side.draft", "side.reset", "side.abort"] as const) {
     registerServiceOperation(pi, operation, (payload, ctx) => sideAction(JSON.stringify({
-      action: operation.slice(5), message: "text" in payload ? payload.text : undefined,
+      action: operation.slice(5),
+      message: operation === "side.prompt" && "text" in payload ? payload.text : undefined,
+      draft: operation === "side.draft" && "text" in payload ? payload.text : undefined,
       parentSessionFile: ctx.sessionManager.getSessionFile(),
     }), ctx));
   }

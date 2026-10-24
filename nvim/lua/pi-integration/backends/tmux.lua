@@ -44,7 +44,7 @@ local function parse_instances(output)
 			and entry.pid > 0
 			and entry.pid == math.floor(entry.pid)
 			and type(entry.title) == "string"
-			and type(entry.cwd) == "string"
+			and (type(entry.cwd) == "string" or entry.cwd == nil and entry.frontend_attachment == true and entry.session_id == nil)
 			and type(entry.status) == "string"
 			and type(entry.updated) == "number"
 			and vim.uv.kill(entry.pid, 0)

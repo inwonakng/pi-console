@@ -1,5 +1,5 @@
-// Fixed owner-only command in an unsaved Pi process. Model/provider discovery
-// and startup selection belong to Pi, not a second implementation in the server.
+// Fixed owner-only metadata command in an unsaved Pi process. Resource discovery
+// and startup selection belong to Pi, including its normal project trust gate.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { loadExtensionSettings } from "../extensions/shared/extension-settings";
@@ -9,7 +9,7 @@ import { modelReady } from "../extensions/shared/model-readiness";
 export default function hostOptions(pi: ExtensionAPI): void {
   if (process.env.PI_CONSOLE_SERVICE !== "1") return;
   pi.registerCommand("pi-host-options", {
-    description: "Read initialized host model options without starting a conversation",
+    description: "Read initialized host options and commands without starting a conversation",
     handler: async (args, ctx) => {
       if (args !== "directory-selected" && args !== "directory-required") throw new Error("Invalid host options request");
       const settings = loadExtensionSettings();
@@ -23,7 +23,15 @@ export default function hostOptions(pi: ExtensionAPI): void {
       const models = model && !available.some(option => option.provider === model.provider && option.id === model.id)
         ? [...available, model] : available;
       if (models.length > 10_000) throw new Error("Model count exceeds limit");
+      // Enumerate initialized resources only; never dispatch a discovered command.
+      const commands = pi.getCommands().filter(command => command.name !== "pi-host-options");
+      if (commands.length > 10_000) throw new Error("Command count exceeds limit");
       const result = {
+        commands: commands.map(command => ({ name: command.name, source: command.source,
+          ...(command.description !== undefined && { description: command.description }),
+          sourceInfo: { path: command.sourceInfo.path, source: command.sourceInfo.source,
+            scope: command.sourceInfo.scope, origin: command.sourceInfo.origin,
+            ...(command.sourceInfo.baseDir !== undefined && { baseDir: command.sourceInfo.baseDir }) } })),
         models: models.map(model => ({ provider: model.provider, id: model.id,
           contextWindow: model.contextWindow, thinkingLevels: getSupportedThinkingLevels(model) })),
         defaults: {
@@ -35,7 +43,7 @@ export default function hostOptions(pi: ExtensionAPI): void {
         },
       };
       const output = JSON.stringify(result);
-      if (Buffer.byteLength(output) > 1024 * 1024) throw new Error("Model metadata exceeds limit");
+      if (Buffer.byteLength(output) > 1024 * 1024) throw new Error("Host metadata exceeds limit");
       ctx.ui.setStatus("pi-host-options-result", output);
     },
   });

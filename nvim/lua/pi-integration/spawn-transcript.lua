@@ -131,7 +131,7 @@ function M.open(ctx, path, title, query, contents)
 	owner.spawn_buf = nil
 
 	local state = {
-		show_nested_tools = ctx.resources ~= nil,
+		show_nested_tools = false,
 		tool_outputs = {},
 		next_tool_output_id = 0,
 		tool_calls = {},
