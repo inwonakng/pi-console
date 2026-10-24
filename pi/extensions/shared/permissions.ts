@@ -1,5 +1,7 @@
 import { serviceUi } from "./service-ui";
-import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+import { PERMISSION_HISTORY, permissionSnapshot } from "../../scripts/permission-history.mjs";
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathInside, resolveToolPath } from "./paths";
@@ -26,6 +28,67 @@ const sessionGrants: Permission[] = [];
 let approvalQueue: Promise<void> = Promise.resolve();
 let generation = 0;
 let approvalLifetime = new AbortController();
+
+type Decision = "allowed" | "denied" | "cancelled";
+type HistoryRuntime = {
+  pi: ExtensionAPI;
+  ctx: ExtensionContext;
+  pending: Set<(reason: string) => void>;
+};
+let historyRuntime: HistoryRuntime | undefined;
+
+/** Audit entries are non-context data, never a source of permission grants. */
+export function registerPermissionHistory(pi: ExtensionAPI): void {
+  const close = () => {
+    for (const cancel of historyRuntime?.pending ?? []) cancel("Session runtime ended.");
+    historyRuntime = undefined;
+  };
+  const restore = (_event: unknown, ctx: ExtensionContext) => {
+    close();
+    historyRuntime = { pi, ctx, pending: new Set() };
+    const pending = new Set<string>();
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "custom" || entry.customType !== PERMISSION_HISTORY) continue;
+      const data = entry.data as { version?: unknown; id?: unknown; state?: unknown } | undefined;
+      if (data?.version !== 1 || typeof data.id !== "string") continue;
+      if (data.state === "pending") pending.add(data.id);
+      else pending.delete(data.id);
+    }
+    for (const id of pending) pi.appendEntry(PERMISSION_HISTORY, {
+      version: 1, id, state: "cancelled", answeredAt: new Date().toISOString(),
+      reason: "Session resumed without a recorded permission decision.",
+    });
+    if (ctx.mode === "rpc") ctx.ui.setStatus(PERMISSION_HISTORY, JSON.stringify(permissionSnapshot(ctx.sessionManager.getBranch())));
+  };
+  pi.on("session_start", restore);
+  pi.on("session_tree", restore);
+  pi.on("session_shutdown", close);
+}
+
+function recordPermission(ctx: ExtensionContext, request: Record<string, unknown>): (state: Decision, choice?: string, reason?: string) => void {
+  const runtime = historyRuntime;
+  if (!runtime || runtime.ctx.sessionManager !== ctx.sessionManager) return () => {};
+  const id = randomUUID();
+  let finished = false;
+  const current = () => runtime === historyRuntime;
+  const finish = (state: Decision, choice?: string, reason?: string) => {
+    if (finished) return;
+    finished = true;
+    runtime.pending.delete(cancel);
+    // A branch replacement must not append an old answer to the new branch.
+    if (!current() || !ctx.sessionManager.getBranch().some(entry => entry.type === "custom"
+      && entry.customType === PERMISSION_HISTORY && (entry.data as { id?: unknown })?.id === id)) return;
+    runtime.pi.appendEntry(PERMISSION_HISTORY, { version: 1, id, state, choice, reason, answeredAt: new Date().toISOString() });
+  };
+  const cancel = (reason: string) => finish("cancelled", undefined, reason);
+  if (current()) {
+    runtime.pi.appendEntry(PERMISSION_HISTORY, {
+      ...request, version: 1, id, state: "pending", requestedAt: new Date().toISOString(),
+    });
+    runtime.pending.add(cancel);
+  }
+  return finish;
+}
 
 export function canonicalPath(path: string): string {
   const resolveLinks = (candidate: string, remainingLinks: number): string => {
@@ -189,16 +252,32 @@ export function requestPermission(
         { ...permission, scopeType: "session" });
     }
     const choices = remember ? ["Allow once", ...sessionChoices.keys(), "Deny"] : ["Allow once", "Deny"];
-    const choice = await serviceUi(ctx).select(title, choices, { signal });
-    assertCurrent();
-    if (getAccessMode() === "readonly") throw new Error("Permission request cancelled because access mode changed to readonly.");
-    const grant = remember && choice ? sessionChoices.get(choice) : undefined;
-    if (choice !== "Allow once" && !grant) {
-      throw new Error(`${permission.kind} access denied by user: ${scopeLabel}`);
-    }
-    if (grant) {
-      sessionGrants.push(grant);
-      if (grant.kind !== "unsandboxed" && grant.kind !== "unix-socket") onSessionGrant();
+    const finish = recordPermission(ctx, {
+      tool, mode: getAccessMode(), scope: scopeLabel, request: summary, directory: ctx.cwd,
+      preview: contents.text, previewFiletype: contents.filetype, options: choices,
+    });
+    const cancel = () => finish("cancelled", undefined, "Permission request aborted.");
+    signal.addEventListener("abort", cancel, { once: true });
+    let choice: string | undefined;
+    try {
+      choice = await serviceUi(ctx).select(title, choices, { signal });
+      assertCurrent();
+      if (getAccessMode() === "readonly") throw new Error("Permission request cancelled because access mode changed to readonly.");
+      const grant = remember && choice ? sessionChoices.get(choice) : undefined;
+      if (choice !== "Allow once" && !grant) {
+        finish(choice === "Deny" ? "denied" : "cancelled", choice);
+        throw new Error(`${permission.kind} access denied by user: ${scopeLabel}`);
+      }
+      if (grant) {
+        sessionGrants.push(grant);
+        if (grant.kind !== "unsandboxed" && grant.kind !== "unix-socket") onSessionGrant();
+      }
+      finish("allowed", choice);
+    } catch (error) {
+      finish("cancelled", choice, error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", cancel);
     }
   };
   // All file-tool and network requests share the frontend's one active picker.

@@ -12,6 +12,7 @@ import {
   type SessionHeader,
 } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { messageKey, PERMISSION_HISTORY, permissionSnapshot } from "../scripts/permission-history.mjs";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -153,11 +154,16 @@ export default function sideExtension(pi: ExtensionAPI) {
     }
     if (g.publishTimer) clearTimeout(g.publishTimer);
     g.publishTimer = undefined;
+    const permissions = permissionSnapshot(g.entries);
+    if (!g.running) permissions.items = permissions.items.map(item => item.state === "pending"
+      ? { ...item, state: "cancelled", reason: "Side conversation stopped without a recorded permission decision." } : item);
     g.ctx.ui.setStatus("pi-side", JSON.stringify({
       parentSessionFile: g.parentSessionFile,
       id: g.id,
       capturedAt: g.seed?.source.capturedAt,
       messages: g.messages,
+      messageKeys: g.messages.map(messageKey),
+      permissions,
       partialMessage: g.partialMessage,
       running: g.running,
       draft: g.draft,
@@ -286,7 +292,10 @@ export default function sideExtension(pi: ExtensionAPI) {
       void relay(g, child, data as unknown as RpcExtensionUIRequest);
       return;
     }
-    if (data.type === "message_start" && (data.message as AgentMessage)?.role === "assistant") {
+    if (data.type === "entry_appended" && (data.entry as SessionEntry)?.type === "custom"
+      && (data.entry as { customType?: string }).customType === PERMISSION_HISTORY) {
+      void drain(g).then(() => publish(g), () => undefined);
+    } else if (data.type === "message_start" && (data.message as AgentMessage)?.role === "assistant") {
       g.partialMessage = data.message as AgentMessage;
       publish(g);
     } else if (data.type === "message_update") {

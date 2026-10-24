@@ -467,6 +467,10 @@ function M.collect_message_lines(ctx, messages, tools)
 				appended = render_tool_summary(ctx, lines, items, message, ensure_assistant_block)
 				rendered_kind = appended and "tool" or nil
 			end
+		elseif role == "permission" then
+			ensure_assistant_block()
+			require("pi-integration.permission-output").append(ctx, lines, items, message.permission)
+			appended, rendered_kind = true, "tool"
 		elseif role == "bashExecution" then
 			ensure_assistant_block()
 			local output_id = pi_tool_output.store(ctx.state, "bash", message.output or "", "text", { fullOutputPath = message.fullOutputPath })

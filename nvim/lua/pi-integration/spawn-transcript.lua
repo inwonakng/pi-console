@@ -16,16 +16,20 @@ local function decode_json(line)
 end
 
 local function read_messages(contents)
-	local messages = {}
+	local messages, permissions = {}, {}
 	for _, line in ipairs(vim.split(contents or "", "\n", { plain = true })) do
 		local record = decode_json(line)
 		local event = type(record) == "table" and record.event or nil
-		if type(record) == "table" and record.type == "message" and type(record.message) == "table" then
+		if type(record) == "table" and require("pi-integration.permission-output").add_record(messages, permissions, record) then
+			-- Decision entries update the row at the original request.
+		elseif type(record) == "table" and record.type == "message" and type(record.message) == "table" then
 			table.insert(messages, record.message)
 		elseif type(record) == "table" and (record.type == "compaction" or record.type == "branch_summary") then
 			table.insert(messages, { role = "assistant", content = { { type = "text", text = record.type .. ": " .. tostring(record.summary or "") } } })
 		elseif type(event) == "table" then
-			if event.type == "message_end" and type(event.message) == "table" then
+			if event.type == "entry_appended" and type(event.entry) == "table" then
+				require("pi-integration.permission-output").add_record(messages, permissions, event.entry)
+			elseif event.type == "message_end" and type(event.message) == "table" then
 				table.insert(messages, event.message)
 			elseif event.type == "tool_execution_start" or event.type == "tool_execution_update"
 				or event.type == "tool_execution_end" or event.type == "agent_end" or event.type == "agent_settled"
@@ -191,7 +195,7 @@ function M.open(ctx, path, title, query, contents)
 		if owner.spawn_win == win then owner.spawn_win = nil end
 		if owner.spawn_buf == buf then owner.spawn_buf = nil end
 	end
-	floats.close_on_win_leave(buf, close_win, { win = win, parent = ctx.window.parent })
+	floats.close_on_win_leave(buf, close_win, { win = win, parent = ctx.window and ctx.window.parent or owner.transcript_win })
 	local dismiss = function()
 		if ctx.resources then ctx.resources.select() end
 		close_win()

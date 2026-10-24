@@ -30,6 +30,7 @@ local ctx, sync_pending
 local recovery_id, backup_scheduled, restarting_frontend
 local render, refresh, connect, attach, recover_selection, tree_ctx, advance_start, host_options, backup
 local side_buf, side_input_buf, side_context, side_id
+local side_permission_state, side_permission_items = {}, {}
 local queue_editor
 local side_draft_saved, side_draft_pending, side_after_draft, restored_side_draft, side_prompt_pending
 local save_side_draft, side_save_scheduled, side_reset_draft
@@ -556,12 +557,25 @@ render = function()
 			side_id = side.id
 		end
 		local side_lines = { "# Side conversation", "", "Ctrl+Enter sends. :PiSideNew resets; :PiSideAbort stops.", "" }
+		side_permission_items = {}
+		require("pi-integration.tool-output").reset(side_permission_state)
 		if side then
 			table.insert(side_lines, side.running and "Working" or "Idle")
 			if side.error then
 				table.insert(side_lines, "Side status: " .. tostring(side.error))
 			end
-			for _, message in ipairs(side.messages or {}) do
+			local function permissions_after(key)
+				for _, permission in ipairs(side.permissions and side.permissions.items or {}) do
+					if permission.afterMessage == key then
+						require("pi-integration.permission-output").append({ state = side_permission_state }, side_lines, side_permission_items, permission)
+					end
+				end
+			end
+			if side.permissions and (side.permissions.omitted or 0) > 0 then
+				table.insert(side_lines, "> Older permission records are omitted from this view.")
+			end
+			permissions_after(vim.NIL)
+			for index, message in ipairs(side.messages or {}) do
 				table.insert(side_lines, "## " .. tostring(message.role))
 				if type(message.content) == "string" then vim.list_extend(side_lines, vim.split(message.content, "\n", { plain = true }))
 				else for _, block in ipairs(message.content or {}) do
@@ -576,6 +590,7 @@ render = function()
 						message.errorMessage or (message.stopReason == "aborted" and "Response aborted." or "Model request failed."),
 						true, message.stopReason == "aborted" and "Aborted" or "Error")
 				end
+				permissions_after(side.messageKeys and side.messageKeys[index])
 			end
 			if side.partialMessage then
 				for _, block in ipairs(side.partialMessage.content or {}) do vim.list_extend(side_lines, vim.split(block.text or block.thinking or "", "\n", { plain = true })) end
@@ -1681,6 +1696,12 @@ function M.side_prompt()
 		vim.keymap.set({ "n", "i" }, "<C-CR>", submit, { buffer = input, desc = "Send side message" })
 		vim.api.nvim_create_autocmd("BufHidden", { buffer = input, callback = function() save_side_draft() end })
 		local resource = owner_resources()
+		vim.keymap.set("n", "<CR>", function()
+			if require("pi-integration.utils.markdown-links").follow(nil, resource) then return end
+			local item = require("pi-integration.tool-groups").item_at_line(side_permission_items, vim.api.nvim_win_get_cursor(0)[1])
+			if item then require("pi-integration.tool-output").open_float({ state = side_permission_state,
+				ui = { notify = notify }, window = { parent = vim.api.nvim_get_current_win() }, resources = resource }, item.output_id) end
+		end, { buffer = side_buf, desc = "Inspect side permission" })
 		for _, buf in ipairs({ side_buf, side_input_buf }) do
 			resource.bind(buf)
 			require("pi-integration.markdown-render").prepare_buffer(buf, { latex = buf == side_buf })

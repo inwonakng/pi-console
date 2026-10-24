@@ -1,19 +1,11 @@
-import { createHash } from "node:crypto";
 import type { JsonAgentSessionEvent, RpcCommand, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
-import { type PiEvent } from "./pi-records.js";
+import { messageKey, PERMISSION_HISTORY, updatePermissionHistory, type PermissionHistoryItem } from "../../pi/scripts/permission-history.mjs";
+import { object, type PiEvent } from "./pi-records.js";
+export { messageKey } from "../../pi/scripts/permission-history.mjs";
 
 type Success<C extends string> = Extract<RpcResponse, { command: C; success: true }>;
 export type PiMessage = Success<"get_messages">["data"]["messages"][number];
 
-/** A reference to owner-observed message content, never submitted prompt text.
- * Ambiguous identical messages must remain unresolved by consumers. */
-export function messageKey(message: PiMessage): string {
-  const content = [message.role, "timestamp" in message ? message.timestamp : null,
-    "content" in message ? message.content : message];
-  return createHash("sha256").update(JSON.stringify(content, (_key, value: unknown) =>
-    value && typeof value === "object" && !Array.isArray(value)
-      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)).digest("hex");
-}
 type Assistant = Extract<PiMessage, { role: "assistant" }>;
 type SessionStats = Success<"get_session_stats">["data"] & {
   tokens: { sessionCacheRead?: number; sessionCacheWrite?: number };
@@ -57,6 +49,8 @@ export type ConversationSnapshot = {
   partialAssistant?: { message: Assistant; toolArguments: Record<number, string>; interrupted: boolean };
   tools: ToolState[];
   diagnostics: ConversationDiagnostic[];
+  permissions: PermissionHistoryItem[];
+  omittedPermissions: number;
   work: WorkState[];
   queue: { steering: readonly string[]; followUp: readonly string[] };
   execution: {
@@ -85,6 +79,7 @@ export type FrontendEffect =
 export type ConversationChange =
   | { type: "event"; event: JsonAgentSessionEvent }
   | { type: "history"; messages: PiMessage[] }
+  | { type: "permission_history"; permissions: PermissionHistoryItem[]; omitted: number }
   | { type: "diagnostic"; message: string }
   | { type: "pi_state"; state: RpcSessionState }
   | { type: "session_stats"; stats: SessionStats }
@@ -105,7 +100,7 @@ const LIFECYCLE_STATUSES = new Set(["pi-console-runtime", "pi-console-dialog"]);
 export class PiConversation {
   private state: ConversationSnapshot = {
     messages: [], messageKeys: [], omittedMessages: 0, historyRevision: 0, hydrated: false,
-    tools: [], diagnostics: [], work: [], queue: { steering: [], followUp: [] },
+    tools: [], diagnostics: [], permissions: [], omittedPermissions: 0, work: [], queue: { steering: [], followUp: [] },
     execution: { running: false, interrupted: false }, statuses: {}, widgets: {},
   };
   private historyBytes = 0;
@@ -188,6 +183,18 @@ export class PiConversation {
       case "setWidget": return { type: "widget", key: event.widgetKey, value: event.widgetLines === undefined ? undefined
         : { lines: event.widgetLines, placement: event.widgetPlacement ?? "aboveEditor" } };
       case "setStatus":
+        if (event.statusKey === PERMISSION_HISTORY && event.statusText) {
+          let value: unknown;
+          try { value = JSON.parse(event.statusText); } catch { return; }
+          if (!object(value) || value.version !== 1 || !Array.isArray(value.items)) return;
+          let permissions: PermissionHistoryItem[] = [];
+          for (const item of value.items) {
+            if (!object(item) || (item.afterMessage !== null && typeof item.afterMessage !== "string")) continue;
+            permissions = updatePermissionHistory(permissions, { ...item, state: "pending" }, item.afterMessage);
+            if (item.state !== "pending") permissions = updatePermissionHistory(permissions, item, item.afterMessage);
+          }
+          return { type: "permission_history", permissions, omitted: typeof value.omitted === "number" ? value.omitted : 0 };
+        }
         if (LIFECYCLE_STATUSES.has(event.statusKey)) return;
         if (EFFECT_STATUSES.has(event.statusKey)) return { type: "extension_signal", key: event.statusKey, value: event.statusText };
         return { type: "status", key: event.statusKey, value: event.statusText };
@@ -251,6 +258,10 @@ export class PiConversation {
           this.reserve("partial", undefined);
         }
         break;
+      case "permission_history":
+        this.state.omittedPermissions = change.omitted;
+        this.setPermissions(change.permissions);
+        break;
       case "invalidate_history": this.state.hydrated = false; this.version++; break;
       case "pi_state":
         this.reserve("pi_state", change.state);
@@ -284,6 +295,8 @@ export class PiConversation {
         this.pendingOutcome = undefined;
         this.state.hydrated = false;
         this.state.execution = { running: false, interrupted: true };
+        this.setPermissions(this.state.permissions.map(item => item.state === "pending"
+          ? { ...item, state: "cancelled", reason: "Runtime ended without a recorded permission decision." } : item));
         if (this.state.partialAssistant) this.state.partialAssistant.interrupted = true;
         for (const tool of this.state.tools) if (tool.state === "running") tool.state = "interrupted";
         for (const work of this.state.work) if (work.state === "dispatched") work.state = "uncertain";
@@ -347,9 +360,31 @@ export class PiConversation {
     }
   }
 
+  private setPermissions(items: PermissionHistoryItem[]): void {
+    // As with conversation messages, older entries remain in owner history.
+    let bytes = 0;
+    let start = items.length;
+    while (start > 0 && items.length - start < 128) {
+      const next = size(items[start - 1]);
+      if (next > HISTORY_BYTES) throw new Error("Pi permission record exceeds 16 MiB");
+      if (bytes + next > HISTORY_BYTES && start < items.length) break;
+      bytes += next;
+      start--;
+    }
+    for (const item of this.state.permissions) this.reserve(`permission:${item.id}`, undefined);
+    this.state.omittedPermissions += start;
+    this.state.permissions = items.slice(start);
+    for (const item of this.state.permissions) this.reserve(`permission:${item.id}`, item);
+  }
+
   private reduceEvent(event: JsonAgentSessionEvent): void {
     this.version++;
     switch (event.type) {
+      case "entry_appended":
+        if (event.entry.type === "custom" && event.entry.customType === PERMISSION_HISTORY) {
+          this.setPermissions(updatePermissionHistory(this.state.permissions, event.entry.data, this.state.messageKeys.at(-1) ?? null));
+        }
+        break;
       case "message_start":
         if (event.message.role === "assistant") {
           this.reserve("partial", event.message);

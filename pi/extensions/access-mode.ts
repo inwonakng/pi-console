@@ -21,6 +21,7 @@ import {
   hasPermission,
   pathInside,
   requestPermission,
+  registerPermissionHistory,
   resolveToolPath,
   restorePermissionGrants,
   type Permission,
@@ -184,6 +185,7 @@ function restoreAccessState(ctx: ExtensionContext, restoreGrants = true): void {
 }
 
 export default function accessModeExtension(pi: ExtensionAPI) {
+  registerPermissionHistory(pi);
   const defaultBash = createBashToolDefinition(process.cwd());
   pi.registerTool({
     ...defaultBash,

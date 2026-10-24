@@ -1,0 +1,24 @@
+export const PERMISSION_HISTORY: "pi-permission-history";
+export type PermissionHistoryItem = {
+  version: 1;
+  id: string;
+  state: "pending" | "allowed" | "denied" | "cancelled";
+  tool: string;
+  mode: string;
+  scope: string;
+  request: string;
+  directory: string;
+  preview: string;
+  previewFiletype: string;
+  options: string[];
+  requestedAt: string;
+  answeredAt?: string;
+  choice?: string;
+  reason?: string;
+  afterMessage: string | null;
+};
+type Entry = { type: string; customType?: string; data?: unknown; message?: { role: string } };
+export function messageKey(message: { role: string }): string;
+export function updatePermissionHistory(items: PermissionHistoryItem[], data: unknown, afterMessage: string | null): PermissionHistoryItem[];
+export function permissionHistory(branch: readonly Entry[]): PermissionHistoryItem[];
+export function permissionSnapshot(branch: readonly Entry[]): { version: 1; items: PermissionHistoryItem[]; omitted: number };

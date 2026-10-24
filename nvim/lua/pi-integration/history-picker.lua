@@ -23,8 +23,9 @@ local function render(row, contents, truncated)
 		table.insert(branch, by_id[leaf])
 		leaf = by_id[leaf].parentId
 	end
-	local visible = {}
+	local visible, permissions = {}, {}
 	local function add(record)
+		if require("pi-integration.permission-output").add_record(visible, permissions, record) then return end
 		if record.type == "message" and type(record.message) == "table" then
 			table.insert(visible, record.message)
 		elseif record.type == "custom_message" then

@@ -117,6 +117,15 @@ function M.timeline_messages(entries, session, snapshot)
 			place(entry.payload.text, entry.error, entry.timeline)
 		end
 	end
+	for _, permission in ipairs(conversation.permissions or {}) do
+		local anchor = permission.afterMessage
+		local at = anchor == vim.NIL and (conversation.omittedMessages or 0) == 0 and 0
+			or (anchor and not ambiguous[anchor] and positions[anchor])
+		if at then
+			buckets[at] = buckets[at] or {}
+			table.insert(buckets[at], { role = "permission", permission = permission })
+		end
+	end
 	local partial_diagnostics = {}
 	for _, diagnostic in ipairs(conversation.diagnostics or {}) do
 		local message = { role = "error", content = { { type = "text", text = diagnostic.message } } }
@@ -136,6 +145,9 @@ function M.timeline_messages(entries, session, snapshot)
 		end
 	end
 	local visible = {}
+	if (conversation.omittedPermissions or 0) > 0 then
+		table.insert(visible, { role = "custom", content = "> Permission history is limited here; :PiTranscript opens the full saved history." })
+	end
 	vim.list_extend(visible, buckets[0] or {})
 	for index, message in ipairs(history) do
 		table.insert(visible, message)

@@ -1121,7 +1121,7 @@ function M.open_float(ctx, output_id, resolved)
 		title_pos = "left",
 	})
 
-	local wrap = output.name == "codemode" or output.name == "question"
+	local wrap = output.name == "codemode" or output.name == "question" or output.name == "permission"
 	vim.api.nvim_set_option_value("wrap", wrap, { win = win })
 	if wrap then
 		vim.api.nvim_set_option_value("linebreak", true, { win = win })
