@@ -30,6 +30,7 @@ require("catppuccin").setup({
 			PiOverviewStatusLine = { fg = colors.subtext1, bg = M.ui_bg },
 			PiOverviewKey = { fg = colors.blue, bg = M.ui_bg, bold = true },
 			PiOverviewTitle = { fg = colors.text, bg = M.ui_bg, bold = true },
+			PiOverviewMetadata = { fg = colors.subtext0 },
 			PiOverviewNewSession = { fg = colors.text, bg = M.ui_bg, italic = true },
 			PiOverviewDetailTitle = { fg = colors.red, bg = M.ui_bg, bold = true },
 			PiOverviewValue = { fg = colors.green, bg = M.ui_bg },

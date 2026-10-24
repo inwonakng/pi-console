@@ -72,18 +72,6 @@ local function indicator_columns(entry)
 	return table.concat(cells), spans
 end
 
-local blank_indicators = column("", indicator_widths[1])
-	.. " " .. column("", indicator_widths[2])
-	.. " " .. column("", indicator_widths[3])
-
-local metadata_columns = {
-	{ key = "status", label = "Status", limit = 13 },
-	{ key = "project", label = "Project", limit = 20 },
-	{ key = "workspace", label = "Workspace", limit = 14 },
-	{ key = "host", label = "Host", limit = 32 },
-	{ key = "controller", label = "Controller", limit = 24 },
-}
-
 local function metadata(entry)
 	local host = text(entry.location) ~= "" and text(entry.location) or text(entry.host_name)
 	local controller = type(entry.controller) == "table" and text(entry.controller.label) or ""
@@ -92,50 +80,17 @@ local function metadata(entry)
 		project = vim.fn.fnamemodify(project(entry), ":t"),
 		workspace = workspace_label(entry),
 		host = host .. (entry.connected == false and " (unreachable)" or ""),
-		controller = entry.connected == false and "" or (controller ~= "" and controller or "-"),
+		controller = entry.connected ~= false and controller ~= "" and controller or "-",
 	}
 end
 
-local function column_widths(win, entries)
-	-- Reserve the indentation, indicators, and five two-space gaps.
-	local usable = math.max(0, vim.api.nvim_win_get_width(win) - 5 - vim.fn.strdisplaywidth(blank_indicators) - 10)
-	local widths, total, minimum_total = {}, 0, 0
-	for _, spec in ipairs(metadata_columns) do
-		widths[spec.key] = #spec.label
-		minimum_total = minimum_total + #spec.label
-	end
-	for _, entry in ipairs(entries) do
-		local values = metadata(entry)
-		for _, spec in ipairs(metadata_columns) do
-			widths[spec.key] = math.max(widths[spec.key], math.min(spec.limit, vim.fn.strdisplaywidth(values[spec.key])))
-		end
-	end
-	for _, spec in ipairs(metadata_columns) do total = total + widths[spec.key] end
-	while total > usable do
-		local widest
-		for _, spec in ipairs(metadata_columns) do
-			local minimum = usable >= minimum_total and #spec.label or 0
-			if widths[spec.key] > minimum and (not widest or widths[spec.key] > widths[widest]) then
-				widest = spec.key
-			end
-		end
-		if not widest then break end
-		widths[widest], total = widths[widest] - 1, total - 1
-	end
-	return widths
-end
-
-local function metadata_line(values, widths)
-	local cells = {}
-	for _, spec in ipairs(metadata_columns) do
-		local value = values[spec.key]
-		local suffix = " (unreachable)"
-		if spec.key == "host" and value:sub(-#suffix) == suffix and widths.host >= #suffix then
-			value = column(value:sub(1, -#suffix - 1), widths.host - #suffix) .. suffix
-		end
-		table.insert(cells, column(value, widths[spec.key]))
-	end
-	return "     " .. table.concat(cells, "  ")
+local function metadata_line(values)
+	return "       " .. table.concat({
+		values.status,
+		values.project .. " / " .. values.workspace,
+		"host: " .. values.host,
+		"controller: " .. values.controller,
+	}, " · ")
 end
 
 local function set_lines(buf, lines)
@@ -292,14 +247,10 @@ function M.open(config)
 		for _, entry in ipairs(entries) do
 			if entry.pinned then pinned_count = pinned_count + 1 end
 		end
-		local widths = column_widths(list_win, entries)
-		local labels = {}
-		for _, spec in ipairs(metadata_columns) do labels[spec.key] = spec.label end
 		local lines = {
 			" Pi sessions · " .. #instances .. " active · " .. pinned_count .. " pinned",
 			query == "" and "" or (" Filter: " .. query),
 			"",
-			metadata_line(labels, widths),
 		}
 		local function highlight(row, first, last, group)
 			table.insert(highlights, { row = row - 1, first = first, last = last, group = group })
@@ -325,9 +276,10 @@ function M.open(config)
 				highlight(row, #prefix + #badge, #lines[row] - #suffix, entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle")
 				if suffix ~= "" then highlight(row, #lines[row] - #suffix, #lines[row], "PiSubagent") end
 				local values = metadata(entry)
-				local metadata_text = metadata_line(values, widths)
+				local metadata_text = metadata_line(values)
 				table.insert(lines, metadata_text)
-				highlight(row + 1, 5, 5 + #column(values.status, widths.status), icons.highlight(entry.status))
+				highlight(row + 1, 7, 7 + #values.status, icons.highlight(entry.status))
+				highlight(row + 1, 7 + #values.status, #metadata_text, "PiOverviewMetadata")
 				if entry.connected ~= false and entry.status ~= "Inactive" then
 					local indicators, spans = indicator_columns(entry)
 					local indicator_start = #metadata_text + 2
