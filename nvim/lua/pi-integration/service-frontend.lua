@@ -608,6 +608,8 @@ render = function()
 			end
 		end
 		side_view.render(side_buf, side_lines)
+		side_permission_state.transcript_items = side_permission_items
+		transcript.apply_quote_highlights_to_buffer(side_buf, side_permission_state)
 	end
 	-- Every snapshot is a pure render; never invoke legacy event/effect handlers.
 	local split = {}

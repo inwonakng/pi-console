@@ -29,37 +29,38 @@ function M.add_record(messages, requests, record)
 end
 
 local labels = { pending = "Pending", allowed = "Allowed", denied = "Denied", cancelled = "Cancelled" }
-local function field(lines, label, value)
-	if type(value) ~= "string" then return end
-	vim.list_extend(lines, { "## " .. label, "" })
-	vim.list_extend(lines, vim.split(value, "\n", { plain = true }))
-	table.insert(lines, "")
+local function field(label, value)
+	if type(value) ~= "string" or value == "" then return nil end
+	return string.format("%-9s%s", label, value:gsub("%s+", " "))
+end
+
+local function fields(lines, left, right)
+	if left and right then
+		table.insert(lines, left .. string.rep(" ", math.max(4, 38 - vim.fn.strdisplaywidth(left))) .. right)
+	elseif left or right then
+		table.insert(lines, left or right)
+	end
 end
 
 function M.append(ctx, lines, items, permission)
 	local status = labels[permission.state] or "No recorded decision"
-	local detail = { "# Permission request", "" }
-	field(detail, "Status", status)
-	field(detail, "Selected choice", permission.choice)
-	field(detail, "Question", permission.request)
-	field(detail, "Tool", permission.tool)
-	field(detail, "Access mode", permission.mode)
-	field(detail, "Requested scope", permission.scope)
-	field(detail, "Working directory", permission.directory)
-	field(detail, "Asked at", permission.requestedAt)
-	field(detail, "Answered at", permission.answeredAt)
-	field(detail, "Cancellation reason", permission.reason)
-	vim.list_extend(detail, { "## Offered choices", "" })
-	for _, choice in ipairs(permission.options or {}) do table.insert(detail, "- " .. choice) end
-	vim.list_extend(detail, { "", "## Command / file preview", "" })
-	local preview = permission.preview or ""
-	local fence_length = 3
-	for ticks in preview:gmatch("`+") do fence_length = math.max(fence_length, #ticks + 1) end
-	local fence = string.rep("`", fence_length)
-	table.insert(detail, fence .. tostring(permission.previewFiletype or "text"):gsub("[^%w_-]", ""))
-	vim.list_extend(detail, vim.split(preview, "\n", { plain = true }))
-	table.insert(detail, fence)
-	local output_id = tool_output.store(ctx.state, "permission", table.concat(detail, "\n"), "markdown")
+	local detail = { type(permission.choice) == "string" and permission.choice ~= "" and permission.choice or status, "" }
+	if type(permission.request) == "string" and permission.request ~= "" then
+		vim.list_extend(detail, vim.split(permission.request, "\n", { plain = true }))
+		table.insert(detail, "")
+	end
+	fields(detail, field("Tool", permission.tool), field("Mode", permission.mode))
+	fields(detail, field("Scope", permission.scope))
+	fields(detail, field("CWD", permission.directory))
+	fields(detail, field("Asked", permission.requestedAt), field("Answered", permission.answeredAt))
+	fields(detail, field("Reason", permission.reason))
+	if permission.branchDecision then table.insert(detail, "Decision recorded on another branch.") end
+	table.insert(detail, "")
+	local preview_start = #detail + 1
+	vim.list_extend(detail, vim.split(permission.preview or "", "\n", { plain = true }))
+	local output_id = tool_output.store(ctx.state, "permission", table.concat(detail, "\n"), "text", {
+		status_label = status, preview_start = preview_start, preview_filetype = permission.previewFiletype,
+	})
 	local choice = type(permission.choice) == "string" and (": " .. permission.choice) or ""
 	local summary = "Permission: " .. tostring(permission.tool or "tool") .. " | " .. status .. choice
 	if permission.branchDecision then summary = summary .. " (another branch)" end
@@ -68,6 +69,27 @@ function M.append(ctx, lines, items, permission)
 	table.insert(lines, "> " .. summary:gsub("[\r\n]", " "))
 	table.insert(items, { kind = "tool", output_id = output_id, start_line = #lines, end_line = #lines })
 	table.insert(lines, "")
+end
+
+function M.highlight(buf, details)
+	vim.api.nvim_buf_set_extmark(buf, vim.api.nvim_create_namespace("pi-permission-detail"), 0, 0, {
+		end_col = #vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1],
+		hl_group = "PiPermissionQuote",
+	})
+	-- As in approval previews, syntax belongs to the body, never the metadata.
+	local filetype = details.preview_filetype
+	vim.api.nvim_buf_call(buf, function()
+		vim.cmd("syntax clear")
+		vim.b[buf].current_syntax = nil
+		if type(filetype) == "string" and filetype ~= "text" and filetype:match("^[%w_]+$")
+			and #vim.fn.globpath(vim.o.runtimepath, "syntax/" .. filetype .. ".vim", false, true) > 0 then
+			vim.cmd("syntax include @PiPermissionBody syntax/" .. filetype .. ".vim")
+			vim.cmd("syntax region PiPermissionBody start=/\\%" .. details.preview_start
+				.. "l/ end=/\\%$/ contains=@PiPermissionBody keepend")
+			vim.cmd("syntax sync fromstart")
+		end
+		vim.b[buf].current_syntax = "pi_permission"
+	end)
 end
 
 return M

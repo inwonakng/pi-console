@@ -852,6 +852,8 @@ function M.summary_highlight(state, output_id)
 		return "PiToolEditQuote"
 	elseif output.name == "workspace" then
 		return "PiToolWorkspaceQuote"
+	elseif output.name == "permission" then
+		return "PiPermissionQuote"
 	end
 	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
 	local pending = call and (call.execution_status == "running" or call.execution_status == "interrupted")
@@ -1034,8 +1036,7 @@ function M.open_float(ctx, output_id, resolved)
 	local height = math.max(10, math.floor(vim.o.lines * 0.8))
 	width = math.min(width, math.max(1, vim.o.columns - 4))
 	height = math.min(height, math.max(1, vim.o.lines - 4))
-	local row = math.floor((vim.o.lines - height) / 2)
-	local col = math.floor((vim.o.columns - width) / 2)
+	local permission = output.name == "permission" and output.details
 
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.api.nvim_buf_set_name(buf, "pi://tool/" .. output_id .. "/" .. sanitize_buf_name_part(output.name))
@@ -1103,22 +1104,32 @@ function M.open_float(ctx, output_id, resolved)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, content_lines)
 	if workspace_review then require("pi-integration.workspace-summary").highlight(buf) end
 	if source_end then highlight_codemode(buf, source_end, output_start, rendered_text) end
+	if permission then
+		require("pi-integration.permission-output").highlight(buf, permission)
+		width = 48
+		for _, line in ipairs(content_lines) do width = math.max(width, vim.fn.strdisplaywidth(line)) end
+		width = math.max(1, math.min(width, 96, vim.o.columns - 4))
+		height = math.min(#content_lines, height)
+	end
 	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 	if ctx.resources then
 		ctx.resources.qualify(buf, "tool-" .. tostring(output.name))
 		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, ctx.resources) end, { buffer = buf, desc = "Follow owner link" })
 	end
 
+	local title = permission and ("Permission · " .. permission.status_label)
+		or ("Tool: " .. tostring(output.name or "tool") .. (path and (" · " .. vim.fn.fnamemodify(path, ":t")) or ""))
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",
 		width = width,
 		height = height,
-		row = row,
-		col = col,
+		row = math.floor((vim.o.lines - height) / 2),
+		col = math.floor((vim.o.columns - width) / 2),
 		style = "minimal",
 		border = "rounded",
-		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "Tool: " .. tostring(output.name or "tool") .. (path and (" · " .. vim.fn.fnamemodify(path, ":t")) or "") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. title .. " ",
 		title_pos = "left",
+		footer = permission and " q close " or nil,
 	})
 
 	local wrap = output.name == "codemode" or output.name == "question" or output.name == "permission"
@@ -1130,6 +1141,14 @@ function M.open_float(ctx, output_id, resolved)
 	vim.api.nvim_set_option_value("number", false, { win = win })
 	vim.api.nvim_set_option_value("relativenumber", false, { win = win })
 	vim.api.nvim_set_option_value("signcolumn", "no", { win = win })
+	if permission then
+		height = math.min(vim.api.nvim_win_text_height(win, { start_row = 0, end_row = -1 }).all,
+			math.max(1, math.floor(vim.o.lines * 0.8)), math.max(1, vim.o.lines - 4))
+		vim.api.nvim_win_set_config(win, {
+			relative = "editor", height = height,
+			row = math.floor((vim.o.lines - height) / 2), col = math.floor((vim.o.columns - width) / 2),
+		})
+	end
 
 	local close_tool_win = function()
 		floats.close_window(win)
