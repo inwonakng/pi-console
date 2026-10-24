@@ -19,11 +19,19 @@ export type CatalogSession = {
   archived?: boolean;
   deleted?: boolean;
   lifecycleRevision?: number;
-  state: "saved" | "open" | "suspended" | "stopped" | "interrupted";
+  stopReason?: "user" | "service_shutdown" | "error";
   ownerEpoch?: string;
   acceptedQueue?: AcceptedQueueItem[];
 };
-type CatalogData = { schemaVersion: 1; channel: Channel; hostId: string; sessions: CatalogSession[]; commands?: StoredCommand[] };
+type LegacySession = Omit<CatalogSession, "stopReason"> & { state: "saved" | "open" | "suspended" | "stopped" | "interrupted" };
+type CatalogData = { schemaVersion: 1; channel: Channel; hostId: string; sessions: LegacySession[]; commands?: StoredCommand[] };
+
+function migrateSession(legacy: LegacySession): CatalogSession {
+  const { state, ...session } = legacy;
+  return { ...session, ...(state === "stopped" ? { stopReason: "user" as const }
+    : state === "suspended" ? { stopReason: "service_shutdown" as const }
+    : state === "interrupted" ? { stopReason: "error" as const } : {}) };
+}
 const CATALOG_BYTES = 64 * 1024 * 1024;
 const COMMAND_BYTES = 32 * 1024 * 1024;
 const ABORT_RESERVATION = 17 * 1024 * 1024;
@@ -136,7 +144,7 @@ function catalogData(value: unknown, channel: Channel): CatalogData {
   return value as CatalogData;
 }
 
-function queueBudget(data: CatalogData): void {
+function queueBudget(data: { sessions: CatalogSession[] }): void {
   const items = data.sessions.flatMap((session) => session.acceptedQueue ?? []);
   // Reserve fixed metadata/error headroom so terminal/recovery transitions never
   // grow the charge beyond the budget admitted for text.
@@ -150,7 +158,7 @@ function queueBudget(data: CatalogData): void {
 // owners reject it. Keep the original source bytes separately for offline recovery.
 type Activation = { schemaVersion: 2; database: "catalog.sqlite"; hostId: string; channel: Channel;
   phase: "initializing" | "ready"; sourceDigest?: string };
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 
 async function optionalJson(path: string): Promise<unknown | undefined> {
   try { return await privateJson(path, CATALOG_BYTES); }
@@ -250,8 +258,8 @@ export async function readManagedMetadata(root: string, session: CatalogSession)
 
 export function insertSession(db: DatabaseSync, session: CatalogSession): void {
   const { acceptedQueue: _, ...metadata } = session;
-  db.prepare("INSERT INTO sessions(id, pi_id, state, owner_epoch, metadata) VALUES(?,?,?,?,?)")
-    .run(session.id, session.piSessionId, session.state, session.ownerEpoch ?? null, JSON.stringify(metadata));
+  db.prepare("INSERT INTO sessions(id, pi_id, owner_epoch, metadata) VALUES(?,?,?,?)")
+    .run(session.id, session.piSessionId, session.ownerEpoch ?? null, JSON.stringify(metadata));
   insertQueue(db, session.id, session.acceptedQueue ?? []);
 }
 
@@ -334,12 +342,14 @@ export async function openStorage(root: string, channel: Channel, mutating: () =
   let version: number;
   try {
     version = Number(inspection.prepare("PRAGMA user_version").get()!.user_version);
-    if (version !== DATABASE_VERSION && !(version === 0 && activation.phase === "initializing"
+    if (version !== DATABASE_VERSION && version !== 1 && !(version === 0 && activation.phase === "initializing"
       && Number(inspection.prepare("SELECT count(*) AS n FROM sqlite_master").get()!.n) === 0)) throw new Error("Unsupported SQLite catalog schema; leaving data unchanged");
-    if (version === DATABASE_VERSION) {
+    if (version === DATABASE_VERSION || version === 1) {
       const meta = inspection.prepare("SELECT host_id, channel FROM profile WHERE singleton=1").get();
       if (meta?.host_id !== activation.hostId || meta.channel !== channel) throw new Error("SQLite profile identity mismatch");
-      const owned = inspection.prepare("SELECT owner_epoch FROM sessions WHERE state='open' OR owner_epoch IS NOT NULL").all();
+      const owned = inspection.prepare(version === 1
+        ? "SELECT owner_epoch FROM sessions WHERE state='open' OR owner_epoch IS NOT NULL"
+        : "SELECT owner_epoch FROM sessions WHERE owner_epoch IS NOT NULL").all();
       if (owned.some((row) => !recoveryEpoch || row.owner_epoch !== recoveryEpoch)) throw new Error("Catalog contains unresolved live ownership; recovery required");
     }
   } finally { inspection.close(); }
@@ -356,17 +366,25 @@ export async function openStorage(root: string, channel: Channel, mutating: () =
     if (version === 0) {
       db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE profile(singleton INTEGER PRIMARY KEY CHECK(singleton=1), host_id TEXT NOT NULL, channel TEXT NOT NULL);
-        CREATE TABLE sessions(id TEXT PRIMARY KEY, pi_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL, owner_epoch TEXT, metadata TEXT NOT NULL);
+        CREATE TABLE sessions(id TEXT PRIMARY KEY, pi_id TEXT NOT NULL UNIQUE, owner_epoch TEXT, metadata TEXT NOT NULL);
         CREATE TABLE queue(session_id TEXT NOT NULL REFERENCES sessions(id), id TEXT NOT NULL, position INTEGER NOT NULL, charge INTEGER NOT NULL, item TEXT NOT NULL, PRIMARY KEY(session_id,id), UNIQUE(session_id,position));
         CREATE TABLE commands(seq INTEGER PRIMARY KEY, epoch TEXT NOT NULL, id TEXT NOT NULL, session_id TEXT REFERENCES sessions(id), fingerprint TEXT NOT NULL, status TEXT NOT NULL, operation TEXT NOT NULL, reserved_bytes INTEGER NOT NULL, receipt TEXT NOT NULL, UNIQUE(epoch,id));
         CREATE INDEX commands_recent ON commands(session_id,seq DESC);
         CREATE INDEX commands_pending ON commands(status) WHERE status='accepted';
         CREATE TABLE recovery(command_seq INTEGER PRIMARY KEY REFERENCES commands(seq), payload TEXT NOT NULL);
-        PRAGMA user_version=1;`);
+        PRAGMA user_version=2;`);
       db.prepare("INSERT INTO profile VALUES(1,?,?)").run(activation.hostId, channel);
-      for (const session of source?.sessions ?? []) insertSession(db, session);
+      for (const session of source?.sessions ?? []) insertSession(db, migrateSession(session));
       for (const command of source?.commands ?? []) insertCommand(db, command);
       db.exec("COMMIT");
+    }
+    if (version === 1) {
+      db.exec("BEGIN IMMEDIATE");
+      for (const row of db.prepare("SELECT id, metadata FROM sessions").all()) {
+        const session = migrateSession(JSON.parse(String(row.metadata)) as LegacySession);
+        db.prepare("UPDATE sessions SET metadata=? WHERE id=?").run(JSON.stringify(session), row.id);
+      }
+      db.exec("ALTER TABLE sessions DROP COLUMN state; PRAGMA user_version=2; COMMIT;");
     }
     if (activation.phase !== "ready") await activate(root, { ...activation, phase: "ready" });
     await syncDirectory(root);

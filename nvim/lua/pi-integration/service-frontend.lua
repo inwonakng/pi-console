@@ -920,12 +920,12 @@ recover_selection = function(allow_restore)
 			local row
 			for _, entry in ipairs(value.sessions or {}) do if entry.id == session_id then row = entry; break end end
 			if row and not row.archived and not row.deleted then
-				if row.state == "open" then attach(session_id); return end
-				if row.state == "suspended" and allow_restore and vim.tbl_contains(hello.capabilities, "host.recover") then
+				if row.live then attach(session_id); return end
+				if row.stopReason == "service_shutdown" and allow_restore and vim.tbl_contains(hello.capabilities, "host.recover") then
 					host_operation("host.recover", { sessionId = session_id }); return
 				end
 			end
-			session_status = not row and "unavailable" or row.archived and "archived" or row.deleted and "deleted" or row.state
+			session_status = not row and "unavailable" or row.archived and "archived" or row.deleted and "deleted" or "Inactive"
 			session_error = "Session " .. session_status .. ". Use :PiSessions to inspect or explicitly reopen it."
 		end
 		render()
@@ -1012,6 +1012,14 @@ connect = function()
 			if pending then pending.callback(value.success, value.success and value.result or value.error) end
 		elseif value.type == "update" then
 			if value.update.sessionId ~= session_id then return end
+			local close = value.update.closeFrontend
+			if close and close.attachmentId == attachment and hello and value.update.serviceEpoch == hello.serviceEpoch then
+				if backup() and can_close_frontend() then
+					M.detach()
+					vim.cmd("qall!")
+				end
+				return
+			end
 			local old_revision = current_revision()
 			observe_authority(value.update, false)
 			if old_revision ~= current_revision() then close_approval() end
@@ -2189,7 +2197,7 @@ local function follow_resumed_selection()
 			if resume_check == captured then resume_check = nil end
 			if not ok or not same_selection(captured) then return end
 			for _, row in ipairs(result.sessions or {}) do
-				if row.id == session_id and row.state == "open" and not row.archived and not row.deleted then attach(session_id); return end
+				if row.id == session_id and row.live and not row.archived and not row.deleted then attach(session_id); return end
 			end
 		end)
 	elseif not job and stopped then recovery_requested = false; connect() end

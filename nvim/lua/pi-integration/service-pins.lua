@@ -62,7 +62,7 @@ function M.merge(instances)
 			local host = require("pi-integration.service-hosts").find(entry.host_id)
 			entry.connected = host and host.connected or false
 			entry.host_name = host and host.alias or entry.host_name
-			entry.status = entry.connected and "Not Open" or "Disconnected"
+			entry.status = entry.connected and "Inactive" or "Unknown"
 			entry.location = entry.host_name
 			table.insert(entries, entry)
 		end

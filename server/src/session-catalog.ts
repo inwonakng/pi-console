@@ -79,9 +79,9 @@ export class SessionCatalog {
           for (const row of db.prepare("SELECT id,metadata FROM sessions WHERE owner_epoch=?").all(epoch)) {
             const session = JSON.parse(String(row.metadata)) as CatalogSession;
             // An accepted kill remains an explicit stop even if the owner crashed.
-            if (session.state !== "stopped") session.state = "interrupted";
+            if (session.stopReason !== "user") session.stopReason = "error";
             delete session.ownerEpoch;
-            db.prepare("UPDATE sessions SET state=?,owner_epoch=NULL,metadata=? WHERE id=?").run(session.state, JSON.stringify(session), row.id);
+            db.prepare("UPDATE sessions SET owner_epoch=NULL,metadata=? WHERE id=?").run(JSON.stringify(session), row.id);
           }
           db.exec("COMMIT");
           if (db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()?.busy !== 0) throw new Error("Recovery checkpoint blocked; retain original claim");
@@ -211,7 +211,7 @@ export class SessionCatalog {
     await this.change(() => {
       if (saved) {
         const session = this.get(saved.sessionId);
-        if (session.state === "open" || session.ownerEpoch) throw new Error("Saved session became owned before completion");
+        if (session.ownerEpoch) throw new Error("Saved session became owned before completion");
         if (saved.archived !== undefined) session.archived = saved.archived;
         if (saved.deleted) session.deleted = true;
         session.lifecycleRevision = (session.lifecycleRevision ?? 0) + 1;
@@ -231,7 +231,7 @@ export class SessionCatalog {
       const directory = await realpath(cwd);
       if (!(await lstat(directory)).isDirectory()) throw new Error("Session cwd must be a host directory");
       const id = randomUUID();
-      const session: CatalogSession = { id, piSessionId: id, cwd: directory, createdAt: new Date().toISOString(), state: "saved" };
+      const session: CatalogSession = { id, piSessionId: id, cwd: directory, createdAt: new Date().toISOString() };
       const file = await open(join(this.root, "sessions", `${id}.jsonl`), "wx", 0o600);
       try {
         await file.writeFile(JSON.stringify({ type: "session", version: 3, id, timestamp: session.createdAt, cwd: directory }) + "\n");
@@ -252,22 +252,22 @@ export class SessionCatalog {
     return validateManagedFile(this.root, this.get(id));
   }
 
-  async markOpen(id: string): Promise<void> {
+  async claimOwnership(id: string): Promise<void> {
     await this.change(() => {
       const session = this.get(id);
-      if (session.state === "open" || session.ownerEpoch !== undefined || session.archived || session.deleted) throw new Error("Session is owned, archived, or deleted");
+      if (session.ownerEpoch !== undefined || session.archived || session.deleted) throw new Error("Session is owned, archived, or deleted");
       session.lifecycleRevision = (session.lifecycleRevision ?? 0) + 1;
-      session.state = "open";
+      delete session.stopReason;
       session.ownerEpoch = this.epoch;
       this.updateSession(session);
     });
   }
 
-  async markStopped(id: string, interrupted: boolean, suspended = false): Promise<void> {
+  async releaseOwnership(id: string, reason?: CatalogSession["stopReason"]): Promise<void> {
     await this.change(() => {
       const session = this.get(id);
-      if (!["open", "stopped"].includes(session.state) || session.ownerEpoch !== this.epoch) throw new Error("Session ownership changed before recording its exit");
-      if (session.state !== "stopped") session.state = interrupted ? "interrupted" : suspended ? "suspended" : "saved";
+      if (session.ownerEpoch !== this.epoch) throw new Error("Session ownership changed before recording its exit");
+      if (session.stopReason !== "user") session.stopReason = reason;
       delete session.ownerEpoch;
       this.updateSession(session);
     });
@@ -313,8 +313,8 @@ export class SessionCatalog {
 
   private updateSession(session: CatalogSession): void {
     const { acceptedQueue: _, ...metadata } = session;
-    this.db.prepare("UPDATE sessions SET state=?, owner_epoch=?, metadata=? WHERE id=?")
-      .run(session.state, session.ownerEpoch ?? null, JSON.stringify(metadata), session.id);
+    this.db.prepare("UPDATE sessions SET owner_epoch=?, metadata=? WHERE id=?")
+      .run(session.ownerEpoch ?? null, JSON.stringify(metadata), session.id);
   }
 
   private receipts(where: string, parameters: SQLInputValue[]): StoredCommand[] {
@@ -389,10 +389,10 @@ export class SessionCatalog {
         if (items) this.setQueue(copy.receipt.sessionId, items);
         if (copy.receipt.operation === "session.kill") {
           const session = this.get(copy.receipt.sessionId);
-          if (session.ownerEpoch !== this.epoch || session.state !== "open") throw new CommandError("session_unavailable", "Session is no longer live");
+          if (session.ownerEpoch !== this.epoch || session.stopReason === "user") throw new CommandError("session_unavailable", "Session is no longer live");
           // Persist intent atomically with acceptance, retaining the ownership
           // fence until worker cleanup (or explicit reconciliation) completes.
-          session.state = "stopped";
+          session.stopReason = "user";
           session.lifecycleRevision = (session.lifecycleRevision ?? 0) + 1;
           this.updateSession(session);
         }
@@ -409,7 +409,7 @@ export class SessionCatalog {
     const directory = join(this.root, "sessions");
     const id = basename(file, ".jsonl");
     if (dirname(file) !== directory || file !== join(directory, `${id}.jsonl`) || !/^[0-9a-f-]{36}$/.test(id)) throw new Error("Clone is not an owner-managed session file");
-    const record: CatalogSession = { id, piSessionId: id, cwd, createdAt: new Date().toISOString(), state: "saved" };
+    const record: CatalogSession = { id, piSessionId: id, cwd, createdAt: new Date().toISOString() };
     const header = await validateManagedFile(this.root, record);
     if (header.cwd !== cwd) throw new Error("Clone cwd does not match its header");
     Object.assign(record, await readManagedMetadata(this.root, record));
@@ -489,7 +489,7 @@ export class SessionCatalog {
         this.lifetime.close();
         throw this.failure;
       }
-      if (this.db.prepare("SELECT 1 FROM sessions WHERE state='open' OR owner_epoch IS NOT NULL LIMIT 1").get()) throw new Error("Stop owned sessions before releasing the service catalog");
+      if (this.db.prepare("SELECT 1 FROM sessions WHERE owner_epoch IS NOT NULL LIMIT 1").get()) throw new Error("Stop owned sessions before releasing the service catalog");
       const jobs = inspectEpoch(this.processRegistry, this.epoch);
       if (jobs.some((job) => !["done", "cancelled"].includes(job.status))) throw new Error("Known managed processes remain unresolved; retain ownership");
       sealEpoch(this.processRegistry, this.epoch);

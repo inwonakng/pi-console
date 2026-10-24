@@ -22,14 +22,14 @@ local styles = {
 	Idle = { icon = "󰽥", color = colors.muted },
 	Unstarted = { icon = "", color = colors.apricot },
 	Error = { icon = "", color = colors.red },
-	["Not Open"] = { icon = "", color = colors.muted },
-	Disconnected = { icon = "", color = colors.muted },
+	Inactive = { icon = "", color = colors.muted },
+	Unknown = { icon = "?", color = colors.muted },
 	Stopping = { icon = "", color = colors.muted },
 }
 styles.Retrying = styles.Working
 styles.Starting = styles.Loading
-styles.Stopped = styles.Error
-styles.Unresponsive = styles.Error
+styles.Unresponsive = styles.Unknown
+styles.Disconnected = styles.Unknown
 
 function M.get(status)
 	local style = styles[status] or styles.Error

@@ -37,7 +37,7 @@ type RenameFlight = {
   message: string; dispatched: boolean; requestId?: string; result?: RenameResult;
 };
 type SessionActivity = {
-  status: "Starting" | "Stopping" | "Stopped" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Idle";
+  status: "Starting" | "Stopping" | "Inactive" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Idle";
   completionSeq: number;
   turnOutcome?: ConversationSnapshot["execution"]["outcome"];
   subagentRuns: { runId: string; status: "running"; agent?: string; role?: string; progress?: string }[];
@@ -63,7 +63,7 @@ export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevi
   accessMode?: string; integrationMode?: string; notificationsEnabled: boolean; cwd: string;
 };
 export type HostSummaries = {
-  sessions: (Pick<CatalogSession, "id" | "cwd" | "name" | "state"> & { live?: OwnedSessionSummary })[];
+  sessions: (Pick<CatalogSession, "id" | "cwd" | "name"> & { live?: OwnedSessionSummary })[];
   hostId: string;
   channel: Channel;
   serviceEpoch: string;
@@ -79,6 +79,7 @@ export type OwnedSessionUpdate = {
   runtimeRevision: number;
   sequence: number;
   owner?: OwnedSessionState;
+  closeFrontend?: { attachmentId: string; commandId: string };
   conversation?: ConversationChange;
   effect?: EffectOffer;
   command?: CommandReceipt;
@@ -142,13 +143,18 @@ export class HostOwner {
   get buildId(): string { return this.resources.buildId; }
   get hostId(): string { return this.catalog.hostId; }
   get serviceEpoch(): string { return this.catalog.epoch; }
-  list(): CatalogSession[] { return this.catalog.list(); }
+  list(): (CatalogSession & { live?: OwnedSessionSummary })[] {
+    return this.catalog.list().map((record) => {
+      const session = this.lookup(record.id);
+      return { ...record, ...(session ? { live: session.summary() } : {}) };
+    });
+  }
 
   /** Owner-local display projection only; never subscribes to workers or other hosts. */
   summaries(): HostSummaries {
-    return { sessions: this.catalog.list().map(({ id, cwd, name, state }) => {
-      const session = this.sessions.get(id);
-      return { id, cwd, name: session?.name || name, state, ...(session && !session.finished ? { live: session.summary() } : {}) };
+    return { sessions: this.catalog.list().map(({ id, cwd, name }) => {
+      const session = this.lookup(id);
+      return { id, cwd, name: session?.name || name, ...(session ? { live: session.summary() } : {}) };
     }), hostId: this.hostId, channel: this.options.channel, serviceEpoch: this.serviceEpoch };
   }
 
@@ -225,7 +231,7 @@ export class HostOwner {
   private savedRecord(id: string): CatalogSession {
     const record = this.catalog.get(id);
     if (record.deleted) throw new CommandError("session_unavailable", "Session was deleted; receipts and workspace recovery data remain available");
-    if (record.state === "open" || record.ownerEpoch || this.sessions.get(id) && !this.sessions.get(id)!.finished) {
+    if (record.ownerEpoch || this.sessions.get(id) && !this.sessions.get(id)!.finished) {
       throw new CommandError("session_busy", "Open conversations are protected. Use current control to explicitly kill the session before archiving/deleting it.");
     }
     return record;
@@ -328,11 +334,11 @@ export class HostOwner {
     if (record.archived || record.deleted) throw new CommandError("session_unavailable", "Explicitly unarchive before resuming; deleted sessions cannot resume");
     const previous = this.sessions.get(id);
     if (previous && !previous.finished) {
-      if (recoverOnly && (record.state === "stopped" || !previous.recoverable)) throw new CommandError("session_unavailable", "Session is stopping or failed; explicitly reopen it after cleanup");
+      if (recoverOnly && (record.stopReason === "user" || !previous.recoverable)) throw new CommandError("session_unavailable", "Session is stopping or failed; explicitly reopen it after cleanup");
       return previous;
     }
-    if (record.ownerEpoch || record.state === "open") throw new Error("Session has unresolved ownership; recovery is required");
-    if (recoverOnly && record.state !== "suspended") throw new CommandError("session_unavailable", `Session is ${record.state}; explicitly reopen it first`);
+    if (record.ownerEpoch) throw new Error("Session has unresolved ownership; recovery is required");
+    if (recoverOnly && record.stopReason !== "service_shutdown") throw new CommandError("session_unavailable", "Session was not stopped by service shutdown; explicitly reopen it first");
     const previousState = previous?.snapshot();
     const session = new OwnedSession(this.catalog, record, this.options, previousState?.runtimeRevision ?? 0, previousState?.sequence ?? 0, () => {
       if (this.savedMutations.size) throw new CommandError("session_busy", "Saved-session lifecycle operation in progress; retry workspace changes explicitly after inspecting its outcome");
@@ -593,6 +599,7 @@ export class OwnedSession {
       this.control.detach(id);
     }, (update) => {
       if (update.effect && !this.validOffer(id, update)) delete update.effect;
+      if (update.closeFrontend?.attachmentId !== id) delete update.closeFrontend;
       return update;
     });
     this.viewers.add(subscription);
@@ -809,17 +816,23 @@ export class OwnedSession {
       }
       const worker = this.commandRuntime(command.runtimeRevision);
       if (this.lifecyclePending) throw new CommandError("session_busy", "Session lifecycle operation pending");
-      const bundled = command.operation !== "session.kill" ? this.prepareBundled(command, worker) : undefined;
+      const bundled = command.operation !== "session.kill" && command.operation !== "turn.abort" ? this.prepareBundled(command, worker) : undefined;
       const receipt: CommandReceipt = { id: command.id, sessionId: this.id, serviceEpoch: this.catalog.epoch,
         runtimeRevision: command.runtimeRevision, operation: command.operation, authority: "management", status: "accepted" };
-      try { await this.catalog.reserveCommand({ fingerprint, receipt }, undefined, admission); }
-      catch (error) { if (!(error instanceof CommandError)) this.commandFailure(error); throw error; }
+      let closeAttachment: string | undefined;
+      try {
+        await this.catalog.reserveCommand({ fingerprint, receipt }, undefined, () => {
+          admission?.();
+          if (command.operation === "session.kill") closeAttachment = this.control.current()?.attachmentId;
+        });
+      } catch (error) { if (!(error instanceof CommandError)) this.commandFailure(error); throw error; }
       if (bundled) this.bundled = bundled;
       this.publish({ command: receipt });
       if (command.operation === "session.kill") {
         this.lifecyclePending = true;
-        this.lifecycle = this.executeLifecycle(command, receipt).catch((error: unknown) => this.commandFailure(error));
-      } else if (bundled) this.trackCommand(this.executeBundled(receipt, bundled));
+        this.lifecycle = this.executeLifecycle(command, receipt, closeAttachment).catch((error: unknown) => this.commandFailure(error));
+      } else if (command.operation === "turn.abort") this.trackCommand(this.executeCommand(command, receipt));
+      else if (bundled) this.trackCommand(this.executeBundled(receipt, bundled));
       return structuredClone(receipt);
     });
     this.admission = task.then(() => undefined, () => undefined);
@@ -1326,9 +1339,9 @@ export class OwnedSession {
 
   private activity(): SessionActivity {
     const pending = this.worker?.interactionSnapshot().pending.some((item) => !item.submitted);
-    const status = this.error || this.phase === "failed" ? "Error"
+    const status = this.done ? "Inactive"
+      : this.error || this.phase === "failed" ? "Error"
       : this.phase === "stopping" ? "Stopping"
-      : this.phase === "stopped" ? "Stopped"
       : pending ? "Waiting"
       : this.phase === "initializing" ? "Starting"
       : this.conversation.compacting ? "Compacting"
@@ -1415,7 +1428,7 @@ export class OwnedSession {
     this.publish({ command: outcome });
   }
 
-  private async executeLifecycle(command: { runtimeRevision: number; operation: "session.kill" | "session.restart" }, receipt: CommandReceipt): Promise<void> {
+  private async executeLifecycle(command: { runtimeRevision: number; operation: "session.kill" | "session.restart" }, receipt: CommandReceipt, closeAttachment?: string): Promise<void> {
     let error: unknown;
     try {
       // No takeover can cancel an already accepted kill/restart. Context and
@@ -1432,8 +1445,10 @@ export class OwnedSession {
         if (this.cleanupError) throw this.cleanupError;
       }
     } catch (failure) { error = failure; }
-    try { await this.finishCommand(receipt, error); }
-    finally { this.lifecyclePending = false; }
+    try {
+      await this.finishCommand(receipt, error);
+      if (!error && closeAttachment) this.publish({ closeFrontend: { attachmentId: closeAttachment, commandId: receipt.id } });
+    } finally { this.lifecyclePending = false; }
   }
 
   private requestStop(): void {
@@ -1444,7 +1459,7 @@ export class OwnedSession {
     this.changed();
   }
 
-  private async executeCommand(command: SessionCommand, receipt: CommandReceipt): Promise<void> {
+  private async executeCommand(command: SessionCommand | Extract<ManagementCommand, { operation: "turn.abort" }>, receipt: CommandReceipt): Promise<void> {
     let error: unknown;
     try {
       const worker = this.commandRuntime(command.runtimeRevision);
@@ -1595,7 +1610,7 @@ export class OwnedSession {
     try {
       const header = await this.catalog.validateSessionFile(this.id);
       this.checkRunning();
-      await this.catalog.markOpen(this.id);
+      await this.catalog.claimOwnership(this.id);
       owned = true;
       this.checkRunning();
       // Only one trust-driven process replacement is permitted per startup.
@@ -1656,14 +1671,14 @@ export class OwnedSession {
           if (this.exit.descendantsUnresolved) throw new Error("Known Pi managed work remains unresolved; retain session ownership for recovery");
           if (this.exit.error || this.exit.code !== 0) this.error ??= new Error(this.exit.error ?? "Pi exited abnormally");
         }
-        // A failed markOpen may have an uncertain commit: never undo that claim.
+        // A failed ownership claim may have an uncertain commit: never undo it.
         // stop() awaits the managed supervisor's terminal evidence. Unknown
         // escaped work remains outside the explicitly best-effort guarantee.
         await this.admission;
         await Promise.allSettled([...this.commands]);
         await this.admission;
         await this.interruptQueue("session_stopped", "Session stopped; review accepted work before explicitly editing/resubmitting");
-        if (owned) await this.catalog.markStopped(this.id, !!this.error, this.serviceStopping);
+        if (owned) await this.catalog.releaseOwnership(this.id, this.error ? "error" : this.serviceStopping ? "service_shutdown" : undefined);
       } catch (error) {
         this.cleanupError = asError(error);
         this.error = new Error("Session ownership cleanup failed; recovery is required", { cause: error });
@@ -1969,7 +1984,7 @@ export class OwnedSession {
     this.publish({ conversation: change });
   }
 
-  private publish(change: Pick<OwnedSessionUpdate, "owner" | "conversation" | "effect" | "command" | "acceptedQueue">): void {
+  private publish(change: Pick<OwnedSessionUpdate, "owner" | "conversation" | "effect" | "command" | "acceptedQueue" | "closeFrontend">): void {
     const update: OwnedSessionUpdate = {
       sessionId: this.id, serviceEpoch: this.catalog.epoch, runtimeRevision: this.runtimeRevision,
       sequence: ++this.sequence, ...change,

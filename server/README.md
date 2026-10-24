@@ -248,7 +248,13 @@ C adds typed model/thinking/mode pickers and cycles, owner `!` / `!!` shell,
 native steering / `:PiFollowUp`, retry/compaction settings through the command picker,
 history navigation/fork/clone/delete, `:PiWorkspace` enter/integrate/discard,
 side/spawn controls, retitle/notifications/usage and confirmed owner-session restart.
-`:PiKill` kills the session and closes only this frontend after preserving drafts.
+`:PiKill` / `<leader>pk` stops the session worker and closes this frontend after
+preserving drafts. `<leader>qq` only closes the frontend; the worker keeps running.
+In the Neovim overview, `dd` stops the selected session and closes the controller
+attachment captured when the stop is accepted. Other attachments remain open.
+`<leader>pi` interrupts the selected turn without stopping the worker or taking control.
+Pinned sessions without a runtime display `Inactive`; an unreachable host displays
+`(unreachable)` in the Host column and its session activity is `Unknown`.
 `:PiOperations` inspects outcomes/recovered history text; `:PiHostRequest` reviews an
 unresolved create/resume ID. These do not replay work. See the C report for exact
 arguments, confirmations and what completion means.
@@ -502,9 +508,11 @@ complete third-party-dialog acceptance. See the contracts report for scoped evid
 
 - `src/host-owner.ts` opens one catalog per host/profile. Create/resume registers
   an initializing handle before startup; concurrent resume returns that handle.
-  It validates managed history, commits open ownership before spawning, runs
-  trust/workspace initialization, and awaits child exit before recording saved or
-  interrupted state. Lookup/list/snapshot are reads, never startup operations.
+  It validates managed history, claims ownership before spawning, runs
+  trust/workspace initialization, and awaits managed cleanup before releasing ownership.
+  Session rows expose an optional `live` runtime summary instead of a stored lifecycle
+  status. `stopReason` retains user-stop, service-shutdown, or error information for
+  recovery; it is not an activity status. Lookup/list/snapshot never start workers.
 - `src/pi-process.ts` starts one owned RPC child, reads LF-framed records using a
   fatal streaming UTF-8 decoder, correlates responses and serializes stdin writes
   with backpressure. Worker environment comes from the host owner, with frontend,
@@ -728,11 +736,14 @@ unrestricted frontend stop endpoint. `HostOwner.close()` refuses active/initiali
 sessions or in-flight creation; it never silently stops them.
 
 The catalog's exclusive claim is not proof that all worker descendants have died.
-It refuses stale claims and unresolved open entries rather than guessing from a
-PID or replaying work. The owner marks an entry open before launching
-its child and marks it stopped only after managed terminal evidence is available.
+It refuses stale claims and unresolved ownership rather than guessing from a
+PID or replaying work. Ownership is claimed before child launch and released only
+after managed terminal evidence is available. User-stop intent is persisted at
+command acceptance, without releasing that ownership fence. SQLite catalog v2
+removes the old lifecycle state column and migrates its recovery information into
+`stopReason`; histories and command receipts are retained.
 A live catalog cannot be closed. Failed exit persistence or known unresolved managed
-jobs retain open ownership and refuse replacement. Explicit reconciliation and default
+jobs retain ownership and refuse replacement. Explicit reconciliation and default
 per-channel roots follow the best-effort B2 contract above. A failed/ambiguous SQLite commit,
 checkpoint or initialization write retains the claim and fences further mutations
 rather than overwriting a possibly committed entry. A failed create may

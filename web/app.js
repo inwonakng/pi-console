@@ -22,11 +22,13 @@ const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
 let hosts = [], tabs = new Map(), activeKey = null, connecting = false, generation = 0;
 const completionStates = new Map(), expandedSubagents = new Set();
+// Automatic controller-tab closure keeps unsent text available in this page.
+const stoppedPromptDrafts = new Map();
 function sessionStatus(host, row, activity = row.live, resetSeen = false, viewed = false) {
-  if (row.state !== "open") return row.state === "interrupted" ? "Error" : "Stopped";
-  if (!host.connected) return "Disconnected";
-  if (!activity) return "Starting";
+  if (!host.connected) return "Unknown";
   const key = sessionKey(host.hello.hostId, row.id);
+  if (!row.live) { completionStates.delete(key); return "Inactive"; }
+  if (!activity) return "Unknown";
   const epoch = host.hello.serviceEpoch;
   const viewedCompletion = viewed ? activity.completionSeq || 0 : 0;
   let previous = completionStates.get(key);
@@ -91,7 +93,7 @@ function setSummaries(host, value) {
   for (const tab of tabs.values()) {
     if (tab.identity === host.hello.hostId && (!tab.host.connected || !hosts.includes(tab.host))) tab.rebind(host);
   }
-  if (host.historyRows) host.historyRows = value.sessions.map(row => ({ ...host.historyRows.find(saved => saved.id === row.id), ...row }));
+  if (host.historyRows) host.historyRows = value.sessions.map(row => ({ ...host.historyRows.find(saved => saved.id === row.id), ...row, live: row.live }));
   renderOverview();
   if ($("history-dialog").open) renderHistory();
   renderTabs();
@@ -106,6 +108,7 @@ async function connectHost(host) {
       host.connected = false;
       host.error = record.message;
       renderOverview();
+      renderTabs();
       if ($("history-dialog").open) renderHistory();
     } else if (record.type === "summaries" && host.hello) setSummaries(host, record.result);
   });
@@ -189,7 +192,7 @@ function filteredRows(historyView = false) {
   const query = $(historyView ? "history-search" : "search").value.toLowerCase();
   const filter = $(historyView ? "history-host" : "host-filter").value;
   const sources = filter ? hosts.filter(host => host.key === filter) : uniqueHosts();
-  return sources.flatMap(host => (historyView ? host.historyRows || host.sessions : host.sessions).filter(row => (historyView || row.state === "open")
+  return sources.flatMap(host => (historyView ? host.historyRows || host.sessions : host.sessions).filter(row => (historyView || row.live)
     && `${sessionName(row)} ${row.cwd} ${host.alias}`.toLowerCase().includes(query)).map(row => ({ host, row })));
 }
 function renderOverview() {
@@ -228,7 +231,7 @@ function renderOverview() {
     heading.append(text("span", sessionName(row), "row-title"), status);
     link.append(heading, text("span", `${host.alias} / ${row.live?.cwd || row.cwd}`, "row-directory"));
     if (tabs.has(key)) link.append(text("span", "Tab open", "row-open"));
-    const runs = row.live?.subagentRuns || [];
+    const runs = host.connected ? row.live?.subagentRuns || [] : [];
     if (!runs.length) return link;
     const group = text("div", "", "session-entry"), details = text("details", "", "subagent-runs");
     details.open = expandedSubagents.has(key);
@@ -247,13 +250,13 @@ function renderHistory() {
   $("history-list").replaceChildren(...filteredRows(true).map(({ host, row }) => {
     const node = text("div", "", "history-row");
     const description = text("div", "", "history-description");
-    description.append(text("div", sessionName(row)), text("div", `${host.alias} / ${row.cwd} / ${row.state}${row.archived ? " / archived" : ""}`, "row-directory"));
-    const open = button(row.state === "open" ? "Open" : "Resume", () => perform(async () => {
+    description.append(text("div", sessionName(row)), text("div", `${host.alias} / ${row.cwd} / ${sessionStatus(host, row)}${row.archived ? " / archived" : ""}`, "row-directory"));
+    const open = button(row.live ? "Open" : "Resume", () => perform(async () => {
       if (host.busy) return;
       host.busy = true;
       renderHistory();
       try {
-        if (row.state !== "open") {
+        if (!row.live) {
           if (!confirm(`Resume "${sessionName(row)}" on ${host.alias}?`)) return;
           await hostCommand(host, "host.resume", { sessionId: row.id });
           setSummaries(host, await host.client.request("sessions.subscribe"));
@@ -324,7 +327,7 @@ function route() {
     const host = hosts.find(host => host.connected && host.hello.hostId === match[1]);
     if (!host) { if (!connecting) notice("This host is unavailable. Reconnect it from Overview."); return; }
     const row = host.sessions.find(row => row.id === match[2]);
-    if (!row || row.state !== "open") { notice("This session is stopped or unavailable. Open History to resume it explicitly."); return; }
+    if (!row?.live) { notice("This session is inactive or unavailable. Open History to resume it explicitly."); return; }
     tab = createConversation(host, row);
     tabs.set(key, tab);
     $("panels").append(tab.element);
@@ -406,6 +409,8 @@ function createConversation(host, row) {
   const selectedId = row.id;
   const identity = host.hello.hostId;
   const key = sessionKey(identity, selectedId);
+  $("prompt").value = stoppedPromptDrafts.get(key) || "";
+  stoppedPromptDrafts.delete(key);
   const tabElement = text("div", "", "conversation-tab");
   const link = text("a", sessionName(row));
   link.href = sessionRoute(host, row);
@@ -453,7 +458,7 @@ function createConversation(host, row) {
     $("notice").hidden = !message;
   }
   function controlsCurrent() {
-    return connected && grant && owner?.controller?.attachmentId === attachment
+    return host.connected && row.live && connected && grant && owner?.controller?.attachmentId === attachment
       && owner.controller.grantId === grant.grantId;
   }
   function context() { return { client, selectedId, attachment, runtimeRevision }; }
@@ -506,6 +511,11 @@ function createConversation(host, row) {
         return;
       }
       streamSequence = update.sequence;
+      if (update.closeFrontend && update.closeFrontend.attachmentId === attachment) {
+        if ($("prompt").value) stoppedPromptDrafts.set(key, $("prompt").value);
+        closeTab(key);
+        return;
+      }
       // A snapshot can already include an update still waiting in the stream.
       if (update.sequence > authoritySequence) {
         authoritySequence = update.sequence;
@@ -529,12 +539,12 @@ function createConversation(host, row) {
   }
   function scheduleRefresh() {
     dirty = true;
-    if (refreshTimer || refreshing || !connected || !selectedId) return;
+    if (refreshTimer || refreshing || !host.connected || !row.live || !connected || !selectedId) return;
     refreshTimer = setTimeout(refresh, 100);
   }
   async function refresh() {
     refreshTimer = null;
-    if (!connected || !selectedId || refreshing) return;
+    if (!host.connected || !row.live || !connected || !selectedId || refreshing) return;
     const captured = context();
     refreshing = true;
     dirty = false;
@@ -561,11 +571,12 @@ function createConversation(host, row) {
   function renderControls() {
     const controlled = Boolean(controlsCurrent());
     $("reconnect").hidden = connected;
-    $("reconnect").disabled = busy || row.state !== "open";
+    $("reconnect").disabled = busy || !host.connected || !row.live;
     $("stop").disabled = !controlled || busy;
-    $("control").disabled = !connected || !snapshot || busy;
+    $("control").disabled = !host.connected || !row.live || !connected || !snapshot || busy;
     $("control").textContent = controlled ? "Release control" : owner?.controller ? "Take over" : "Take control";
-    $("controller").textContent = !connected ? "Disconnected / read only" : controlled ? "You control this session"
+    $("controller").textContent = !host.connected ? "Unknown / read only" : !row.live ? "Inactive / read only"
+      : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
     $("abort").disabled = !controlled || busy || !snapshot?.conversation.execution.running;
     $("rename").disabled = !controlled || busy;
@@ -582,7 +593,7 @@ function createConversation(host, row) {
     return JSON.stringify([attachment, runtimeRevision, model?.provider, model?.id]);
   }
   async function loadSettings() {
-    if (!connected || owner?.phase !== "ready" || !hello.capabilities.includes("session.read")) return;
+    if (!host.connected || !row.live || !connected || owner?.phase !== "ready" || !hello.capabilities.includes("session.read")) return;
     const captured = context(), key = settingsKey();
     if (optionsLoad?.key === key) return;
     const load = optionsLoad = { key };
@@ -633,21 +644,23 @@ function createConversation(host, row) {
       field.select.value = value;
       field.select.disabled = !enabled || !choices.length || !hello?.capabilities.includes(field.operation) || Boolean(optionsLoad);
     }
-    $("refresh-settings").disabled = !connected || owner?.phase !== "ready" || Boolean(optionsLoad) || !hello?.capabilities.includes("session.read");
-    $("settings-hint").textContent = optionsLoad ? "Loading model options..." : optionsError ? `${optionsError} Tap Refresh options to retry.`
+    $("refresh-settings").disabled = !host.connected || !row.live || !connected || owner?.phase !== "ready" || Boolean(optionsLoad) || !hello?.capabilities.includes("session.read");
+    $("settings-hint").textContent = !host.connected ? "Host unavailable. Current settings are unknown." : !row.live ? "Session inactive. Resume it from History."
+      : optionsLoad ? "Loading model options..." : optionsError ? `${optionsError} Tap Refresh options to retry.`
       : !connected ? "Reconnect to read current settings." : owner?.phase !== "ready" ? "Waiting for session setup."
       : !controlsCurrent() ? "Take control to change settings." : "Changes apply to this session on the execution host.";
   }
   function displayStatus() {
-    if (row.state !== "open") return row.state === "interrupted" ? "Error" : "Stopped";
-    if (!connected) return owner?.status === "Error" ? "Error" : "Disconnected";
+    if (!host.connected) return "Unknown";
+    if (!row.live) return "Inactive";
+    if (!connected) return "Unknown";
     return sessionStatus(host, row, owner || row.live);
   }
   function renderSession() {
     const currentRow = host.sessions.find(item => item.id === selectedId) || row;
     $("session-title").textContent = snapshot.piState?.sessionName || sessionName(currentRow);
     $("session-directory").textContent = `${host.alias} / ${owner?.interactions.runtime?.cwd || currentRow.cwd || ""}`;
-    if (owner?.error) notice(owner.error);
+    if (host.connected && row.live && connected && owner?.error) notice(owner.error);
     renderTranscript();
     if (connected) sessionStatus(host, row, snapshot, false, true);
     const state = displayStatus();
@@ -676,7 +689,8 @@ function createConversation(host, row) {
   function renderTranscript() {
     if (element.hidden) return;
     const conversation = snapshot.conversation;
-    const key = JSON.stringify(conversation);
+    const live = Boolean(host.connected && row.live && connected);
+    const key = JSON.stringify([conversation, live]);
     if (key === transcriptKey) return;
     transcriptKey = key;
     const target = $("transcript");
@@ -719,7 +733,7 @@ function createConversation(host, row) {
       return article;
     });
     if (conversation.omittedMessages) nodes.unshift(text("p", `${conversation.omittedMessages} older messages are outside this snapshot.`, "muted"));
-    for (const tool of conversation.tools.filter(tool => tool.state === "running")) {
+    for (const tool of conversation.tools.filter(tool => live && tool.state === "running")) {
       const details = blockDetails(`${tool.toolName} / running`, tool.partialResult || tool.args, `tool-${tool.toolCallId}`);
       details.className = "tool-output";
       nodes.push(details);
@@ -755,7 +769,7 @@ function createConversation(host, row) {
     }
   }
   function renderInteractions() {
-    const pending = owner?.interactions.pending || [];
+    const pending = host.connected && row.live && connected ? owner?.interactions.pending || [] : [];
     const enabled = Boolean(controlsCurrent()) && !busy;
     const key = JSON.stringify([pending, enabled, runtimeRevision]);
     if (key === interactionKey) return;
@@ -817,8 +831,8 @@ function createConversation(host, row) {
   function renderQueue() {
     const accepted = snapshot.acceptedQueue?.items || [];
     const native = snapshot.conversation.queue;
-    const queued = [...accepted.map(item => ({ text: item.text, label: `Queued / ${item.status}` })),
-      ...native.steering.map(value => ({ text: value, label: "Steering" })), ...native.followUp.map(value => ({ text: value, label: "Follow-up" }))];
+    const queued = host.connected && row.live && connected ? [...accepted.map(item => ({ text: item.text, label: `Queued / ${item.status}` })),
+      ...native.steering.map(value => ({ text: value, label: "Steering" })), ...native.followUp.map(value => ({ text: value, label: "Follow-up" }))] : [];
     $("queue-panel").hidden = !queued.length;
     $("queue-summary").textContent = `Queued prompts (${queued.length})`;
     $("queue").replaceChildren(...queued.map(item => {
@@ -891,7 +905,7 @@ function createConversation(host, row) {
       setSummaries(host, summaries);
       if (disposed) return;
       const currentRow = host.sessions.find(item => item.id === selectedId);
-      if (currentRow?.state !== "open") throw new Error("This session is stopped. Open History to resume it explicitly.");
+      if (!currentRow?.live) throw new Error("This session is inactive. Open History to resume it explicitly.");
       client?.close();
       const next = new ServiceClient(record => { if (!disposed && client === next) receive(record); });
       client = next;
@@ -920,12 +934,16 @@ function createConversation(host, row) {
     rebind(current) { host = current; if (snapshot) renderSession(); },
     disconnect(message = "Host registration removed, disabled or changed.") { client?.close(message); },
     syncRow(value) {
-      if (value) row = value;
-      if (row.state !== "open") {
-        client?.close("Session stopped. Resume it explicitly from History.");
+      row = value || { ...row, live: undefined };
+      if (!row.live) {
+        connected = false;
+        grant = null;
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+        // Keep the attachment subscribed for a targeted closeFrontend update.
       }
-      setStatus($("session-status"), displayStatus());
-      renderControls();
+      if (snapshot) renderSession();
+      else { setStatus($("session-status"), displayStatus()); renderControls(); }
     },
     cwd: () => owner?.interactions.runtime?.cwd || row.cwd,
     show() { if (snapshot) renderSession(); element.focus({ preventScroll: true }); },

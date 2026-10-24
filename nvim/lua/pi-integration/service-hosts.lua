@@ -266,7 +266,7 @@ function M.list()
 	for _, identity in ipairs(identities) do
 		local host = owners[identity]
 		for _, row in ipairs(host.rows or {}) do
-			if row.state == "open" then
+			if row.live then
 				local id = vim.json.encode({ identity, row.id })
 				local live = row.live or {}
 				local epoch = host.hello and host.hello.serviceEpoch
@@ -293,13 +293,13 @@ function M.list()
 				local status = live.status or "Idle"
 				if status == "Idle" and live.turnOutcome == "completed" and completion > seen then status = "Done" end
 				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host_label(host),
-					connected = host.connected == true, status = host.connected and status or connection_status(host), frontend_keys = frontend_keys,
+					connected = host.connected == true, status = host.connected and status or "Unknown", frontend_keys = frontend_keys,
 					title = session_title(row), cwd = row.cwd, directory = row.cwd,
-					location = host.alias, controller = row.live and row.live.controller, activity = nil,
+					location = host.alias, controller = host.connected and live.controller or nil, activity = nil,
 					workspace_cwd = row.live and row.live.cwd or row.cwd, last_focused_at = focused,
-					subagent_runs = live.subagentRuns or {}, subagents = #(live.subagentRuns or {}),
-					access_mode = row.live and row.live.accessMode, integration_mode = row.live and row.live.integrationMode,
-					notification_status = row.live and row.live.notificationsEnabled and "notify on" or "notify off",
+					subagent_runs = host.connected and live.subagentRuns or {}, subagents = host.connected and #(live.subagentRuns or {}) or 0,
+					access_mode = host.connected and live.accessMode or nil, integration_mode = host.connected and live.integrationMode or nil,
+					notification_status = host.connected and (live.notificationsEnabled and "notify on" or "notify off") or nil,
 					channel = channel, service_epoch = host.hello and host.hello.serviceEpoch,
 					runtime_revision = row.live and row.live.runtimeRevision })
 			end
@@ -376,7 +376,7 @@ function M.open(entry, in_place)
 		local opened, failure = tmux.launch_service(frontend.config.launcher, M.target(host), entry.session_id, nil, resume)
 		if not opened then notify(failure) end
 	end
-	select(entry.status == "Not Open")
+	select(entry.status == "Inactive")
 	return true
 end
 saved_request = function(host, envelope, callback)
@@ -541,7 +541,7 @@ function M.history_picker(identity, opts)
 			local function mutate(chosen, operation) saved_actions(host, chosen, operation, not opts.archived, reopen) end
 			require("pi-integration.history-picker").pick(host, rows, function(row)
 				local timestamp = tostring(row.lastActivityAt or row.createdAt or "Unknown time"):gsub("T", " "):gsub("%.%d+Z$", " UTC")
-				return timestamp .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " (" .. row.state .. ")"
+				return timestamp .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " (" .. (row.live and row.live.status or "Inactive") .. ")"
 			end, function(chosen, preview_opts)
 				if not current() or #chosen == 0 then return end
 				if not opts.archived then
@@ -551,7 +551,7 @@ function M.history_picker(identity, opts)
 						for _, row in ipairs(chosen) do
 							if not current() then notify("Owner changed; remaining sessions were not opened"); return end
 							local ok, err = M.open({ host_id = host.host_id, session_id = row.id,
-								status = row.state == "open" and "Idle" or "Not Open" }, in_place)
+								status = row.live and "Idle" or "Inactive" }, in_place)
 							if not ok then notify(err) end
 						end
 					end
@@ -605,7 +605,7 @@ function M.maybe_prompt_archive(identity)
 		local cutoff, stale, count = os.date("!%Y-%m-%dT%H:%M:%S", now - days * 86400), {}, 0
 		for _, row in ipairs(result.sessions) do
 			local timestamp = row.lastActivityAt or row.createdAt
-			if not row.deleted and not row.archived and row.state ~= "open" and type(timestamp) == "string" and timestamp < cutoff then
+			if not row.deleted and not row.archived and not row.live and type(timestamp) == "string" and timestamp < cutoff then
 				stale[row.id], count = true, count + 1
 			end
 		end
@@ -699,12 +699,13 @@ function M.management_operations()
 end
 function M.manage(entry, action, argument)
 	if not entry.session_id then return nil, "Frontend has no owner session yet" end
+	if entry.status == "Inactive" then return nil, "Session is inactive" end
 	local host = M.find(entry.host_id)
 	if not host or not host.connected then return nil, "Host disconnected; mutations disabled" end
 	if not vim.tbl_contains(host.hello.capabilities or {}, "session.manage") then return nil, "Server does not support session management" end
 	local operations = { cycle_access_mode = "access.cycle", set_access_mode = "access.set",
 		cycle_integration_mode = "integration.cycle", set_integration_mode = "integration.set",
-		toggle_notifications = "notifications.set", kill = "session.kill" }
+		toggle_notifications = "notifications.set", kill = "session.kill", interrupt = "turn.abort" }
 	local operation = operations[action]
 	if not operation then return nil, "Unsupported management action" end
 	local frontend = require("pi-integration.service-frontend")
@@ -718,6 +719,7 @@ function M.manage(entry, action, argument)
 		elseif action == "cycle_integration_mode" then payload = { modes = frontend.config.integration_modes }
 		elseif action == "set_access_mode" or action == "set_integration_mode" then payload = { mode = argument }
 		elseif action == "toggle_notifications" then payload = { enabled = entry.notification_status ~= "notify on" }
+		elseif action == "interrupt" then payload = {}
 		else payload = { confirmed = true } end
 		local envelope = { version = 1, id = uid(), sessionId = entry.session_id, serviceEpoch = entry.service_epoch,
 			runtimeRevision = entry.runtime_revision, operation = operation, payload = payload }
@@ -745,8 +747,8 @@ function M.manage(entry, action, argument)
 		end)
 	end
 	if action == "kill" then
-		vim.ui.select({ "Kill session", "Cancel" }, { prompt = "Kill " .. entry.title .. " on " .. host.alias .. "? Active work is interrupted; history/workspaces remain." }, function(choice)
-			if choice == "Kill session" then send() end
+		vim.ui.select({ "Stop session", "Cancel" }, { prompt = "Stop " .. entry.title .. " on " .. host.alias .. " and close its controller? History/workspaces remain." }, function(choice)
+			if choice == "Stop session" then send() end
 		end)
 	else send() end
 	return true

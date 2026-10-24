@@ -8,6 +8,7 @@ local build_info = require("pi-integration.build-info")
 local session_navigation = require("pi-integration.session-navigation")
 local M = {}
 local ns = vim.api.nvim_create_namespace("pi-overview")
+local selection_ns = vim.api.nvim_create_namespace("pi-overview-selection")
 
 local function text(value)
 	return type(value) == "string" and value:gsub("[%c]", " ") or ""
@@ -75,15 +76,66 @@ local blank_indicators = column("", indicator_widths[1])
 	.. " " .. column("", indicator_widths[2])
 	.. " " .. column("", indicator_widths[3])
 
-local function column_widths(win)
-	-- Reserve the pin/expand prefix, indicators, and five two-space gaps.
-	local usable = math.max(0, vim.api.nvim_win_get_width(win) - 5 - vim.fn.strdisplaywidth(blank_indicators) - 10)
+local metadata_columns = {
+	{ key = "status", label = "Status", limit = 13 },
+	{ key = "project", label = "Project", limit = 20 },
+	{ key = "workspace", label = "Workspace", limit = 14 },
+	{ key = "host", label = "Host", limit = 32 },
+	{ key = "controller", label = "Controller", limit = 24 },
+}
+
+local function metadata(entry)
+	local host = text(entry.location) ~= "" and text(entry.location) or text(entry.host_name)
+	local controller = type(entry.controller) == "table" and text(entry.controller.label) or ""
 	return {
-		status = math.min(13, math.floor(usable * 0.08)),
-		project = math.min(20, math.floor(usable * 0.14)),
-		workspace = math.min(14, math.floor(usable * 0.12)),
-		host = math.min(12, math.floor(usable * 0.10)),
+		status = text(entry.status),
+		project = vim.fn.fnamemodify(project(entry), ":t"),
+		workspace = workspace_label(entry),
+		host = host .. (entry.connected == false and " (unreachable)" or ""),
+		controller = entry.connected == false and "" or (controller ~= "" and controller or "-"),
 	}
+end
+
+local function column_widths(win, entries)
+	-- Reserve the indentation, indicators, and five two-space gaps.
+	local usable = math.max(0, vim.api.nvim_win_get_width(win) - 5 - vim.fn.strdisplaywidth(blank_indicators) - 10)
+	local widths, total, minimum_total = {}, 0, 0
+	for _, spec in ipairs(metadata_columns) do
+		widths[spec.key] = #spec.label
+		minimum_total = minimum_total + #spec.label
+	end
+	for _, entry in ipairs(entries) do
+		local values = metadata(entry)
+		for _, spec in ipairs(metadata_columns) do
+			widths[spec.key] = math.max(widths[spec.key], math.min(spec.limit, vim.fn.strdisplaywidth(values[spec.key])))
+		end
+	end
+	for _, spec in ipairs(metadata_columns) do total = total + widths[spec.key] end
+	while total > usable do
+		local widest
+		for _, spec in ipairs(metadata_columns) do
+			local minimum = usable >= minimum_total and #spec.label or 0
+			if widths[spec.key] > minimum and (not widest or widths[spec.key] > widths[widest]) then
+				widest = spec.key
+			end
+		end
+		if not widest then break end
+		widths[widest], total = widths[widest] - 1, total - 1
+	end
+	return widths
+end
+
+local function metadata_line(values, widths)
+	local cells = {}
+	for _, spec in ipairs(metadata_columns) do
+		local value = values[spec.key]
+		local suffix = " (unreachable)"
+		if spec.key == "host" and value:sub(-#suffix) == suffix and widths.host >= #suffix then
+			value = column(value:sub(1, -#suffix - 1), widths.host - #suffix) .. suffix
+		end
+		table.insert(cells, column(value, widths[spec.key]))
+	end
+	return "     " .. table.concat(cells, "  ")
 end
 
 local function set_lines(buf, lines)
@@ -106,7 +158,7 @@ end
 function M.render_statusline()
 	local win = vim.g.statusline_winid or vim.api.nvim_get_current_win()
 	return build_info.statusline(vim.api.nvim_win_get_width(win), {
-		" 󰕮", "Enter open", "Tab expand", "J/K move", "g group", "p pin", "dd kill/delete", "/ filter", "<leader>? keys",
+		" 󰕮", "Enter open", "Tab expand", "J/K move", "g group", "p pin", "dd stop/delete group", "<leader>pi interrupt", "/ filter", "<leader>? keys",
 	})
 end
 
@@ -153,6 +205,18 @@ function M.open(config)
 			return rows[vim.api.nvim_win_get_cursor(list_win)[1]]
 		end
 	end
+	local function highlight_selection()
+		vim.api.nvim_buf_clear_namespace(list_buf, selection_ns, 0, -1)
+		local row = vim.api.nvim_win_get_cursor(list_win)[1]
+		local node = rows[row]
+		if not node or node.kind ~= "session" then return end
+		if rows[row - 1] == node then row = row - 1 end
+		for line = row, row + 1 do
+			vim.api.nvim_buf_set_extmark(list_buf, selection_ns, line - 1, 0, {
+				end_row = line, end_col = 0, hl_group = "CursorLine", hl_eol = true, priority = 200,
+			})
+		end
+	end
 	local function details()
 		if not vim.api.nvim_buf_is_valid(detail_buf) then
 			return
@@ -186,13 +250,13 @@ function M.open(config)
 			table.insert(lines, " Project:   " .. text(project(entry)))
 			table.insert(lines, " Workspace: " .. workspace_path(entry))
 			if entry.host_id then
-				table.insert(lines, " Host:      " .. text(entry.host_name))
-				table.insert(lines, " Control:   " .. (type(entry.controller) == "table" and text(entry.controller.label) or "Unclaimed"))
+				table.insert(lines, " Host:      " .. text(entry.host_name) .. (entry.connected == false and " (unreachable)" or ""))
+				table.insert(lines, " Controller: " .. (entry.connected ~= false and type(entry.controller) == "table" and text(entry.controller.label) or "-"))
 			end
 			table.insert(lines, " Location:  " .. text(entry.location))
 			table.insert(lines, " Model:     " .. (text(entry.model) ~= "" and text(entry.model) or "—"))
 			table.insert(lines, " Subagents: " .. tostring(tonumber(entry.subagents) or 0))
-			table.insert(lines, " Session:   " .. (text(entry.path) ~= "" and text(entry.path) or "Not saved yet"))
+			table.insert(lines, " Session:   " .. (text(entry.session_id) ~= "" and text(entry.session_id) or text(entry.path) ~= "" and text(entry.path) or "No session yet"))
 		end
 		set_lines(detail_buf, lines)
 		vim.api.nvim_buf_clear_namespace(detail_buf, ns, 0, -1)
@@ -228,12 +292,14 @@ function M.open(config)
 		for _, entry in ipairs(entries) do
 			if entry.pinned then pinned_count = pinned_count + 1 end
 		end
-		local widths = column_widths(list_win)
+		local widths = column_widths(list_win, entries)
+		local labels = {}
+		for _, spec in ipairs(metadata_columns) do labels[spec.key] = spec.label end
 		local lines = {
-			" Pi sessions · " .. #instances .. " open · " .. pinned_count .. " pinned",
+			" Pi sessions · " .. #instances .. " active · " .. pinned_count .. " pinned",
 			query == "" and "" or (" Filter: " .. query),
 			"",
-			"     " .. column("Status", widths.status) .. "  " .. blank_indicators .. "  " .. column("Project", widths.project) .. "  " .. column("Workspace", widths.workspace) .. "  " .. column("Host", widths.host) .. "  Title",
+			metadata_line(labels, widths),
 		}
 		local function highlight(row, first, last, group)
 			table.insert(highlights, { row = row - 1, first = first, last = last, group = group })
@@ -251,24 +317,26 @@ function M.open(config)
 				highlight(row, 0, #lines[row], "PiSubagent")
 			else
 				local entry = node.entry
-				local name = vim.fn.fnamemodify(project(entry), ":t")
-				local indicators, spans = indicator_columns(entry)
 				local prefix = " " .. session_list.session_prefix(node)
-				local status_cell = column(entry.status, widths.status)
-				local indicator_start = #prefix + #status_cell + 2
-				local host_alias = text(entry.location) ~= "" and entry.location or entry.host_name
-				local row_prefix = prefix .. status_cell .. "  " .. indicators .. "  " .. column(name, widths.project) .. "  " .. column(workspace_label(entry), widths.workspace) .. "  " .. column(host_alias, widths.host) .. "  "
 				local badge = build_info.is_dev(entry) and "DEV " or ""
-				local suffix = session_list.session_suffix(node)
-				local title = badge .. text(entry.title) .. suffix
-				table.insert(lines, row_prefix .. title)
-				highlight(row, #prefix, #prefix + #status_cell, icons.highlight(entry.status))
-				for _, span in ipairs(spans) do
-					highlight(row, indicator_start + span.start_col, indicator_start + span.end_col, span.highlight)
-				end
-				if badge ~= "" then highlight(row, #row_prefix, #row_prefix + 3, "PiBuildDev") end
-				highlight(row, #row_prefix + #badge, #lines[row] - #suffix, entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle")
+				local suffix = node.running > 0 and (" · " .. icons.subagent_icon .. " " .. node.running) or ""
+				table.insert(lines, prefix .. badge .. text(entry.title) .. suffix)
+				if badge ~= "" then highlight(row, #prefix, #prefix + 3, "PiBuildDev") end
+				highlight(row, #prefix + #badge, #lines[row] - #suffix, entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle")
 				if suffix ~= "" then highlight(row, #lines[row] - #suffix, #lines[row], "PiSubagent") end
+				local values = metadata(entry)
+				local metadata_text = metadata_line(values, widths)
+				table.insert(lines, metadata_text)
+				highlight(row + 1, 5, 5 + #column(values.status, widths.status), icons.highlight(entry.status))
+				if entry.connected ~= false and entry.status ~= "Inactive" then
+					local indicators, spans = indicator_columns(entry)
+					local indicator_start = #metadata_text + 2
+					lines[row + 1] = metadata_text .. "  " .. indicators
+					for _, span in ipairs(spans) do
+						highlight(row + 1, indicator_start + span.start_col, indicator_start + span.end_col, span.highlight)
+					end
+				end
+				rows[row + 1] = node
 				if focus_target and entry.id == focus_target.id then focused_row = row end
 			end
 			if node.kind ~= "subagent" then
@@ -299,6 +367,7 @@ function M.open(config)
 		view.lnum, view.col = cursor, 0
 		vim.api.nvim_win_call(list_win, function() vim.fn.winrestview(view) end)
 		navigation.set_rows(starts)
+		highlight_selection()
 		updating = false
 		details()
 	end
@@ -410,7 +479,12 @@ function M.open(config)
 		buffer = list_buf,
 		callback = function()
 			if not updating then
+				local row = vim.api.nvim_win_get_cursor(list_win)[1]
+				if rows[row] and rows[row] == rows[row - 1] then
+					vim.api.nvim_win_set_cursor(list_win, { row - 1, 0 })
+				end
 				navigation.snap()
+				highlight_selection()
 				details()
 			end
 		end,

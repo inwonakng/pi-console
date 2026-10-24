@@ -20,8 +20,8 @@ function M.same(left, right)
 	return false
 end
 
-local summary_order = { "Working", "Waiting", "Idle", "Done", "Loading", "Compacting", "Error", "Not Open", "Disconnected" }
-local summary_status = { Retrying = "Working", Starting = "Loading", Stopped = "Error", Unresponsive = "Error" }
+local summary_order = { "Working", "Waiting", "Idle", "Done", "Loading", "Compacting", "Stopping", "Error", "Inactive", "Unknown", "Unstarted" }
+local summary_status = { Retrying = "Working", Starting = "Loading", Unresponsive = "Unknown", Disconnected = "Unknown" }
 
 function M.group_summary(node)
 	local counts, parts = {}, {}
@@ -192,6 +192,12 @@ function M.new()
 				if choice.create then create() else report(organization.assign(entry, choice.id)) end
 			end)
 		end, "Assign session to group / create group")
+		if config.role == "overview" then
+			map("<leader>pi", function()
+				local entry = session()
+				if entry then report(runtime.control(entry, "interrupt")) end
+			end, "Interrupt current turn (keep session running)")
+		end
 		map("dd", function()
 			local node = selected()
 			if not node then return end
@@ -212,7 +218,7 @@ function M.new()
 			local entry = session()
 			if not entry then return end
 			report(runtime.kill(entry))
-		end, "Kill session / delete group (keep sessions)")
+		end, "Stop session and close controller / delete group (keep sessions)")
 	end
 
 	return list
