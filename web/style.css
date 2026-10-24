@@ -7,6 +7,9 @@
   --border: #39433d;
   --danger: #f0a09a;
   --hover: #2b352e;
+  --collapse-surface: #253029;
+  --collapse-header: #1c2520;
+  --collapse-hover: #222d25;
   --status-working: #8caaee;
   --status-waiting: #e5c890;
   --status-compacting: #ca9ee6;
@@ -126,16 +129,44 @@ label { font-size: 12px; color: var(--muted); }
 .settings-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 12px; font-size: 12px; color: var(--muted); }
 .settings-footer button { flex-shrink: 0; font-size: 12px; }
 .transcript { flex: 1; min-height: min(80px, 16dvh); overflow-y: auto; overflow-wrap: anywhere; padding: 12px max(24px, calc((100% - 860px) / 2)); }
-.message { padding: 22px 0; border-bottom: 1px solid var(--border); }
+.message { padding: 22px 0; }
 .message-label { font-size: 11px; color: var(--accent); margin-bottom: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .message[data-role="user"] .message-label { color: var(--muted); }
 .message-text { white-space: pre-wrap; }
-.message details { margin: 10px 0; color: var(--muted); }
+.markdown { white-space: normal; }
+.markdown > * { margin: 0 0 12px; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown :is(h1, h2, h3, h4, h5, h6) { margin: 18px 0 10px; font-weight: 600; letter-spacing: normal; line-height: 1.4; }
+.markdown > :first-child { margin-top: 0; }
+.markdown h1 { font-size: 22px; }
+.markdown h2 { font-size: 19px; }
+.markdown :is(h3, h4, h5, h6) { font-size: 16px; }
+.markdown :is(ul, ol) { padding-left: 24px; }
+.markdown li + li { margin-top: 4px; }
+.markdown li > p { margin-bottom: 8px; }
+.markdown a { color: var(--accent); text-underline-offset: 3px; }
+.markdown code { font: inherit; font-size: .9em; background: var(--surface); border-radius: 3px; padding: 2px 5px; }
+.markdown pre { background: var(--bg); border-radius: 5px; padding: 12px; overflow-x: auto; white-space: pre; overflow-wrap: normal; }
+.markdown pre code { font-size: inherit; background: none; border-radius: 0; padding: 0; }
+.markdown blockquote { margin-left: 0; margin-right: 0; padding: 10px 14px; background: var(--surface); color: var(--muted); }
+.markdown blockquote > :last-child { margin-bottom: 0; }
+.markdown input[type="checkbox"] { width: 14px; min-height: 0; margin: 0 6px 0 0; accent-color: var(--accent); }
+.markdown-table { overflow-x: auto; }
+.markdown table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.markdown :is(th, td) { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.markdown th { background: var(--surface); }
+.markdown [data-align="center"] { text-align: center; }
+.markdown [data-align="right"] { text-align: right; }
+.transcript details { margin: 10px 0; border-radius: 5px; overflow: hidden; background: var(--collapse-surface); color: var(--muted); }
+.transcript details > summary { padding: 10px 14px; background: var(--collapse-header); color: var(--text); }
+.transcript details > :not(summary) { margin: 0; padding: 12px 14px; }
+.transcript details > details { margin: 10px 14px; padding: 0; }
+@media (hover: hover) {
+  .transcript details > summary:hover { background: var(--collapse-hover); }
+}
 summary { cursor: pointer; min-height: 44px; padding: 10px 0; font-size: 12px; }
 pre { font: inherit; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; }
-.tool-output { border-left: 2px solid var(--border); padding-left: 14px; color: var(--muted); }
 .message[data-role="toolResult"] { padding: 6px 0; }
-.tool-output > summary { color: var(--text); }
 .message[data-role="toolResult"] .tool-output { margin: 0; }
 .latest { align-self: center; font-size: 12px; margin: 4px; }
 .interactions { flex-shrink: 1; min-height: 46px; background: var(--surface); border-top: 2px solid var(--accent); padding: 0 24px; max-height: 30dvh; overflow: auto; }

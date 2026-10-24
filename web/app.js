@@ -1,4 +1,5 @@
 import { ServiceClient, requestId } from "./client.js";
+import { renderMarkdown } from "./markdown.js";
 
 const $ = id => document.getElementById(id);
 const channel = document.documentElement.dataset.piChannel;
@@ -671,18 +672,19 @@ function createConversation(host, row) {
     renderQueue();
     renderControls();
   }
-  function blockDetails(label, value, key) {
+  function blockDetails(label, value, key, markdown = false) {
     const details = document.createElement("details");
     details.dataset.key = key;
-    details.append(text("summary", label), text("pre", typeof value === "string" ? value : JSON.stringify(value, null, 2)));
+    details.append(text("summary", label), markdown ? renderMarkdown(value) : text("pre", typeof value === "string" ? value : JSON.stringify(value, null, 2)));
     return details;
   }
-  function contentNodes(content, prefix) {
-    if (typeof content === "string") return [text("div", content, "message-text")];
+  function contentNodes(content, prefix, markdown = true) {
+    const messageText = value => markdown ? renderMarkdown(value) : text("div", value, "message-text");
+    if (typeof content === "string") return [messageText(content)];
     if (!Array.isArray(content)) return [text("pre", JSON.stringify(content, null, 2))];
     return content.map((block, index) => {
-      if (block.type === "text") return text("div", block.text, "message-text");
-      if (block.type === "thinking") return blockDetails("Thinking", block.thinking, `${prefix}-thinking-${index}`);
+      if (block.type === "text") return messageText(block.text);
+      if (block.type === "thinking") return blockDetails("Thinking", block.thinking, `${prefix}-thinking-${index}`, markdown);
       if (block.type === "toolCall") return blockDetails(block.name, block.arguments, `${prefix}-call-${block.id}`);
       if (block.type === "image") return text("p", "[Image attachment]", "muted");
       return blockDetails(block.type || "Content", block, `${prefix}-${index}`);
@@ -724,7 +726,7 @@ function createConversation(host, row) {
         details.className = "tool-output";
         details.dataset.key = `tool-${message.toolCallId || index}`;
         details.append(text("summary", `${message.toolName || "Tool"} / ${message.isError ? "error" : "output"}`));
-        details.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, String(index)));
+        details.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, String(index), false));
         if (message.errorMessage) details.append(text("p", message.errorMessage));
         article.append(details);
       } else {

@@ -43,6 +43,8 @@ export class RemoteListener {
         ["/", "index.html", "text/html; charset=utf-8"],
         ["/app.js", "app.js", "text/javascript; charset=utf-8"],
         ["/client.js", "client.js", "text/javascript; charset=utf-8"],
+        ["/markdown.js", "markdown.js", "text/javascript; charset=utf-8"],
+        ["/vendor/marked.js", "vendor/marked.js", "text/javascript; charset=utf-8"],
         ["/style.css", "style.css", "text/css; charset=utf-8"],
         ["/logo.svg", "logo.svg", "image/svg+xml"],
         ["/apple-touch-icon.png", "apple-touch-icon.png", "image/png"],
