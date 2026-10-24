@@ -1320,7 +1320,7 @@ local function request_label(item)
 	local request_data = item.request
 	local data = dialog_description(request_data.title)
 	local title = data and (data.prompt or data.request or data.summary or data.title) or request_data.title
-	return request_data.method .. " - " .. (item.submitted and "answered" or "pending") .. ": " .. preview(title)
+	return request_data.method .. ": " .. preview(title)
 end
 local function dialog_preview(value, lines, label)
 	local data = dialog_description(value)
@@ -1421,7 +1421,7 @@ end
 function M.restore_pending_action()
 	if not snapshot then return end
 	if control_current() then
-		if not dialogs_ready() then notify("Waiting for the current owner snapshot."); refresh(); return end
+		if not dialogs_ready() then notify("Waiting for the current session state."); refresh(); return end
 		if approval_request then
 			pending_picker.restore(ctx)
 			return
@@ -1429,24 +1429,30 @@ function M.restore_pending_action()
 		for _, item in ipairs(snapshot.interactions.pending) do
 			if not item.submitted and not pending_replies[item.request.id] then open_pending(item); return end
 		end
-		notify("No unanswered owner requests.")
+		notify("No pending request.")
 		return
 	end
-	local choices, captured = snapshot.interactions.pending, stamp()
-	vim.ui.select(choices, { prompt = "Pending owner requests (viewer can inspect)", format_item = request_label }, function(item)
-		if not item or not same_context(captured) then return end
-		close_approval()
-		local lines = { "# " .. request_label(item), "", "VIEWER: :PiControl is required to answer.", "" }
-		dialog_preview(item.request.title, lines, "Title")
-		dialog_preview(item.request.message, lines, "Message")
-		fields(lines, item.request, { { "prefill", "Initial text" }, { "placeholder", "Placeholder" } })
-		for _, option in ipairs(item.request.options or {}) do table.insert(lines, "- " .. option) end
-		if item.tag and item.tag.deadline then table.insert(lines, "Deadline: " .. os.date("%Y-%m-%d %H:%M:%S", math.floor(item.tag.deadline / 1000))) end
-		local approval_buf = layout.create_buffer(nil, scratch_name("approval"), "markdown", false)
-		layout.set_buffer_lines(ctx, approval_buf, lines, false)
-		approval_win = vim.api.nvim_open_win(approval_buf, true, { relative = "editor", style = "minimal", border = "rounded", width = math.max(1, math.min(100, vim.o.columns - 4)), height = math.max(1, math.min(30, vim.o.lines - 4)), row = 1, col = 1 })
-		vim.keymap.set("n", "q", close_approval, { buffer = approval_buf })
-	end)
+	local item
+	for _, candidate in ipairs(snapshot.interactions.pending) do
+		if not candidate.submitted then item = candidate; break end
+	end
+	if not item then notify("No pending request."); return end
+	close_approval()
+	local lines = { "# Pending request", "", request_label(item), "", "Take control to answer (:PiControl).", "" }
+	dialog_preview(item.request.title, lines, "Title")
+	dialog_preview(item.request.message, lines, "Message")
+	fields(lines, item.request, { { "prefill", "Initial text" }, { "placeholder", "Placeholder" } })
+	for _, option in ipairs(item.request.options or {}) do table.insert(lines, "- " .. option) end
+	if item.tag and item.tag.deadline then table.insert(lines, "Deadline: " .. os.date("%Y-%m-%d %H:%M:%S", math.floor(item.tag.deadline / 1000))) end
+	local approval_buf = layout.create_buffer(nil, scratch_name("approval"), "markdown", false)
+	layout.set_buffer_lines(ctx, approval_buf, lines, false)
+	local width = math.max(1, math.min(100, vim.o.columns - 4))
+	local height = math.max(1, math.min(30, vim.o.lines - 4))
+	approval_win = vim.api.nvim_open_win(approval_buf, true, {
+		relative = "editor", style = "minimal", border = "rounded", width = width, height = height,
+		row = math.floor((vim.o.lines - height - 2) / 2), col = math.floor((vim.o.columns - width - 2) / 2),
+	})
+	vim.keymap.set("n", "q", close_approval, { buffer = approval_buf })
 end
 function M.show_offers()
 	vim.ui.select(offers, { prompt = "Inspect-only offers (never applied)", format_item = function(update)
