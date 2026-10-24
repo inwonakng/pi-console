@@ -52,12 +52,13 @@ local function indicator_columns(entry)
 	local cells = {}
 	local spans = {}
 	local byte_offset = 0
+	local visible = entry.connected ~= false and entry.status ~= "Inactive"
 	for index, indicator in ipairs(statusline.status_indicators(entry)) do
 		if index > 1 then
 			table.insert(cells, " ")
 			byte_offset = byte_offset + 1
 		end
-		local icon = text(indicator.text)
+		local icon = visible and text(indicator.text) or ""
 		local cell = column(icon, indicator_widths[index])
 		table.insert(cells, cell)
 		if icon ~= "" then
@@ -85,7 +86,7 @@ local function metadata(entry)
 end
 
 local function metadata_line(values)
-	return "       " .. table.concat({
+	return table.concat({
 		values.status,
 		values.project .. " / " .. values.workspace,
 		"host: " .. values.host,
@@ -276,17 +277,14 @@ function M.open(config)
 				highlight(row, #prefix + #badge, #lines[row] - #suffix, entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle")
 				if suffix ~= "" then highlight(row, #lines[row] - #suffix, #lines[row], "PiSubagent") end
 				local values = metadata(entry)
-				local metadata_text = metadata_line(values)
+				local indicators, spans = indicator_columns(entry)
+				local metadata_prefix = "       " .. indicators .. "  "
+				local metadata_text = metadata_prefix .. metadata_line(values)
 				table.insert(lines, metadata_text)
-				highlight(row + 1, 7, 7 + #values.status, icons.highlight(entry.status))
-				highlight(row + 1, 7 + #values.status, #metadata_text, "PiOverviewMetadata")
-				if entry.connected ~= false and entry.status ~= "Inactive" then
-					local indicators, spans = indicator_columns(entry)
-					local indicator_start = #metadata_text + 2
-					lines[row + 1] = metadata_text .. "  " .. indicators
-					for _, span in ipairs(spans) do
-						highlight(row + 1, indicator_start + span.start_col, indicator_start + span.end_col, span.highlight)
-					end
+				highlight(row + 1, #metadata_prefix, #metadata_prefix + #values.status, icons.highlight(entry.status))
+				highlight(row + 1, #metadata_prefix + #values.status, #metadata_text, "PiOverviewMetadata")
+				for _, span in ipairs(spans) do
+					highlight(row + 1, 7 + span.start_col, 7 + span.end_col, span.highlight)
 				end
 				rows[row + 1] = node
 				if focus_target and entry.id == focus_target.id then focused_row = row end
