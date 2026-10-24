@@ -1,13 +1,13 @@
 local M = {}
 
 local which_key = require("which-key")
+local kill_spec = { lhs = "<leader>pk", action = "kill_session", desc = "Kill conversation and close frontend" }
 
 M.specs = {
 	input = {
 		{ modes = { "n", "i" }, lhs = "<C-CR>", action = "submit_prompt", desc = "Submit prompt" },
 	},
 	shared = {
-		{ lhs = "<leader>pk", action = "kill_session", desc = "Kill conversation and close frontend" },
 		{ lhs = "<leader>a", action = "cycle_access_mode", desc = "Cycle access mode" },
 		{ lhs = "<leader>i", action = "cycle_integration_mode", desc = "Cycle integration mode" },
 		{ lhs = "<leader>?", action = "show_help", desc = "Pi help" },
@@ -104,6 +104,20 @@ function M.merged(context)
 	return specs
 end
 
+function M.update_kill(ctx)
+	local enabled = ctx.state.can_kill_session == true
+	for _, buf in ipairs({ ctx.state.input_buf, ctx.state.transcript_buf }) do
+		if ctx.buffer.valid(buf) and vim.b[buf].pi_kill_enabled ~= enabled then
+			if enabled then
+				set_keymaps(ctx, buf, { kill_spec })
+			elseif vim.b[buf].pi_kill_enabled then
+				vim.keymap.del("n", kill_spec.lhs, { buffer = buf })
+			end
+			vim.b[buf].pi_kill_enabled = enabled
+		end
+	end
+end
+
 function M.setup(ctx)
 	local input_specs = M.merged("input")
 	local transcript_specs = M.merged("transcript")
@@ -115,12 +129,15 @@ function M.setup(ctx)
 	set_keymaps(ctx, ctx.state.transcript_buf, transcript_specs)
 	register_which_key(ctx, ctx.state.input_buf, input_specs)
 	register_which_key(ctx, ctx.state.transcript_buf, transcript_specs)
+	-- which-key discovers this conditional mapping from the buffer itself.
+	M.update_kill(ctx)
 end
 
 function M.help_key_lines()
 	local lines = {
 		"- `<C-CR>` submit the input buffer.",
 		"- `<leader>qq` close the frontend; conversation keeps running.",
+		"- `" .. kill_spec.lhs .. "` " .. kill_spec.desc .. " (requires control of a live session).",
 	}
 	for _, spec in ipairs(M.specs.shared) do
 		table.insert(lines, "- `" .. spec.lhs .. "` " .. spec.desc .. ".")

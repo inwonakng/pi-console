@@ -19,6 +19,7 @@ local authority
 local session_status, session_error, recovery_requested
 local callbacks, unresolved, offers, drafts = {}, {}, {}, {}
 local outcomes = {}
+local kill_pending
 local submission_status = {}
 local pending_host, pending_host_select, resume_requested
 local generation, counter, refresh_scheduled, refreshing, dirty = 0, 0, false, false, false
@@ -212,6 +213,10 @@ local function control_current()
 	local controller = current_controller()
 	return job and attachment and grant and controller
 		and controller.attachmentId == attachment and controller.grantId == grant.grantId
+end
+local function can_kill_session()
+	return control_current() and snapshot and snapshot.phase ~= "stopped" and snapshot.phase ~= "failed"
+		and snapshot.phase ~= "stopping" and hello and vim.tbl_contains(hello.capabilities or {}, "session.kill")
 end
 local function stamp()
 	return { generation = generation, attachment = attachment, token = grant and grant.token, epoch = snapshot and snapshot.serviceEpoch,
@@ -469,6 +474,10 @@ local function update_status_state()
 	local terminal = snapshot and (snapshot.phase == "stopped" or snapshot.phase == "failed") and snapshot.phase
 	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active" or "view only")
 		or (session_id and ("session " .. (session_status or "unattached")) or starting and "starting" or "unstarted")
+	if kill_pending and kill_pending.status == "stopping" then state.client_status = "Stopping conversation..."
+	elseif kill_pending and kill_pending.status == "unknown" then state.client_status = "kill outcome unknown" end
+	state.can_kill_session = not kill_pending and not not can_kill_session()
+	require("pi-integration.keymaps").update_kill({ state = state, actions = M, buffer = ctx.buffer })
 	state.access_mode = (statuses["pi-access-mode"] or ""):match("^Mode: (%w+)$") or defaults.accessMode
 	state.integration_mode = (statuses["pi-integration-mode"] or ""):match("^Integration: (%w+)$") or defaults.integrationMode
 	state.notification_status = statuses["pi-notifications"]
@@ -704,6 +713,7 @@ local function disconnected()
 	session_status, session_error = "unattached", nil
 	feedback_ui.interrupt(feedback)
 	callbacks, outcomes, new_control_selection, starting, resume_check = {}, {}, nil, nil, nil
+	kill_pending = nil
 	refreshing, refresh_scheduled, dirty = false, false, false
 	close_approval()
 	render()
@@ -938,7 +948,12 @@ connect = function()
 			end
 			if value.update.owner then
 				-- Revoke local callbacks immediately, not after the coalesced read.
-				if grant and (not value.update.owner.controller or value.update.owner.controller.grantId ~= grant.grantId) then grant = nil; close_approval() end
+				if grant and (not value.update.owner.controller or value.update.owner.controller.grantId ~= grant.grantId) then
+					grant = nil
+					close_approval()
+					update_status_state()
+					statusline.update(ctx)
+				end
 			end
 			if value.update.effect then
 				local update, captured = value.update, stamp()
@@ -1512,24 +1527,52 @@ function M.change_cwd(path)
 		if hello and hello.serviceEpoch == epoch and same_selection(captured) then M.select_owner(M.config, nil, false, cwd) end
 	end)
 end
-local function lifecycle(operation, label, prompt)
-	local captured = stamp()
-	vim.ui.select({ label, "Cancel" }, { prompt = prompt or label .. " on owner? Active work is interrupted; history/workspaces and recovery text remain." }, function(choice)
-		if choice ~= label then return end
-		command(operation, { confirmed = true }, nil, captured, function(receipt)
-			if receipt.status == "completed" and operation == "session.kill" then
+function M.restart()
+	local captured, label = stamp(), "Restart session"
+	vim.ui.select({ label, "Cancel" }, { prompt = label .. " on owner? Active work is interrupted; history/workspaces and recovery text remain." }, function(choice)
+		if choice == label then command("session.restart", { confirmed = true }, nil, captured) end
+	end)
+end
+function M.kill_session()
+	if kill_pending then notify("Kill already pending; no duplicate request sent."); return end
+	if not can_kill_session() then notify("Kill requires control of a live session (:PiControl)."); return end
+	if not can_close_frontend() then return end
+	local captured, label = stamp(), "Kill conversation and close"
+	kill_pending = captured
+	captured.status = "confirming"
+	render()
+	vim.ui.select({ label, "Cancel" }, { prompt = "Stop this conversation? Active work will be interrupted. History is preserved." }, function(choice)
+		if kill_pending ~= captured then return end
+		if choice ~= label or not current(captured) or not can_kill_session() or not can_close_frontend() then
+			kill_pending = nil
+			render()
+			return
+		end
+		captured.status = "stopping"
+		render()
+		local sent = command("session.kill", { confirmed = true }, function(ok, result)
+			if kill_pending ~= captured or not same_selection(captured) or ok then return end
+			if result.delivery == "not_sent" then kill_pending = nil
+			else
+				captured.status = "unknown"
+				notify("Kill outcome unknown. Inspect :PiOperations; no request was replayed.", vim.log.levels.WARN)
+			end
+			render()
+		end, captured, function(receipt)
+			if kill_pending ~= captured then return end
+			if receipt.status == "uncertain" then captured.status = "unknown" else kill_pending = nil end
+			if receipt.status == "completed" then
 				local preserved = backup()
 				M.detach()
 				if preserved and can_close_frontend() then vim.cmd("qall!") end
+			else
+				notify("Kill " .. receipt.status .. ": " .. (receipt.error and receipt.error.message or "Inspect :PiOperations."), vim.log.levels.WARN)
+				render()
 			end
 		end)
+		if sent then notify("Stopping conversation...")
+		else kill_pending = nil; render() end
 	end)
-end
-function M.restart() lifecycle("session.restart", "Restart session") end
-function M.kill_session()
-	if can_close_frontend() then
-		lifecycle("session.kill", "Kill conversation and close", "Stop this conversation? Active work will be interrupted. History is preserved.")
-	end
 end
 function M.new_session_window()
 	local cwd = new_session_cwd()
