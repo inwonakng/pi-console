@@ -482,7 +482,11 @@ Input is strict UTF-8/LF JSONL, limited to 2 MiB/request; output frames to 80 Mi
 bounded materialized snapshots/recovery. There are 64 connections, 32 in-flight requests
 per connection and bounded output/subscription buffers. A slow attachment may be dropped
 and must reconnect for a fresh snapshot; it cannot backpressure the owner's Pi reducer.
-The stdio Node bridge relays requests/events only and retains no execution authority.
+The stdio Node bridge relays requests/events and renews an existing attachment's
+control grant independently of Neovim's UI loop. It never acquires control or replays
+execution. Ordinary bridge/client requests use at most 30 slots, reserving capacity
+for grant lookup and renewal. Frontend EOF, process death, or output failure closes
+the attachment; blocked output remains bounded.
 
 **Fresh local verification:** macOS/unchanged Pi 1.3.0/Neovim 0.12.6 passed startup
 races, two actual frontends, streaming/approval late attach with zero frontends,
@@ -815,6 +819,11 @@ session editing, not network access. Heartbeat every 5 seconds with
 `heartbeat(attachmentId, token)`; expiry is 20 seconds on `performance.now()`, not
 client/wall-clock time. Heartbeats are ephemeral liveness checks, not durable
 commands, and never reacquire a grant. Timer/authority checks expire old grants.
+Neovim's bridge renews control while the editor process remains alive and connected,
+including during modal prompts. Queue-edit reservation renewal still depends on the
+visible Neovim editor, so an interrupted editing pause can expire without losing
+session control. Control-loss reasons appear in the frontend header and `:PiLogs`
+without opening another modal notification. Reconnect starts as a viewer.
 Clean detach, slow-view drop, explicit release, takeover and session shutdown
 revoke control without answering dialogs or cancelling accepted execution.
 

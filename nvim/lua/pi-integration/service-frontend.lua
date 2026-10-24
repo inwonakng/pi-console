@@ -17,6 +17,7 @@ state.show_nested_tools = false
 local session_id, attachment, snapshot, hello, grant, job
 local authority
 local session_status, session_error, recovery_requested
+local control_loss_generation = 0
 local callbacks, unresolved, offers, drafts = {}, {}, {}, {}
 local outcomes = {}
 local kill_pending
@@ -82,11 +83,14 @@ local function current_owner_label()
 	return owner_label(M.config.expected_host, M.config.service_remote, M.config.service_root)
 end
 
-local function notify(text, level)
+local function log(text, level)
 	local lines = vim.split(tostring(text), "\n", { plain = true })
 	local message = table.remove(lines, 1)
 	table.insert(state.logs, { timestamp = os.date("%Y-%m-%d %H:%M:%S"), level = level == vim.log.levels.ERROR and "error" or level == vim.log.levels.WARN and "warn" or "info", message = message, details = table.concat(lines, "\n") })
 	while #state.logs > 1000 do table.remove(state.logs, 1) end
+end
+local function notify(text, level)
+	log(text, level)
 	vim.notify(text, level or vim.log.levels.INFO, { title = "pi-console service" })
 end
 local function valid(buf) return buf and vim.api.nvim_buf_is_valid(buf) end
@@ -248,7 +252,7 @@ end
 local function request(method, payload, callback)
 	if not job then notify("Disconnected. Use :PiReconnect; no mutation was retried.", vim.log.levels.WARN); return end
 	local id = uid()
-	callbacks[id] = callback or function() end
+	callbacks[id] = { callback = callback or function() end, quiet = method == "heartbeat" }
 	vim.fn.chansend(job, vim.json.encode({ id = id, method = method, payload = object_payload(payload) }) .. "\n")
 	return id
 end
@@ -726,7 +730,7 @@ attach = function(id, acquire_control)
 	resources.invalidate()
 	selection = selection + 1
 	local gen, selected = generation, selection
-	session_status, session_error = "attaching", nil
+	session_status, session_error, state.control_loss_reason = "attaching", nil, nil
 	render()
 	request("attach", { sessionId = id, label = "Neovim " .. vim.fn.getpid() }, function(ok, value)
 		if gen ~= generation or selected ~= selection then return end
@@ -925,9 +929,12 @@ connect = function()
 				else recover_selection(restore) end
 			end
 		elseif value.type == "response" then
-			local callback = callbacks[value.id]; callbacks[value.id] = nil
-			if value.success == false then notify(value.error.code .. ": " .. value.error.message, vim.log.levels.WARN) end
-			if callback then callback(value.success, value.success and value.result or value.error) end
+			local pending = callbacks[value.id]; callbacks[value.id] = nil
+			if value.success == false then
+				local report = pending and pending.quiet and log or notify
+				report(value.error.code .. ": " .. value.error.message, vim.log.levels.WARN)
+			end
+			if pending then pending.callback(value.success, value.success and value.result or value.error) end
 		elseif value.type == "update" then
 			if value.update.sessionId ~= session_id then return end
 			local old_revision = current_revision()
@@ -986,6 +993,16 @@ connect = function()
 				end
 			end
 			refresh()
+		elseif value.type == "control_lost" then
+			if value.sessionId == session_id and hello and value.serviceEpoch == hello.serviceEpoch
+				and value.attachmentId == attachment and (not grant or value.grantId == grant.grantId) then
+				grant = nil
+				control_loss_generation = control_loss_generation + 1
+				state.control_loss_reason = tostring(value.reason)
+				log("Control lost: " .. state.control_loss_reason, vim.log.levels.WARN)
+				close_approval()
+				render()
+			end
 		elseif value.type == "disconnected" then disconnected() end
 	end
 	local started = vim.fn.jobstart(args, {
@@ -1051,6 +1068,7 @@ function M.select_owner(target, id, resume, cwd)
 		pending_host, pending_host_select = saved.pending_host, false
 		session_id, resume_requested, selected_cwd, recovery_requested = id, resume, cwd, false
 		snapshot, hello, pending_settings = nil, nil, settings
+		state.control_loss_reason = nil
 		selection = selection + 1
 		if id and valid(state.input_buf) then layout.set_buffer_lines(ctx, state.input_buf, { "" }, true) end
 	end
@@ -1086,9 +1104,12 @@ local function acquire_control(takeover, captured)
 	end
 	command(takeover and "control.takeover" or "control.acquire", takeover and { confirmed = true } or {}, function(ok)
 		if not ok or not same_context(captured) then fail_start("Startup control was not acquired; submitted text remains in :PiDrafts."); return end
+		local loss_generation = control_loss_generation
 		request("grant", {}, function(found, value)
-			if not found or not same_context(captured) or value == vim.NIL then fail_start("Startup control was not acquired; submitted text remains in :PiDrafts."); return end
-			grant = value
+			if not found or not same_context(captured) or value == vim.NIL or loss_generation ~= control_loss_generation then
+				fail_start("Startup control was not acquired; submitted text remains in :PiDrafts."); return
+			end
+			grant, state.control_loss_reason = value, nil
 			request("snapshot", {}, function(synced, value_snapshot)
 				if not synced or not same_context(captured) then fail_start("Startup synchronization failed; submitted text remains in :PiDrafts."); return end
 				apply_snapshot(value_snapshot)
@@ -2204,16 +2225,15 @@ function M.open(restore)
 	heartbeat:start(5000, 5000, vim.schedule_wrap(function()
 		publish_attachment()
 		follow_resumed_selection()
-		if control_current() then
-			local captured = stamp()
-			local editor = queue_editor
-			local reservation = editor and current(editor.captured) and valid(editor.buf)
-				and vim.fn.bufwinid(editor.buf) ~= -1 and editor.id or nil
-			request("heartbeat", { controlToken = grant.token, reservationId = reservation }, function(ok, result)
-				if not ok and current(captured) then grant = nil; close_approval(); render()
-				elseif ok and result.reservationCurrent == false and queue_editor == editor then
+		-- The bridge renews control independently of UI scheduling. Only the
+		-- visible queue editor's finite pause is renewed from this callback.
+		local editor = queue_editor
+		if control_current() and editor and current(editor.captured) and valid(editor.buf)
+			and vim.fn.bufwinid(editor.buf) ~= -1 then
+			request("heartbeat", { controlToken = grant.token, reservationId = editor.id }, function(ok, result)
+				if ok and result.reservationCurrent == false and queue_editor == editor then
 					queue_editor = nil
-					notify("Queue editing pause expired; draft retained. Reopen the queue before saving.", vim.log.levels.WARN)
+					log("Queue editing pause expired; draft retained. Reopen the queue before saving.", vim.log.levels.WARN)
 				end
 			end)
 		end

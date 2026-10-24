@@ -72,7 +72,14 @@ export class LocalClient {
     finally { clearTimeout(deadline); }
   }
   request(method: string, payload: unknown = {}, id: string = randomUUID()): Promise<unknown> {
-    if (this.socket.destroyed || this.pending.size >= 32 || this.pending.has(id)) return Promise.reject(Object.assign(
+    return this.send(method, payload, id, 30);
+  }
+  /** Keep two of the service's 32 request slots available for lease maintenance. */
+  requestControl(method: "grant" | "heartbeat", payload: unknown = {}): Promise<unknown> {
+    return this.send(method, payload, randomUUID(), 32);
+  }
+  private send(method: string, payload: unknown, id: string, limit: number): Promise<unknown> {
+    if (this.socket.destroyed || this.pending.size >= limit || this.pending.has(id)) return Promise.reject(Object.assign(
       new Error("Connection closed or request limit/conflict"), { code: "request_not_sent", delivery: "not_sent" }));
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });

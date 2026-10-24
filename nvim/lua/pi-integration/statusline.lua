@@ -608,6 +608,9 @@ local function header_formats(state, width)
 	if state.status_error then
 		detail = "Error (:PiLogs): " .. single_line(state.status_error)
 		highlight = "DiagnosticError"
+	elseif state.control_loss_reason then
+		detail = "Control lost (:PiLogs): " .. single_line(state.control_loss_reason)
+		highlight = "DiagnosticWarn"
 	elseif (state.unplaced_submissions or 0) > 0 then
 		detail = tostring(state.unplaced_submissions) .. " unpositioned submissions (:PiSubmissions)"
 		highlight = "DiagnosticWarn"
