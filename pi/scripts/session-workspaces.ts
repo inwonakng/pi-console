@@ -3,11 +3,9 @@
 // mutations stay in the shared helpers.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  listWorkspaces,
   prepareWorkspaceDiscard,
   removeWorkspace,
-  retainedChildWorkspaces,
-  sameSessionFile,
+  sessionWorkspacesForDeletion,
 } from "../extensions/shared/workspace";
 
 export default function sessionWorkspaces(pi: ExtensionAPI) {
@@ -23,14 +21,7 @@ export default function sessionWorkspaces(pi: ExtensionAPI) {
           throw new Error("Expected a removal action and session file paths.");
         }
         const sessionPaths = paths.map((path) => path.replace(/\.archived$/, ""));
-        const linked = listWorkspaces().filter((record) => (record.retained || record.lifecycle === "cleanup_failed")
-          && sessionPaths.some((path) => sameSessionFile(record.sourceSessionFile, path)
-            || sameSessionFile(record.targetSessionFile, path)));
-        for (const record of linked) {
-          if (retainedChildWorkspaces(record.id).length > 0) {
-            throw new Error(`Join or discard child workspaces before deleting ${record.label}.`);
-          }
-        }
+        const linked = sessionWorkspacesForDeletion(sessionPaths);
         if (!Array.isArray(workspaceIds) || !workspaceIds.every((id) => typeof id === "string")
           || JSON.stringify([...workspaceIds].sort()) !== JSON.stringify(linked.map((record) => record.id).sort())) {
           throw new Error("Linked workspaces changed while confirming; select the sessions again.");

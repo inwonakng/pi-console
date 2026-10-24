@@ -18,9 +18,9 @@ import {
 import { appendFile } from "fs/promises";
 import { dirname, join, relative, resolve } from "path";
 import { createHash } from "crypto";
-import { loadWorkspace, prepareWorkspaceDiscard, removeWorkspace, retainedChildWorkspaces, sameSessionFile, workspaceDiscardWarning, workspaceForContext } from "./shared/workspace";
+import { loadWorkspace, prepareWorkspaceDiscard, removeWorkspace, sameSessionFile, workspaceDiscardWarning, workspaceForContext } from "./shared/workspace";
 import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
-import { collectDeletedIds, locationWorkspaceId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
+import { collectDeletedIds, locationWorkspaceId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import { pathInside, resolveToolPath } from "./shared/paths";
 
@@ -445,11 +445,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 		ctx.ui.notify("Cannot revert an already integrated workspace; its changes were applied to the destination checkout.", "error");
 		return;
 	}
-	const discarded = referenced.filter((record) => record.retained);
-	if (discarded.some((record) => retainedChildWorkspaces(record.id).length)) {
-		ctx.ui.notify("Join or discard child workspaces before reverting their parent worktree.", "warning");
-		return;
-	}
+	const discarded = workspacesRemovedWithSubtree(records, deletedIds, sessionFile);
 	// Only active-path snapshots are rolled back. Inactive descendants are deleted, not replayed.
 	const entries = ctx.sessionManager.getEntries();
 	const snapshots = readRecords(sessionFile).map((record) => ({ record, entryId: recordEntryId(record, entries) }));
@@ -472,7 +468,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 		assertOk(conflicts.length === 0, `Revert blocked; files changed since the agent turn:\n${conflicts.join("\n")}`);
 	};
 	validateFiles();
-	const patches = await Promise.all(discarded.map((record) => prepareWorkspaceDiscard(record.id)));
+	const patches = await Promise.all(discarded.map((record) => record.retained ? prepareWorkspaceDiscard(record.id) : record));
 	const fileCount = rollback.reduce((count, item) => count + item.files.length, 0);
 	const approved = await serviceUi(ctx).confirm(
 		JSON.stringify({ kind: "pi_confirmation", prompt: "Permanently revert history?", notify: false }),
@@ -532,7 +528,8 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 				}
 				for (const record of discarded) {
 					try {
-						const cleaned = await removeWorkspace(record.id, "discarded");
+						const cleaned = await removeWorkspace(record.id,
+							record.integration === "applied" || record.integration === "none" ? "integrated" : "discarded");
 						if (cleaned.lifecycle === "cleanup_failed") {
 							warnings.push(`Could not remove ${record.label}: ${cleaned.integrationReason}`);
 						}

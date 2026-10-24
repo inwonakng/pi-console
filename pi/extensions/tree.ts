@@ -1,23 +1,18 @@
 import { serviceUi } from "./shared/service-ui";
 import { registerServiceOperation } from "./shared/service-operation";
-import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
+import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, recordId, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { revertSubtree } from "./history";
 import { cloneThroughEntry } from "./shared/session-clone";
 import { selectNavigation } from "./shared/navigation";
 import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
 import {
-	loadWorkspace,
 	prepareWorkspaceDiscard,
 	removeWorkspace,
-	retainedChildWorkspaces,
-	sameSessionFile,
 	workspaceDiscardWarning,
 	type WorkspaceRecord,
 } from "./shared/workspace";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
-
-type JsonRecord = Record<string, unknown>;
 
 function parseArgs(args: string) {
 	const parts = args.trim().split(/\s+/).filter(Boolean);
@@ -61,19 +56,6 @@ function editorTextForTreeEntry(entry: unknown): string | undefined {
 		return contentText(entry.content);
 	}
 	return undefined;
-}
-
-function workspacesRemovedWithSubtree(
-	records: JsonRecord[],
-	deletedIds: Set<string>,
-	sessionFile: string,
-): WorkspaceRecord[] {
-	return workspaceIdsRemovedWithSubtree(records, deletedIds)
-		.map(loadWorkspace)
-		.filter((record): record is WorkspaceRecord => !!record
-			&& record.kind === "task"
-			&& record.retained
-			&& sameSessionFile(record.sourceSessionFile, sessionFile));
 }
 
 function deletionConfirmation(entryId: string, deleteCount: number, workspaces: WorkspaceRecord[]): string {
@@ -218,12 +200,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 			try {
 				location = locationForEntry(ctx, expectedLeaf);
 				const affected = workspacesRemovedWithSubtree(records, removedIds, sessionFile);
-				const blocked = affected.find((record) => retainedChildWorkspaces(record.id).length > 0);
-				if (blocked) {
-					ctx.ui.notify(`Join or discard child workspaces before deleting ${blocked.label}.`, "warning");
-					return;
-				}
-				removedWorkspaces = await Promise.all(affected.map((record) => prepareWorkspaceDiscard(record.id)));
+				removedWorkspaces = await Promise.all(affected.map((record) => record.retained ? prepareWorkspaceDiscard(record.id) : record));
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Could not prepare tree deletion: ${message}`, "error");

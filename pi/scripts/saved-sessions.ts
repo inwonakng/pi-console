@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { constants, accessSync, lstatSync, openSync, closeSync, fstatSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { delimiter, join, resolve } from "node:path";
-import { listWorkspaces, removeWorkspace, retainedChildWorkspaces, sameSessionFile } from "../extensions/shared/workspace";
+import { removeWorkspace, sameSessionFile, sessionWorkspacesForDeletion } from "../extensions/shared/workspace";
 
 function trashCommand(): string[] | undefined {
   for (const [binary, args] of [["trash", []], ["gio", ["trash"]]] as const) {
@@ -16,9 +16,7 @@ function trashCommand(): string[] | undefined {
   }
 }
 function linked(path: string) {
-  return listWorkspaces().filter(record => (record.retained || record.lifecycle === "cleanup_failed")
-    && (sameSessionFile(record.sourceSessionFile, path) || sameSessionFile(record.targetSessionFile, path)))
-    .sort((a, b) => a.id.localeCompare(b.id));
+  return sessionWorkspacesForDeletion([path]);
 }
 function stamp(path: string): string {
   const info = lstatSync(path, { bigint: true });
@@ -29,10 +27,6 @@ function preview(path: string) {
   const fileVersion = stamp(path);
   const records = linked(path);
   if (records.length > 128) throw new Error("Too many linked workspaces");
-  for (const record of records) {
-    if (retainedChildWorkspaces(record.id).length) throw new Error(`Join or discard child workspaces before deleting ${record.label}.`);
-    if (record.managedCleanupPending) throw new Error(`Workspace ${record.label} still has managed writers; session file kept.`);
-  }
   const command = trashCommand();
   const mode = command ? "trash" : "permanent";
   const version = createHash("sha256").update(JSON.stringify([fileVersion, records, command])).digest("hex");

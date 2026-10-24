@@ -538,7 +538,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       "Before making implementation changes with edit or write inside the git repository containing the current session cwd, call workspace with action=enter as the only tool call in that assistant response, unless the current session is already in an associated workspace. To edit existing ignored files, provide their paths relative to the original cwd in ignoredFiles on the first enter call; only those files are copied and later integrated. Wait for the cwd switch before using more tools.",
       "Temporary probes, scripts, and generated artifacts may be created under $TMPDIR without entering a workspace; keep them outside the repository and remove them when finished.",
       "Call workspace with action=status when the expected workspace is missing or its lifecycle is unclear.",
-      "Join or stop running subagents and collect their results before switching workspaces.",
+      "Join running subagents, or stop them and wait for cleanup, before switching workspaces.",
       "When integration commits are enabled, supply commitMessage describing what changed and why. Never push automatically.",
       "If committing could expose sensitive files, secrets, or has another safety concern, use question to ask the user before integration, even when integration is pre-authorized. Describe the concern without exposing secret values. If question is unavailable, cancelled, or the user declines, retain the workspace without integrating or committing. Integration permission does not approve a questionable commit.",
       "To undo a managed integration, use action=revert with its workspace id and a reason from the origin checkout. Review and verify the prepared reversal, then integrate it to create a new revert commit. Do not use reset/amend/history rewriting for undo; fix requests normally use a new corrective workspace and commit instead.",
@@ -576,7 +576,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         throw new Error("ignoredFiles only applies to action=enter.");
       }
       if (TRANSITION_ACTIONS.has(action) && hasRunningSubagents()) {
-        throw new Error("Cannot change workspaces while subagents are running. Use spawn_control join/join_all, or stop them and collect their results, then retry this workspace action.");
+        throw new Error("Cannot change workspaces while subagents or their cleanup are active. Use spawn_control join/join_all, or stop them and wait for cleanup, then retry this workspace action.");
       }
       if (action === "revert") {
         if (!params.id || !params.reason) throw new Error("Revert requires the recorded integration's workspace id and a reason.");

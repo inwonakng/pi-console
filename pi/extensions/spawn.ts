@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAccessMode } from "./shared/access-state";
 import { registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
+import { spawnRunIds } from "./shared/session-deletion";
 import {
   createWorkspace,
   findGitRoot,
@@ -117,6 +118,9 @@ type SpawnRun = {
   child?: PiRpcChild;
   childCwd: string;
   parentSessionFile?: string;
+  ownerEntryId?: string;
+  cancellationRequested?: boolean;
+  settled: boolean;
   worktree?: RunWorkspace;
   integrationBlock?: IntegrationBlock;
   cleanupError?: string;
@@ -669,6 +673,8 @@ function artifactDetails(run: SpawnRun): Record<string, unknown> {
     status: run.status,
     progress: run.progress ?? null,
     joined: run.joined,
+    cancellationRequested: run.cancellationRequested ?? false,
+    settled: run.settled,
     joinRequested: run.joinRequested ?? false,
   };
 }
@@ -680,6 +686,10 @@ function statusJson(run: SpawnRun): Record<string, unknown> {
     ownerPid: process.pid,
     prompt: run.prompt,
     parentSessionFile: run.parentSessionFile ?? null,
+    ownerEntryId: run.ownerEntryId,
+    cancellationRequested: run.cancellationRequested ?? false,
+    settled: run.settled,
+    stopReason: run.stopReason,
     accessMode: run.accessMode,
     isolation: run.isolation,
     mode: run.mode,
@@ -879,9 +889,15 @@ function restoredRun(statusPath: string, parentSessionFile: string | undefined):
     agentPromptPath: existsSync(join(runDir, "subagent-prompt.md")) ? join(runDir, "subagent-prompt.md") : undefined,
     childCwd: record?.workspaceCwd ?? "",
     parentSessionFile,
+    ownerEntryId: typeof data.ownerEntryId === "string" ? data.ownerEntryId : undefined,
+    cancellationRequested: data.cancellationRequested === true
+      || data.cancellationRequested === undefined && (data.error === "Subagent aborted: parent_abort." || data.error === "Subagent aborted: stopped_by_parent." || data.error === "Subagent aborted: session_switch."),
+    stopReason: typeof data.stopReason === "string" ? data.stopReason : undefined,
+    settled: true,
     worktree,
     integrationBlock,
-    cleanupError: typeof data.cleanupError === "string" ? data.cleanupError : undefined,
+    cleanupError: typeof data.cleanupError === "string" ? data.cleanupError
+      : data.settled === false ? "Subagent cleanup did not finish before the runtime ended." : undefined,
     notified: data.notified === true,
     joined: data.joined === true,
     // No join operation survives a runtime restart.
@@ -919,6 +935,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
   const owner = Symbol("spawn runtime");
   let retired = false;
   let runtimeCancellation = new AbortController();
+  const pendingJoins = new Set<{ runIds: Set<string>; cancellation: AbortController; finished: Promise<void> }>();
   const announcedCompletions = new Set<string>();
   let sessionManager: ExtensionContext["sessionManager"] | undefined;
   let ui: Pick<ExtensionUIContext, "notify" | "setStatus"> | undefined;
@@ -964,7 +981,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
   };
 
   const completionEligible = (run: SpawnRun): boolean => !retired && run.mode === "background"
-    && run.status !== "running" && !run.notified && !run.joined && !run.joinRequested && branchHasSpawn(run.id);
+    && run.settled && !run.cancellationRequested && run.status !== "running" && !run.notified && !run.joined && !run.joinRequested && branchHasSpawn(run.id);
 
   const announceCompletion = (run: SpawnRun) => {
     if (!ui || !completionEligible(run) || announcedCompletions.has(run.id)) return;
@@ -1008,8 +1025,22 @@ export default function spawnExtension(pi: ExtensionAPI) {
     refreshSpawnTool(ctx);
     runs.clear();
     announcedCompletions.clear();
-    registerSubagentRuntime(owner, () => Array.from(runs.values()).some((run) => run.status === "running"), historyBlockReason);
+    registerSubagentRuntime(owner, () => Array.from(runs.values()).some((run) => !run.settled || run.status === "running" || run.joinRequested || run.cleanupError), historyBlockReason);
+    const references = new Map<string, string>();
+    for (const entry of ctx.sessionManager.getEntries()) {
+      for (const runId of spawnRunIds(entry)) {
+        if (!references.has(runId)) references.set(runId, entry.id);
+      }
+    }
     for (const run of restoreRuns(ctx.sessionManager.getSessionFile())) {
+      // Known ownership follows all surviving history, not only the active branch.
+      // Unknown legacy ownership is retained rather than guessed.
+      const reference = references.get(run.id);
+      if (run.ownerEntryId && !reference) continue;
+      if (!run.ownerEntryId && reference) {
+        run.ownerEntryId = reference;
+        writeStatus(run);
+      }
       if (!runs.has(run.id)) runs.set(run.id, run);
     }
     reconcileCompletionDelivery();
@@ -1025,6 +1056,10 @@ export default function spawnExtension(pi: ExtensionAPI) {
     reconcileCompletionDelivery();
     for (const run of runs.values()) announceCompletion(run);
     publishSpawnStatus();
+  });
+
+  pi.on("agent_settled", async (event) => {
+    if (!retired && event.aborted) await cancelRuns();
   });
 
   pi.on("session_tree", () => {
@@ -1055,17 +1090,53 @@ export default function spawnExtension(pi: ExtensionAPI) {
       }
     }
     await Promise.all([...runs.values()].map((run) => run.finished));
+    if (ownedRuntime) {
+      for (const run of runs.values()) {
+        try { writeStatus(run); } catch (error) {
+          failures.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+    }
     if (failures.length) throw new Error(`Could not save subagent shutdown state: ${failures.join("; ")}`);
   });
 
   const stopRun = (run: SpawnRun, reason: string) => {
-    if (run.status !== "running") {
-      return;
-    }
-    run.stopReason = reason;
+    if (run.settled) return;
+    if (reason === "parent_abort" || reason === "stopped_by_parent" || reason === "session_switch") run.cancellationRequested = true;
+    run.stopReason ??= reason;
     run.child?.abort();
-    publishSpawnStatus();
+    if (run.cancellationRequested) {
+      for (const join of pendingJoins) {
+        if (join.runIds.has(run.id)) join.cancellation.abort();
+      }
+    }
+    try {
+      writeStatus(run);
+      publishSpawnStatus();
+    } catch (error) {
+      // Abort listeners must not throw or prevent cancellation of sibling runs.
+      run.cleanupError ??= `Could not record cancellation: ${error instanceof Error ? error.message : String(error)}`;
+    }
   };
+
+  async function cancelRuns(): Promise<void> {
+    const pending = Array.from(runs.values()).filter((run) => !run.settled);
+    // Command joins have no parent-turn signal, including during integration.
+    const joins = [...pendingJoins];
+    for (const join of joins) join.cancellation.abort();
+    for (const run of pending) stopRun(run, "parent_abort");
+    await Promise.all([...pending.map((run) => run.finished), ...joins.map((join) => join.finished)]);
+    const failures = Array.from(runs.values()).filter((run) => run.cancellationRequested && run.cleanupError);
+    if (failures.length) throw new Error(failures.map((run) => `${run.id}: ${run.cleanupError}`).join("; "));
+  }
+
+  // The owner invokes this even while the parent is idle or waiting on a join.
+  registerServiceOperation(pi, "spawn.cancel", async (_payload, ctx) => {
+    const cleanup = cancelRuns();
+    ctx.abort();
+    await cleanup;
+    return { changed: true };
+  });
 
   const waitForRun = async (run: SpawnRun, signal: AbortSignal | undefined, stopOnAbort: boolean): Promise<SpawnRun> => {
     // Execution status can settle before asynchronous artifact finalization.
@@ -1103,8 +1174,13 @@ export default function spawnExtension(pi: ExtensionAPI) {
     report: () => T,
     onWaiting?: () => void,
   ): Promise<T> => {
-    signal = signal ? AbortSignal.any([signal, runtimeCancellation.signal]) : runtimeCancellation.signal;
+    const cancellation = new AbortController();
+    signal = AbortSignal.any([runtimeCancellation.signal, cancellation.signal, ...(signal ? [signal] : [])]);
     const previouslyJoined = new Map(selected.map((run) => [run.id, run.joined]));
+    let finishJoin!: () => void;
+    const join = { runIds: new Set(selected.map((run) => run.id)), cancellation,
+      finished: new Promise<void>((resolve) => { finishJoin = resolve; }) };
+    pendingJoins.add(join);
     try {
       if (retired) throw new Error("Spawn runtime was retired.");
       for (const run of selected) {
@@ -1151,15 +1227,21 @@ export default function spawnExtension(pi: ExtensionAPI) {
       if (failures.length === 1 && outcomes.length === 0) throw error;
       const reason = failures.map((failure) => failure instanceof Error ? failure.message : String(failure)).join("; ");
       throw new Error(`${reason}${outcomes.length ? `\n\n${outcomes.join("\n\n")}` : ""}`, { cause: error });
+    } finally {
+      pendingJoins.delete(join);
+      finishJoin();
     }
   };
 
   function historyBlockReason(): string | undefined {
     const all = Array.from(runs.values());
-    if (all.some((run) => run.status === "running" || run.joinRequested)) {
-      return "There are active subagents that haven't completed. Join them before changing history, or stop them and collect their results. Open <leader>ps to manage them.";
+    if (all.some((run) => run.cleanupError)) {
+      return "Subagent cleanup is unresolved. Inspect its cleanup error before changing history. Open <leader>ps to manage it.";
     }
-    if (all.some((run) => !run.joined)) {
+    if (all.some((run) => !run.settled || run.status === "running" || run.joinRequested)) {
+      return "Subagents or their cleanup are still active. Wait for them, join them, or stop them before changing history. Open <leader>ps to manage them.";
+    }
+    if (all.some((run) => !run.joined && !run.cancellationRequested)) {
       return "There are subagent results that haven't been collected. Join them before changing history. Open <leader>ps to manage them.";
     }
     return undefined;
@@ -1264,6 +1346,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       agentPromptPath,
       childCwd: input.cwd,
       parentSessionFile: input.parentSessionFile,
+      settled: false,
       notified: false,
       joined: false,
       joinRequested: false,
@@ -1287,8 +1370,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
       run.abortSignal = input.signal;
       run.abortListener = abortListener;
       input.signal.addEventListener("abort", abortListener, { once: true });
+      if (input.signal.aborted) abortListener();
     }
 
+    pi.appendEntry("pi-spawn-owner", { runId: id, workspaceId: run.worktree?.workspaceId });
+    run.ownerEntryId = sessionManager?.getLeafId() ?? undefined;
     runs.set(id, run);
     writeStatus(run);
     publishSpawnStatus();
@@ -1385,30 +1471,54 @@ export default function spawnExtension(pi: ExtensionAPI) {
     }
 
     let child: PiRpcChild;
-    try { child = new PiRpcChild(argv, {
-      cwd: run.childCwd,
-      env: childEnv,
-      onEvent: (event) => {
-        transcript(event);
-        const progress = summarizeChildEvent(event);
-        if (run.status === "running" && progress && progress !== run.progress) {
-          run.progress = progress;
-          if (!retired) writeStatus(run);
-          publishProgress();
-        }
-      },
-    }); } catch (error) {
-      run.status = "failed";
+    try {
+      if (run.stopReason) throw new Error(`Subagent aborted before launch: ${run.stopReason}.`);
+      child = new PiRpcChild(argv, {
+        cwd: run.childCwd,
+        env: childEnv,
+        onEvent: (event) => {
+          try {
+            transcript(event);
+            const progress = summarizeChildEvent(event);
+            if (run.status === "running" && progress && progress !== run.progress) {
+              run.progress = progress;
+              if (!retired) writeStatus(run);
+              publishProgress();
+            }
+          } catch (error) {
+            // Process callbacks cannot throw into the owner's event loop. Retain
+            // the failure and finish disposal before allowing history changes.
+            run.cleanupError ??= `Could not record child activity: ${error instanceof Error ? error.message : String(error)}`;
+            run.child?.abort();
+          }
+        },
+      });
+    } catch (error) {
+      run.status = run.stopReason ? "aborted" : "error";
       run.error = `Subagent was not launched: ${error instanceof Error ? error.message : String(error)}`;
       run.completedAt = new Date().toISOString();
       try {
         if (run.worktree) await updateWorkspace(run.worktree.workspaceId, (record) => { delete record.managedCleanupPending; });
         writeFileSync(run.resultPath, run.error + "\n", "utf8");
-        writeStatus(run);
-      } finally { run.resolveFinished(run); }
+        await prepareWorktreePatch(run);
+      } catch (failure) {
+        run.cleanupError = failure instanceof Error ? failure.message : String(failure);
+      } finally {
+        if (run.abortSignal && run.abortListener) run.abortSignal.removeEventListener("abort", run.abortListener);
+        run.settled = true;
+        try {
+          writeStatus(run);
+          publishSpawnStatus();
+        } catch (error) {
+          run.cleanupError ??= error instanceof Error ? error.message : String(error);
+          throw error;
+        } finally { run.resolveFinished(run); }
+      }
       return;
     }
     run.child = child;
+    // Cancellation can arrive before the child handle exists.
+    if (run.stopReason || run.abortSignal?.aborted) stopRun(run, run.stopReason ?? "parent_abort");
 
     const timeoutMs = Math.max(1, params.timeoutSeconds ?? 1800) * 1000;
     run.timeout = setTimeout(() => stopRun(run, "timeout"), timeoutMs);
@@ -1486,8 +1596,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
           if (run.worktree) await updateWorkspace(run.worktree.workspaceId, (record) => { delete record.managedCleanupPending; });
           await prepareWorktreePatch(run);
         } catch (error) {
+          run.cleanupError = error instanceof Error ? error.message : String(error);
           if (run.worktree) {
-            run.integrationBlock = { integration: "failed", reason: `managed cleanup/patch failed: ${error instanceof Error ? error.message : String(error)}` };
+            run.integrationBlock = { integration: "failed", reason: `managed cleanup/patch failed: ${run.cleanupError}` };
           }
         }
         if (run.worktree && !run.integrationBlock && run.status !== "completed") {
@@ -1499,6 +1610,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         }
         // dispose was awaited before capture; failed cleanup remains persisted
         // and blocks every later join and shared workspace mutation.
+        run.settled = true;
         if (run.cleanupError) writeStatus(run);
         // Retired callbacks may finish artifacts but must not overwrite status
         // already restored by a replacement runtime or publish to its UI.
@@ -1512,8 +1624,10 @@ export default function spawnExtension(pi: ExtensionAPI) {
     })().catch(async (error: unknown) => {
       try { await child.dispose(); }
       catch (cleanup) { run.cleanupError = cleanup instanceof Error ? cleanup.message : String(cleanup); }
-      try { writeStatus(run); } catch { /* Preserve original failure; workspace marker remains. */ }
       const failure = error instanceof Error ? error : new Error(String(error));
+      run.cleanupError ??= failure.message;
+      run.settled = true;
+      try { writeStatus(run); } catch { /* In-memory state still blocks history. */ }
       // A failed status write/send is reported, but must not strand all later
       // joins. Their own writes can retry durable finalization.
       run.resolveFinished(run);
@@ -1530,7 +1644,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         await finalizeJoin([run], ctx.signal, () => emitCommandResult(resultSummary(run), artifactDetails(run)));
       } else {
         stopRun(run, "stopped_by_parent");
-        await waitForRun(run, ctx.signal, false);
+        await waitForRun(run, undefined, false);
         publishSpawnStatus();
         emitCommandResult(`Stopped ${run.id}: ${run.status}`, artifactDetails(run));
       }
@@ -1564,7 +1678,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         if (action === "stop") {
           const run = getRunById(id);
           stopRun(run, "stopped_by_parent");
-          await waitForRun(run, ctx.signal, false);
+          await waitForRun(run, undefined, false);
           publishSpawnStatus();
           emitCommandResult(`Stopped ${run.id}: ${run.status}${run.error ? ` (${run.error})` : ""}`, artifactDetails(run));
           return;
@@ -1773,7 +1887,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         for (const run of selected) {
           stopRun(run, "stopped_by_parent");
         }
-        await waitForRuns(selected, signal, false);
+        await waitForRuns(selected, undefined, false);
         const text = selected.map((run) => `Stopped ${run.id}: ${run.status}${run.error ? ` (${run.error})` : ""}`).join("\n");
         return { content: [{ type: "text", text }], details: { runs: selected.map(statusJson) } };
       }

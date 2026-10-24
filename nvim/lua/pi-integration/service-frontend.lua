@@ -1874,7 +1874,8 @@ function M.pick_spawn()
 		fields(details, run, { { "status", "Status" }, { "progress", "Latest activity" }, { "prompt", "Task" },
 			{ "error", "Error" }, { "cleanupError", "Cleanup error" },
 			{ "startedAt", "Started" }, { "completedAt", "Completed" },
-			{ "joined", "Joined" }, { "integration", "Integration" }, { "integrationReason", "Integration details" } })
+			{ "joined", "Joined" }, { "cancellationRequested", "Cancelled without joining" }, { "settled", "Cleanup finished" },
+			{ "integration", "Integration" }, { "integrationReason", "Integration details" }, { "worktreePath", "Retained worktree" } })
 		fields(details, run.integrationBlock, { { "integration", "Integration blocked" }, { "reason", "Reason" } })
 		vim.ui.select({ "Artifacts", "Inspect", "Join", "Stop" }, {
 			prompt = run_label(run), preview_title = run_label(run),
@@ -1888,7 +1889,8 @@ function M.pick_spawn()
 					{ "prompt", "Task" }, { "startedAt", "Started" }, { "completedAt", "Completed" },
 					{ "accessMode", "Access mode" }, { "isolation", "Isolation" }, { "mode", "Interaction mode" },
 					{ "error", "Error" }, { "cleanupError", "Cleanup error" }, { "progress", "Progress" },
-					{ "joined", "Joined" }, { "joinRequested", "Join requested" }, { "integration", "Integration" },
+					{ "joined", "Joined" }, { "joinRequested", "Join requested" }, { "cancellationRequested", "Cancelled without joining" },
+					{ "settled", "Cleanup finished" }, { "integration", "Integration" },
 					{ "integrationReason", "Integration details" }, { "agentSource", "Agent source" }, { "agentProfilePath", "Agent profile" },
 					{ "parentSessionFile", "Parent session file" }, { "runDir", "Artifacts directory" }, { "statusPath", "Status file" },
 					{ "briefPath", "Brief" }, { "resultPath", "Result" }, { "transcriptPath", "Transcript" },

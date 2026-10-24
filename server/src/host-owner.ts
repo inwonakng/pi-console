@@ -31,6 +31,7 @@ type BundledFlight = {
   worker: PiProcess; revision: number; runtimeId: string; invocationId: string; operation: BundledOperation["operation"];
   message: string; dispatched: boolean; requestId?: string; result?: OperationResult; resultRevision?: number; recipient?: Controller;
 };
+type SubagentCancellation = { runtimeId: string; message: string; requestId?: string; result?: OperationResult };
 type RenameFlight = {
   worker: PiProcess; revision: number; runtimeId: string; invocationId: string;
   message: string; dispatched: boolean; requestId?: string; result?: RenameResult;
@@ -502,6 +503,7 @@ export class OwnedSession {
   private nativeQueueCommands = new Set<Promise<void>>();
   private bundled?: BundledFlight;
   private bundledInterrupt?: BundledFlight;
+  private readonly subagentCancellations = new Map<string, SubagentCancellation>();
   // Delivery provenance is ephemeral, separate from durable accepted work. A
   // restart never revives a grant; explicit edits capture their own recipient.
   private readonly queueRecipients = new Map<string, Controller>();
@@ -1489,9 +1491,33 @@ export class OwnedSession {
         clearingError = error;
       }
       // Existing behavior attempts abort even after native clear_queue rejection.
-      if (active) await worker.request({ type: "abort" }, guard);
+      try { await this.cancelSubagents(revision, worker); }
+      finally { await worker.request({ type: "abort" }, guard); }
       if (clearingError) throw clearingError;
     } finally { this.aborting--; this.scheduleQueue(); }
+  }
+
+  private async cancelSubagents(revision: number, worker: PiProcess): Promise<void> {
+    const guard = () => { this.commandRuntime(revision, worker); };
+    const discovery = await worker.request({ type: "get_commands" }, guard);
+    const name = "pi-console-spawn-cancel";
+    if (discovery.command !== "get_commands" || discovery.data.commands.filter((command) => command.name === name
+      && command.source === "extension" && command.sourceInfo?.path === join(this.options.appRoot, "pi", "extensions", "spawn.ts")).length !== 1) {
+      throw new CommandError("unsupported_command", "Subagent cancellation capability is missing or ambiguous");
+    }
+    guard();
+    const invocationId = randomUUID();
+    const runtimeId = worker.interactionSnapshot().runtime!.id;
+    const flight: SubagentCancellation = { runtimeId, message: `/${name} ${JSON.stringify({ version: 1, invocationId,
+      runtimeId, sessionId: this.record.piSessionId, sessionFile: this.catalog.sessionFile(this.id), payload: {} })}` };
+    this.subagentCancellations.set(invocationId, flight);
+    try {
+      const response = await worker.request({ type: "prompt", message: flight.message }, guard);
+      if (response.command !== "prompt" || response.data.disposition !== "handled"
+        || flight.result?.status !== "completed" || flight.result.data?.changed !== true) {
+        throw new Error("Subagent cancellation did not confirm cleanup; inspect retained work before changing history");
+      }
+    } finally { this.subagentCancellations.delete(invocationId); }
   }
 
   private async cancelMainInteractions(revision: number, worker: PiProcess): Promise<void> {
@@ -1754,6 +1780,13 @@ export class OwnedSession {
     }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === OPERATION_RESULT) {
       const result = operationResult(event.statusText);
+      const cancellation = this.subagentCancellations.get(result.invocationId);
+      if (cancellation) {
+        if (cancellation.result || result.runtimeId !== cancellation.runtimeId || result.sessionId !== this.record.piSessionId
+          || result.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Unmatched subagent cancellation result");
+        cancellation.result = result;
+        return;
+      }
       const flight = [this.bundled, this.bundledInterrupt].find((flight) => flight?.invocationId === result.invocationId);
       if (!flight?.dispatched || flight.result || result.invocationId !== flight.invocationId || result.runtimeId !== flight.runtimeId
         || result.sessionId !== this.record.piSessionId || result.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Unmatched managed operation result");
@@ -1822,6 +1855,11 @@ export class OwnedSession {
   }
 
   private dispatch(command: RpcCommand & { id: string }): void {
+    const cancellation = [...this.subagentCancellations.values()].find((flight) => command.type === "prompt" && command.message === flight.message);
+    if (cancellation) {
+      cancellation.requestId = command.id;
+      return;
+    }
     const flight = [this.bundled, this.bundledInterrupt].find((flight) => flight?.dispatched && command.type === "prompt" && command.message === flight.message);
     if (flight) {
       flight.requestId = command.id;
@@ -1851,6 +1889,7 @@ export class OwnedSession {
   }
 
   private response(response: RpcResponse, command: RpcCommand & { id: string }): void {
+    if ([...this.subagentCancellations.values()].some((flight) => response.id === flight.requestId)) return;
     if (response.id === this.rename?.requestId || response.id === this.bundled?.requestId || response.id === this.bundledInterrupt?.requestId) return;
     // Prompt acceptance precedes its user events in Pi's stdout stream. Record
     // it synchronously, before a later event in the same batch is reduced.

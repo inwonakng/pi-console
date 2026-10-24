@@ -19,6 +19,7 @@ export type BundledOperation =
   | { operation: "side.draft"; payload: { text: string } }
   | { operation: "side.reset"; payload: Record<string, never> }
   | { operation: "side.abort"; payload: Record<string, never> }
+  | { operation: "spawn.cancel"; payload: Record<string, never> }
   | { operation: "spawn.join"; payload: { id: string } }
   | { operation: "spawn.stop"; payload: { id: string } }
   | { operation: "title.generate"; payload: Record<string, never> }
@@ -46,7 +47,7 @@ export function validBundled(operation: unknown, p: Record<string, unknown>): bo
         && (p.ignoredFiles === undefined || Array.isArray(p.ignoredFiles) && p.ignoredFiles.length <= 128 && p.ignoredFiles.every((v) => typeof v === "string" && v.length <= 4096));
     case "workspace.revert": return exact(p, ["id", "reason"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
       && typeof p.reason === "string" && !!p.reason.trim() && !p.reason.includes("\0") && Buffer.byteLength(p.reason) <= 8192;
-    case "usage.refresh": case "title.generate": case "side.open": case "side.reset": case "side.abort": return exact(p, []);
+    case "usage.refresh": case "title.generate": case "side.open": case "side.reset": case "side.abort": case "spawn.cancel": return exact(p, []);
     case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";
     case "side.prompt": return exact(p, ["text"]) && typeof p.text === "string" && !!p.text.trim() && Buffer.byteLength(p.text) <= 1024 * 1024;
     case "side.draft": return exact(p, ["text"]) && typeof p.text === "string" && Buffer.byteLength(p.text) <= 1024 * 1024;

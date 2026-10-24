@@ -553,6 +553,37 @@ export function retainedChildWorkspaces(parentId: string): WorkspaceRecord[] {
   );
 }
 
+/** A deletion may remove a parent only when every retained child is selected. */
+export function orderWorkspaceDeletion(records: WorkspaceRecord[]): WorkspaceRecord[] {
+  const selected = new Map(records.map((record) => [record.id, record]));
+  const all = listWorkspaces();
+  const ordered: WorkspaceRecord[] = [];
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (record: WorkspaceRecord): void => {
+    if (visited.has(record.id)) return;
+    if (visiting.has(record.id)) throw new Error(`Workspace ancestry is cyclic at ${record.label}.`);
+    assertManagedCleanup(record);
+    visiting.add(record.id);
+    for (const child of all.filter((child) => child.parentWorkspaceId === record.id
+      && (child.retained || child.lifecycle === "cleanup_failed"))) {
+      const included = selected.get(child.id);
+      if (!included) throw new Error(`Child workspace ${child.label} is still referenced outside this deletion; ${record.label} was kept.`);
+      visit(included);
+    }
+    visiting.delete(record.id);
+    visited.add(record.id);
+    ordered.push(record);
+  };
+  for (const record of records) visit(record);
+  return ordered;
+}
+
+export function sessionWorkspacesForDeletion(sessionFiles: string[]): WorkspaceRecord[] {
+  return orderWorkspaceDeletion(listWorkspaces().filter((record) => (record.retained || record.lifecycle === "cleanup_failed")
+    && sessionFiles.some((path) => sameSessionFile(record.sourceSessionFile, path) || sameSessionFile(record.targetSessionFile, path))));
+}
+
 export function taskWorkspacesForSession(sessionFile: string | undefined): WorkspaceRecord[] {
   return sessionFile ? listWorkspaces().filter((record) =>
     record.kind === "task" && record.retained && sameSessionFile(record.sourceSessionFile, sessionFile),
