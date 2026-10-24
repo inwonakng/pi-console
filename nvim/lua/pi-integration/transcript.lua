@@ -371,8 +371,37 @@ end
 local function align_bottom(buf, win)
 	vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
 	vim.api.nvim_win_call(win, function()
-		vim.cmd("noautocmd normal! zb")
+		-- Reveal the end even when the last line wraps beyond the window.
+		vim.cmd("noautocmd normal! $zb")
+		-- Resolve wrapped-line skipcol while this window is current.
+		vim.cmd("redraw")
 	end)
+end
+
+function M.is_at_bottom(ctx)
+	if not M.win_valid(ctx) then return false end
+	local win = ctx.state.transcript_win
+	return vim.api.nvim_win_call(win, function()
+		local view = vim.fn.winsaveview()
+		local height = vim.api.nvim_win_get_height(win)
+		local remaining = vim.api.nvim_win_text_height(win, {
+			start_row = view.topline - 1, start_vcol = view.skipcol, max_height = height + 1,
+		})
+		return remaining.all + view.topfill <= height
+	end)
+end
+
+function M.update_lines(ctx, lines)
+	local buf = ctx.state.transcript_buf
+	if not ctx.buffer.valid(buf) then return end
+	local follow = not M.is_focused(ctx) and M.is_at_bottom(ctx)
+	-- Metadata updates do not count as new transcript content.
+	M.update_metadata(ctx)
+	local tick = vim.api.nvim_buf_get_changedtick(buf)
+	M.preserve_view(ctx, function() buffer.update_lines(buf, lines) end)
+	if follow and vim.api.nvim_buf_get_changedtick(buf) ~= tick then
+		M.scroll_to_bottom(ctx)
+	end
 end
 
 function M.scroll_to_bottom_unless_focused(ctx)
@@ -389,7 +418,9 @@ function M.finish_pending_scroll(ctx)
 	state.pending_transcript_scroll = nil
 	if pending and pending.buf == state.transcript_buf
 		and buffer.window_matches(pending.win, pending.buf) and not M.is_focused(ctx) then
-		align_bottom(pending.buf, pending.win)
+		local view = vim.api.nvim_win_call(pending.win, vim.fn.winsaveview)
+		-- A render must not finish an old alignment after the user navigated.
+		if vim.deep_equal(view, pending.view) then align_bottom(pending.buf, pending.win) end
 	end
 end
 
@@ -540,7 +571,10 @@ function M.scroll_to_bottom(ctx)
 	local state = ctx.state
 	if M.win_valid(ctx) and ctx.buffer.valid(state.transcript_buf) then
 		align_bottom(state.transcript_buf, state.transcript_win)
-		state.pending_transcript_scroll = { buf = state.transcript_buf, win = state.transcript_win }
+		state.pending_transcript_scroll = {
+			buf = state.transcript_buf, win = state.transcript_win,
+			view = vim.api.nvim_win_call(state.transcript_win, vim.fn.winsaveview),
+		}
 	end
 end
 

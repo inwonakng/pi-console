@@ -409,7 +409,7 @@ local function command(operation, payload, callback, captured, terminal, submiss
 			vim.bo[input_buf].modified = false
 		end
 		render()
-		transcript.scroll_to_bottom_unless_focused(ctx)
+		if operation == "prompt.submit" then transcript.scroll_to_bottom_unless_focused(ctx) end
 		vim.cmd("redraw")
 		if not backup() then
 			entry.status, entry.error, entry.sent = "Not sent", "Local recovery could not be saved. No command was sent.", false
@@ -695,10 +695,9 @@ render = function()
 	-- Every snapshot is a pure render; never invoke legacy event/effect handlers.
 	local split = {}
 	for _, line in ipairs(lines) do vim.list_extend(split, vim.split(line, "\n", { plain = true })) end
-	transcript.preserve_view(ctx, function() buffer.update_lines(state.transcript_buf, split) end)
+	transcript.update_lines(ctx, split)
 	transcript.apply_collected_transcript_items(ctx, items)
 	transcript.render(ctx)
-	transcript.scroll_to_bottom_unless_focused(ctx)
 	statusline.update(ctx)
 	publish_attachment()
 	if sync_pending then vim.schedule(sync_pending) end
@@ -753,7 +752,7 @@ local function apply_snapshot(value)
 	end
 	-- History may arrive after the initial attachment snapshot.
 	local initial_history = snapshot.conversation.hydrated and (not previous or not previous.conversation.hydrated)
-	if initial_history or same_runtime and previous.conversation.execution.running and not snapshot.conversation.execution.running then
+	if initial_history then
 		transcript.scroll_to_bottom_unless_focused(ctx)
 	end
 	tree.update(tree_ctx)
