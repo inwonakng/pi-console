@@ -207,7 +207,7 @@ function M.pick(host, rows, format_item, on_choice, opts)
 				local row = chosen[1]
 				if not row then return end
 				local action_closed = false
-				on_choice(row, {
+				on_choice(chosen, {
 					previewer = { _ctor = function()
 						return previewer(function() return row end, function() return not action_closed and connected() end)
 					end },

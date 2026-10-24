@@ -376,9 +376,7 @@ function M.open(entry, in_place)
 		local opened, failure = tmux.launch_service(frontend.config.launcher, M.target(host), entry.session_id, nil, resume)
 		if not opened then notify(failure) end
 	end
-	if entry.status == "Not Open" then
-		vim.ui.select({ "Resume", "Cancel" }, { prompt = "Resume stopped session on " .. host.alias .. "? No work is replayed." }, function(choice) if choice == "Resume" then select(true) end end)
-	else select(false) end
+	select(entry.status == "Not Open")
 	return true
 end
 saved_request = function(host, envelope, callback)
@@ -544,18 +542,35 @@ function M.history_picker(identity, opts)
 			require("pi-integration.history-picker").pick(host, rows, function(row)
 				local timestamp = tostring(row.lastActivityAt or row.createdAt or "Unknown time"):gsub("T", " "):gsub("%.%d+Z$", " UTC")
 				return timestamp .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " (" .. row.state .. ")"
-			end, function(row, preview_opts)
-				if row.state == "open" and not row.archived then
-					M.open({ host_id = host.host_id, session_id = row.id, status = "Idle" }); return
+			end, function(chosen, preview_opts)
+				if not current() or #chosen == 0 then return end
+				if not opts.archived then
+					local function open()
+						local in_place
+						if #chosen > 1 then in_place = false end
+						for _, row in ipairs(chosen) do
+							if not current() then notify("Owner changed; remaining sessions were not opened"); return end
+							local ok, err = M.open({ host_id = host.host_id, session_id = row.id,
+								status = row.state == "open" and "Idle" or "Not Open" }, in_place)
+							if not ok then notify(err) end
+						end
+					end
+					if #chosen == 1 then open(); return end
+					local lines = { "Resume/open " .. #chosen .. " conversations on " .. host_label(host) .. "? No work is replayed." }
+					for _, row in ipairs(chosen) do
+						table.insert(lines, session_title(row) .. (row.cwd and (" | " .. row.cwd) or ""))
+					end
+					vim.ui.select({ "Resume", "Cancel" }, { prompt = table.concat(lines, "\n") }, function(choice)
+						if choice == "Resume" then open() end
+					end)
+					return
 				end
-				local actions = row.archived and { "Unarchive", "Delete" } or { "Resume", "Archive", "Delete" }
 				local select_opts = vim.tbl_extend("force", preview_opts, {
-					prompt = "Saved conversation on " .. host_label(host) .. ": " .. session_title(row),
+					prompt = "Archived conversations on " .. host_label(host) .. ": " .. #chosen .. " selected",
 				})
-				vim.ui.select(actions, select_opts, function(action)
+				vim.ui.select({ "Unarchive", "Delete" }, select_opts, function(action)
 					if not action or not current() then return end
-					if action == "Resume" then M.open({ host_id = host.host_id, session_id = row.id, status = "Not Open" })
-					else mutate({ row }, action == "Delete" and "host.delete" or "host.archive") end
+					mutate(chosen, action == "Delete" and "host.delete" or "host.archive")
 				end)
 			end, { archived = opts.archived, select_all = opts.select_all,
 				on_archive = function(chosen) mutate(chosen, "host.archive") end,
