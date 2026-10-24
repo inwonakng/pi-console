@@ -32,6 +32,7 @@ button:disabled { opacity: .45; cursor: default; }
 input, textarea, select { width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); padding: 10px 12px; font-size: 16px; }
 textarea { resize: vertical; max-height: 30dvh; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#overview:focus-visible, .conversation:focus-visible, .transcript:focus-visible { outline: none; }
 [hidden] { display: none !important; }
 h1, h2, p { margin: 0; }
 h1 { font-size: 22px; font-weight: 600; letter-spacing: -.04em; }
@@ -43,6 +44,7 @@ label { font-size: 12px; color: var(--muted); }
 .wordmark img { flex-shrink: 0; }
 .connection-form { display: flex; gap: 10px; align-items: center; font-size: 12px; }
 #channel { color: var(--accent); border: 1px solid var(--border); padding: 2px 7px; border-radius: 4px; }
+#connect, #history, #new-session { min-height: 32px; padding: 4px 12px; }
 #new-session { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 .danger { color: var(--danger); }
 #connection-state { color: var(--muted); }
@@ -59,6 +61,7 @@ label { font-size: 12px; color: var(--muted); }
 @media (pointer: coarse) {
   #tabs { min-height: 44px; }
   .conversation-tab button { min-width: 44px; min-height: 44px; }
+  #connect, #history, #new-session { min-height: 44px; }
 }
 .conversation-tab > .status { padding-right: 8px; }
 #panels { flex: 1; min-height: 0; min-width: 0; }
@@ -169,7 +172,7 @@ dialog p { font-size: 12px; margin-top: 10px; }
   .app-header { padding: 8px 12px; gap: 8px; }
   .wordmark { font-size: 18px; }
   .connection-form { gap: 6px; }
-  #connect { padding: 7px 8px; font-size: 11px; }
+  #connect { padding: 4px 8px; font-size: 11px; }
   #tabs a { padding: 6px 10px; }
   #tabs .conversation-tab a { max-width: 180px; }
   .overview-heading { padding: 20px 12px 12px; flex-wrap: wrap; }

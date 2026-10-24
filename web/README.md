@@ -84,7 +84,7 @@ prompt patches and hidden custom messages are omitted from the transcript.
 All actions use on-screen controls, with no custom keyboard shortcuts. Use Send
 to submit a prompt, and the conversation's Actions menu to rename, stop, or create
 a new session in the same workspace. Standard browser keyboard navigation remains
-available. Execution hosts expands to show connection status and reconnection
+available. Hosts expands to show connection status and reconnection
 controls; registrations for the same host share a single display entry.
 
 The UI supports creation, attachment, control acquisition/takeover/release,
