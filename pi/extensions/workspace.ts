@@ -28,6 +28,9 @@ import { activeLocation, moveToLocation, publishWorkspaceState } from "./shared/
 import {
   createWorkspace,
   createRevertWorkspace,
+  beginWorkspaceContinuation,
+  clearWorkspaceContinuation,
+  getWorkspaceContinuation,
   findGitRoot,
   formatWorkspaceRecord,
   formatIntegrationSummary,
@@ -174,6 +177,14 @@ function queueCommand(pi: ExtensionAPI, command: string): void {
   });
 }
 
+function publishWorkspaceContinuation(ctx: ExtensionContext, workspaceId: string): void {
+  const file = sessionFile(ctx);
+  if (!file) throw new Error("Workspace switching requires a persisted session.");
+  setPendingWorkspace(workspaceId);
+  beginWorkspaceContinuation(file);
+  publishWorkspaceState(ctx);
+}
+
 function taskForCurrentContext(ctx: ExtensionContext): WorkspaceRecord | undefined {
   const active = workspaceForContext(ctx.cwd, sessionFile(ctx));
   return active?.kind === "task" && sameSessionFile(active.sourceSessionFile, sessionFile(ctx)) ? active : undefined;
@@ -261,6 +272,14 @@ async function confirmDestructive(
 export default function workspaceExtension(pi: ExtensionAPI) {
   let runtimeCancellation = new AbortController();
   pi.on("session_shutdown", () => runtimeCancellation.abort());
+  pi.on("agent_start", (_event, ctx) => {
+    const continuation = getWorkspaceContinuation(sessionFile(ctx));
+    if (continuation?.phase === "starting") {
+      clearWorkspaceContinuation(continuation);
+      // Hooks precede the public event. The owner clears its handoff atomically
+      // with agent_start; publishing a clear here would introduce an idle gap.
+    }
+  });
   const restoreWorkspace = (event: { reason: string }, ctx: ExtensionContext) => {
     if (!projectTrustReady()) {
       publishWorkspaceState(ctx);
@@ -284,7 +303,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           && location.cwd === ctx.cwd;
         if (recoveringReturn && (!pendingId || pendingId === location.workspace.id)) {
           const workspaceId = location.workspace.id;
-          setPendingWorkspace(workspaceId);
+          publishWorkspaceContinuation(ctx, workspaceId);
           // A restore switch emits session_start before its replacement callback returns.
           // Defer the return so it does not start a nested session replacement.
           setTimeout(() => queueCommand(pi, `/pi-workspace-return ${workspaceId}`), 0);
@@ -326,10 +345,13 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   });
 
   const enterWorkspace = async (args: string, ctx: ExtensionCommandContext) => {
+      const file = sessionFile(ctx);
+      const continuation = getWorkspaceContinuation(file);
       const record = loadWorkspace(args.trim());
       if (!record || record.kind !== "task" || !record.retained || isWorkspaceFinalized(record)
         || !sameSessionFile(record.sourceSessionFile, sessionFile(ctx))) {
         setPendingWorkspace(undefined);
+        if (continuation) clearWorkspaceContinuation(continuation);
         publishWorkspaceState(ctx);
         throw new Error(`Task workspace is unavailable: ${args.trim()}`);
       }
@@ -350,9 +372,13 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         if (!moved) throw new Error("Workspace switch was cancelled.");
         return moved;
       } catch (error) {
-        const transitionPending = getPendingWorkspaceId() !== undefined;
-        setPendingWorkspace(undefined);
-        if (transitionPending) publishWorkspaceState(ctx);
+        const pendingContinuation = getWorkspaceContinuation(file);
+        if (!pendingContinuation || pendingContinuation === continuation) {
+          const transitionPending = getPendingWorkspaceId() !== undefined;
+          setPendingWorkspace(undefined);
+          if (pendingContinuation) clearWorkspaceContinuation(pendingContinuation);
+          if (transitionPending || pendingContinuation) publishWorkspaceState(ctx);
+        }
         await updateWorkspace(record.id, (current) => {
           current.lifecycle = "retained";
           current.integrationReason = error instanceof Error ? error.message : String(error);
@@ -392,6 +418,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   });
 
   const returnWorkspace = async (args: string, ctx: ExtensionCommandContext) => {
+      const file = sessionFile(ctx);
+      const continuation = getWorkspaceContinuation(file);
       const id = args.trim();
       try {
         const record = loadWorkspace(id);
@@ -420,9 +448,13 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         if (!moved) throw new Error("Return to the origin checkout was cancelled; the workspace was retained.");
         return moved;
       } catch (error) {
-        const transitionPending = getPendingWorkspaceId() !== undefined;
-        setPendingWorkspace(undefined);
-        if (transitionPending) publishWorkspaceState(ctx);
+        const pendingContinuation = getWorkspaceContinuation(file);
+        if (!pendingContinuation || pendingContinuation === continuation) {
+          const transitionPending = getPendingWorkspaceId() !== undefined;
+          setPendingWorkspace(undefined);
+          if (pendingContinuation) clearWorkspaceContinuation(pendingContinuation);
+          if (transitionPending || pendingContinuation) publishWorkspaceState(ctx);
+        }
         const retained = loadWorkspace(id);
         if (retained?.retained && !isWorkspaceFinalized(retained)) {
           await updateWorkspace(id, (current) => {
@@ -588,8 +620,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           content: [{ type: "text", text: `Revert was not prepared; the destination was not changed. Inspect or discard the retained workspace.\n${formatWorkspaceRecord(record)}` }],
           details: record,
         };
-        setPendingWorkspace(record.id);
-        publishWorkspaceState(ctx);
+        publishWorkspaceContinuation(ctx, record.id);
         if (move) await move("enter", record.id);
         else queueCommand(pi, `/pi-workspace-enter ${record.id}`);
         return { content: [{ type: "text", text: `Prepared reversal of ${record.reverts.commit}. Review and verify before integrating; integration creates a new commit, never rewrites history. Ignored-file changes from the original integration are not reversed.\n\n${formatWorkspaceRecord(record)}\n\nCwd switch queued; wait before using repository tools.` }], details: record, terminate: true };
@@ -639,8 +670,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           setExpectedWorkspaceMissing(record.id);
           throw new Error(`Retained workspace record points to a missing path: ${record.worktreePath}`);
         }
-        setPendingWorkspace(record.id);
-        publishWorkspaceState(ctx);
+        publishWorkspaceContinuation(ctx, record.id);
         if (move) await move("enter", record.id);
         else queueCommand(pi, `/pi-workspace-enter ${record.id}`);
         return {
@@ -731,8 +761,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
             details: integrated,
           };
         }
-        setPendingWorkspace(integrated.id);
-        publishWorkspaceState(ctx);
+        publishWorkspaceContinuation(ctx, integrated.id);
         if (move) await move("return", integrated.id);
         else queueCommand(pi, `/pi-workspace-return ${integrated.id}`);
         return {
@@ -770,8 +799,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         await updateWorkspace(prepared.id, (current) => {
           current.lifecycle = "discard_pending";
         });
-        setPendingWorkspace(prepared.id);
-        publishWorkspaceState(ctx);
+        publishWorkspaceContinuation(ctx, prepared.id);
         if (move) await move("return", prepared.id);
         else queueCommand(pi, `/pi-workspace-return ${prepared.id}`);
         return {

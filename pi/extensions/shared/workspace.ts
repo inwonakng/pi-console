@@ -113,9 +113,12 @@ type GitResult = {
   stderr: Buffer;
 };
 
+export const WORKSPACE_CONTINUATION_STATUS = "pi-workspace-continuation";
+type WorkspaceContinuation = { sessionFile: string; phase: "pending" | "starting" };
 type WorkspaceGlobalState = {
   destinationQueues: Map<string, Promise<void>>;
   pendingWorkspaceId?: string;
+  continuation?: WorkspaceContinuation;
   expectedWorkspaceMissing?: string;
 };
 
@@ -130,7 +133,7 @@ const TEMP_DIR = join(WORKSPACE_ROOT, "tmp");
 const LOCKS_DIR = join(WORKSPACE_ROOT, "locks");
 const GLOBAL_KEY = Symbol.for("pi.agent.extensions.workspace-state");
 const globalObject = globalThis as typeof globalThis & Record<symbol, WorkspaceGlobalState | undefined>;
-const globalState = globalObject[GLOBAL_KEY] ??= { destinationQueues: new Map() };
+const globalState: WorkspaceGlobalState = globalObject[GLOBAL_KEY] ??= { destinationQueues: new Map() };
 
 function ensureDirectories(): void {
   for (const path of [RECORDS_DIR, TREES_DIR, ARTIFACTS_DIR, TEMP_DIR, LOCKS_DIR]) {
@@ -596,6 +599,20 @@ export function setPendingWorkspace(id: string | undefined): void {
 
 export function getPendingWorkspaceId(): string | undefined {
   return globalState.pendingWorkspaceId;
+}
+
+export function beginWorkspaceContinuation(sessionFile: string): WorkspaceContinuation {
+  return globalState.continuation = { sessionFile, phase: "pending" };
+}
+
+export function getWorkspaceContinuation(sessionFile: string | undefined): WorkspaceContinuation | undefined {
+  const continuation = globalState.continuation;
+  return continuation && sameSessionFile(continuation.sessionFile, sessionFile) ? continuation : undefined;
+}
+
+export function clearWorkspaceContinuation(continuation: WorkspaceContinuation): void {
+  // A completed continuation may already have queued its next workspace switch.
+  if (globalState.continuation === continuation) globalState.continuation = undefined;
 }
 
 export function setExpectedWorkspaceMissing(id: string | undefined): void {

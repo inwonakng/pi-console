@@ -1,7 +1,7 @@
 import type { ExtensionCommandContext, ExtensionContext, SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { assertManagedResources } from "../../scripts/managed-process.mjs";
-import { getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, workspaceDisplayState, type WorkspaceRecord } from "./workspace";
+import { beginWorkspaceContinuation, clearWorkspaceContinuation, getWorkspaceContinuation, getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, workspaceDisplayState, WORKSPACE_CONTINUATION_STATUS, type WorkspaceRecord } from "./workspace";
 import { hasRunningSubagents } from "./subagent-state";
 import { prepareProjectTrust, projectTrustReady } from "./project-trust";
 import { modelReady, preserveModelForSwitch } from "./model-readiness";
@@ -48,6 +48,9 @@ export function publishWorkspaceState(ctx: ExtensionContext): void {
     "pi-workspace",
     ctx.mode === "rpc" ? JSON.stringify(state) : `Workspace: ${state.name}${branch}`,
   );
+  if (ctx.mode === "rpc") {
+    ctx.ui.setStatus(WORKSPACE_CONTINUATION_STATUS, getWorkspaceContinuation(ctx.sessionManager.getSessionFile())?.phase);
+  }
 }
 
 /** Change Pi's cwd-bound runtime without forking its session. The cursor survives a later reopen. */
@@ -71,10 +74,22 @@ export async function moveToLocation(
   }
   if (!projectTrustReady()) throw new Error("Resolve project trust before switching workspaces");
   if (ctx.cwd !== cwd || options.reload) await prepareProjectTrust(ctx, cwd);
-  const ownsPending = (ctx.cwd !== cwd || options.reload === true) && !getPendingWorkspaceId();
+  const pendingWorkspaceId = getPendingWorkspaceId();
+  const ownsPending = (ctx.cwd !== cwd || options.reload === true) && !pendingWorkspaceId;
   const previousCwd = ctx.cwd;
   const previousModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+  const continuation = options.continueWith ? getWorkspaceContinuation(file) ?? beginWorkspaceContinuation(file) : undefined;
+  let currentCtx = ctx;
+  // Captured UI methods can report closure even if runtime creation leaves no live ctx.
+  const rpcUi = ctx.mode === "rpc" ? ctx.ui : undefined;
+  const releaseContinuation = () => {
+    if (continuation && getWorkspaceContinuation(file) === continuation) {
+      clearWorkspaceContinuation(continuation);
+      rpcUi?.setStatus(WORKSPACE_CONTINUATION_STATUS, undefined);
+    }
+  };
   const arrival = async (nextCtx: ExtensionCommandContext, sendMessage?: MoveContext["sendMessage"]) => {
+    currentCtx = nextCtx;
     const manager = nextCtx.sessionManager as SessionManager;
     try {
       if (options.navigateTo) {
@@ -116,18 +131,19 @@ export async function moveToLocation(
       continuation: options.continueWith ? blocked ? "blocked" : "ready" : "none",
     });
     if (blocked) {
+      releaseContinuation();
       nextCtx.ui.notify("Workspace switch completed, but automatic continuation stopped because the selected model is unavailable or its provider is not configured. Select a valid model (in pi-console: <leader>m), then explicitly continue. No prompt was sent or queued.", "error");
       return;
     }
-    if (options.continueWith) {
+    if (options.continueWith && continuation) {
       if (!sendMessage) throw new Error("The switched session cannot resume the agent.");
+      continuation.phase = "starting";
+      publishWorkspaceState(nextCtx);
       await sendMessage({ customType: "workspace-continuation", content: options.continueWith, display: false }, { triggerTurn: true });
+      // A pre-start abort can finish without agent_start. Never clear a newer handoff.
+      releaseContinuation();
     }
   };
-  if (ctx.cwd === cwd && !options.reload) {
-    await arrival(ctx);
-    return true;
-  }
   // Pi's runtime supports cwdOverride in RPC mode; the extension-context type omits it.
   const switchWithCwd = ctx.switchSession as (path: string, options: {
     cwdOverride: string;
@@ -137,6 +153,11 @@ export async function moveToLocation(
   let arrived = false;
   let releaseSelection: (() => void) | undefined;
   try {
+    publishWorkspaceState(ctx);
+    if (ctx.cwd === cwd && !options.reload) {
+      await arrival(ctx);
+      return true;
+    }
     await options.beforeSwitch?.();
     assertManagedResources();
     releaseSelection = preserveModelForSwitch(ctx);
@@ -147,16 +168,19 @@ export async function moveToLocation(
         await arrival(nextCtx, nextCtx.sendMessage.bind(nextCtx));
       },
     });
-    if (result.cancelled && ownsPending) {
-      setPendingWorkspace(undefined);
+    if (result.cancelled) {
+      if (ownsPending) setPendingWorkspace(undefined);
+      releaseContinuation();
       publishWorkspaceState(ctx);
     }
     return !result.cancelled;
   } catch (error) {
-    if (ownsPending && !arrived) {
-      setPendingWorkspace(undefined);
+    const pendingContinuation = getWorkspaceContinuation(file);
+    if (!pendingContinuation || pendingContinuation === continuation) {
+      if ((ownsPending && !arrived) || getPendingWorkspaceId() === pendingWorkspaceId) setPendingWorkspace(undefined);
       try {
-        publishWorkspaceState(ctx);
+        releaseContinuation();
+        publishWorkspaceState(currentCtx);
       } catch {
         // Runtime creation can fail after disposing ctx, before a fresh context exists.
         // Preserve the original switch error when there is no live context to publish from.
@@ -165,7 +189,7 @@ export async function moveToLocation(
     throw error;
   } finally {
     releaseSelection?.();
-    if (ownsPending) setPendingWorkspace(undefined);
+    if (ownsPending && getPendingWorkspaceId() === "navigation") setPendingWorkspace(undefined);
   }
 }
 

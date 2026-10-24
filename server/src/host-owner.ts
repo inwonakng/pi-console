@@ -908,7 +908,8 @@ export class OwnedSession {
 
   private queueCanDispatch(): boolean {
     return !this.stopRequested && !this.error && !this.exit && this.phase === "ready" && this.usableWorkspace()
-      && !this.aborting && !this.rename && !this.nativePending && !this.bundled && !this.bundledInterrupt && !this.queueRunPending && this.conversation.executionSettled;
+      && !this.aborting && !this.rename && !this.nativePending && !this.bundled && !this.bundledInterrupt && !this.queueRunPending
+      && !this.conversation.continuationPending && this.conversation.executionSettled;
   }
 
   private async pumpQueue(): Promise<void> {
@@ -1346,7 +1347,7 @@ export class OwnedSession {
       : this.phase === "initializing" ? "Starting"
       : this.conversation.compacting ? "Compacting"
       : this.conversation.retrying ? "Retrying"
-      : this.queueRunPending || !this.conversation.executionSettled ? "Working"
+      : this.queueRunPending || this.conversation.continuationPending || !this.conversation.executionSettled ? "Working"
       : this.conversation.turnOutcome === "error" ? "Error" : "Idle";
     const subagentRuns: SessionActivity["subagentRuns"] = [];
     const raw = this.conversation.status("pi-spawn-runs");
@@ -1742,6 +1743,10 @@ export class OwnedSession {
   private event(event: PiEvent): void {
     const previousRevision = this.runtimeRevision;
     this.syncRevision();
+    if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-workspace-continuation"
+      && event.statusText !== undefined && event.statusText !== "pending" && event.statusText !== "starting") {
+      throw new Error("Invalid Pi workspace continuation status");
+    }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-history-changed") {
       // Branch/history edits can keep the same Pi runtime UUID. Fence queued
       // text and deferred commands against that changed conversation context.
@@ -1758,7 +1763,7 @@ export class OwnedSession {
     }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-console-runtime") {
       const runtime = this.worker?.interactionSnapshot().runtime;
-      if (!runtime?.active) this.retain({ type: "runtime_ended" });
+      if (!runtime?.active) this.retain({ type: "runtime_ended", preserveContinuation: true });
       else if (previousRevision !== this.runtimeRevision) {
         // Preserve statuses already published during extension binding. Pi binds
         // extensions before subscribing to the new runtime's session events.
@@ -1858,7 +1863,7 @@ export class OwnedSession {
     }
     if (dialogRequest(event) || event.type === "extension_error"
       || (event.type === "extension_ui_request" && event.method === "setStatus"
-        && ["pi-console-runtime", "pi-console-dialog", "pi-project-trust", "pi-workspace"].includes(event.statusKey))) this.changed();
+        && ["pi-console-runtime", "pi-console-dialog", "pi-project-trust", "pi-workspace", "pi-workspace-continuation"].includes(event.statusKey))) this.changed();
     if (event.type === "agent_settled" || event.type === "compaction_end"
       || (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-history-changed")) {
       this.retain({ type: "invalidate_history" });
@@ -1866,7 +1871,8 @@ export class OwnedSession {
     }
     if (event.type === "agent_settled" || event.type === "compaction_end" || event.type === "auto_retry_end"
       || event.type === "summarization_retry_finished" || event.type === "queue_update"
-      || event.type === "message_end" && event.message.role === "user") this.scheduleQueue();
+      || event.type === "message_end" && event.message.role === "user"
+      || event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-workspace-continuation") this.scheduleQueue();
   }
 
   private dispatch(command: RpcCommand & { id: string }): void {

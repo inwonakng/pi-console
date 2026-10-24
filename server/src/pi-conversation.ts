@@ -88,7 +88,7 @@ export type ConversationChange =
   | { type: "title"; title: string }
   | { type: "work"; work: WorkState }
   | { type: "invalidate_history" }
-  | { type: "runtime_ended" };
+  | { type: "runtime_ended"; preserveContinuation?: boolean };
 
 const HISTORY_BYTES = 16 * 1024 * 1024;
 const LIVE_BYTES = 32 * 1024 * 1024;
@@ -109,6 +109,7 @@ export class PiConversation {
   private unsettled = false;
   private pendingOutcome?: ConversationSnapshot["execution"]["outcome"];
   private completionSeq = 0;
+  private workspaceContinuation?: "pending" | "starting";
   private diagnosticSeq = 0;
   private readonly liveSizes = new Map<string, number>();
   private liveBytes = 0;
@@ -149,6 +150,7 @@ export class PiConversation {
   get sessionState(): RpcSessionState | undefined { return this.state.piState; }
   get completedTurns(): number { return this.completionSeq; }
   get turnOutcome(): ConversationSnapshot["execution"]["outcome"] { return this.state.execution.outcome; }
+  get continuationPending(): boolean { return this.workspaceContinuation !== undefined; }
   get compacting(): boolean { return this.state.piState?.isCompacting === true || this.state.execution.compaction?.type === "compaction_start"; }
   get retrying(): boolean { return this.state.execution.retry?.type === "auto_retry_start" || !!this.state.execution.summarization; }
   status(key: string): string | undefined { return this.state.statuses[key]; }
@@ -166,7 +168,7 @@ export class PiConversation {
       && this.state.execution.retry?.type !== "auto_retry_start" && !this.state.execution.summarization;
   }
   get settled(): boolean {
-    return this.executionSettled && !this.state.queue.steering.length && !this.state.queue.followUp.length && !this.state.piState?.pendingMessageCount;
+    return !this.continuationPending && this.executionSettled && !this.state.queue.steering.length && !this.state.queue.followUp.length && !this.state.piState?.pendingMessageCount;
   }
 
   /** Separate effects before retention. Closure is consumed by PiInteractions. */
@@ -272,7 +274,14 @@ export class PiConversation {
         this.reserve("session_stats", change.stats);
         this.state.stats = change.stats;
         break;
-      case "status": this.reserve(`status:${change.key}`, change.value); setValue(this.state.statuses, change.key, change.value); break;
+      case "status": {
+        this.reserve(`status:${change.key}`, change.value);
+        setValue(this.state.statuses, change.key, change.value);
+        if (change.key === "pi-workspace-continuation") {
+          this.workspaceContinuation = change.value === "pending" || change.value === "starting" ? change.value : undefined;
+        }
+        break;
+      }
       case "widget": this.reserve(`widget:${change.key}`, change.value); setValue(this.state.widgets, change.key, change.value); break;
       case "title": this.reserve("title", change.title); this.state.title = change.title; break;
       case "work": {
@@ -291,6 +300,7 @@ export class PiConversation {
         break;
       }
       case "runtime_ended":
+        if (!change.preserveContinuation) this.workspaceContinuation = undefined;
         this.unsettled = false;
         this.pendingOutcome = undefined;
         this.state.hydrated = false;
@@ -467,6 +477,9 @@ export class PiConversation {
       }
       case "queue_update": this.reserve("queue", event); this.state.queue = { steering: event.steering, followUp: event.followUp }; break;
       case "agent_start":
+        // Only the destination's announced continuation owns this handoff.
+        // A retry in the original runtime must not release it.
+        if (this.workspaceContinuation === "starting") this.workspaceContinuation = undefined;
         this.unsettled = true;
         this.pendingOutcome = undefined;
         this.state.execution.outcome = undefined;
@@ -484,7 +497,8 @@ export class PiConversation {
       // agent_end is not settlement: retries, compaction and queues can continue.
       case "agent_settled":
         if (this.unsettled) {
-          this.state.execution.outcome = event.aborted ? "aborted" : this.pendingOutcome;
+          const outcome = event.aborted ? "aborted" : this.pendingOutcome;
+          this.state.execution.outcome = outcome === "completed" && this.continuationPending ? undefined : outcome;
           if (this.state.execution.outcome === "completed") this.state.execution.completionSeq = ++this.completionSeq;
         }
         this.pendingOutcome = undefined;
