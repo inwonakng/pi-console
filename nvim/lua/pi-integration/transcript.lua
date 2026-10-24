@@ -313,6 +313,7 @@ end
 
 function M.render(ctx)
 	local state = ctx.state
+	if state.frontend_visible == false then return end
 	update_revert_cover(ctx)
 	if not ctx.buffer.valid(state.transcript_buf) then
 		return
@@ -321,9 +322,13 @@ function M.render(ctx)
 		return
 	end
 
-	local buf = state.transcript_buf
+	if state.transcript_render_scheduled then return end
+	state.transcript_render_scheduled = true
 	vim.schedule(function()
-		if state.transcript_buf == buf and ctx.buffer.valid(buf) and M.win_valid(ctx) then
+		state.transcript_render_scheduled = false
+		-- Coalesced requests may target a buffer recreated before this callback.
+		local buf = state.transcript_buf
+		if state.frontend_visible ~= false and ctx.buffer.valid(buf) and M.win_valid(ctx) then
 			M.preserve_view(ctx, function()
 				for _, win in ipairs(vim.api.nvim_list_wins()) do
 					if buffer.window_matches(win, buf) then
@@ -412,6 +417,7 @@ end
 
 function M.finish_pending_scroll(ctx)
 	local state = ctx.state
+	if state.frontend_visible == false then return end
 	local pending = state.pending_transcript_scroll
 	-- Consume before moving the view: rendering caused by the scroll must not
 	-- turn this one-shot alignment into a persistent auto-follow mode.
@@ -569,6 +575,7 @@ end
 
 function M.scroll_to_bottom(ctx)
 	local state = ctx.state
+	if state.frontend_visible == false then return end
 	if M.win_valid(ctx) and ctx.buffer.valid(state.transcript_buf) then
 		align_bottom(state.transcript_buf, state.transcript_win)
 		state.pending_transcript_scroll = {

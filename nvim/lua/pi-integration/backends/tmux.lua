@@ -5,7 +5,8 @@ local option = "@pi_console"
 local tab_option = "@pi_console_tab"
 local owner_pane
 local owner_window
-local publication
+local publication, pending_snapshot, pending_heartbeat, last_published
+local last_publication, last_tab_refresh = -math.huge, -math.huge
 
 local tabs = require("pi-integration.backends.tmux-tabs")
 
@@ -94,6 +95,29 @@ function M.is_focused()
 		end
 	end
 	return false
+end
+
+-- Keyboard focus excludes visible inactive splits. Match every ordinary
+-- client's window instead, including linked windows in other sessions.
+function M.is_visible_async(callback)
+	local argv = { "tmux", "display-message", "-p", "-t", vim.env.TMUX_PANE,
+		"pane\t#{window_id}\t#{pane_active}\t#{window_zoomed_flag}",
+		";", "list-clients", "-F", "client\t#{window_id}\t#{client_control_mode}\t#{client_flags}" }
+	local ok, process = pcall(vim.system, argv, { text = true, timeout = 2000 }, vim.schedule_wrap(function(result)
+		local output, err = command_result(result, true)
+		if not output then callback(nil, err); return end
+		local window, active, zoomed = output:match("pane\t(@%d+)\t([01])\t([01])")
+		if not window then callback(nil, "Missing tmux pane visibility"); return end
+		if zoomed == "1" and active ~= "1" then callback(false); return end
+		for line in output:gmatch("[^\n]+") do
+			local viewed, control, flags = line:match("^client\t(@%d+)\t([01])\t(.*)$")
+			if viewed == window and control == "0" and not ("," .. flags .. ","):find(",suspended,", 1, true) then
+				callback(true); return
+			end
+		end
+		callback(false)
+	end))
+	if not ok then vim.schedule(function() callback(nil, tostring(process)) end) end
 end
 
 function M.focus(id)
@@ -238,36 +262,54 @@ function M.start_overview()
 	return true
 end
 
-local function publish_tab(snapshot, run)
-	local installed, install_err = tabs.install_hooks(run)
-	if not installed then return nil, install_err end
+local function publish_tab(snapshot, run, reconcile)
+	if reconcile then
+		local installed, install_err = tabs.install_hooks(run)
+		if not installed then return nil, install_err end
+	end
 	local window, err = run({
 		"set-option", "-p", "-t", owner_pane, option, json.encode(snapshot),
 		";", "display-message", "-p", "-t", owner_pane, "#{window_id}",
 	})
 	if not window then return nil, err end
-	if owner_window and owner_window ~= window then
+	local moved = owner_window ~= window
+	if owner_window and moved then
 		tabs.refresh(owner_window, run)
 	end
 	owner_window = window
-	return tabs.refresh(window, run)
+	if reconcile or moved then return tabs.refresh(window, run) end
+	return true
 end
 
-function M.publish(snapshot)
-	-- Skip overlapping refreshes rather than queueing stale snapshots.
-	if publication then return true end
+function M.publish(snapshot, heartbeat_only)
+	-- Keep only the latest overlapping publication, never a queue of stale tabs.
+	if publication then
+		pending_snapshot, pending_heartbeat = snapshot, pending_heartbeat or heartbeat_only
+		return true
+	end
+	local semantic = vim.tbl_extend("force", snapshot, {})
+	semantic.updated = nil
+	local now = vim.uv.hrtime() / 1000000
+	local changed = not vim.deep_equal(semantic, last_published)
+	if not changed and not heartbeat_only and now - last_publication < 5000 then return true end
+	-- Periodically reconcile external theme changes, independently of liveness.
+	local reconcile = changed or now - last_tab_refresh >= 30000
 	owner_pane = owner_pane or vim.env.TMUX_PANE
 	local update = {}
 	publication = update
 	-- Keep the existing tab/ownership logic sequential, but yield at every
 	-- subprocess so Neovim can handle input while tmux is working.
 	update.thread = coroutine.create(function()
-		publish_tab(snapshot, function(args, raw)
+		local published = publish_tab(snapshot, function(args, raw)
 			-- Shutdown finishes the remaining operations synchronously so tab
 			-- cleanup sees all installed styles and their ownership marker.
 			if publication ~= update then return command(args, raw) end
 			return command_result(coroutine.yield(args), raw)
-		end)
+		end, reconcile)
+		if published then
+			last_published, last_publication = semantic, vim.uv.hrtime() / 1000000
+			if reconcile then last_tab_refresh = last_publication end
+		end
 	end)
 	local function advance(...)
 		if publication ~= update then return end
@@ -275,6 +317,9 @@ function M.publish(snapshot)
 		if not ok or coroutine.status(update.thread) == "dead" then
 			publication = nil
 			if not ok then error(args) end
+			local pending, heartbeat = pending_snapshot, pending_heartbeat
+			pending_snapshot, pending_heartbeat = nil, nil
+			if pending then M.publish(pending, heartbeat) end
 			return
 		end
 		local argv = { "tmux" }
@@ -296,7 +341,8 @@ function M.clear()
 	-- Finish the in-flight update before cleanup. Its scheduled callback is
 	-- invalidated first, so it cannot restore metadata after shutdown.
 	local update = publication
-	publication = nil
+	publication, pending_snapshot, pending_heartbeat, last_published = nil, nil, nil, nil
+	last_publication, last_tab_refresh = -math.huge, -math.huge
 	if update and update.process then
 		local ok, err = coroutine.resume(update.thread, update.process:wait(2000))
 		if not ok then require("pi-integration.logs").notify(tostring(err), vim.log.levels.ERROR) end

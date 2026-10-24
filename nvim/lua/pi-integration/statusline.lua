@@ -620,6 +620,7 @@ local function header_formats(state, width)
 	return statusline_text(" " .. truncate_plain_to_width(title, math.max(0, width - 2)), "PiSessionTitle") .. "%*", details
 end
 
+local rendered_bars = {}
 local function render_bar(ctx, bar, buf, width)
 	local primary_format, secondary_format
 	if bar == header then
@@ -628,12 +629,21 @@ local function render_bar(ctx, bar, buf, width)
 		primary_format, secondary_format = M.render(ctx), M.render_secondary(ctx)
 	end
 	local primary = evaluate_statusline(primary_format, ctx.state[bar.win], width)
-	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { primary.str })
-	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
-	vim.api.nvim_buf_clear_namespace(buf, status_ns, 0, -1)
-	apply_evaluated_highlights(buf, 0, primary)
-	vim.api.nvim_set_option_value("statusline", secondary_format, { win = ctx.state[bar.win] })
+	local previous = rendered_bars[bar]
+	local changed = not previous or previous.buf ~= buf or not vim.deep_equal(previous.primary, primary)
+	if changed then
+		vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { primary.str })
+		vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+		vim.api.nvim_buf_clear_namespace(buf, status_ns, 0, -1)
+		apply_evaluated_highlights(buf, 0, primary)
+		rendered_bars[bar] = { buf = buf, primary = primary }
+	end
+	if vim.api.nvim_get_option_value("statusline", { win = ctx.state[bar.win] }) ~= secondary_format then
+		vim.api.nvim_set_option_value("statusline", secondary_format, { win = ctx.state[bar.win] })
+		changed = true
+	end
+	return changed
 end
 
 function M.setup(ctx)
@@ -657,6 +667,7 @@ function M.setup(ctx)
 		timer:start(interval_ms, interval_ms, vim.schedule_wrap(function()
 			if not timer then return end
 			local state = ctx.state
+			if state.frontend_visible == false then return end
 			if not state.is_loading and not state.is_agent_running and not state.is_streaming
 				and not state.is_retrying and not state.awaiting_agent_output then return end
 			if not buffer.window_matches(state.status_win, state.status_buf) then return end
@@ -709,6 +720,8 @@ end
 
 function M.update(ctx)
 	local state = ctx.state
+	if state.frontend_visible == false then return end
+	local changed = false
 	local bars = service_bars
 	if not ctx.transcript.win_valid() then
 		for _, bar in ipairs(bars) do close_bar(state, bar) end
@@ -722,11 +735,11 @@ function M.update(ctx)
 			if width < 1 then
 				close_bar(state, bar)
 			else
-				render_bar(ctx, bar, buf, width)
+				changed = render_bar(ctx, bar, buf, width) or changed
 			end
 		end
 	end
-	vim.cmd("redraw")
+	if changed then vim.cmd("redraw") end
 end
 
 return M

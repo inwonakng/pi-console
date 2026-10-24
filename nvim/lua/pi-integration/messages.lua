@@ -359,13 +359,76 @@ local function scope_tool_calls(messages)
 	return visible
 end
 
-function M.collect_message_lines(ctx, messages, tools)
+-- Keep this list aligned with the three output modules' reset functions.
+-- tool_items_by_output also belongs to the renderer and shares objects with items.
+local output_state_fields = {
+	"tool_outputs", "next_tool_output_id", "tool_calls", "live_tool_output_by_call",
+	"spawn_run_output_by_id", "todo_tool_output_id", "tool_items_by_output",
+	"thinking_outputs", "next_thinking_output_id", "active_thinking_output_id", "active_thinking_line",
+	"skill_tool_calls", "skill_outputs", "next_skill_output_id",
+}
+
+local function render_dependencies(state)
+	local workspace = type(state.workspace) == "table" and state.workspace or {}
+	return {
+		show_nested_tools = state.show_nested_tools,
+		workspace_path = workspace.path,
+		workspace_cwd = workspace.cwd,
+		todo_status = state.todo_status,
+		session_file = state.session_file,
+		spawn_runs_session_file = state.spawn_runs_session_file,
+		spawn_runs = state.spawn_runs,
+	}
+end
+
+local function prefix_matches(checkpoint, visible, prefix_end, metadata, dependencies)
+	if not checkpoint or checkpoint.count > prefix_end
+		or not vim.deep_equal(checkpoint.metadata, metadata)
+		or not vim.deep_equal(checkpoint.dependencies, dependencies) then return false end
+	for index = 1, checkpoint.count do
+		if not vim.deep_equal(checkpoint.messages[index], visible[index]) then return false end
+	end
+	return true
+end
+
+-- With a cache, this collector owns output resets. Without one, callers retain
+-- the existing reset contract. Cache only the prefix before the latest user turn:
+-- retry-error suppression cannot cross that boundary. Suffix events may still
+-- update earlier spawn/tool/skill rows, so restore a fresh, shared object graph.
+function M.collect_message_lines(ctx, messages, tools, cache)
 	local lines = ctx.transcript.metadata_lines()
+	local metadata = cache and vim.deepcopy(lines)
+	local dependencies = cache and render_dependencies(ctx.state)
 	local items = {}
+	if cache then
+		pi_tool_output.reset(ctx.state)
+		pi_thinking_output.reset(ctx.state)
+		pi_skills.reset(ctx.state)
+	end
 	ctx.state.tool_items_by_output = {}
 	local has_body = false
 	local last_rendered_kind = nil
 	local assistant_block_open = false
+	local visible = scope_tool_calls(with_tool_executions(messages, tools))
+	local prefix_end, first_message = 0, 1
+	if cache then
+		for index, message in ipairs(visible) do
+			local role = message.role or message.type
+			if role == "user" or role == "You" then prefix_end = index - 1 end
+		end
+		local checkpoint = cache.checkpoint
+		if prefix_matches(checkpoint, visible, prefix_end, metadata, dependencies) then
+			local restored = vim.deepcopy({ lines = checkpoint.lines, items = checkpoint.items, state = checkpoint.state })
+			lines, items = restored.lines, restored.items
+			for _, field in ipairs(output_state_fields) do ctx.state[field] = restored.state[field] end
+			has_body = checkpoint.has_body
+			last_rendered_kind = checkpoint.last_rendered_kind
+			assistant_block_open = checkpoint.assistant_block_open
+			first_message = checkpoint.count + 1
+		else
+			cache.checkpoint = nil
+		end
+	end
 
 	local function ensure_assistant_block()
 		if assistant_block_open then
@@ -388,7 +451,6 @@ function M.collect_message_lines(ctx, messages, tools)
 		assistant_block_open = false
 	end
 
-	local visible = scope_tool_calls(with_tool_executions(messages, tools))
 	local superseded_errors, retry_error = {}, nil
 	for index, message in ipairs(visible) do
 		local role = message.role or message.type
@@ -402,7 +464,22 @@ function M.collect_message_lines(ctx, messages, tools)
 		end
 	end
 
-	for index, message in ipairs(visible) do
+	for index = first_message, #visible do
+		if cache and prefix_end > 0 and index == prefix_end + 1
+			and (not cache.checkpoint or cache.checkpoint.count ~= prefix_end) then
+			local prefix, output_state = {}, {}
+			for at = 1, prefix_end do prefix[at] = visible[at] end
+			for _, field in ipairs(output_state_fields) do output_state[field] = ctx.state[field] end
+			-- Copy items and their state lookup together to preserve group/child identity.
+			-- Never retain final-render rows: later events can rewrite this prefix.
+			cache.checkpoint = vim.deepcopy({
+				count = prefix_end, messages = prefix, metadata = metadata, dependencies = dependencies,
+				lines = lines, items = items, state = output_state,
+				has_body = has_body, last_rendered_kind = last_rendered_kind,
+				assistant_block_open = assistant_block_open,
+			})
+		end
+		local message = visible[index]
 		local role = message.role or message.type
 		local appended = false
 		local rendered_kind = nil

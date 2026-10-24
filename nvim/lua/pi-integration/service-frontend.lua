@@ -24,6 +24,14 @@ local outcomes = {}
 local kill_pending
 local pending_host, pending_host_select, resume_requested
 local generation, counter, refresh_scheduled, refreshing, dirty = 0, 0, false, false, false
+local refresh_timer, refresh_due, refresh_urgent, refresh_ticket
+local refresh_callbacks = {}
+local last_refresh = -math.huge
+local visibility_timer, visibility_pending
+local transcript_cache, rendered_transcript, rendered_metadata = {}, nil, nil
+local rendered_side, rendered_side_buf
+local initial_scroll_pending = false
+state.frontend_visible = true -- Unknown visibility must not suppress the UI.
 local selection = 0
 local approval_win, approval_request, heartbeat
 local approval_context, pending_context
@@ -47,7 +55,7 @@ local function status_data(key)
 	local ok, value = pcall(vim.json.decode, raw or "")
 	return ok and value or nil
 end
-local function publish_attachment()
+local function publish_attachment(heartbeat_only)
 	local tmux = require("pi-integration.backends.tmux")
 	if M.config.role ~= "conversation" or not tmux.available() then return end
 	if frontend_focused then
@@ -73,7 +81,7 @@ local function publish_attachment()
 		title = name, slug = slug,
 		status = status, last_focused_at = state.last_focused_at,
 		service_epoch = snapshot and snapshot.serviceEpoch, runtime_revision = snapshot and snapshot.runtimeRevision,
-		seen_seq = state.seen_seq, viewed_seq = state.viewed_seq })
+		seen_seq = state.seen_seq, viewed_seq = state.viewed_seq }, heartbeat_only)
 end
 local function owner_key() return M.config.expected_host or M.config.service_remote or M.config.service_root or "local" end
 local function owner_label(identity, remote, root)
@@ -525,8 +533,10 @@ ctx.transcript.refresh_ui = function()
 	if approval_request and not state.pending_ui_requests[approval_request] then
 		approval_request, approval_context = nil, nil
 	end
-	statusline.update(ctx)
-	transcript.render(ctx)
+	if state.frontend_visible then
+		if not rendered_transcript or rendered_transcript.buf ~= state.transcript_buf then render()
+		else statusline.update(ctx); transcript.render(ctx) end
+	end
 	if sync_pending then vim.schedule(sync_pending) end
 end
 local function update_status_state()
@@ -626,14 +636,32 @@ render = function()
 	if not valid(state.transcript_buf) then return end
 	local conversation = snapshot and snapshot.conversation
 	update_status_state()
+	publish_attachment()
+	if sync_pending then vim.schedule(sync_pending) end
+	if not state.frontend_visible then return end
 	layout.update_input_sidebar(ctx)
 	local visible, unplaced = feedback_ui.timeline_messages(feedback, session_id, snapshot)
 	state.unplaced_submissions = #unplaced
-	require("pi-integration.tool-output").reset(state)
-	require("pi-integration.thinking-output").reset(state)
-	require("pi-integration.skills").reset(state)
-	local lines, items = messages.collect_message_lines(ctx, visible, conversation and conversation.tools)
-	if valid(side_buf) then
+	local inputs = { messages = visible, tools = conversation and conversation.tools,
+		buf = state.transcript_buf, nested = state.show_nested_tools, workspace = state.workspace,
+		selection = selection, revision = current_revision(), generation = generation }
+	local metadata = transcript.metadata_lines(ctx)
+	local body_changed = not vim.deep_equal(inputs, rendered_transcript)
+	local metadata_changed = not vim.deep_equal(metadata, rendered_metadata)
+	if body_changed then
+		local lines, items = messages.collect_message_lines(ctx, visible, conversation and conversation.tools, transcript_cache)
+		local split = {}
+		for _, line in ipairs(lines) do vim.list_extend(split, vim.split(line, "\n", { plain = true })) end
+		transcript.update_lines(ctx, split)
+		transcript.apply_collected_transcript_items(ctx, items)
+		rendered_transcript = inputs
+	elseif metadata_changed then
+		transcript.update_metadata(ctx)
+	end
+	rendered_metadata = metadata
+	local side_raw = conversation and conversation.statuses["pi-side"]
+	if valid(side_buf) and (side_buf ~= rendered_side_buf or side_raw ~= rendered_side) then
+		rendered_side_buf, rendered_side = side_buf, side_raw
 		local side = status_data("pi-side")
 		if side and side.id and side.id ~= side_id then
 			if side_id and valid(side_input_buf) then
@@ -692,18 +720,16 @@ render = function()
 		side_permission_state.transcript_items = side_permission_items
 		transcript.apply_quote_highlights_to_buffer(side_buf, side_permission_state)
 	end
-	-- Every snapshot is a pure render; never invoke legacy event/effect handlers.
-	local split = {}
-	for _, line in ipairs(lines) do vim.list_extend(split, vim.split(line, "\n", { plain = true })) end
-	transcript.update_lines(ctx, split)
-	transcript.apply_collected_transcript_items(ctx, items)
-	transcript.render(ctx)
+	-- Every snapshot is a pure render; never replay event/effect handlers.
+	if body_changed or metadata_changed then transcript.render(ctx) end
+	if initial_scroll_pending then
+		initial_scroll_pending = false
+		transcript.scroll_to_bottom_unless_focused(ctx)
+	end
 	statusline.update(ctx)
-	publish_attachment()
-	if sync_pending then vim.schedule(sync_pending) end
 end
 local function refresh_workspace_stats()
-	if not job or not attachment or not snapshot or not state.workspace or not state.workspace.id then return end
+	if not state.frontend_visible or not job or not attachment or not snapshot or not state.workspace or not state.workspace.id then return end
 	if stats_pending then return end
 	local captured = stamp()
 	stats_pending = captured
@@ -737,6 +763,8 @@ local function apply_snapshot(value)
 	for _, receipt in ipairs(snapshot.commands or {}) do record_command(receipt) end
 	for _, item in ipairs(snapshot.acceptedQueue.items or {}) do record_queue(item) end
 	feedback_ui.reconcile(feedback, snapshot)
+	-- History received while hidden is aligned only when it is first drawn.
+	if snapshot.conversation.hydrated and (not previous or not previous.conversation.hydrated) then initial_scroll_pending = true end
 	render()
 	if auto_control_selection then
 		local runtime = snapshot.interactions.runtime
@@ -750,31 +778,53 @@ local function apply_snapshot(value)
 			acquire_control(false, stamp())
 		end
 	end
-	-- History may arrive after the initial attachment snapshot.
-	local initial_history = snapshot.conversation.hydrated and (not previous or not previous.conversation.hydrated)
-	if initial_history then
-		transcript.scroll_to_bottom_unless_focused(ctx)
-	end
-	tree.update(tree_ctx)
+	if state.frontend_visible then tree.update(tree_ctx) end
 	if advance_start then advance_start() end
 end
-refresh = function()
+refresh = function(immediate, callback)
+	if callback then table.insert(refresh_callbacks, callback) end
 	dirty = true
-	if refreshing or refresh_scheduled or not attachment or not job then return end
-	refresh_scheduled = true
-	local gen = generation
-	vim.schedule(function()
-		if gen ~= generation then return end
-		refresh_scheduled = false
-		if not attachment or not job then return end
-		dirty, refreshing = false, true
-		local target, selected = attachment, session_id
+	refresh_urgent = refresh_urgent or immediate == true
+	if refreshing or not attachment or not job then return end
+	local now = vim.uv.hrtime() / 1000000
+	local interval = state.frontend_visible and 100 or 1000
+	local delay = refresh_urgent and 0 or math.max(0, last_refresh + interval - now)
+	local due = now + delay
+	if refresh_scheduled and refresh_due <= due then return end
+	refresh_timer = refresh_timer or vim.uv.new_timer()
+	refresh_timer:stop()
+	refresh_scheduled, refresh_due = true, due
+	local gen, target, selected, selected_selection = generation, attachment, session_id, selection
+	local ticket = {}
+	refresh_ticket = ticket
+	refresh_timer:start(math.ceil(delay), 0, vim.schedule_wrap(function()
+		if ticket ~= refresh_ticket or gen ~= generation or target ~= attachment or selected ~= session_id or selected_selection ~= selection then return end
+		refresh_scheduled, refresh_due = false, nil
+		local flight, completed = {}, refresh_callbacks
+		refresh_callbacks = {}
+		dirty, refreshing, refresh_urgent = false, flight, false
+		last_refresh = vim.uv.hrtime() / 1000000
 		request("snapshot", {}, function(ok, value)
+			if refreshing ~= flight then return end
 			refreshing = false
-			if ok and gen == generation and target == attachment and selected == session_id then apply_snapshot(value) end
+			if gen == generation and target == attachment and selected == session_id and selected_selection == selection then
+				if ok then apply_snapshot(value) end
+				for _, done in ipairs(completed) do done(ok, value) end
+			end
 			if dirty then refresh() end
 		end)
-	end)
+	end))
+end
+local function reset_refresh(detached)
+	if refresh_timer then refresh_timer:stop() end
+	-- Selection changes retain ownership of an outstanding read until its reply;
+	-- only a disconnected bridge guarantees that reply can never arrive.
+	if detached then refreshing = false end
+	refresh_scheduled, dirty, refresh_urgent = false, false, false
+	refresh_callbacks = {}
+	refresh_ticket, refresh_due, last_refresh = nil, nil, -math.huge
+	transcript_cache, rendered_transcript, rendered_metadata = {}, nil, nil
+	rendered_side, rendered_side_buf, initial_scroll_pending = nil, nil, false
 end
 local function disconnected()
 	for _, envelope in pairs(unresolved) do
@@ -791,7 +841,7 @@ local function disconnected()
 	feedback_ui.interrupt(feedback)
 	callbacks, outcomes, auto_control_selection, starting, resume_check = {}, {}, nil, nil, nil
 	kill_pending = nil
-	refreshing, refresh_scheduled, dirty = false, false, false
+	reset_refresh(true)
 	close_approval()
 	render()
 end
@@ -803,6 +853,7 @@ attach = function(id)
 	if pending_host then pending_host_select = false end
 	resources.invalidate()
 	selection = selection + 1
+	reset_refresh()
 	local gen, selected = generation, selection
 	session_status, session_error, state.control_loss_reason = "attaching", nil, nil
 	render()
@@ -816,6 +867,7 @@ attach = function(id)
 		end
 		session_status, session_error = nil, nil
 		close_approval()
+		reset_refresh()
 		session_id, attachment, grant, snapshot, authority = id, value.attachmentId, nil, nil, nil
 		auto_control_selection = stamp()
 		apply_snapshot(value.snapshot)
@@ -1072,7 +1124,13 @@ connect = function()
 					end)
 				end
 			end
-			refresh()
+			local change = value.update.conversation
+			local event = change and change.type == "event" and change.event
+			local streaming = event and (event.type == "message_update" or event.type == "tool_execution_update"
+				or event.type == "extension_ui_request" and (event.method == "setStatus" or event.method == "setWidget"))
+			local immediate = value.update.owner or receipt or value.update.acceptedQueue
+				or change and not streaming and change.type ~= "status" and change.type ~= "widget"
+			refresh(not not immediate)
 		elseif value.type == "control_lost" then
 			if value.sessionId == session_id and hello and value.serviceEpoch == hello.serviceEpoch
 				and value.attachmentId == attachment and (not grant or value.grantId == grant.grantId) then
@@ -1190,9 +1248,8 @@ acquire_control = function(takeover, captured)
 				fail_start("Startup control was not acquired; submitted text remains in :PiDrafts."); return
 			end
 			grant, state.control_loss_reason = value, nil
-			request("snapshot", {}, function(synced, value_snapshot)
-				if not synced or not same_context(captured) then fail_start("Startup synchronization failed; submitted text remains in :PiDrafts."); return end
-				apply_snapshot(value_snapshot)
+			refresh(true, function(synced)
+				if not synced then fail_start("Startup synchronization failed; submitted text remains in :PiDrafts."); return end
 				if not same_context(captured) then notify("Session runtime changed; select the action again."); return end
 			end)
 		end)
@@ -2103,7 +2160,7 @@ function M.pick_command()
 		end)
 	end)
 end
-function M.refresh_messages() refresh() end
+function M.refresh_messages() refresh(true) end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
@@ -2243,11 +2300,34 @@ function M.open(restore)
 		state.last_focused_at = seconds * 1000000 + microseconds
 		publish_attachment()
 	end
+	local backend = require("pi-integration.backends.tmux")
+	local function check_visibility()
+		if not backend.available() or visibility_pending then return end
+		visibility_pending = true
+		backend.is_visible_async(function(visible)
+			visibility_pending = false
+			if not visibility_timer then return end
+			-- A failed query must never strand the UI in hidden mode.
+			visible = visible ~= false
+			local was_visible = state.frontend_visible
+			state.frontend_visible = visible
+			if visible and not was_visible then
+				render()
+				-- A previously queued decoration pass may have been skipped on hide.
+				transcript.render(ctx)
+				refresh(true)
+				refresh_workspace_stats()
+			end
+		end)
+	end
 	vim.api.nvim_create_autocmd({ "FocusGained", "FocusLost" }, { callback = function(event)
 		frontend_focused = event.event == "FocusGained"
-		if frontend_focused then record_focus(); follow_resumed_selection() end
+		if frontend_focused then record_focus(); follow_resumed_selection(); check_visibility() end
 	end })
-	local backend = require("pi-integration.backends.tmux")
+	if backend.available() then
+		visibility_timer = vim.uv.new_timer()
+		visibility_timer:start(0, 1000, vim.schedule_wrap(check_visibility))
+	end
 	frontend_focused = backend.available() and backend.is_focused() == true
 	if frontend_focused then record_focus() end
 	layout.open(ctx)
@@ -2279,7 +2359,7 @@ function M.open(restore)
 	stats_timer:start(0, 2000, vim.schedule_wrap(refresh_workspace_stats))
 	heartbeat = vim.uv.new_timer()
 	heartbeat:start(5000, 5000, vim.schedule_wrap(function()
-		publish_attachment()
+		publish_attachment(true)
 		follow_resumed_selection()
 		-- The bridge renews control independently of UI scheduling. Only the
 		-- visible queue editor's finite pause is renewed from this callback.
@@ -2301,6 +2381,8 @@ function M.open(restore)
 	connect()
 end
 vim.api.nvim_create_autocmd("VimLeavePre", { callback = function()
+	if visibility_timer then visibility_timer:stop(); visibility_timer:close(); visibility_timer = nil end
+	if refresh_timer then refresh_timer:stop(); refresh_timer:close(); refresh_timer = nil end
 	if stats_timer then stats_timer:stop(); stats_timer:close(); stats_timer = nil end
 	if heartbeat then heartbeat:stop(); heartbeat:close(); heartbeat = nil end
 	backup()
