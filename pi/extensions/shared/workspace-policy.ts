@@ -5,7 +5,7 @@ import { resolveToolPath } from "./paths";
 import { findGitRoot, getExpectedWorkspaceMissing, getPendingWorkspaceId, isWorkspaceFinalized,
   listWorkspaces, pathInside, sameSessionFile, workspaceForContext } from "./workspace";
 
-const TRANSITION_ACTIONS = new Set(["enter", "integrate", "discard"]);
+const TRANSITION_ACTIONS = new Set(["enter", "integrate", "discard", "revert"]);
 
 function managedRepositoryPath(path: string): boolean {
   return listWorkspaces().some((record) =>

@@ -50,7 +50,7 @@ export type CommandReceipt = {
     queueItemId?: string; queueItemRevision?: number; queueItemText?: string; reservationId?: string; title?: string;
     submittedText?: string; editorText?: string; contextRevision?: number; disposition?: "queued" | "handled" | "accepted"; exitCode?: number; cancelled?: boolean;
     resourceVersion?: string; resourceId?: string; resourcePath?: string; reviewRecovery?: ReviewRecovery;
-    mode?: string; changed?: boolean; sessionId?: string; workspaceId?: string; lifecycle?: string; integration?: string; status?: string; enabled?: boolean };
+    mode?: string; changed?: boolean; sessionId?: string; workspaceId?: string; lifecycle?: string; integration?: string; commit?: string; reverts?: string; status?: string; enabled?: boolean };
   error?: { code: string; message: string };
 };
 export type StoredCommand = { fingerprint: string; receipt: CommandReceipt };

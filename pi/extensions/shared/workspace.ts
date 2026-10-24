@@ -20,6 +20,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathInside as lexicalPathInside } from "./paths";
+import { commitDestination, prepareWorkspaceCommit, publishWorkspaceCommit, type WorkspaceCommit } from "./workspace-commits";
 
 export type WorkspaceKind = "task" | "child";
 export type WorkspaceLifecycle =
@@ -67,6 +68,9 @@ export type WorkspaceRecord = {
   integration: WorkspaceIntegration;
   integrationReason?: string;
   integrationReview?: WorkspaceIntegrationReview;
+  integrationCommit?: WorkspaceCommit;
+  integrationIgnoredChanges?: { path: string; hash: string }[];
+  reverts?: { workspaceId: string; commit: string; reason: string; prepared: boolean };
   changedFiles: string[];
   includedIgnoredFiles?: { path: string; originalHash: string }[];
   unpreservedFiles?: string[];
@@ -95,6 +99,8 @@ export type WorkspaceDisplayState = {
 };
 
 type Snapshot = {
+  head: string;
+  branch?: string;
   commit: string;
   tree: string;
   ref: string;
@@ -290,6 +296,7 @@ function captureSnapshot(gitRoot: string, workspaceId: string, purpose: string):
   ensureDirectories();
   rejectUnsupportedRepositoryState(gitRoot);
   const head = gitText(gitRoot, ["rev-parse", "HEAD"]).trim();
+  const branch = gitTextOrUndefined(gitRoot, ["symbolic-ref", "--quiet", "HEAD"]);
   const indexPath = gitText(gitRoot, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).trim();
   const tempIndex = join(TEMP_DIR, `${safeRefSegment(workspaceId)}-${safeRefSegment(purpose)}-${randomUUID()}.index`);
   try {
@@ -305,7 +312,7 @@ function captureSnapshot(gitRoot: string, workspaceId: string, purpose: string):
     const commit = commitSnapshotTree(gitRoot, tree, head, purpose);
     const ref = snapshotRef(workspaceId, purpose);
     updateRef(gitRoot, ref, commit);
-    return { commit, tree, ref, indexFingerprint: fingerprint(indexPath) };
+    return { head, branch, commit, tree, ref, indexFingerprint: fingerprint(indexPath) };
   } finally {
     rmSync(tempIndex, { force: true });
   }
@@ -355,7 +362,14 @@ function integrationReview(record: WorkspaceRecord, destination: Snapshot, merge
 }
 
 export function formatIntegrationSummary(record: WorkspaceRecord): string {
-  return record.integrationReview ? formatIntegrationChanges(record.integrationReview) : "";
+  const lines = [record.integrationReview ? formatIntegrationChanges(record.integrationReview) : ""];
+  if (record.integrationCommit) {
+    lines.push(`Commit (${record.integrationCommit.status}): ${record.integrationCommit.oid}`,
+      record.integrationCommit.message.split("\n")[0]!);
+  }
+  if (record.reverts) lines.push(`Reverts: ${record.reverts.commit}\nReason: ${record.reverts.reason}`);
+  if (record.integrationReview?.ignoredFiles.length) lines.push("Ignored-file updates are outside the commit and cannot be undone by Git revert.");
+  return lines.filter(Boolean).join("\n\n");
 }
 
 function formatIntegrationChanges(review: Pick<WorkspaceIntegrationReview, "files" | "ignoredFiles">, pending = false): string {
@@ -603,6 +617,7 @@ function assertManagedCleanup(record: WorkspaceRecord): void {
 export async function prepareWorkspaceDiscard(id: string): Promise<WorkspaceRecord> {
   return withWorkspaceLock(id, async (record) => {
     assertManagedCleanup(record);
+    assertCommitSettled(record);
     if (isWorkspaceFinalized(record)) return record;
     assertWorkspaceAvailable(record);
     return snapshotWorkspaceResult(record);
@@ -808,6 +823,7 @@ export async function previewWorkspaceIntegration(id: string, signal?: AbortSign
     assertManagedCleanup(record);
     if (isWorkspaceFinalized(record)) return formatIntegrationSummary(record);
     assertWorkspaceAvailable(record);
+    if (record.integrationCommit) return `${formatIntegrationSummary(record)}\n\nResume the recorded commit attempt only if the saved destination state still matches; no new task patch will be computed.`;
     const { destination, merge, ignoredChanges } = prepareIntegration(record);
     try {
       checkCancellation(signal);
@@ -826,7 +842,7 @@ export async function previewWorkspaceIntegration(id: string, signal?: AbortSign
   }, signal);
 }
 
-export async function integrateWorkspace(id: string, signal?: AbortSignal): Promise<WorkspaceRecord> {
+export async function integrateWorkspace(id: string, signal?: AbortSignal, options: { commitMessage?: string } = {}): Promise<WorkspaceRecord> {
   return withWorkspaceLock(id, async (record) => {
     assertManagedCleanup(record);
     let applicationStarted = false;
@@ -835,6 +851,14 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal): Prom
       // Finalized contributions are idempotent, including after cleanup.
       if (isWorkspaceFinalized(record)) return record;
       assertWorkspaceAvailable(record);
+      if (record.reverts) {
+        if (!record.reverts.prepared) throw new Error("Revert preparation conflicted; discard this workspace and review the target before retrying.");
+        assertRevertTarget(record.destinationRoot, record.reverts.workspaceId, record.id);
+        if (!options.commitMessage && !record.integrationCommit) throw new Error("Revert integration requires a commit message.");
+      }
+      // Resume only a recorded publication, never recompute/reapply a task delta
+      // against files that may already contain it after an interrupted attempt.
+      if (record.integrationCommit) return await resumeWorkspaceCommit(record, signal);
       // Each tool result owns one attempt; previous results keep their pinned
       // revisions even when a retry fails before preparing a new comparison.
       delete record.integrationReview;
@@ -882,47 +906,63 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal): Prom
         assertWorkspaceAvailable(current);
         const recheck = captureSnapshot(record.destinationRoot, record.id, `recheck-${randomUUID()}`);
         try {
-          if (recheck.tree !== destination.tree || recheck.indexFingerprint !== destination.indexFingerprint) {
+          if (recheck.tree !== destination.tree || recheck.indexFingerprint !== destination.indexFingerprint
+            || recheck.head !== destination.head || recheck.branch !== destination.branch) {
             throw new Error("Destination changed while integration was being prepared; retry integration.");
           }
           const ignoredChanges = changedIgnoredFiles(record);
           checkCancellation(signal);
           const review = integrationReview(record, destination, merge.mergedTree!);
           record.integrationReview = review;
-          // Preserve the attempted comparison even if application fails partway.
-          // The UI exposes failed attempts only after a recorded application.
-          saveWorkspace(record);
-          if (applicationPatch.length > 0) {
-            gitBuffer(record.destinationRoot, ["apply", "--check", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
-            const indexBefore = realIndexFingerprint(record.destinationRoot);
-            applicationStarted = true;
-            gitBuffer(record.destinationRoot, ["apply", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
-            review.applied = true;
-            saveWorkspace(record);
-            const indexAfter = realIndexFingerprint(record.destinationRoot);
-            if (indexAfter !== indexBefore) {
-              throw new Error("Destination index changed during integration.");
-            }
+          record.integrationIgnoredChanges = ignoredChanges;
+          if (options.commitMessage && applicationPatch.length > 0) {
+            record.integrationCommit = prepareWorkspaceCommit({
+              root: record.destinationRoot, artifactDir: workspaceArtifactDir(record.id), workspaceId: record.id,
+              sessionFile: record.sourceSessionFile, beforeTree: destination.tree, afterTree: merge.mergedTree!,
+              sourceTree: record.resultTree!, patch: applicationPatch, message: options.commitMessage, expectedHead: destination.head,
+              expectedBranch: destination.branch, expectedIndex: destination.indexFingerprint, reverts: record.reverts?.commit,
+            });
           }
-          for (const file of ignoredChanges) {
-            const destinationPath = join(record.destinationRoot, file.path);
-            if (regularFileHash(record.destinationRoot, file.path) === file.hash) continue;
-            const temporary = `${destinationPath}.pi-${randomUUID()}.tmp`;
-            try {
-              copyFileSync(join(record.worktreePath, file.path), temporary);
-              if (regularFileHash(record.destinationRoot, relative(record.destinationRoot, temporary)) !== file.hash) {
-                throw new Error(`Ignored file changed while copying: ${file.path}`);
-              }
+          // Preserve the attempted comparison and commit plan before mutation.
+          saveWorkspace(record);
+          const apply = () => {
+            if (applicationPatch.length > 0) {
+              gitBuffer(record.destinationRoot, ["apply", "--check", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
+              const indexBefore = realIndexFingerprint(record.destinationRoot);
               applicationStarted = true;
-              renameSync(temporary, destinationPath);
-              changedIncludedFile = true;
-              review.ignoredFiles.push(file.path);
+              gitBuffer(record.destinationRoot, ["apply", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
               review.applied = true;
               saveWorkspace(record);
-            } finally {
-              rmSync(temporary, { force: true });
+              if (realIndexFingerprint(record.destinationRoot) !== indexBefore) {
+                throw new Error("Destination index changed during integration.");
+              }
             }
-          }
+            for (const file of ignoredChanges) {
+              const destinationPath = join(record.destinationRoot, file.path);
+              if (regularFileHash(record.destinationRoot, file.path) === file.hash) continue;
+              const temporary = `${destinationPath}.pi-${randomUUID()}.tmp`;
+              try {
+                copyFileSync(join(record.worktreePath, file.path), temporary);
+                if (regularFileHash(record.destinationRoot, relative(record.destinationRoot, temporary)) !== file.hash) {
+                  throw new Error(`Ignored file changed while copying: ${file.path}`);
+                }
+                applicationStarted = true;
+                renameSync(temporary, destinationPath);
+                changedIncludedFile = true;
+                review.ignoredFiles.push(file.path);
+                review.applied = true;
+                saveWorkspace(record);
+              } finally {
+                rmSync(temporary, { force: true });
+              }
+            }
+            if (record.integrationCommit) assertCommittedWorktree(record);
+          };
+          if (record.integrationCommit) {
+            publishWorkspaceCommit(record.destinationRoot, record.integrationCommit, () => saveWorkspace(record), apply);
+            record.integrationCommit.status = "published";
+            saveWorkspace(record);
+          } else apply();
         } finally {
           deleteRef(record.destinationRoot, recheck.ref);
         }
@@ -955,6 +995,138 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal): Prom
   }, signal);
 }
 
+function assertCommitSettled(record: WorkspaceRecord): void {
+  if (record.integrationCommit?.status === "prepared") {
+    throw new Error("Recover the recorded integration commit before discarding its workspace or deleting its session. Destination files or the branch may already have changed; discard is not commit undo.");
+  }
+}
+
+function assertCommittedWorktree(record: WorkspaceRecord): void {
+  const snapshot = captureSnapshot(record.destinationRoot, record.id, `publication-${randomUUID()}`);
+  try {
+    if (snapshot.tree !== record.integrationCommit!.afterTree) throw new Error("Destination files changed during commit publication; inspect the retained attempt before retrying.");
+  } finally { deleteRef(record.destinationRoot, snapshot.ref); }
+}
+
+async function resumeWorkspaceCommit(record: WorkspaceRecord, signal?: AbortSignal): Promise<WorkspaceRecord> {
+  const plan = record.integrationCommit!, review = record.integrationReview;
+  if (!review) throw new Error("Interrupted commit has no saved integration comparison; inspect its recovery metadata.");
+  const paths = [...review.files.map(file => file.path), ...(record.integrationIgnoredChanges ?? []).map(file => file.path)]
+    .map(path => join(record.destinationRoot, path));
+  await withMutationQueues(paths, async () => {
+    checkCancellation(signal);
+    const source = captureSnapshot(record.worktreePath, record.id, `recovery-source-${randomUUID()}`);
+    try {
+      if (source.tree !== plan.sourceTree) throw new Error("Workspace changed after commit preparation; preserve the newer edits before recovering this integration.");
+    } finally { deleteRef(record.worktreePath, source.ref); }
+    const snapshot = captureSnapshot(record.destinationRoot, record.id, `recovery-${randomUUID()}`);
+    try {
+      if (snapshot.tree !== plan.beforeTree && snapshot.tree !== plan.afterTree) {
+        throw new Error("Interrupted integration has partial or newer destination edits; inspect the saved comparison before continuing. No patch was reapplied.");
+      }
+      if (snapshot.tree === plan.beforeTree && (review.applied || snapshot.head !== plan.parent || snapshot.indexFingerprint !== plan.indexBefore)) {
+        throw new Error("Interrupted integration no longer matches its original unapplied state; refusing to reapply it.");
+      }
+      for (const file of record.integrationIgnoredChanges ?? []) {
+        if (regularFileHash(record.worktreePath, file.path) !== file.hash) throw new Error(`Ignored source changed since the recorded attempt: ${file.path}`);
+      }
+      const ignoredChanges = changedIgnoredFiles(record);
+      const plannedIgnored = new Map((record.integrationIgnoredChanges ?? []).map(file => [file.path, file.hash]));
+      if (ignoredChanges.length !== plannedIgnored.size || ignoredChanges.some(file => plannedIgnored.get(file.path) !== file.hash)) {
+        throw new Error("Included ignored files changed after commit preparation; preserve those newer edits before recovering this integration.");
+      }
+      publishWorkspaceCommit(record.destinationRoot, plan, () => saveWorkspace(record), () => {
+        if (snapshot.tree === plan.beforeTree) {
+          gitBuffer(record.destinationRoot, ["apply", "--check", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
+          gitBuffer(record.destinationRoot, ["apply", "--binary", "--whitespace=nowarn", record.applicationPatchPath]);
+        }
+        review.applied = true;
+        saveWorkspace(record);
+        for (const file of ignoredChanges) {
+          const temporary = join(record.destinationRoot, `${file.path}.pi-${randomUUID()}.tmp`);
+          try {
+            copyFileSync(join(record.worktreePath, file.path), temporary);
+            if (regularFileHash(record.destinationRoot, relative(record.destinationRoot, temporary)) !== file.hash) throw new Error(`Ignored source changed during recovery: ${file.path}`);
+            renameSync(temporary, join(record.destinationRoot, file.path));
+            if (!review.ignoredFiles.includes(file.path)) review.ignoredFiles.push(file.path);
+            saveWorkspace(record);
+          } finally { rmSync(temporary, { force: true }); }
+        }
+        assertCommittedWorktree(record);
+      });
+      plan.status = "published";
+      record.integration = "applied";
+      record.lifecycle = "integration_pending";
+      delete record.integrationReason;
+      saveWorkspace(record);
+    } finally { deleteRef(record.destinationRoot, snapshot.ref); }
+  });
+  return record;
+}
+
+function assertRevertTarget(root: string, workspaceId: string, exceptId?: string): WorkspaceRecord {
+  const target = loadWorkspace(workspaceId), commit = target?.integrationCommit;
+  if (!target || target.kind !== "task" || canonicalPath(target.destinationRoot) !== canonicalPath(root)
+    || commit?.status !== "published" || !isWorkspaceFinalized(target)) {
+    throw new Error("Revert requires a successfully committed task integration in this destination repository.");
+  }
+  commitDestination(root);
+  if (gitResult(root, ["merge-base", "--is-ancestor", commit.oid, "HEAD"]).status !== 0) {
+    throw new Error("The recorded integration commit is not in the current branch's history.");
+  }
+  const parents = gitText(root, ["rev-list", "--parents", "-n", "1", commit.oid]).split(" ");
+  if (parents.length !== 2 || parents[1] !== commit.parent) throw new Error("Recorded integration commit does not match its saved parent.");
+  for (const other of listWorkspaces()) {
+    if (other.id === exceptId || other.reverts?.commit !== commit.oid || canonicalPath(other.destinationRoot) !== canonicalPath(root)) continue;
+    if (other.retained && !isWorkspaceFinalized(other)) throw new Error(`A reversal is already being prepared in workspace ${other.id}. Resume or discard it first.`);
+    if (other.integrationCommit?.status === "published" && gitResult(root, ["merge-base", "--is-ancestor", other.integrationCommit.oid, "HEAD"]).status === 0) {
+      throw new Error(`This integration already has a recorded revert: ${other.integrationCommit.oid}`);
+    }
+  }
+  return target;
+}
+
+/** Prepare a reversal against the current checkout, never reset its branch or
+ * replay a historical whole-file snapshot over later work. */
+export async function createRevertWorkspace(input: {
+  workspaceId: string; destinationCwd: string; sourceSessionFile: string; reason: string;
+}, signal?: AbortSignal): Promise<WorkspaceRecord> {
+  const root = findGitRoot(input.destinationCwd);
+  if (!root || workspaceForContext(input.destinationCwd)) throw new Error("Prepare a revert from the origin checkout, outside any active workspace.");
+  if (!input.reason.trim() || input.reason.includes("\0") || Buffer.byteLength(input.reason) > 8192) throw new Error("A revert reason is required (maximum 8 KiB, no NUL bytes).");
+  return withWorkspaceLock(input.workspaceId, async () => {
+    checkCancellation(signal);
+    const target = assertRevertTarget(root, input.workspaceId);
+    const commit = target.integrationCommit!;
+    const record = createWorkspace({ kind: "task", destinationCwd: input.destinationCwd,
+      sourceSessionFile: input.sourceSessionFile, label: `revert-${commit.oid.slice(0, 8)}` });
+    record.reverts = { workspaceId: target.id, commit: commit.oid, reason: input.reason.trim(), prepared: false };
+    saveWorkspace(record);
+    // Reverse only this commit's delta; later compatible edits survive.
+    const result = gitResult(root, ["merge-tree", "--write-tree", `--merge-base=${commit.oid}`, record.baselineCommit, commit.parent]);
+    if (result.status !== 0) {
+      record.lifecycle = "conflicted";
+      record.integration = result.status === 1 ? "conflict" : "failed";
+      record.integrationReason = result.stdout.toString("utf8") + result.stderr.toString("utf8");
+      writeFileSync(record.conflictPath, record.integrationReason);
+      saveWorkspace(record);
+      return record;
+    }
+    const tree = result.stdout.toString("utf8").split("\n")[0]!.trim();
+    const patch = gitBuffer(root, ["diff", "--binary", "--full-index", record.baselineTree, tree]);
+    if (!patch.length) {
+      record.integration = "failed";
+      record.integrationReason = "The recorded change is already absent; no revert was prepared.";
+      saveWorkspace(record);
+      return record;
+    }
+    gitBuffer(record.worktreePath, ["apply", "--binary", "--whitespace=nowarn", "-"], { input: patch });
+    record.reverts.prepared = true;
+    snapshotWorkspaceResult(record);
+    return record;
+  }, signal);
+}
+
 function cleanupGitDirectory(record: WorkspaceRecord): string {
   const visited = new Set<string>();
   let current: WorkspaceRecord | undefined = record;
@@ -974,6 +1146,7 @@ function cleanupGitDirectory(record: WorkspaceRecord): string {
 export async function removeWorkspace(id: string, finalLifecycle: "integrated" | "discarded", sessionDeletion = false): Promise<WorkspaceRecord> {
   return withWorkspaceLock(id, async (record) => {
     assertManagedCleanup(record);
+    assertCommitSettled(record);
     if (!record.retained && record.lifecycle !== "cleanup_failed") return record;
     if (sessionDeletion && record.retained) {
       assertWorkspaceAvailable(record);
@@ -1091,6 +1264,8 @@ export function formatWorkspaceRecord(record: WorkspaceRecord): string {
     `- destination: ${record.destinationRoot}`,
     `- baseline: ${record.baselineCommit}`,
     `- integration: ${record.integration}${record.integrationReason ? ` (${record.integrationReason})` : ""}`,
+    ...(record.integrationCommit ? [`- commit (${record.integrationCommit.status}): ${record.integrationCommit.oid}`] : []),
+    ...(record.reverts ? [`- reverts: ${record.reverts.commit} (${record.reverts.reason})`] : []),
     `- result patch: ${record.resultPatchPath}`,
     `- application patch: ${record.applicationPatchPath}`,
   ];

@@ -21,6 +21,12 @@ integration-mode:
   # ask | allowed
   default: ask
 
+workspace:
+  # Create one descriptive local commit per top-level integration. Never pushes.
+  # Uses your Git identity; Git commit hooks are not run. Verify before integrating.
+  # Off by default. Reverts always create a new commit, even when this is off.
+  auto-commit: false
+
 access-mode:
   # readonly | ask | edit | full
   default: ask

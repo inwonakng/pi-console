@@ -133,7 +133,7 @@ function previewForTool(event: ToolCallEvent, ctx: ExtensionContext): { text: st
 }
 
 function workspaceManagesApproval(input: Record<string, unknown>): boolean {
-  return input.action === "integrate" || input.action === "discard";
+  return input.action === "integrate" || input.action === "discard" || input.action === "revert";
 }
 
 function readonlyToolBlockReason(toolName: string, input: Record<string, unknown>): string | undefined {

@@ -11,7 +11,8 @@ export type BundledOperation =
   | { operation: "history.fork"; payload: { entryId: string } }
   | { operation: "history.delete"; payload: { entryId: string } }
   | { operation: "workspace.enter"; payload: { id?: string; ignoredFiles?: string[] } }
-  | { operation: "workspace.integrate"; payload: { id?: string } }
+  | { operation: "workspace.integrate"; payload: { id?: string; commitMessage?: string } }
+  | { operation: "workspace.revert"; payload: { id: string; reason: string } }
   | { operation: "workspace.discard"; payload: { id?: string } }
   | { operation: "side.open"; payload: Record<string, never> }
   | { operation: "side.prompt"; payload: { text: string } }
@@ -27,7 +28,7 @@ export const BUNDLED_SOURCES = {
   "access.set": "access-mode.ts", "access.cycle": "access-mode.ts",
   "integration.set": "workspace.ts", "integration.cycle": "workspace.ts",
   "history.navigate": "tree.ts", "history.clone": "tree.ts", "history.fork": "tree.ts", "history.delete": "tree.ts",
-  "workspace.enter": "workspace.ts", "workspace.integrate": "workspace.ts", "workspace.discard": "workspace.ts",
+  "workspace.enter": "workspace.ts", "workspace.integrate": "workspace.ts", "workspace.discard": "workspace.ts", "workspace.revert": "workspace.ts",
   "side.open": "side.ts", "side.prompt": "side.ts", "side.draft": "side.ts", "side.reset": "side.ts", "side.abort": "side.ts",
   "spawn.join": "spawn.ts", "spawn.stop": "spawn.ts", "title.generate": "auto-title.ts",
   "notifications.set": "notifications.ts", "usage.refresh": "codex-usage.ts",
@@ -48,9 +49,12 @@ export function validBundled(operation: unknown, p: Record<string, unknown>): bo
     case "history.navigate": return exact(p, ["entryId", "summarize"]) && entry(p.entryId) && typeof p.summarize === "boolean";
     case "history.clone": case "history.fork": case "history.delete": return exact(p, ["entryId"]) && entry(p.entryId);
     case "workspace.enter": case "workspace.integrate": case "workspace.discard":
-      return Object.keys(p).every((key) => key === "id" || operation === "workspace.enter" && key === "ignoredFiles")
+      return Object.keys(p).every((key) => key === "id" || operation === "workspace.enter" && key === "ignoredFiles" || operation === "workspace.integrate" && key === "commitMessage")
+        && (p.commitMessage === undefined || typeof p.commitMessage === "string" && !!p.commitMessage.trim() && !p.commitMessage.includes("\0") && Buffer.byteLength(p.commitMessage) <= 16384)
         && (p.id === undefined || typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id))
         && (p.ignoredFiles === undefined || Array.isArray(p.ignoredFiles) && p.ignoredFiles.length <= 128 && p.ignoredFiles.every((v) => typeof v === "string" && v.length <= 4096));
+    case "workspace.revert": return exact(p, ["id", "reason"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
+      && typeof p.reason === "string" && !!p.reason.trim() && !p.reason.includes("\0") && Buffer.byteLength(p.reason) <= 8192;
     case "usage.refresh": case "title.generate": case "side.open": case "side.reset": case "side.abort": return exact(p, []);
     case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";
     case "side.prompt": return exact(p, ["text"]) && typeof p.text === "string" && !!p.text.trim() && Buffer.byteLength(p.text) <= 1024 * 1024;
@@ -62,7 +66,7 @@ export function validBundled(operation: unknown, p: Record<string, unknown>): bo
 export function isBundled(value: { operation: string }): value is BundledOperation { return Object.hasOwn(BUNDLED_SOURCES, value.operation); }
 export type OperationResult = { version: 1; invocationId: string; runtimeId: string; sessionId: string; sessionFile: string;
   status: "completed" | "failed" | "uncertain"; data?: { mode?: string; changed?: boolean; sessionFile?: string; cwd?: string; workspaceId?: string;
-    lifecycle?: string; integration?: string; disposition?: "accepted"; status?: string; title?: string; enabled?: boolean; editorText?: string }; code?: string };
+    lifecycle?: string; integration?: string; commit?: string; reverts?: string; disposition?: "accepted"; status?: string; title?: string; enabled?: boolean; editorText?: string }; code?: string };
 export function operationResult(text: string | undefined): OperationResult {
   const v: unknown = JSON.parse(text ?? "null");
   if (!object(v) || Object.keys(v).some((key) => !["version", "invocationId", "runtimeId", "sessionId", "sessionFile", "status", "data", "code"].includes(key))
@@ -71,7 +75,7 @@ export function operationResult(text: string | undefined): OperationResult {
     || (v.status === "completed" ? !object(v.data) : typeof v.code !== "string")
     || (v.code !== undefined && (typeof v.code !== "string" || !/^[\w-]{1,128}$/.test(v.code)))) throw new Error("Invalid managed operation result");
   if (v.data !== undefined) {
-    if (!object(v.data) || Object.keys(v.data).some((key) => !["mode", "changed", "sessionFile", "cwd", "workspaceId", "lifecycle", "integration", "disposition", "status", "title", "enabled", "editorText"].includes(key))
+    if (!object(v.data) || Object.keys(v.data).some((key) => !["mode", "changed", "sessionFile", "cwd", "workspaceId", "lifecycle", "integration", "commit", "reverts", "disposition", "status", "title", "enabled", "editorText"].includes(key))
       || ["changed", "enabled"].some((key) => v.data && object(v.data) && v.data[key] !== undefined && typeof v.data[key] !== "boolean")
       || Object.entries(v.data).some(([key, value]) => !["changed", "enabled"].includes(key) && (typeof value !== "string" || Buffer.byteLength(value) > (key === "editorText" ? 16 * 1024 * 1024 : 4096)))) {
       throw new Error("Invalid managed operation result data");

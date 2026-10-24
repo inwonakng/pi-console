@@ -6,6 +6,9 @@ export interface ExtensionSettings {
 	notifications?: {
 		default?: "enabled" | "disabled";
 	};
+	workspace?: {
+		"auto-commit"?: boolean;
+	};
 	"integration-mode"?: {
 		default?: "ask" | "allowed";
 	};

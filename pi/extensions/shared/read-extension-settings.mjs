@@ -51,7 +51,7 @@ export function readExtensionSettings(channel = process.env.PI_CONSOLE_CHANNEL) 
 		const value = document.toJS();
 		if (value === null && document.contents === null) return {};
 		const root = requireMapping(value, "settings");
-		requireKnownKeys(root, ["notifications", "access-mode", "integration-mode", "auto-title", "session-picker", "server"], "settings");
+		requireKnownKeys(root, ["notifications", "access-mode", "integration-mode", "workspace", "auto-title", "session-picker", "server"], "settings");
 		const settings = {};
 
 		if (Object.hasOwn(root, "server")) {
@@ -98,6 +98,16 @@ export function readExtensionSettings(channel = process.env.PI_CONSOLE_CHANNEL) 
 					throw new Error("integration-mode.default must be ask or allowed");
 				}
 				settings["integration-mode"].default = value;
+			}
+		}
+
+		if (Object.hasOwn(root, "workspace")) {
+			const workspace = requireMapping(root.workspace, "workspace");
+			requireKnownKeys(workspace, ["auto-commit"], "workspace");
+			settings.workspace = {};
+			if (Object.hasOwn(workspace, "auto-commit")) {
+				if (typeof workspace["auto-commit"] !== "boolean") throw new Error("workspace.auto-commit must be a boolean");
+				settings.workspace["auto-commit"] = workspace["auto-commit"];
 			}
 		}
 
