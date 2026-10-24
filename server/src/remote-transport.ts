@@ -44,6 +44,7 @@ export class RemoteListener {
         ["/app.js", "app.js", "text/javascript; charset=utf-8"],
         ["/client.js", "client.js", "text/javascript; charset=utf-8"],
         ["/style.css", "style.css", "text/css; charset=utf-8"],
+        ["/logo.svg", "logo.svg", "image/svg+xml"],
       ]) {
         let body = readFileSync(join(web.root, file));
         if (path === "/") body = Buffer.from(body.toString("utf8").replace("{{PI_CONSOLE_CHANNEL}}", web.channel));
@@ -79,7 +80,7 @@ export class RemoteListener {
       response.writeHead(200, {
         "Content-Type": asset.type, "Content-Length": asset.body.length,
         "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
       });
       response.end(request.method === "HEAD" ? undefined : asset.body);
     });

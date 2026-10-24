@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" width="1254" height="1254" fill="none">
+  <title>Agent console icon</title>
+  <desc>A terminal face with a circular eye, and one offset console outline behind it. Single color; transparent background.</desc>
+  <g stroke="#4BE8B6" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Visible portion of one back window, offset down and right. -->
+    <path d="M897 354H916C960 354 995 389 995 433V876C995 920 960 955 916 955H445C401 955 366 920 366 876V872" stroke-width="31"/>
+    <!-- Front terminal window and title bar. -->
+    <rect x="256" y="279" width="643" height="593" rx="79" stroke-width="31"/>
+    <path d="M257 404H898" stroke-width="26" stroke-linecap="butt"/>
+    <!-- Terminal prompt as a face: chevron eye, dot eye, underscore mouth. -->
+    <path d="M410 538L465 581L410 625" stroke-width="32"/>
+    <circle cx="705" cy="581" r="57" fill="#4BE8B6" stroke="none"/>
+    <path d="M500 705H613" stroke-width="32"/>
+  </g>
+</svg>

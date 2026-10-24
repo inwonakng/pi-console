@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="web/logo.svg" alt="pi-console logo" width="240" height="240">
+</p>
+
 # pi-console
 
 A Neovim frontend for the [Pi coding agent](https://pi.dev). Write prompts and
