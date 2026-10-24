@@ -82,10 +82,12 @@ filesystem, process, shell or `nvim_exec_lua` paths. Overview remote dispatch st
 - Pending approval windows are not rebuilt/cancelled by streaming, retry, compaction
   or ordinary refresh. Native queues and the editable queue render separately.
   `clear_queue` precedes active abort and preserves steering and follow-up text.
-- Lost-ack text remains protected under its original ID. `:PiSubmissions` explicitly
-  reviews text; `:PiOperations` inspects all session receipts; `:PiHostRequest` reviews
-  an unresolved allocation/resume ID. A pending host ID cannot be overwritten by a
-  second request. Reconnect looks up IDs with four bounded readers; it never resends.
+- Lost-ack requests retain their original IDs for status lookup; a new user submission
+  is never blocked because its text matches an earlier request. `:PiLogs` / `<leader>pl`
+  opens the client log in a float, with full notifications, action outcomes and recovery
+  details. Command-line previews are truncated. `:PiHostRequest` reviews an unresolved
+  allocation/resume ID, which cannot be overwritten by a second host request.
+  Reconnect looks up IDs with four bounded readers; it never resends.
 - Interruption operations use essential storage headroom. Lifecycle outcomes drain
   before administrative close; a restart does not replace subscriptions with a new
   handle. Cleanup failures retain the existing best-effort ownership/recovery policy.

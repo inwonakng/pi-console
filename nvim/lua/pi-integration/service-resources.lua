@@ -153,12 +153,11 @@ function M.edit(options, resource, query, title, filetype, anchor)
 				options.notify("Owner file saved. Later local edits remain unsaved.")
 			elseif receipt.status == "failed" then
 				save_id = nil
-				options.notify((receipt.error and receipt.error.message or "Save refused") .. " Local draft retained; gO inspects current owner content.")
-			else options.notify("Save is " .. tostring(receipt.status) .. "; retain the draft and original ID. Use gS / :PiOperations, never resubmit automatically.") end
+			end
 		end
 		local function lookup()
 			if not save_id then return end
-			if not alive() then options.notify("Old owner context; inspect the original command via :PiOperations / :PiDrafts."); return end
+			if not alive() then options.notify("Old owner context; inspect the original command via :PiLogs / :PiDrafts."); return end
 			options.request("command.status", { commandId = save_id, serviceEpoch = captured.epoch }, function(ok, receipt)
 				if not alive() then return end
 				if ok then status(receipt) else options.notify("Save status unavailable; draft and original ID retained.") end
@@ -171,8 +170,7 @@ function M.edit(options, resource, query, title, filetype, anchor)
 			save_id = options.command("workspace.review.save", { resourceId = resource_id, expectedVersion = version, text = submitted }, function(ok, receipt)
 				if not alive() then return end
 				if ok then status(receipt)
-				elseif receipt.delivery == "not_sent" then save_id = nil; options.notify("Save was not sent; local draft retained.")
-				else options.notify((receipt.message or "Save outcome unknown") .. "; draft and original ID retained.") end
+				elseif receipt.delivery == "not_sent" then save_id = nil end
 			end, options.control_stamp(), status)
 			if save_id then vim.b[buf].pi_review_command_id, vim.b[buf].pi_review_command_epoch = save_id, captured.epoch end
 		end

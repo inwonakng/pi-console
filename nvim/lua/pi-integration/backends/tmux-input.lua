@@ -63,7 +63,7 @@ function M.dispatch()
 		current_client = context
 		local ok, err = xpcall(callback, debug.traceback)
 		current_client = previous
-		if not ok then vim.notify(err, vim.log.levels.ERROR, { title = "Pi Enter" }) end
+		if not ok then require("pi-integration.logs").notify(err, vim.log.levels.ERROR, { title = "Pi Enter" }) end
 	end
 end
 
@@ -99,7 +99,7 @@ function M.register(buf, callback)
 			vim.api.nvim_create_autocmd({ "BufEnter", "ModeChanged" }, {
 				callback = function()
 					local synced, sync_err = pcall(sync_registration)
-					if not synced then vim.notify(sync_err, vim.log.levels.WARN, { title = "Pi Enter" }) end
+					if not synced then require("pi-integration.logs").notify(sync_err, vim.log.levels.WARN, { title = "Pi Enter" }) end
 				end,
 			})
 			installed = true
@@ -115,7 +115,7 @@ function M.register(buf, callback)
 		end
 		sync_registration()
 	end)
-	if not ok then vim.notify(tostring(err), vim.log.levels.WARN, { title = "Pi Enter" }) end
+	if not ok then require("pi-integration.logs").notify(tostring(err), vim.log.levels.WARN, { title = "Pi Enter" }) end
 	vim.api.nvim_create_autocmd("BufWipeout", {
 		buffer = buf,
 		once = true,

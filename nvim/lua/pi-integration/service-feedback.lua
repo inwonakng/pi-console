@@ -80,7 +80,7 @@ function M.timeline_messages(entries, session, snapshot)
 		positions[key] = index
 	end
 	local buckets, unmatched, queued = {}, {}, {}
-	local function place(text, error, timeline)
+	local function place(text, error, timeline, status)
 		local observed_key = timeline and timeline.observedMessage
 		local observed = positions[observed_key]
 		local at
@@ -110,11 +110,11 @@ function M.timeline_messages(entries, session, snapshot)
 	local queue = snapshot and snapshot.acceptedQueue.items or {}
 	for _, item in ipairs(queue) do
 		queued[item.id] = true
-		place(item.text, item.error and item.error.message, item.timeline)
+		place(item.text, item.error and item.error.message, item.timeline, item.status)
 	end
 	for _, entry in ipairs(entries) do
 		if entry.sessionId == session and entry.operation == "prompt.submit" and not queued[queue_id(entry)] then
-			place(entry.payload.text, entry.error, entry.timeline)
+			place(entry.payload.text, entry.error, entry.timeline, entry.status)
 		end
 	end
 	for _, permission in ipairs(conversation.permissions or {}) do
@@ -155,7 +155,7 @@ function M.timeline_messages(entries, session, snapshot)
 	end
 	if conversation.partialAssistant then table.insert(visible, vim.deepcopy(conversation.partialAssistant.message)) end
 	vim.list_extend(visible, partial_diagnostics)
-	-- Unknown chronology belongs in :PiSubmissions, never below a newer response.
+	-- Unknown chronology stays out of the transcript; request details remain in :PiLogs.
 	return visible, unmatched
 end
 return M

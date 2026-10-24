@@ -63,7 +63,7 @@ function M.open(config)
 		return vim.api.nvim_win_is_valid(win) and rows[vim.api.nvim_win_get_cursor(win)[1]] or nil
 	end
 	local function notify(err)
-		vim.notify(err or "Session operation failed", vim.log.levels.WARN, { title = "Pi sidebar" })
+		require("pi-integration.logs").notify(err or "Session operation failed", vim.log.levels.WARN, { title = "Pi sidebar" })
 	end
 	local function render(instances, err)
 		if closed or not vim.api.nvim_win_is_valid(win) or not vim.api.nvim_buf_is_valid(buf) then

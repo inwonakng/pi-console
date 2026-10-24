@@ -8,7 +8,7 @@ local reminder_checked = {}
 local saved_request
 local initial = { version = 1, hosts = {} }
 local channel = vim.env.PI_CONSOLE_CHANNEL or "stable"
-local function notify(message) vim.notify(tostring(message), vim.log.levels.WARN, { title = "Pi hosts" }) end
+local function notify(message) require("pi-integration.logs").notify(tostring(message), vim.log.levels.WARN, { title = "Pi hosts" }) end
 local function uid() return vim.fn.sha256(tostring(vim.uv.hrtime()) .. ":" .. vim.fn.getpid()) end
 local function host_label(host)
 	local endpoint = host.remote or host.service_remote or host.root or host.service_root
@@ -434,7 +434,7 @@ function M.saved_operations()
 					if records[key] then records[key].receipt = receipt end
 					return true
 				end)
-				vim.notify(item.envelope.operation .. ": " .. outcome_label(receipt), vim.log.levels.INFO, { title = "Saved-session outcome" })
+				require("pi-integration.logs").notify(item.envelope.operation .. ": " .. outcome_label(receipt), vim.log.levels.INFO, { title = "Saved-session outcome" })
 				if receipt.status == "unknown" or receipt.status == "uncertain" then
 					vim.ui.select({ "Allow a new saved-session request", "Keep protected" }, { prompt = "Original work may have partially or fully run. Inspect owner session/workspace state first. This does not replay it." }, function(choice)
 						if choice ~= "Allow a new saved-session request" then return end
@@ -458,7 +458,7 @@ local function saved_actions(host, rows, operation, archived, done)
 	local verb = operation == "host.archive" and (archived and "Archive" or "Unarchive") or "Delete"
 	local function failed(row, message) table.insert(failures, session_title(row) .. ": " .. tostring(message)) end
 	local function finish()
-		vim.notify(verb .. ": " .. succeeded .. " completed, " .. #failures .. " skipped/failed"
+		require("pi-integration.logs").notify(verb .. ": " .. succeeded .. " completed, " .. #failures .. " skipped/failed"
 			.. (#failures > 0 and ("\n" .. table.concat(failures, "\n")) or ""),
 			#failures > 0 and vim.log.levels.WARN or vim.log.levels.INFO, { title = "Pi sessions" })
 		if done and current() then done() end
@@ -675,7 +675,7 @@ function M.management_operations()
 			if not ok then notify(receipt.message); return end
 			local saved, err = save_management(item.host_id, item.envelope, receipt)
 			if not saved then notify(err) end
-			vim.notify(item.envelope.operation .. ": " .. outcome_label(receipt), vim.log.levels.INFO, { title = "Management outcome" })
+			require("pi-integration.logs").notify(item.envelope.operation .. ": " .. outcome_label(receipt), vim.log.levels.INFO, { title = "Management outcome" })
 		end)
 	end)
 end

@@ -185,7 +185,7 @@ function source:load(kind, callback)
 				state.retry = vim.uv.hrtime() / 1000000 + 10000
 				if not self.error_shown then
 					self.error_shown = true
-					vim.notify("Zotero unavailable" .. (state.entries and " (using cached suggestions)" or "") .. ". Open Zotero and enable Settings → Advanced → Allow other applications to communicate with Zotero.", vim.log.levels.WARN)
+					require("pi-integration.logs").notify("Zotero unavailable" .. (state.entries and " (using cached suggestions)" or "") .. ". Open Zotero and enable Settings → Advanced → Allow other applications to communicate with Zotero.", vim.log.levels.WARN)
 				end
 			end
 			state.pending = false

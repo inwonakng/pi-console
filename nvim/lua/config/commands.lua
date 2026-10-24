@@ -19,7 +19,7 @@ local function file_path(relative)
 		if resource or review_path or vim.b[buf].pi_review_host or vim.api.nvim_buf_get_name(buf):match("^pi://") then
 			local path = resource and resource.path or review_path
 			if type(path) ~= "string" or path == "" then
-				vim.notify("This owner buffer has no source path to copy.", vim.log.levels.WARN, { title = "pi-console" })
+				require("pi-integration.logs").notify("This owner buffer has no source path to copy.", vim.log.levels.WARN, { title = "pi-console" })
 				return nil
 			end
 			return path
@@ -113,7 +113,7 @@ end, { desc = "Abort only the side conversation" })
 
 vim.api.nvim_create_user_command("PiLogs", function()
 	require("pi-integration").show_logs()
-end, { desc = "Show pi-console runtime logs" })
+end, { desc = "Show pi-console client log" })
 
 vim.api.nvim_create_user_command("PiUsage", function()
 	require("pi-integration").show_usage()

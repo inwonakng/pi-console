@@ -138,7 +138,7 @@ function M.jump_to_heading(anchor) return jump_to_heading(percent_decode(anchor)
 function M.follow(cwd, resources)
 	local ok, handled = pcall(follow_link, cwd, resources)
 	if not ok then
-		vim.notify(handled, vim.log.levels.WARN)
+		require("pi-integration.logs").notify(handled, vim.log.levels.WARN)
 		return true
 	end
 	return handled

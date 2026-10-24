@@ -119,7 +119,7 @@ end
 function M.open(config)
 	local registered, registration_error = runtime.start_overview()
 	if not registered then
-		vim.notify(registration_error, vim.log.levels.WARN, { title = "Pi overview" })
+		require("pi-integration.logs").notify(registration_error, vim.log.levels.WARN, { title = "Pi overview" })
 	end
 	local list_buf = scratch("pi://overview")
 	local list_win = vim.api.nvim_get_current_win()
@@ -314,7 +314,7 @@ function M.open(config)
 	end
 	local function report(result, err)
 		if not result then
-			vim.notify(err or "Session operation failed", vim.log.levels.WARN, { title = "Pi overview" })
+			require("pi-integration.logs").notify(err or "Session operation failed", vim.log.levels.WARN, { title = "Pi overview" })
 		end
 		refresh()
 	end
@@ -330,7 +330,7 @@ function M.open(config)
 	local function require_selected()
 		local entry = selected()
 		if not entry or entry.kind ~= "session" then
-			vim.notify("Select a conversation first", vim.log.levels.WARN, { title = "Pi overview" })
+			require("pi-integration.logs").notify("Select a conversation first", vim.log.levels.WARN, { title = "Pi overview" })
 			return nil
 		end
 		return entry.entry

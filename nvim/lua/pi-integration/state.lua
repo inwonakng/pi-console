@@ -111,9 +111,6 @@ function M.new()
 		todo_tool_output_id = nil,
 		notification_status = nil,
 		codex_usage = nil,
-		logs = {},
-		logs_buf = nil,
-		logs_win = nil,
 	}
 end
 

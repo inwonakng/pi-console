@@ -12,6 +12,8 @@ map("n", "<C-j>", "<C-w><C-j>", { desc = "Move focus to the lower window" })
 map("n", "<C-k>", "<C-w><C-k>", { desc = "Move focus to the upper window" })
 map("n", "<Esc>", "<cmd>nohlsearch<CR>")
 
+map("n", "<leader>pl", "<cmd>PiLogs<cr>", { desc = "Show Pi logs" })
+
 -- Conversation-only actions must not start an agent in the overview.
 if not vim.g.pi_overview then
 	map("n", "<leader>pa", function()
@@ -60,7 +62,7 @@ map("n", "<leader>bo", function()
 		end
 	end
 	if #failed > 0 then
-		vim.notify("Could not close:\n" .. table.concat(failed, "\n"), vim.log.levels.WARN)
+		require("pi-integration.logs").notify("Could not close:\n" .. table.concat(failed, "\n"), vim.log.levels.WARN)
 	end
 end, { desc = "delete hidden buffers" })
 

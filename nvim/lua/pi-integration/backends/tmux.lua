@@ -299,7 +299,7 @@ function M.clear()
 	publication = nil
 	if update and update.process then
 		local ok, err = coroutine.resume(update.thread, update.process:wait(2000))
-		if not ok then vim.notify(tostring(err), vim.log.levels.ERROR) end
+		if not ok then require("pi-integration.logs").notify(tostring(err), vim.log.levels.ERROR) end
 	end
 	if owner_pane then
 		-- Do not remove a replacement instance's metadata during shutdown.

@@ -43,7 +43,7 @@ function M.open(options, workspace_id, pinned)
 	local function lookup_action(buf)
 		local action = actions[buf]
 		if not action or not action.pending then return false end
-		if not alive() then options.notify("Old review context; inspect the original review action via :PiOperations / :PiDrafts."); return true end
+		if not alive() then options.notify("Old review context; inspect the original review action via :PiLogs / :PiDrafts."); return true end
 		options.request("command.status", { commandId = action.pending, serviceEpoch = captured.epoch }, function(ok, receipt)
 			if ok then action.status(receipt) else options.notify("Review action status unavailable; original ID retained.") end
 		end)
@@ -76,14 +76,12 @@ function M.open(options, workspace_id, pinned)
 				if receipt.status == "completed" or receipt.status == "failed" then
 					action.pending = nil
 					action.used = receipt.status == "completed"
-					options.notify(receipt.status == "completed" and "Owner review action completed. Reopen the review for fresh versions; local drafts are unchanged. Restore recovery is in :PiOperations."
-						or ((receipt.error and receipt.error.message or "Review action refused") .. " Local drafts retained."))
-				else options.notify("Review action is " .. tostring(receipt.status) .. "; inspect it via :PiOperations, never resubmit automatically.") end
+					if receipt.status == "completed" then options.notify("Owner review action completed. Reopen the review for fresh versions; local drafts are unchanged. Restore recovery is in :PiLogs.") end
+				end
 			end
 			action.pending = options.command("workspace.review." .. operation, { actionId = reference, confirmed = operation == "restore" and true or nil }, function(ok, receipt)
 				if ok then action.status(receipt)
-				elseif receipt.delivery == "not_sent" then action.pending = nil; options.notify("Review action was not sent; drafts retained.")
-				else options.notify((receipt.message or "Review action outcome unknown") .. "; original ID and drafts retained.") end
+				elseif receipt.delivery == "not_sent" then action.pending = nil end
 			end, control, action.status)
 			if action.pending then vim.b[buf].pi_review_command_id, vim.b[buf].pi_review_command_epoch = action.pending, captured.epoch end
 		end
@@ -109,8 +107,7 @@ function M.open(options, workspace_id, pinned)
 					options.notify("Owner edit saved. Later local edits remain unsaved.")
 				elseif receipt.status == "failed" then
 					save_id = nil
-					options.notify((receipt.error and receipt.error.message or "Save refused") .. " Local draft retained; gO inspects current owner content.")
-				else options.notify("Save is " .. tostring(receipt.status) .. "; draft retained. Use gS / :PiOperations to inspect, never resubmit automatically.") end
+				end
 			end
 			local function lookup()
 				if not save_id or not alive() then return end
@@ -127,8 +124,7 @@ function M.open(options, workspace_id, pinned)
 				submitted = contents(target)
 				save_id = options.command("workspace.review.save", { resourceId = resource_id, expectedVersion = version, text = submitted }, function(ok, result)
 					if ok then status(result)
-					elseif result.delivery == "not_sent" then save_id = nil; options.notify("Save was not sent; local draft retained.")
-					else options.notify((result.message or "Save outcome unknown") .. "; draft and original ID retained.") end
+					elseif result.delivery == "not_sent" then save_id = nil end
 				end, options.control_stamp(), status)
 				if save_id then vim.b[target].pi_review_command_id, vim.b[target].pi_review_command_epoch = save_id, captured.epoch end
 			end

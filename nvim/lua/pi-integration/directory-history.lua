@@ -38,19 +38,19 @@ function M.owner_input(opts, on_choice)
 	local browse, input
 	local function current()
 		if opts.current() then return true end
-		vim.notify("Owner connection changed; directory selection cancelled", vim.log.levels.WARN)
+		require("pi-integration.logs").notify("Owner connection changed; directory selection cancelled", vim.log.levels.WARN)
 		return false
 	end
 	local function choose(path)
 		local ok_save, err = store.update("owner-directories", vim.empty_dict(), function(data) data[opts.key] = path; return true end)
-		if not ok_save then vim.notify(tostring(err), vim.log.levels.WARN) end
+		if not ok_save then require("pi-integration.logs").notify(tostring(err), vim.log.levels.WARN) end
 		local ok_history, history_err = store.update("owner-directory-history", vim.empty_dict(), function(data)
 			local directories = recent_directories(data[opts.key])
 			add_recent(directories, path)
 			data[opts.key] = directories
 			return true
 		end)
-		if not ok_history then vim.notify(tostring(history_err), vim.log.levels.WARN) end
+		if not ok_history then require("pi-integration.logs").notify(tostring(history_err), vim.log.levels.WARN) end
 		on_choice(path)
 	end
 	input = function(default)
@@ -87,7 +87,7 @@ function M.owner_input(opts, on_choice)
 			opts.request({ path = path, offset = 0 }, function(valid, page)
 				if not current() then return end
 				if valid then choose(page.path)
-				else vim.notify(page.message or "Owner directory unavailable", vim.log.levels.WARN); input(path) end
+				else require("pi-integration.logs").notify(page.message or "Owner directory unavailable", vim.log.levels.WARN); input(path) end
 			end)
 		end)
 		if not ok then cleanup(); error(err) end
@@ -96,7 +96,7 @@ function M.owner_input(opts, on_choice)
 		if not current() then return end
 		opts.request({ path = path, offset = offset }, function(ok, page)
 			if not current() then return end
-			if not ok then vim.notify(page.message or "Owner directory unavailable", vim.log.levels.WARN); input(path); return end
+			if not ok then require("pi-integration.logs").notify(page.message or "Owner directory unavailable", vim.log.levels.WARN); input(path); return end
 			local choices = { { label = "Use " .. page.path, use = true }, { label = "Enter another path", input = true } }
 			if page.path ~= "/" then table.insert(choices, { label = "Parent directory", path = page.path:match("^(.*)/[^/]+$") == "" and "/" or page.path:match("^(.*)/[^/]+$") }) end
 			for _, directory in ipairs(page.entries or {}) do table.insert(choices, { label = directory, path = directory }) end

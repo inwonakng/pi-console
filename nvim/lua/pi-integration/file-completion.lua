@@ -103,7 +103,7 @@ function source:get_completions(ctx, callback)
 	local cancel = require("pi-integration.service-frontend").complete_files(reference.prefix, function(data)
 		if cancelled or query ~= self.query then return end
 		local warning = data.error or (data.truncated and "Project scan limit reached; use an explicit path for omitted files.")
-		if warning and warning ~= self.last_error then vim.notify("Owner completion: " .. warning, vim.log.levels.WARN) end
+		if warning and warning ~= self.last_error then require("pi-integration.logs").notify("Owner completion: " .. warning, vim.log.levels.WARN) end
 		self.last_error = warning
 		local items = {}
 		for _, entry in ipairs(data.entries or {}) do
