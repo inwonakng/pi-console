@@ -544,12 +544,15 @@ function M.history_picker(identity, opts)
 			require("pi-integration.history-picker").pick(host, rows, function(row)
 				local timestamp = tostring(row.lastActivityAt or row.createdAt or "Unknown time"):gsub("T", " "):gsub("%.%d+Z$", " UTC")
 				return timestamp .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " (" .. row.state .. ")"
-			end, function(row)
+			end, function(row, preview_opts)
 				if row.state == "open" and not row.archived then
 					M.open({ host_id = host.host_id, session_id = row.id, status = "Idle" }); return
 				end
 				local actions = row.archived and { "Unarchive", "Delete" } or { "Resume", "Archive", "Delete" }
-				vim.ui.select(actions, { prompt = "Saved conversation on " .. host_label(host) .. ": " .. session_title(row) }, function(action)
+				local select_opts = vim.tbl_extend("force", preview_opts, {
+					prompt = "Saved conversation on " .. host_label(host) .. ": " .. session_title(row),
+				})
+				vim.ui.select(actions, select_opts, function(action)
 					if not action or not current() then return end
 					if action == "Resume" then M.open({ host_id = host.host_id, session_id = row.id, status = "Not Open" })
 					else mutate({ row }, action == "Delete" and "host.delete" or "host.archive") end

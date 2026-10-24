@@ -163,7 +163,7 @@ local function prompt_needs_preview(prompt)
 end
 
 local function add_prompt_preview(select_opts)
-	if type(select_opts.preview_item) == "function" then
+	if select_opts.previewer or type(select_opts.preview_item) == "function" then
 		return true
 	end
 
@@ -254,7 +254,7 @@ local function size_select_picker(select_opts, items, winopts)
 	local options_height = math.min(limit, math.max(1, rows) + chrome)
 	local preview = available - options_height
 	winopts.row = 1.0 -- options always end at the bottom, without trailing space
-	if type(select_opts.preview_item) == "function" and preview >= 2 then
+	if (select_opts.previewer or type(select_opts.preview_item) == "function") and preview >= 2 then
 		winopts.height = 1.0
 		-- An absolute size of 1 means 100% to fzf-lua; use at least two rows.
 		winopts.preview.vertical = "up:" .. preview
@@ -338,6 +338,7 @@ fzf.register_ui_select(function(select_opts, items)
 		winopts = winopts,
 		fzf_opts = picker_fzf_opts,
 		keymap = picker_keymap,
+		previewer = select_opts.previewer,
 		pi_request_id = select_opts.pi_request_id,
 		pi_select_layout = select_opts.pi_select_layout,
 	}
