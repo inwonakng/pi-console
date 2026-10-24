@@ -40,6 +40,7 @@ local resume_check
 local stats_timer, stats_pending, workspace_stats_key
 local owner_states, pending_settings = {}, {}
 local selected_cwd, starting, auto_control_selection, startup_options, startup_status
+local startup_options_context, startup_options_pending
 local frontend_focused = false
 local function status_data(key)
 	local raw = snapshot and snapshot.conversation.statuses[key]
@@ -785,6 +786,7 @@ local function disconnected()
 	resources.invalidate()
 	generation = generation + 1
 	job, attachment, grant, authority, hello, startup_options, startup_status = nil, nil, nil, nil, nil, nil, nil
+	startup_options_context, startup_options_pending = nil, nil
 	stats_pending, workspace_stats_key, state.workspace_diff = nil, nil, nil
 	session_status, session_error = "unattached", nil
 	feedback_ui.interrupt(feedback)
@@ -1644,25 +1646,61 @@ function M.cycle_access_mode() cycle_setting("access.set", M.config.access_modes
 function M.set_integration_mode(mode) setting("integration.set", { mode = mode }) end
 function M.pick_integration_mode() pick_setting("integration.set", M.config.integration_modes or { "ask", "allowed" }, "Integration mode") end
 function M.cycle_integration_mode() cycle_setting("integration.set", M.config.integration_modes, state.integration_mode) end
-host_options = function(callback)
+local function host_options_current(context)
+	return context and hello and job and same_selection(context.captured)
+		and context.epoch == hello.serviceEpoch and context.cwd == selected_cwd
+end
+host_options = function(callback, force)
 	if not hello or not job then notify("Connect to a host to read its model options."); return end
 	if not vim.tbl_contains(hello.capabilities or {}, "host.options") then unavailable("Pre-start model options"); return end
-	local captured, cwd = stamp(), selected_cwd
-	request("host.options", { serviceEpoch = hello.serviceEpoch, cwd = cwd }, function(ok, data)
-		if not same_selection(captured) or cwd ~= selected_cwd then return end
-		if not ok then
-			if not startup_options then startup_options = { defaults = { modelStatus = "unavailable" }, models = {} } end
+	local captured = stamp()
+	local now = vim.uv.hrtime() / 1000000
+	if not force and startup_options and host_options_current(startup_options_context)
+		and now < startup_options_context.expires then
+		if callback then callback(startup_options, captured) end
+		return
+	end
+	startup_options, startup_options_context = nil, nil
+	local pending = startup_options_pending
+	if host_options_current(pending) then
+		if force and not pending.force then
+			-- Refresh after the earlier discovery finishes, so it cannot repopulate stale metadata.
+			table.insert(pending.callbacks, function(_, _, err)
+				if host_options_current(pending) then host_options(callback, true)
+				elseif callback then callback(nil, captured, err) end
+			end)
+		elseif callback then table.insert(pending.callbacks, callback) end
+		return
+	end
+	local context = { captured = captured, cwd = selected_cwd, epoch = hello.serviceEpoch,
+		force = force, callbacks = callback and { callback } or {} }
+	startup_options_pending = context
+	request("host.options", { serviceEpoch = context.epoch, cwd = context.cwd, refresh = force or nil }, function(ok, data)
+		if startup_options_pending == context then startup_options_pending = nil end
+		local err
+		if not host_options_current(context) then
+			err = { message = "Host selection changed." }
+		elseif not ok then
+			err = data
+			startup_options = { defaults = { modelStatus = "unavailable" }, models = {} }
 			render()
-			return
+		else
+			-- Start the remaining lifetime at request dispatch, conservatively allowing for transit time.
+			context.expires = now + math.max(0, tonumber(data.cacheTtlMs) or 0)
+			startup_options, startup_options_context = data, context
+			render()
 		end
-		startup_options = data
-		render()
-		if callback then callback(data, captured) end
+		for _, done in ipairs(context.callbacks) do done(not err and data or nil, captured, err) end
 	end)
+end
+function M.refresh_options()
+	if session_id then notify("Options refresh is for unstarted sessions; live sessions read their own runtime."); return end
+	host_options(function(data) if data then notify("Host options refreshed.") end end, true)
 end
 function M.pick_model()
 	local read = not session_id and host_options or function(callback) owner_read("models", callback) end
 	read(function(data, captured)
+		if not data then return end
 		if #data.models == 0 then notify("Pi found no available models on this host.", vim.log.levels.WARN); return end
 		vim.ui.select(data.models, { prompt = "Owner model", format_item = function(model) return model.provider .. "/" .. model.id end }, function(model)
 			if model then setting("model.set", { provider = model.provider, modelId = model.id }, captured) end
@@ -1672,6 +1710,7 @@ end
 function M.pick_thinking()
 	if not session_id then
 		host_options(function(data, captured)
+			if not data then return end
 			local pending = pending_settings["model.set"]
 			local model = pending and { provider = pending.provider, id = pending.modelId } or (data.defaults or {}).model
 			if not model then notify("Choose a model before its pending thinking level."); return end
@@ -2008,11 +2047,9 @@ function M.get_commands(callback)
 		local captured = stamp()
 		captured.token, captured.controller = nil, nil
 		captured.host_discovery, captured.epoch, captured.cwd = true, hello.serviceEpoch, selected_cwd
-		if startup_options and startup_options.commands then callback(startup_options.commands, nil, captured); return end
-		request("host.options", { serviceEpoch = captured.epoch, cwd = captured.cwd }, function(ok, result)
+		host_options(function(result, _, err)
 			if not M.command_context_current(captured) then callback({}); return end
-			if not ok then callback({}, result.message or "Could not read host commands"); return end
-			startup_options = result
+			if not result then callback({}, err and err.message or "Could not read host commands"); return end
 			callback(result.commands or {}, nil, captured)
 		end)
 		return
@@ -2061,7 +2098,7 @@ function M.refresh_messages() refresh() end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; Ctrl+Enter saves; editing pauses dispatch while connected)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle (generate session title)\n:PiLogs / <leader>pl (notifications, action outcomes and recovery text; Enter inspects details)\n:PiHostRequest (unresolved session creation/resume)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (close frontend; conversation keeps running)\n:PiKill / <leader>pk (confirm kill conversation and close; preserves history and local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history use typed owner operations.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the original directory. First prompt creates the session.\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nSlash commands run on the owner through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
+	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; Ctrl+Enter saves; editing pauses dispatch while connected)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (owner enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (owner diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects owner content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle (generate session title)\n:PiLogs / <leader>pl (notifications, action outcomes and recovery text; Enter inspects details)\n:PiHostRequest (unresolved session creation/resume)\n:PiSessions (owner archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (close frontend; conversation keeps running)\n:PiKill / <leader>pk (confirm kill conversation and close; preserves history and local drafts)\n:PiConsoleRestart is frontend-only. The restart shortcut restarts the owner session.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history use typed owner operations.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; existing sessions keep running.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the original directory. First prompt creates the session.\n:PiRefreshOptions: refresh cached pre-start models, defaults, and commands (otherwise expire after 60 seconds).\n:PiTranscript: managed owner history (all branches, read-only).\nTranscript Enter inspects owner thinking/tools/skills/artifacts and file links; @ completion uses owner cwd.\nPaged text: n next / p first / r reload. Skill f reads the current owner file.\nSlash commands run on the owner through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService stop/restart remains separate: pi-console server stop/restart [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()
@@ -2215,7 +2252,8 @@ function M.open(restore)
 		PiSavedOperations = require("pi-integration.service-hosts").saved_operations,
 		PiHosts = M.pick_hosts, PiManagement = require("pi-integration.service-hosts").management_operations, PiSessions = M.pick_session, PiNew = M.new_session, PiTranscript = M.show_owner_transcript,
 		PiWorkspaceReview = M.show_workspace_diff, PiWorkspaceReviews = M.pick_workspace_reviews,
-		PiWorkspace = M.pick_workspace, PiKill = M.kill_session, PiRetitle = M.retitle, PiHostRequest = M.show_host_request }) do
+		PiWorkspace = M.pick_workspace, PiKill = M.kill_session, PiRetitle = M.retitle, PiHostRequest = M.show_host_request,
+		PiRefreshOptions = M.refresh_options }) do
 		vim.api.nvim_create_user_command(name, fn, {})
 	end
 	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "BufWritePost" }, { callback = function(event)

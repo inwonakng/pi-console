@@ -93,6 +93,10 @@ export type HostOwnerOptions = {
   model?: string;
 };
 
+const HOST_OPTIONS_TTL_MS = 60_000;
+const MAX_HOST_OPTIONS = 32;
+type CachedHostOptions = { options: HostOptions; expiresAt: number };
+
 /** Private host composition, not a daemon or an authenticated application API. */
 export class HostOwner {
   private readonly sessions = new Map<string, OwnedSession>();
@@ -100,6 +104,8 @@ export class HostOwner {
   private closing = false;
   private hostAdmission: Promise<void> = Promise.resolve();
   private hostAdmitting = 0;
+  private readonly hostOptionsCache = new Map<string | undefined, CachedHostOptions>();
+  private readonly hostOptionsFlights = new Map<string | undefined, Promise<CachedHostOptions>>();
   private readonly savedMutations = new Set<string>();
   private helperUnresolved?: Error;
 
@@ -155,33 +161,58 @@ export class HostOwner {
     return completeHostFiles(cwd, input, () => { this.assertOpen(); check(); });
   }
 
-  /** Host metadata shares bounded lifecycle admission, without creating a session. */
-  optionsForHost(cwd: unknown, check: () => void): Promise<HostOptions> {
+  /** Cache display metadata only; session startup still initializes and checks trust normally. */
+  async optionsForHost(cwd: unknown, check: () => void, refresh: unknown = false): Promise<HostOptions & { cacheTtlMs: number }> {
     if (cwd !== undefined && (typeof cwd !== "string" || !isAbsolute(cwd) || Buffer.byteLength(cwd) > 4096
       || /[\u0000-\u001f\u007f]/.test(cwd))) throw new CommandError("invalid_command", "Invalid host options directory");
+    if (typeof refresh !== "boolean") throw new CommandError("invalid_command", "Invalid host options refresh");
     this.assertOpen(); check();
+    this.catalog.assertExecutionAllowed();
+    const key = cwd as string | undefined;
+    const cached = this.hostOptionsCache.get(key);
+    this.hostOptionsCache.delete(key);
+    if (!refresh && cached && cached.expiresAt > performance.now()) {
+      this.hostOptionsCache.set(key, cached); // Least-recently-used entries are evicted first.
+      return { ...cached.options, cacheTtlMs: Math.max(0, Math.floor(cached.expiresAt - performance.now())) };
+    }
     if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");
     this.hostAdmitting++;
-    const task = this.hostAdmission.then(async () => {
-      this.assertOpen(); check();
-      this.catalog.assertLaunchAllowed();
-      try {
-        const result = await readHostOptions(this.resources, this.options.environment,
-          { cwd: cwd as string | undefined, provider: this.options.provider, model: this.options.model },
-          () => { this.assertOpen(); check(); this.catalog.assertExecutionAllowed(); });
-        this.assertOpen(); check();
-        this.catalog.assertExecutionAllowed();
-        return result;
-      } catch (error) {
-        if (error instanceof OptionsHelperUnresolved) {
-          this.helperUnresolved = error;
-          for (const session of this.sessions.values()) session.storageFailed(error);
-        }
-        throw error;
+    try {
+      let task = this.hostOptionsFlights.get(key);
+      if (!task) {
+        task = this.hostAdmission.then(async () => {
+          this.assertOpen();
+          this.catalog.assertLaunchAllowed();
+          try {
+            // Discovery belongs to the owner, not the first reader's connection.
+            const options = await readHostOptions(this.resources, this.options.environment,
+              { cwd: key, provider: this.options.provider, model: this.options.model },
+              () => { this.assertOpen(); this.catalog.assertExecutionAllowed(); });
+            this.assertOpen();
+            this.catalog.assertExecutionAllowed();
+            const entry = { options, expiresAt: performance.now() + HOST_OPTIONS_TTL_MS };
+            this.hostOptionsCache.set(key, entry);
+            while (this.hostOptionsCache.size > MAX_HOST_OPTIONS) {
+              this.hostOptionsCache.delete(this.hostOptionsCache.keys().next().value);
+            }
+            return entry;
+          } catch (error) {
+            if (error instanceof OptionsHelperUnresolved) {
+              this.helperUnresolved = error;
+              for (const session of this.sessions.values()) session.storageFailed(error);
+            }
+            throw error;
+          }
+        }).finally(() => { this.hostOptionsFlights.delete(key); });
+        this.hostOptionsFlights.set(key, task);
+        this.hostAdmission = task.then(() => undefined, () => undefined);
       }
-    });
-    this.hostAdmission = task.then(() => undefined, () => undefined);
-    return task.finally(() => { this.hostAdmitting--; });
+      // A refresh joins discovery already running for this directory, but never reuses a cached result.
+      const entry = await task;
+      this.assertOpen(); check();
+      this.catalog.assertExecutionAllowed();
+      return { ...entry.options, cacheTtlMs: Math.max(0, Math.floor(entry.expiresAt - performance.now())) };
+    } finally { this.hostAdmitting--; }
   }
 
   /** Lookup never starts a worker or repeats trust/workspace initialization. */
