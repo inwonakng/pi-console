@@ -857,7 +857,7 @@ attach = function(id)
 	local gen, selected = generation, selection
 	session_status, session_error, state.control_loss_reason = "attaching", nil, nil
 	render()
-	request("attach", { sessionId = id, label = "Neovim " .. vim.fn.getpid() }, function(ok, value)
+	request("attach", { sessionId = id, label = "neovim@" .. vim.fn.hostname() }, function(ok, value)
 		if gen ~= generation or selected ~= selection then return end
 		if not ok then
 			fail_start("Startup attachment failed; submitted text remains in :PiDrafts.")

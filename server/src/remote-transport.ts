@@ -64,7 +64,8 @@ export class RemoteListener {
               || resolve(host.root ?? defaultRoot(web.channel)) !== resolve(web.serviceRoot))
               .map(({ key, alias, enabled, hostId }) =>
               ({ key, alias, enabled, hostId, stream: `/v1/hosts/${key}/stream` }))];
-          const body = JSON.stringify({ channel: web.channel, hosts });
+          const clientAddress = request.socket.remoteAddress?.replace(/^::ffff:/, "");
+          const body = JSON.stringify({ channel: web.channel, hosts, clientAddress });
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(body),
             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
           response.end(body);

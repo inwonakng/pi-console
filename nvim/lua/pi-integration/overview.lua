@@ -64,7 +64,7 @@ local function indicator_columns(entry)
 			table.insert(spans, {
 				start_col = byte_offset,
 				end_col = byte_offset + #icon,
-				highlight = indicator.highlight,
+				highlight = indicator.highlight:gsub("^Pi", "PiOverview"),
 			})
 		end
 		byte_offset = byte_offset + #cell

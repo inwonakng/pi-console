@@ -16,7 +16,7 @@ require("catppuccin").setup({
 		},
 	},
 	custom_highlights = function(colors)
-		return {
+		local highlights = {
 			Normal = { bg = M.ui_bg },
 			NormalNC = { bg = M.ui_bg },
 			Folded = { bg = M.ui_bg },
@@ -118,6 +118,13 @@ require("catppuccin").setup({
 			DiffDelete = { fg = colors.red, bg = "#2a1014" },
 			DiffText = { fg = colors.text, bg = "#3a3214", bold = true },
 		}
+		for _, name in ipairs({
+			"ModeFull", "ModeEdit", "ModeAsk", "ModeReadonly", "ModeUnknown",
+			"IntegrationAsk", "IntegrationAllowed", "NotifyOn", "NotifyOff", "UsageStats",
+		}) do
+			highlights["PiOverview" .. name] = vim.tbl_extend("force", highlights["Pi" .. name], { bg = "NONE" })
+		end
+		return highlights
 	end,
 })
 vim.cmd.colorscheme("catppuccin")

@@ -21,6 +21,7 @@ const sessionName = row => row?.name || row?.cwd?.split("/").filter(Boolean).pop
 const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
 let hosts = [], tabs = new Map(), activeKey = null, connecting = false, generation = 0;
+let controllerLabel = "webui";
 const completionStates = new Map(), expandedSubagents = new Set();
 // Automatic controller-tab closure keeps unsent text available in this page.
 const stoppedPromptDrafts = new Map();
@@ -135,6 +136,7 @@ async function connectAll() {
     const registry = await response.json();
     if (registry.channel !== channel || !Array.isArray(registry.hosts)) throw new Error("Invalid host registry or channel.");
     if (current !== generation) return;
+    controllerLabel = registry.clientAddress ? `webui@${registry.clientAddress}` : "webui";
     const previous = hosts;
     hosts = registry.hosts.map(target => {
       const existing = previous.find(host => host.key === target.key && host.stream === target.stream
@@ -914,7 +916,7 @@ function createConversation(host, row) {
       if (disposed) { next.close(); return; }
       connected = true;
       try {
-        const value = await next.request("attach", { sessionId: selectedId, label: "Web browser" });
+        const value = await next.request("attach", { sessionId: selectedId, label: controllerLabel });
         attachment = value.attachmentId;
         streamSequence = value.snapshot.sequence;
         authoritySequence = 0;
