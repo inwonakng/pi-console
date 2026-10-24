@@ -30,7 +30,7 @@ local approval_context, pending_context
 local pending_seen, pending_replies = {}, {}
 local ctx, sync_pending
 local recovery_id, backup_scheduled, restarting_frontend
-local render, refresh, connect, attach, recover_selection, tree_ctx, advance_start, host_options, backup
+local render, refresh, connect, attach, acquire_control, recover_selection, tree_ctx, advance_start, host_options, backup
 local side_buf, side_input_buf, side_context, side_id
 local side_permission_state, side_permission_items = {}, {}
 local queue_editor
@@ -39,7 +39,7 @@ local save_side_draft, side_save_scheduled, side_reset_draft
 local resume_check
 local stats_timer, stats_pending, workspace_stats_key
 local owner_states, pending_settings = {}, {}
-local selected_cwd, starting, new_control_selection, startup_options, startup_status
+local selected_cwd, starting, auto_control_selection, startup_options, startup_status
 local frontend_focused = false
 local function status_data(key)
 	local raw = snapshot and snapshot.conversation.statuses[key]
@@ -738,16 +738,16 @@ local function apply_snapshot(value)
 	for _, item in ipairs(snapshot.acceptedQueue.items or {}) do record_queue(item) end
 	feedback_ui.reconcile(feedback, snapshot)
 	render()
-	if new_control_selection then
+	if auto_control_selection then
 		local runtime = snapshot.interactions.runtime
-		if not same_selection(new_control_selection) or current_controller() or snapshot.error then
-			new_control_selection = nil
+		if not same_selection(auto_control_selection) or current_controller() or snapshot.error then
+			auto_control_selection = nil
 		elseif runtime and runtime.active and snapshot.piState and snapshot.piState.sessionId == runtime.sessionId
 			and snapshot.piState.sessionFile == runtime.sessionFile then
-			-- New allocates before Pi initializes. Send the first acquire only when
-			-- its managed identity is available, including startup approvals.
-			new_control_selection = nil
-			M.take_control()
+			-- Attach once as controller if unclaimed, waiting for managed identity
+			-- during startup. Never take over or retry after losing control.
+			auto_control_selection = nil
+			acquire_control(false, stamp())
 		end
 	end
 	-- History may arrive after the initial attachment snapshot.
@@ -788,14 +788,15 @@ local function disconnected()
 	stats_pending, workspace_stats_key, state.workspace_diff = nil, nil, nil
 	session_status, session_error = "unattached", nil
 	feedback_ui.interrupt(feedback)
-	callbacks, outcomes, new_control_selection, starting, resume_check = {}, {}, nil, nil, nil
+	callbacks, outcomes, auto_control_selection, starting, resume_check = {}, {}, nil, nil, nil
 	kill_pending = nil
 	refreshing, refresh_scheduled, dirty = false, false, false
 	close_approval()
 	render()
 end
-attach = function(id, acquire_control)
+attach = function(id)
 	if not job then return end
+	auto_control_selection = nil
 	tree.close(tree_ctx)
 	offers = {}
 	if pending_host then pending_host_select = false end
@@ -815,8 +816,7 @@ attach = function(id, acquire_control)
 		session_status, session_error = nil, nil
 		close_approval()
 		session_id, attachment, grant, snapshot, authority = id, value.attachmentId, nil, nil, nil
-		-- Only an explicitly completed New may acquire; attach/reconnect stays a viewer.
-		if acquire_control then new_control_selection = stamp() end
+		auto_control_selection = stamp()
 		apply_snapshot(value.snapshot)
 		local lookups, seen = {}, {}
 		for command_id, envelope in pairs(unresolved) do
@@ -895,7 +895,7 @@ local function host_operation(operation, payload)
 					if operation == "host.create" and startup_status then startup_status.session_id = session_id end
 					feedback_ui.bind(feedback, envelope.id, session_id)
 					backup()
-					attach(session_id, operation == "host.create")
+					attach(session_id)
 				else notify("Host request completed; select the session in :PiSessions. Current view was not changed.") end
 			elseif receipt.error then
 				fail_start("Startup failed; submitted text remains in :PiDrafts.")
@@ -1169,7 +1169,7 @@ function M.pick_hosts()
 			or target.service_remote ~= M.config.service_remote then M.select_owner(target) end
 	end)
 end
-local function acquire_control(takeover, captured)
+acquire_control = function(takeover, captured)
 	if not same_context(captured) or captured.controller ~= (current_controller() and current_controller().grantId) then
 		notify("Attachment/controller changed; request control again for this session."); return
 	end

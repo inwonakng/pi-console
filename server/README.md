@@ -229,9 +229,9 @@ Relayed local profiles cannot perform local-only service administration. Session
 history and explicit resume are separate from the overview. See
 [web frontend usage and limitations](../web/README.md).
 
-Service shutdown remains local-only. Reconnect starts as viewer and never replays
-mutations. Remote capacity is separate from local IPC; frames, output and
-subscriptions remain bounded, and a
+Service shutdown remains local-only. Neovim attach/reconnect acquires control if
+unclaimed, otherwise stays view-only, and never replays mutations. Remote capacity
+is separate from local IPC; frames, output and subscriptions remain bounded, and a
 dropped subscription destroys its transport even when its writer is backpressured.
 Neovim displays the endpoint, host/channel identity and control role.
 
@@ -254,7 +254,8 @@ unresolved create/resume ID. These do not replay work. See the C report for exac
 arguments, confirmations and what completion means.
 
 - `:PiControl` / `<leader>pc` acquires control, confirming before replacing another
-  controller; reconnect starts as viewer. `<leader>ph` / `:PiHosts` manages hosts;
+  controller. Attach/reconnect automatically acquires unclaimed control; otherwise
+  it stays view-only. `<leader>ph` / `:PiHosts` manages hosts;
   select a host and "Attach current frontend" to switch the conversation frontend
   to it. `<leader>pC` / `:PiCd` selects a directory on that host. These
   selections and new frontend windows create no session until the first prompt
@@ -823,7 +824,9 @@ Neovim's bridge renews control while the editor process remains alive and connec
 including during modal prompts. Queue-edit reservation renewal still depends on the
 visible Neovim editor, so an interrupted editing pause can expire without losing
 session control. Control-loss reasons appear in the frontend header and `:PiLogs`
-without opening another modal notification. Reconnect starts as a viewer.
+without opening another modal notification. Neovim attach/reconnect makes one
+acquisition attempt if unclaimed; it never automatically takes over or reacquires
+after losing control.
 Clean detach, slow-view drop, explicit release, takeover and session shutdown
 revoke control without answering dialogs or cancelling accepted execution.
 

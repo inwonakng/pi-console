@@ -100,7 +100,8 @@ parent session has its own side conversation. Stop side work before restarting.
 
 Use `<leader>pR` or `:PiConsoleRestart` to restart only the frontend in the same
 terminal, retaining the selection, drafts and unresolved request IDs. Execution
-continues independently; reconnect does not reacquire control or replay mutations.
+continues independently. Attach/reconnect automatically acquires control if unclaimed;
+otherwise it stays view-only. Mutations are never replayed.
 This requires launching through `pi-console`. To use a newly installed frontend,
 close and relaunch with `--attach ID`; the restart command keeps the old release.
 
