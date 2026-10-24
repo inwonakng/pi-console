@@ -2330,6 +2330,11 @@ function M.open(restore)
 	end
 	frontend_focused = backend.available() and backend.is_focused() == true
 	if frontend_focused then record_focus() end
+	-- Resolve saved owner metadata before the layout's first render.
+	require("pi-integration.service-hosts").start()
+	if not restore and not session_id then selected_cwd = vim.env.PI_CONSOLE_SERVICE_CWD or selected_cwd end
+	vim.env.PI_CONSOLE_SERVICE_NEW, vim.env.PI_CONSOLE_SERVICE_CWD = nil, nil
+	connect()
 	layout.open(ctx)
 	if restore then
 		layout.set_buffer_lines(ctx, state.input_buf, restore.input_lines or { "" }, true)
@@ -2375,10 +2380,6 @@ function M.open(restore)
 		end
 	end))
 	publish_attachment()
-	require("pi-integration.service-hosts").start()
-	if not restore and not session_id then selected_cwd = vim.env.PI_CONSOLE_SERVICE_CWD or selected_cwd end
-	vim.env.PI_CONSOLE_SERVICE_NEW, vim.env.PI_CONSOLE_SERVICE_CWD = nil, nil
-	connect()
 end
 vim.api.nvim_create_autocmd("VimLeavePre", { callback = function()
 	if visibility_timer then visibility_timer:stop(); visibility_timer:close(); visibility_timer = nil end
