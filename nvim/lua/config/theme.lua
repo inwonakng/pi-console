@@ -74,6 +74,7 @@ require("catppuccin").setup({
 			PiTreeWorkspace14 = { fg = colors.lavender, bg = M.ui_bg, bold = true },
 			PiQuoteBar = { fg = colors.pink, bg = M.ui_bg },
 			PiToolQuote = { fg = colors.overlay1, bg = M.ui_bg },
+			PiPermissionQuote = { fg = colors.lavender, bg = "#201b2d", bold = true },
 			PiTodoQuote = { fg = colors.subtext0, bg = "#141414", bold = true },
 			PiToolEditQuote = { fg = colors.peach, bg = M.ui_bg, bold = true },
 			PiToolWorkspaceQuote = { fg = colors.teal, bg = M.ui_bg, bold = true },

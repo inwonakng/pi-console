@@ -149,6 +149,8 @@ local function tool_summary_rows(state, preview)
 					rows[child.start_line] = { output_id = child.output_id, stats = true }
 				end
 			end
+		elseif group.kind == "tool" then
+			rows[group.start_line] = { output_id = group.output_id, stats = true }
 		end
 	end
 	return rows
