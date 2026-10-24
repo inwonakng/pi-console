@@ -157,7 +157,7 @@ local function select_artifact(ctx, choices, prompt, is_output, send_action)
 		prompt = prompt,
 		pi_select_layout = "compact",
 		format_item = function(item)
-			return item.label .. (item.path and ("  " .. item.path) or "")
+			return item.label
 		end,
 	}, function(choice)
 		if ctx.resources and not ctx.resources.current(ticket) then return end
