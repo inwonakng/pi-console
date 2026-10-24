@@ -37,7 +37,7 @@ local save_side_draft, side_save_scheduled, side_reset_draft
 local resume_check
 local stats_timer, stats_pending, workspace_stats_key
 local owner_states, pending_settings = {}, {}
-local selected_cwd, starting, new_control_selection, startup_options
+local selected_cwd, starting, new_control_selection, startup_options, startup_status
 local frontend_focused = false
 local function status_data(key)
 	local raw = snapshot and snapshot.conversation.statuses[key]
@@ -181,7 +181,7 @@ local function fail_start(message)
 	if starting.entry then
 		starting.entry.status, starting.entry.error = "Not sent", message
 	end
-	starting = nil
+	starting, startup_status = nil, nil
 	notify(message)
 	if render then render() end
 end
@@ -453,7 +453,8 @@ ctx.transcript.refresh_ui = function()
 	if sync_pending then vim.schedule(sync_pending) end
 end
 local function update_status_state()
-	local defaults = not session_id and startup_options and startup_options.defaults or {}
+	local initial = session_id and startup_status and startup_status.session_id == session_id and startup_status or nil
+	local defaults = initial or not session_id and startup_options and startup_options.defaults or {}
 	local conversation = snapshot and snapshot.conversation
 	local statuses = conversation and conversation.statuses or {}
 	local pi_state = snapshot and snapshot.piState or {}
@@ -482,7 +483,7 @@ local function update_status_state()
 	state.model_id = model and model.id
 	state.thinking_level = pi_state.thinkingLevel or defaults.thinkingLevel
 	state.model_status = statuses["pi-console-model-readiness"] == "unavailable" and "unavailable"
-		or not session_id and (defaults.modelStatus or (not startup_options and "loading" or nil)) or nil
+		or (not session_id or initial) and (defaults.modelStatus or (not startup_options and "loading" or nil)) or nil
 	if state.model_status == "unavailable" then state.provider, state.model_id = nil, nil end
 	local context_window = defaults.contextWindow
 	if pending_settings["access.set"] then state.access_mode = pending_settings["access.set"].mode end
@@ -502,10 +503,20 @@ local function update_status_state()
 		end
 	end
 	if pending_settings["thinking.set"] then state.thinking_level = pending_settings["thinking.set"].level end
-	state.session_stats = conversation and conversation.stats
+	state.session_stats = conversation and conversation.stats or initial and initial.sessionStats
 	if not session_id then
 		state.session_stats = { tokens = { input = 0, output = 0 }, cost = 0,
 			contextUsage = { tokens = 0, contextWindow = context_window or vim.NIL } }
+	end
+	-- Retire each startup fallback once its owner value has arrived.
+	if initial then
+		if statuses["pi-access-mode"] then initial.accessMode = nil end
+		if statuses["pi-integration-mode"] then initial.integrationMode = nil end
+		if statuses["pi-notifications"] then initial.notificationsEnabled = nil end
+		if pi_state.model then initial.model, initial.modelStatus = nil, nil end
+		if statuses["pi-console-model-readiness"] == "unavailable" then initial.model, initial.modelStatus = nil, nil end
+		if pi_state.thinkingLevel then initial.thinkingLevel = nil end
+		if conversation and conversation.stats then initial.sessionStats = nil end
 	end
 	state.codex_usage = status_data("pi-codex-usage")
 	state.spawn_running_count = snapshot and #(snapshot.subagentRuns or {}) or 0
@@ -686,7 +697,7 @@ local function disconnected()
 	offers = {}
 	resources.invalidate()
 	generation = generation + 1
-	job, attachment, grant, authority, hello, startup_options = nil, nil, nil, nil, nil, nil
+	job, attachment, grant, authority, hello, startup_options, startup_status = nil, nil, nil, nil, nil, nil, nil
 	stats_pending, workspace_stats_key, state.workspace_diff = nil, nil, nil
 	session_status, session_error = "unattached", nil
 	feedback_ui.interrupt(feedback)
@@ -794,6 +805,7 @@ local function host_operation(operation, payload)
 			if receipt.result then
 				if same_selection(captured) then
 					session_id = receipt.result.sessionId
+					if operation == "host.create" and startup_status then startup_status.session_id = session_id end
 					feedback_ui.bind(feedback, envelope.id, session_id)
 					backup()
 					attach(session_id, operation == "host.create")
@@ -1161,6 +1173,13 @@ function M.submit_prompt()
 	elseif next(pending_settings) then
 		if not control_current() then notify("Use :PiControl before applying pending settings and submitting."); return end
 	else submit_input(original); return end
+	if not session_id then
+		-- Preserve the displayed selection across allocation and partial snapshots.
+		startup_status = { accessMode = state.access_mode, integrationMode = state.integration_mode,
+			notificationsEnabled = state.notification_status and state.notification_status == "notify on",
+			model = state.model_id and { provider = state.provider, id = state.model_id },
+			modelStatus = state.model_status, thinkingLevel = state.thinking_level, sessionStats = state.session_stats }
+	end
 	local entry = feedback_ui.add(feedback, uid(), "prompt.submit", { text = original }, session_id, hello.serviceEpoch, current_revision(), snapshot)
 	entry.status = "Starting session"
 	starting = { input = original, entry = entry }
