@@ -161,8 +161,8 @@ local function queue_summary(item)
 	return table.concat(lines, "\n")
 end
 local function run_label(run)
-	return tostring(run.agent ~= vim.NIL and run.agent or run.role ~= vim.NIL and run.role or "Subagent")
-		.. " - " .. tostring(run.status) .. " - " .. tostring(run.startedAt or "") .. ": " .. preview(run.prompt)
+	return type(run.agent) == "string" and run.agent ~= "" and run.agent
+		or type(run.role) == "string" and run.role ~= "" and run.role or "Subagent"
 end
 local function unavailable(name)
 	notify(name .. " is unavailable on this service path. No local/RPC fallback was executed.", vim.log.levels.WARN)
@@ -1829,13 +1829,22 @@ end
 function M.abort_side() command("side.abort", {}) end
 function M.pick_spawn()
 	local data, captured = status_data("pi-spawn-runs"), stamp()
-	vim.ui.select(data and data.runs or {}, { prompt = "Owner subagents", format_item = run_label }, function(run)
+	vim.ui.select(data and data.runs or {}, { prompt = "Subagents", format_item = run_label }, function(run)
 		if not run or not same_context(captured) then return end
-		vim.ui.select({ "Artifacts", "Inspect", "Join", "Stop" }, { prompt = run_label(run) }, function(action)
+		local details = {}
+		fields(details, run, { { "status", "Status" }, { "progress", "Latest activity" }, { "prompt", "Task" },
+			{ "error", "Error" }, { "cleanupError", "Cleanup error" },
+			{ "startedAt", "Started" }, { "completedAt", "Completed" },
+			{ "joined", "Joined" }, { "integration", "Integration" }, { "integrationReason", "Integration details" } })
+		fields(details, run.integrationBlock, { { "integration", "Integration blocked" }, { "reason", "Reason" } })
+		vim.ui.select({ "Artifacts", "Inspect", "Join", "Stop" }, {
+			prompt = run_label(run), preview_title = run_label(run),
+			preview_text = table.concat(details, "\n"), preview_filetype = "markdown",
+		}, function(action)
 			if not same_context(captured) then return end
 			if action == "Artifacts" then require("pi-integration.spawn-artifacts").pick_run({ state = state, ui = { notify = notify }, resources = owner_resources() }, run, function() end)
 			elseif action == "Inspect" then
-				local lines = { "# Owner subagent", "" }
+				local lines = { "# Subagent", "" }
 				fields(lines, run, { { "agent", "Agent" }, { "role", "Role" }, { "status", "Status" },
 					{ "prompt", "Task" }, { "startedAt", "Started" }, { "completedAt", "Completed" },
 					{ "accessMode", "Access mode" }, { "isolation", "Isolation" }, { "mode", "Interaction mode" },
