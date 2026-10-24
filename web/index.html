@@ -19,7 +19,11 @@
     </form>
   </header>
   <div id="notice" class="notice" role="alert" hidden></div>
-  <nav id="tabs" aria-label="Open conversations"><a id="overview-tab" href="#" aria-current="page">Overview</a><div id="conversation-tabs"></div></nav>
+  <nav id="tabs" aria-label="Open conversations">
+    <a id="overview-tab" href="#" aria-current="page">Overview</a>
+    <button id="tab-switcher" type="button" aria-expanded="false" aria-controls="conversation-tabs">Open tabs (0)</button>
+    <div id="conversation-tabs"><p id="empty-tabs" class="empty">No open tabs. Open a session from Overview.</p></div>
+  </nav>
   <main id="panels">
     <section id="overview" aria-label="Session overview" tabindex="-1">
       <div class="overview-heading"><h1>Open sessions <span id="session-count">0</span></h1><div class="actions"><button id="history">History</button><button id="new-session" disabled>New session</button></div></div>

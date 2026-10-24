@@ -298,12 +298,45 @@ function showCreate(inWorkspace = false) {
   $("cwd").value = inWorkspace ? tab?.cwd() || "" : "";
   $("create-dialog").showModal();
 }
+const mobileTabs = window.matchMedia("(max-width: 700px)");
+function setTabsExpanded(expanded, restoreFocus = false) {
+  $("tab-switcher").setAttribute("aria-expanded", String(expanded));
+  if (restoreFocus) $("tab-switcher").focus({ preventScroll: true });
+}
+$("tab-switcher").addEventListener("click", () => {
+  setTabsExpanded($("tab-switcher").getAttribute("aria-expanded") !== "true");
+});
+$("tabs").addEventListener("click", event => {
+  if (mobileTabs.matches && event.target.closest("a")) setTabsExpanded(false, true);
+});
+document.addEventListener("pointerdown", event => {
+  if (!$("tabs").contains(event.target)) setTabsExpanded(false);
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && $("tab-switcher").getAttribute("aria-expanded") === "true") {
+    event.preventDefault();
+    setTabsExpanded(false, true);
+  }
+});
+$("tabs").addEventListener("focusout", event => {
+  if (event.relatedTarget && !$("tabs").contains(event.relatedTarget)) setTabsExpanded(false);
+  // A breakpoint can hide the focused control before the media change event.
+  else if (!event.relatedTarget && mobileTabs.matches && $("conversation-tabs").contains(event.target)
+    && getComputedStyle($("conversation-tabs")).display === "none") $("tab-switcher").focus({ preventScroll: true });
+  else if (!event.relatedTarget && !mobileTabs.matches && event.target === $("tab-switcher")) {
+    (tabs.get(activeKey)?.link || $("overview-tab")).focus({ preventScroll: true });
+  }
+});
+mobileTabs.addEventListener("change", () => setTabsExpanded(false));
 function renderTabs() {
   $("overview-tab").setAttribute("aria-current", activeKey ? "false" : "page");
+  $("tab-switcher").textContent = `Open tabs (${tabs.size})`;
+  $("empty-tabs").hidden = tabs.size > 0;
   for (const [key, tab] of tabs) {
     const row = tab.host.sessions.find(row => row.id === tab.id);
     tab.syncRow(row);
-    tab.link.textContent = `${sessionName(row || tab.row)} / ${tab.host.alias}`;
+    tab.tabTitle.textContent = sessionName(row || tab.row);
+    tab.tabHost.textContent = tab.host.alias;
     tab.link.setAttribute("aria-current", key === activeKey ? "page" : "false");
     setStatus(tab.statusBadge, tab.status());
     tab.closeButton.setAttribute("aria-label", `Close tab: ${sessionName(row || tab.row)}`);
@@ -346,11 +379,14 @@ function route() {
 function closeTab(key) {
   const tab = tabs.get(key);
   if (!tab) return;
+  const nextLink = (tab.tabElement.nextElementSibling || tab.tabElement.previousElementSibling)?.querySelector("a");
   tab.dispose();
   tab.element.remove(); tab.tabElement.remove(); tabs.delete(key);
   if (activeKey === key) navigate("");
   renderTabs(); renderOverview();
-  if (!activeKey) $("overview-tab").focus();
+  if (mobileTabs.matches && $("tab-switcher").getAttribute("aria-expanded") === "true") {
+    (nextLink || $("tab-switcher")).focus({ preventScroll: true });
+  } else if (!activeKey) $("overview-tab").focus();
 }
 
 $("connection-form").addEventListener("submit", event => { event.preventDefault(); perform(connectAll); });
@@ -415,7 +451,10 @@ function createConversation(host, row) {
   $("prompt").value = stoppedPromptDrafts.get(key) || "";
   stoppedPromptDrafts.delete(key);
   const tabElement = text("div", "", "conversation-tab");
-  const link = text("a", sessionName(row));
+  const link = text("a");
+  const tabTitle = text("span", sessionName(row), "tab-title");
+  const tabHost = text("span", host.alias, "tab-host");
+  link.append(tabTitle, text("span", " / ", "tab-separator"), tabHost);
   link.href = sessionRoute(host, row);
   link.setAttribute("aria-controls", panelId);
   link.addEventListener("click", event => { event.preventDefault(); navigate(link.hash); });
@@ -931,7 +970,7 @@ function createConversation(host, row) {
   return {
     get host() { return host; },
     get row() { return row; },
-    identity, id: selectedId, element, tabElement, link, statusBadge, closeButton, reconnect,
+    identity, id: selectedId, element, tabElement, link, tabTitle, tabHost, statusBadge, closeButton, reconnect,
     status: displayStatus,
     viewed() { if (snapshot) renderSession(); },
     connected: () => connected,

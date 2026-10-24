@@ -58,6 +58,7 @@ label { font-size: 12px; color: var(--muted); }
 #tabs a[aria-current="page"] { color: var(--accent); }
 #overview-tab[aria-current="page"] { border-bottom-color: var(--accent); background: var(--bg); }
 #overview-tab { border-right: 1px solid var(--border); }
+#tab-switcher, #empty-tabs { display: none; }
 #conversation-tabs { display: flex; min-width: 0; overflow-x: auto; }
 .conversation-tab { display: flex; flex-shrink: 0; align-items: center; border-right: 1px solid var(--border); border-bottom: 2px solid transparent; }
 .conversation-tab:has(a[aria-current="page"]) { border-bottom-color: var(--accent); background: var(--bg); }
@@ -206,8 +207,22 @@ dialog p { font-size: 12px; margin-top: 10px; }
   .wordmark { font-size: 18px; }
   .connection-form { gap: 6px; }
   #connect { padding: 4px 8px; font-size: 11px; }
-  #tabs a { padding: 6px 10px; }
-  #tabs .conversation-tab a { max-width: 180px; }
+  #tabs { position: relative; overflow: visible; min-height: 44px; }
+  #tabs a { padding: 6px 12px; }
+  #tab-switcher { display: block; margin-left: auto; min-height: 44px; border: 0; border-left: 1px solid var(--border); border-radius: 0; font-size: inherit; }
+  #tab-switcher::after { content: "+"; display: inline-block; width: 16px; margin-left: 8px; color: var(--accent); }
+  #tab-switcher[aria-expanded="true"] { color: var(--accent); background: var(--bg); }
+  #tab-switcher[aria-expanded="true"]::after { content: "-"; }
+  #conversation-tabs { display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 3; flex-direction: column; max-height: min(60dvh, 420px); overflow-y: auto; overscroll-behavior: contain; background: var(--surface); border-bottom: 1px solid var(--border); box-shadow: 0 8px 24px #0006; }
+  #tabs:has(#tab-switcher[aria-expanded="true"]) #conversation-tabs { display: flex; }
+  #empty-tabs { display: block; padding: 16px 12px; line-height: 1.6; }
+  .conversation-tab { display: grid; grid-template-columns: minmax(0, 1fr) auto 44px; border: 0; border-top: 1px solid var(--border); border-left: 3px solid transparent; }
+  .conversation-tab:has(a[aria-current="page"]) { border-left-color: var(--accent); }
+  #tabs .conversation-tab a { max-width: none; min-width: 0; min-height: 44px; padding: 12px 9px; white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+  .tab-host { display: block; color: var(--muted); font-size: 11px; }
+  .tab-separator { display: none; }
+  .conversation-tab button { min-width: 44px; min-height: 44px; align-self: stretch; }
+  .conversation-tab > .status { padding-right: 4px; font-size: 10px; }
   .overview-heading { padding: 20px 12px 12px; flex-wrap: wrap; }
   .overview-heading h1 { flex-basis: 100%; }
   .overview-heading .actions { width: 100%; }
