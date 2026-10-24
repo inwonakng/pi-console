@@ -45,6 +45,7 @@ export class RemoteListener {
         ["/client.js", "client.js", "text/javascript; charset=utf-8"],
         ["/style.css", "style.css", "text/css; charset=utf-8"],
         ["/logo.svg", "logo.svg", "image/svg+xml"],
+        ["/apple-touch-icon.png", "apple-touch-icon.png", "image/png"],
       ]) {
         let body = readFileSync(join(web.root, file));
         if (path === "/") body = Buffer.from(body.toString("utf8").replace("{{PI_CONSOLE_CHANNEL}}", web.channel));
