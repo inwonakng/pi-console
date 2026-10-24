@@ -1,7 +1,7 @@
 export interface ExtensionSettings {
 	server?: {
 		port?: number;
-		webui?: { enabled?: boolean };
+		webui?: { enabled?: boolean; "allowed-origins"?: string[] };
 	};
 	notifications?: {
 		default?: "enabled" | "disabled";

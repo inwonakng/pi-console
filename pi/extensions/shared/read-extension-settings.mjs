@@ -27,6 +27,16 @@ function requirePath(value, path) {
 	return value;
 }
 
+function requireOrigin(value, path) {
+	if (typeof value === "string" && URL.canParse(value)) {
+		const url = new URL(value);
+		if (["http:", "https:"].includes(url.protocol) && url.origin === value && !url.hostname.includes("*")) {
+			return value;
+		}
+	}
+	throw new Error(`${path} must be an exact HTTP(S) origin without a path, credentials, wildcards, or trailing slash`);
+}
+
 // Read on demand so every extension sees edits without a watcher or reload cache.
 // Add each new extension's section and validation here as it adopts this file.
 export function readExtensionSettings(channel = process.env.PI_CONSOLE_CHANNEL) {
@@ -66,11 +76,16 @@ export function readExtensionSettings(channel = process.env.PI_CONSOLE_CHANNEL) 
 			}
 			if (Object.hasOwn(server, "webui")) {
 				const webui = requireMapping(server.webui, "server.webui");
-				requireKnownKeys(webui, ["enabled"], "server.webui");
+				requireKnownKeys(webui, ["enabled", "allowed-origins"], "server.webui");
 				settings.server.webui = {};
 				if (Object.hasOwn(webui, "enabled")) {
 					if (typeof webui.enabled !== "boolean") throw new Error("server.webui.enabled must be a boolean");
 					settings.server.webui.enabled = webui.enabled;
+				}
+				if (Object.hasOwn(webui, "allowed-origins")) {
+					const origins = webui["allowed-origins"];
+					if (!Array.isArray(origins)) throw new Error("server.webui.allowed-origins must be a list of origins");
+					settings.server.webui["allowed-origins"] = origins.map((value, index) => requireOrigin(value, `server.webui.allowed-origins[${index}]`));
 				}
 			}
 		}

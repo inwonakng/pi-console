@@ -12,6 +12,10 @@ server:
   port: 8443
   webui:
     enabled: false
+    # Additional dashboard origins for reverse proxies; restart after changes.
+    # Exact http:// or https:// origins, without paths or trailing slashes.
+    allowed-origins: []
+    # allowed-origins: ["https://pi.hyrax-pollux.ts.net"]
 
 notifications:
   # enabled | disabled

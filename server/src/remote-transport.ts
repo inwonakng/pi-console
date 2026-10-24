@@ -35,7 +35,7 @@ export class RemoteListener {
   private readonly timer: NodeJS.Timeout;
   constructor(private readonly port: number,
     connection: (stream: Duplex, onDetach: (detach: () => void) => void) => Promise<void>,
-    web?: { root: string; serviceRoot: string; channel: Channel; hostId: string }) {
+    web?: { root: string; serviceRoot: string; channel: Channel; hostId: string; allowedOrigins?: readonly string[] }) {
     // Load the fixed asset set at startup; never resolve request paths on disk.
     const assets = new Map<string, { body: Buffer; type: string }>();
     if (web) {
@@ -93,7 +93,8 @@ export class RemoteListener {
     });
     this.server.on("upgrade", (request, socket, head) => {
       // Non-browser clients retain trusted-network access. Browser clients must
-      // come from this HTTP origin, and only when the web frontend is enabled.
+      // come from this HTTP origin or an explicitly configured dashboard origin,
+      // and only when the web frontend is enabled. Proxy headers are not trusted.
       const origin = request.headers.origin;
       let target: RegisteredHost | undefined;
       const relayKey = /^\/v1\/hosts\/(host-[a-f0-9]{64})\/stream$/.exec(request.url ?? "")?.[1];
@@ -101,7 +102,7 @@ export class RemoteListener {
         try { target = readHostRegistry(web.channel).find((host) => host.key === relayKey && host.enabled); }
         catch { /* Invalid or inaccessible configuration fails closed. */ }
       }
-      if (origin !== undefined && (!web || origin !== `http://${request.headers.host}`)
+      if (origin !== undefined && (!web || origin !== `http://${request.headers.host}` && !web.allowedOrigins?.includes(origin))
         || request.url !== "/v1/stream" && !target || this.peers.size + this.upgrading >= 32) {
         socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); return;
       }

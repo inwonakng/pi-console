@@ -21,6 +21,23 @@ connects using the serving host's stable/dev channel and displays it as a read-o
 label. The frontend is disabled by default; configuration and asset changes require
 a service restart.
 
+For an HTTPS reverse proxy, add the external dashboard origin explicitly:
+
+```yaml
+server:
+  webui:
+    enabled: true
+    allowed-origins:
+      - https://pi.hyrax-pollux.ts.net
+```
+
+`allowed-origins` defaults to an empty list. Entries must be exact HTTP(S) origins
+(scheme, hostname, and non-default port if needed), with no path, credentials,
+wildcards, or trailing slash. Direct same-origin HTTP access remains available.
+The proxy must support WebSocket upgrades; forwarded headers do not grant access.
+Install a runtime supporting this setting before adding it to the configuration,
+then restart the matching service.
+
 **Anyone who can reach the server port can view and control sessions as the
 host user, including sessions on its registered hosts. There is no authentication
 or encryption.** Use only trusted internal networks/VPNs and firewall rules.
@@ -29,7 +46,8 @@ or encryption.** Use only trusted internal networks/VPNs and firewall rules.
 
 When enabled, the listener serves `/` (`index.html`), `/app.js`, `/client.js`,
 `/style.css`, and the read-only `/v1/hosts` registry. Browser WebSockets at
-`/v1/stream` and `/v1/hosts/<key>/stream` must have the same HTTP origin as the page;
+`/v1/stream` and `/v1/hosts/<key>/stream` use the page's origin. The listener accepts
+its direct HTTP origin and configured `server.webui.allowed-origins` only;
 connections initiated by unrelated websites are rejected. Registered streams relay
 only enabled targets from the serving machine's `hosts.yaml` (`hosts-dev.yaml` for
 dev), including local root profiles. Saved host identity pins and the selected
