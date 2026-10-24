@@ -43,7 +43,7 @@ local function workspace_label(entry)
 	local name = vim.fn.fnamemodify(workspace_path(entry), ":t")
 	hash = name:match("^task%-%d%d%d%d%-.*%-(%x%x%x%x%x%x%x%x)$")
 		or name:match("^child%-%d%d%d%d%-.*%-(%x%x%x%x%x%x%x%x)$")
-	return hash or name
+	return hash or "local"
 end
 
 local indicator_widths = { 1, 2, 1 }
