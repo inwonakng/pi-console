@@ -73,15 +73,21 @@ local function indicator_columns(entry)
 	return table.concat(cells), spans
 end
 
+local function controller_label(entry)
+	if entry.connected == false then return "-" end
+	local label = type(entry.controller) == "table" and text(entry.controller.label) or ""
+	if label == "neovim@" .. vim.fn.hostname() then return "neovim@localhost" end
+	return label ~= "" and label or "-"
+end
+
 local function metadata(entry)
 	local host = text(entry.location) ~= "" and text(entry.location) or text(entry.host_name)
-	local controller = type(entry.controller) == "table" and text(entry.controller.label) or ""
 	return {
 		status = text(entry.status),
 		project = vim.fn.fnamemodify(project(entry), ":t"),
 		workspace = workspace_label(entry),
 		host = host .. (entry.connected == false and " (unreachable)" or ""),
-		controller = entry.connected ~= false and controller ~= "" and controller or "-",
+		controller = controller_label(entry),
 	}
 end
 
@@ -207,7 +213,7 @@ function M.open(config)
 			table.insert(lines, " Workspace: " .. workspace_path(entry))
 			if entry.host_id then
 				table.insert(lines, " Host:      " .. text(entry.host_name) .. (entry.connected == false and " (unreachable)" or ""))
-				table.insert(lines, " Controller: " .. (entry.connected ~= false and type(entry.controller) == "table" and text(entry.controller.label) or "-"))
+				table.insert(lines, " Controller: " .. controller_label(entry))
 			end
 			table.insert(lines, " Location:  " .. text(entry.location))
 			table.insert(lines, " Model:     " .. (text(entry.model) ~= "" and text(entry.model) or "—"))
