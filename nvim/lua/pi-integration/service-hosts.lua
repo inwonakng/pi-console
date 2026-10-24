@@ -635,11 +635,18 @@ local function with_connected_host(host, callback)
 	if host.connecting then host.waiters = host.waiters or {}; table.insert(host.waiters, ready)
 	else ready(host.connected) end
 end
-function M.select_host(callback)
-	M.start()
+local function sorted_hosts()
 	local choices = {}
 	for _, host in pairs(hosts) do table.insert(choices, host) end
-	table.sort(choices, function(a, b) return a.alias < b.alias end)
+	table.sort(choices, function(a, b)
+		if (a.key == "local") ~= (b.key == "local") then return a.key == "local" end
+		return a.alias < b.alias
+	end)
+	return choices
+end
+function M.select_host(callback)
+	M.start()
+	local choices = sorted_hosts()
 	vim.ui.select(choices, { prompt = "Host", format_item = function(host)
 		return host_label(host) .. " | " .. connection_status(host)
 	end }, function(host)
@@ -796,12 +803,7 @@ local function edit(previous)
 end
 function M.picker(on_attach)
 	M.start()
-	local choices = {}
-	for _, host in pairs(hosts) do table.insert(choices, host) end
-	table.sort(choices, function(a, b)
-		if (a.key == "local") ~= (b.key == "local") then return a.key == "local" end
-		return a.alias < b.alias
-	end)
+	local choices = sorted_hosts()
 	table.insert(choices, { alias = "+ Add host", add = true })
 	vim.ui.select(choices, { prompt = "Hosts", format_item = function(host)
 		return host.alias
