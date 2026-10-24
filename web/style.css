@@ -52,12 +52,14 @@ label { font-size: 12px; color: var(--muted); }
 .notice { background: #392a28; color: var(--danger); border-bottom: 1px solid var(--danger); padding: 10px 22px; max-height: 20dvh; overflow: auto; overflow-wrap: anywhere; }
 #tabs { display: flex; flex-shrink: 0; min-height: 36px; border-bottom: 1px solid var(--border); background: var(--surface); overflow: hidden; font-size: 12px; line-height: 1.2; }
 #tabs a { display: flex; align-items: center; color: var(--muted); text-decoration: none; padding: 6px 10px; white-space: nowrap; border-bottom: 2px solid transparent; }
-#tabs a[aria-current="page"] { color: var(--accent); border-bottom-color: var(--accent); background: var(--bg); }
+#tabs a[aria-current="page"] { color: var(--accent); }
+#overview-tab[aria-current="page"] { border-bottom-color: var(--accent); background: var(--bg); }
 #overview-tab { border-right: 1px solid var(--border); }
 #conversation-tabs { display: flex; min-width: 0; overflow-x: auto; }
-.conversation-tab { display: flex; flex-shrink: 0; align-items: center; border-right: 1px solid var(--border); }
-#tabs .conversation-tab a { max-width: 260px; overflow: hidden; display: block; text-overflow: ellipsis; }
-.conversation-tab button { min-height: 34px; min-width: 34px; padding: 4px 8px; border: 0; border-radius: 0; color: var(--muted); }
+.conversation-tab { display: flex; flex-shrink: 0; align-items: center; border-right: 1px solid var(--border); border-bottom: 2px solid transparent; }
+.conversation-tab:has(a[aria-current="page"]) { border-bottom-color: var(--accent); background: var(--bg); }
+#tabs .conversation-tab a { max-width: 260px; overflow: hidden; display: block; text-overflow: ellipsis; border-bottom: 0; }
+.conversation-tab button { min-height: 34px; min-width: 34px; padding: 4px 8px; border: 0; border-radius: 0; color: var(--muted); background: transparent; }
 @media (pointer: coarse) {
   #tabs { min-height: 44px; }
   .conversation-tab button { min-width: 44px; min-height: 44px; }
