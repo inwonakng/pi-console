@@ -75,7 +75,7 @@ export class ServiceClient {
     const record = JSON.stringify({ id, method, payload }) + "\n";
     if (new TextEncoder().encode(record).length > 2 * 1024 * 1024) return Promise.reject(Object.assign(new Error("Request is too large"), { delivery: "not_sent" }));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.close("Request timed out. Its outcome may be unknown; commands were not replayed."), 30000);
+      const timer = setTimeout(() => this.close("Lost connection to the server. Your last action may still have gone through. Reconnect and check before trying again."), 30000);
       this.pending.set(id, { resolve, reject, timer });
       try { this.socket.send(record); }
       catch (error) { this.close(error.message); }
