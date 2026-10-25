@@ -68,6 +68,17 @@ export type ConversationSnapshot = {
   stats?: SessionStats;
 };
 
+// Each changed section replaces its previous fields, including absent optional fields.
+export const CONVERSATION_SECTIONS = {
+  history: ["messages", "messageKeys", "omittedMessages", "historyRevision", "hydrated"],
+  tools: ["tools"],
+  activity: ["partialAssistant", "diagnostics", "permissions", "omittedPermissions", "work", "queue", "execution"],
+  status: ["statuses", "widgets", "title", "piState", "stats"],
+} as const satisfies Record<string, readonly (keyof ConversationSnapshot)[]>;
+export type ConversationSection = keyof typeof CONVERSATION_SECTIONS;
+export type ConversationRevisions = Record<ConversationSection, number>;
+export type ConversationSections = { [K in ConversationSection]?: Pick<ConversationSnapshot, typeof CONVERSATION_SECTIONS[K][number]> };
+
 export type FrontendEffect =
   | { type: "notification"; message: string; level: "info" | "warning" | "error" }
   | { type: "editor_text"; text: string }
@@ -101,6 +112,7 @@ export class PiConversation {
     tools: [], diagnostics: [], permissions: [], omittedPermissions: 0, work: [], queue: { steering: [], followUp: [] },
     execution: { running: false, interrupted: false }, statuses: {}, widgets: {},
   };
+  private readonly revisions: ConversationRevisions = { history: 0, tools: 0, activity: 0, status: 0 };
   private historyBytes = 0;
   private readonly messageBytes: number[] = [];
   private version = 0;
@@ -114,6 +126,16 @@ export class PiConversation {
 
   snapshot(): ConversationSnapshot {
     return structuredClone(this.state);
+  }
+  sectionRevisions(): ConversationRevisions { return { ...this.revisions }; }
+  changedSections(known: ConversationRevisions): ConversationSections {
+    const sections: ConversationSections = {};
+    for (const section of Object.keys(CONVERSATION_SECTIONS) as ConversationSection[]) {
+      if (known[section] === this.revisions[section]) continue;
+      Object.defineProperty(sections, section, { enumerable: true, value: structuredClone(Object.fromEntries(
+        CONVERSATION_SECTIONS[section].map((key) => [key, this.state[key]]))) });
+    }
+    return sections;
   }
   /** Exact owner-observed output metadata, without copying a conversation per chunk. */
   outputPaths(): string[] {
@@ -208,6 +230,12 @@ export class PiConversation {
   }
 
   apply(change: ConversationChange): void {
+    // Bump before mutation; no snapshot can interleave with this synchronous reducer.
+    if (["history", "invalidate_history", "runtime_ended"].includes(change.type)
+      || change.type === "event" && change.event.type === "message_end") this.revisions.history++;
+    if (change.type === "runtime_ended" || change.type === "event" && change.event.type.startsWith("tool_execution_")) this.revisions.tools++;
+    if (!["status", "widget", "title", "session_stats"].includes(change.type)) this.revisions.activity++;
+    if (["status", "widget", "title", "pi_state", "session_stats", "runtime_ended", "event"].includes(change.type)) this.revisions.status++;
     switch (change.type) {
       case "diagnostic": {
         if (this.state.diagnostics.length >= 128) {

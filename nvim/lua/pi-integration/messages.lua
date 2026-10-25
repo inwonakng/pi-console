@@ -334,15 +334,21 @@ local function scope_tool_calls(messages)
 		local message = original
 		local role = original.role or original.type or ""
 		if role == "assistant" and type(original.content) == "table" then
-			message = vim.deepcopy(original)
-			for _, block in ipairs(message.content) do
+			for index, block in ipairs(original.content) do
 				if type(block) == "table" and (block.type == "toolCall" or block.type == "tool_call") then
 					local id = message_utils.tool_call_id(block)
-					if id then block.id = next_key(id) end
+					if id then
+						if message == original then
+							message = vim.tbl_extend("force", {}, original)
+							message.content = vim.list_slice(original.content)
+						end
+						message.content[index] = vim.tbl_extend("force", {}, block, { id = next_key(id) })
+					end
 				end
 			end
 		elseif role == "toolResult" or role:match("^tool_execution_") then
-			message = vim.deepcopy(original)
+			-- Args, result content and details are read-only throughout output rendering.
+			message = vim.tbl_extend("force", {}, original)
 			local id = message_utils.tool_call_id(message)
 			if id then
 				if not current[id] or role == "tool_execution_start" and completed[id]
@@ -473,11 +479,13 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 			-- Copy items and their state lookup together to preserve group/child identity.
 			-- Never retain final-render rows: later events can rewrite this prefix.
 			cache.checkpoint = vim.deepcopy({
-				count = prefix_end, messages = prefix, metadata = metadata, dependencies = dependencies,
+				count = prefix_end, metadata = metadata, dependencies = dependencies,
 				lines = lines, items = items, state = output_state,
 				has_body = has_body, last_rendered_kind = last_rendered_kind,
 				assistant_block_open = assistant_block_open,
 			})
+			-- Scoped wrappers and snapshot content are never mutated by the renderer.
+			cache.checkpoint.messages = prefix
 		end
 		local message = visible[index]
 		local role = message.role or message.type

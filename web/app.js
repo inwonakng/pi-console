@@ -1,5 +1,6 @@
 import { ServiceClient, requestId } from "./client.js";
 import { renderMarkdown } from "./markdown.js";
+import { snapshotQuery, mergeSnapshot } from "./snapshot.js";
 
 const $ = id => document.getElementById(id);
 const channel = document.documentElement.dataset.piChannel;
@@ -598,7 +599,7 @@ function createConversation(host, row) {
         const captured = context();
         const receipt = await command(operation, payload);
         await terminalReceipt(captured.client, "command.status", { serviceEpoch: hello.serviceEpoch, commandId: receipt.id }, receipt);
-        if (sameContext(captured)) applySnapshot(await captured.client.request("snapshot"));
+        if (sameContext(captured)) applySnapshot(await captured.client.request("snapshot", snapshotQuery(snapshot, hello)));
       });
     });
   }
@@ -697,13 +698,15 @@ function createConversation(host, row) {
     refreshing = true;
     dirty = false;
     try {
-      const value = await captured.client.request("snapshot");
+      const value = await captured.client.request("snapshot", snapshotQuery(snapshot, hello));
       if (sameContext(captured)) applySnapshot(value);
     } catch (error) { if (sameContext(captured)) notice(error.message); }
     finally { refreshing = false; if (dirty) scheduleRefresh(); }
   }
   function applySnapshot(value, resetSeen = false) {
     if (value.sessionId !== selectedId || value.serviceEpoch !== hello.serviceEpoch) return;
+    if (snapshot && value.serviceEpoch === snapshot.serviceEpoch && value.sequence < snapshot.sequence) return;
+    value = mergeSnapshot(snapshot, value);
     snapshot = value;
     if (value.sequence >= authoritySequence) {
       authoritySequence = value.sequence;

@@ -72,7 +72,11 @@ end
 -- replace them with owner history without matching text or authorizing delivery.
 function M.timeline_messages(entries, session, snapshot)
 	local conversation = snapshot and snapshot.conversation or {}
-	local history = vim.deepcopy(conversation.messages or {})
+	-- Snapshot content is immutable; only the renderer's message-key wrapper is local.
+	local history = {}
+	for index, message in ipairs(conversation.messages or {}) do
+		history[index] = vim.tbl_extend("force", {}, message)
+	end
 	local positions, ambiguous = {}, {}
 	for index, key in ipairs(conversation.messageKeys or {}) do
 		history[index].messageKey = key
@@ -153,7 +157,7 @@ function M.timeline_messages(entries, session, snapshot)
 		table.insert(visible, message)
 		vim.list_extend(visible, buckets[index] or {})
 	end
-	if conversation.partialAssistant then table.insert(visible, vim.deepcopy(conversation.partialAssistant.message)) end
+	if conversation.partialAssistant then table.insert(visible, conversation.partialAssistant.message) end
 	vim.list_extend(visible, partial_diagnostics)
 	-- Unknown chronology stays out of the transcript; request details remain in :PiLogs.
 	return visible, unmatched

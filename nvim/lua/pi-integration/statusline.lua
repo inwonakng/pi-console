@@ -240,7 +240,7 @@ local function activity_statusline_label(state)
 	end
 	local label
 	if state.is_loading then
-		label = "loading"
+		label = state.loading_stage or "loading"
 	elseif state.is_retrying then
 		label = "retry"
 	else

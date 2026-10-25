@@ -34,12 +34,12 @@ function M.new(ctx)
 		if action then ctx.notify("Waiting for Pi connection. This action was ignored; try again once connected."); return end
 		local waiting = {}
 		action = waiting
-		local function finish(ok)
+		local function finish(ok, reason)
 			if action ~= waiting then return end
 			action = nil
 			status(nil)
 			if not ok then
-				ctx.notify("Connection recovery failed. Text remains local; no action was retried.")
+				ctx.notify((reason or "Connection recovery failed.") .. " Text remains local; no action was retried.")
 				return
 			end
 			executing = true
@@ -52,8 +52,8 @@ function M.new(ctx)
 			local ready, reason = ctx.ready()
 			if ready then finish(true)
 			elseif vim.uv.hrtime() / 1e6 >= deadline then
-				ctx.disconnect("Readiness timed out after 15 seconds: " .. tostring(reason or "Unknown pending state"))
-				finish(false)
+				-- A slow startup is not evidence that the bridge has failed.
+				finish(false, "Session is still waiting: " .. tostring(reason or "Unknown pending state") .. ".")
 			else vim.defer_fn(function() wait_ready(deadline) end, 25) end
 		end
 		if not ctx.connected() then

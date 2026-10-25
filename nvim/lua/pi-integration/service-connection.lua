@@ -7,7 +7,7 @@ function M.open(target, event)
 		vim.list_extend(args, { "--remote", target.remote })
 	elseif target.root then vim.list_extend(args, { "--root", target.root }) end
 	if target.host_id then vim.list_extend(args, { "--expected-host", target.host_id }) end
-	local partial, errors = "", {}
+	local errors = {}
 	local function fail(message)
 		if connection.closed then return end
 		connection.closed = true
@@ -30,24 +30,16 @@ function M.open(target, event)
 		local ok, sent = pcall(vim.fn.chansend, connection.job, vim.json.encode({ id = id, method = method, payload = payload and next(payload) ~= nil and payload or vim.empty_dict() }) .. "\n")
 		if not ok or sent == 0 then fail("Bridge write failed") end
 	end
+	local consume = require("pi-integration.service-frames").new(function(value)
+		if value.type == "response" then
+			local callback = connection.pending[value.id]; connection.pending[value.id] = nil
+			if callback then callback(value.success, value.success and value.result or value.error) end
+		else event(value) end
+		return not connection.closed
+	end, fail)
 	connection.job = vim.fn.jobstart(args, {
 		on_stdout = function(_, chunks)
-			if connection.closed then return end
-			for i, chunk in ipairs(chunks) do
-				partial = partial .. chunk
-				if #partial > 80 * 1024 * 1024 then fail("Discovery frame too large"); return end
-				if i < #chunks then
-					local line = partial; partial = ""
-					if line ~= "" then
-						local ok, value = pcall(vim.json.decode, line)
-						if not ok then fail("Invalid discovery frame"); return end
-						if value.type == "response" then
-							local callback = connection.pending[value.id]; connection.pending[value.id] = nil
-							if callback then callback(value.success, value.success and value.result or value.error) end
-						else event(value) end
-					end
-				end
-			end
+			if not connection.closed then consume(chunks) end
 		end,
 		on_stderr = function(_, chunks) for _, line in ipairs(chunks) do if line ~= "" then table.insert(errors, line) end end end,
 		on_exit = function() fail(table.concat(errors, "\n") ~= "" and table.concat(errors, "\n") or "Service disconnected") end,

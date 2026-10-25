@@ -44,15 +44,18 @@ function M.metadata_end(ctx)
 	if not ctx.buffer.valid(state.transcript_buf) then
 		return nil
 	end
-	local first = vim.api.nvim_buf_get_lines(state.transcript_buf, 0, 1, false)[1]
-	if first ~= "---" then
+	-- Generated metadata fits in this prefix. Longer headers still use the
+	-- original delimiter search, without reading transcript bodies in the common case.
+	local prefix = vim.api.nvim_buf_get_lines(state.transcript_buf, 0, 32, false)
+	if prefix[1] ~= "---" then
 		return nil
 	end
-	local lines = vim.api.nvim_buf_get_lines(state.transcript_buf, 1, -1, false)
+	for index = 2, #prefix do
+		if prefix[index] == "---" then return index end
+	end
+	local lines = vim.api.nvim_buf_get_lines(state.transcript_buf, #prefix, -1, false)
 	for index, line in ipairs(lines) do
-		if line == "---" then
-			return index + 1
-		end
+		if line == "---" then return #prefix + index end
 	end
 	return nil
 end
@@ -113,6 +116,8 @@ function M.update_metadata(ctx)
 			return
 		end
 	end
+	local quote_cache = state.transcript_quote_cache
+	local tick = vim.api.nvim_buf_get_changedtick(state.transcript_buf)
 	M.preserve_view(ctx, function()
 		ctx.buffer.set_modifiable(state.transcript_buf, true)
 		if end_line then
@@ -122,6 +127,18 @@ function M.update_metadata(ctx)
 		end
 		ctx.buffer.set_modifiable(state.transcript_buf, false)
 	end)
+	-- Equal-height metadata replacements leave body decorations and folds intact.
+	if end_line == #lines then
+		local updated = vim.api.nvim_buf_get_changedtick(state.transcript_buf)
+		if quote_cache and quote_cache.buf == state.transcript_buf and quote_cache.tick == tick then quote_cache.tick = updated end
+		for _, win in ipairs(vim.api.nvim_list_wins()) do
+			local folds = vim.w[win].pi_transcript_folds
+			if buffer.window_matches(win, state.transcript_buf) and folds and folds.buf == state.transcript_buf and folds.tick == tick then
+				folds.tick = updated
+				vim.w[win].pi_transcript_folds = folds
+			end
+		end
+	end
 end
 
 function M.has_body(ctx)
@@ -141,16 +158,23 @@ end
 
 local function tool_summary_rows(state, preview)
 	local rows = {}
+	local function add(line, output_id, stats)
+		local output = state.tool_outputs[output_id]
+		rows[line] = {
+			highlight = tool_output.summary_highlight(state, output_id),
+			edit_stats = stats and output and output.name == "edit" or false,
+		}
+	end
 	for _, group in ipairs(state.transcript_items or {}) do
 		if group.kind == "tool_group" then
-			rows[group.start_line] = { output_id = group.children[1].output_id, stats = false }
+			add(group.start_line, group.children[1].output_id, false)
 			if not preview then
 				for _, child in ipairs(group.children) do
-					rows[child.start_line] = { output_id = child.output_id, stats = true }
+					add(child.start_line, child.output_id, true)
 				end
 			end
 		elseif group.kind == "tool" then
-			rows[group.start_line] = { output_id = group.output_id, stats = true }
+			add(group.start_line, group.output_id, true)
 		end
 	end
 	return rows
@@ -192,12 +216,16 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 		return
 	end
 
+	local tick = vim.api.nvim_buf_get_changedtick(buf)
+	local rows = state and tool_summary_rows(state, opts and opts.preview) or {}
+	local previous = state and state.transcript_quote_cache
+	if previous and previous.buf == buf and previous.tick == tick
+		and vim.deep_equal(previous.rows, rows) then return end
 	vim.api.nvim_buf_clear_namespace(buf, quote_ns, 0, -1)
 	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local rows = state and tool_summary_rows(state, opts and opts.preview) or {}
 	for index, line in ipairs(lines) do
 		local row = rows[index]
-		local highlight = row and tool_output.summary_highlight(state, row.output_id)
+		local highlight = row and row.highlight
 		if not highlight and line:find("> 󰔛 ", 1, true) == 1 then
 			highlight = "PiThinkingQuote"
 		elseif not highlight and line:find("> 󰗨 Session compacted here", 1, true) == 1 then
@@ -216,8 +244,7 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 				virt_text_pos = "overlay",
 				priority = 300,
 			})
-			local output = row and state.tool_outputs[row.output_id]
-			if row and row.stats and output and output.name == "edit" then
+			if row and row.edit_stats then
 				apply_edit_stat_highlights(buf, index, line)
 			end
 			local failure_start = line:find("✗ failed", 1, true)
@@ -233,6 +260,7 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 			end
 		end
 	end
+	if state then state.transcript_quote_cache = { buf = buf, tick = tick, rows = rows } end
 end
 
 function M.apply_quote_highlights(ctx)

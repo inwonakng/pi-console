@@ -14,7 +14,7 @@ import type { RpcCommand, RpcExtensionUIResponse, RpcResponse, RpcSessionState }
 import { PiCommandError, PiProcess, type PiExit, type PiProcessOptions } from "./pi-process.js";
 import type { InteractionSnapshot } from "./pi-interactions.js";
 import { dialogRequest, object, type PiEvent } from "./pi-records.js";
-import { PiConversation, messageKey, type ConversationChange, type ConversationSnapshot, type FrontendEffect } from "./pi-conversation.js";
+import { PiConversation, messageKey, type ConversationChange, type ConversationSnapshot, type ConversationRevisions, type ConversationSections, type FrontendEffect } from "./pi-conversation.js";
 import { SessionSubscription } from "./session-subscription.js";
 import { CommandError, SessionControl, commandFingerprint, sessionCommand, type CommandReceipt, type Controller,
   type ControlGrant, type SessionCommand } from "./session-commands.js";
@@ -56,8 +56,11 @@ export type OwnedSessionState = SessionActivity & {
   controller?: Controller;
   error?: string;
   exit?: PiExit;
+  startupTimings?: { validationMs: number; workerMs: number; historyMs: number };
 };
-export type OwnedSessionSnapshot = OwnedSessionState & { sequence: number; conversation: ConversationSnapshot; commands: CommandReceipt[]; acceptedQueue: AcceptedQueueSnapshot };
+export type SnapshotCursor = { sessionId: string; serviceEpoch: string; runtimeRevision: number; conversationRevisions: ConversationRevisions };
+export type OwnedSessionSnapshot = OwnedSessionState & { sequence: number; conversation: ConversationSnapshot; conversationRevisions: ConversationRevisions; commands: CommandReceipt[]; acceptedQueue: AcceptedQueueSnapshot };
+export type OwnedSessionPatch = Omit<OwnedSessionSnapshot, "conversation"> & { conversationSections: ConversationSections };
 export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevision" | "controller" | keyof SessionActivity> & {
   sequence: number;
   piState?: Pick<RpcSessionState, "isStreaming" | "isCompacting" | "pendingMessageCount">;
@@ -500,6 +503,7 @@ export class HostOwner {
  */
 export class OwnedSession {
   private phase: OwnedSessionState["phase"] = "initializing";
+  private startupTimings?: OwnedSessionState["startupTimings"];
   private readonly conversation = new PiConversation();
   private readonly viewers = new Set<SessionSubscription>();
   private readonly reservations = new QueueReservations(() => this.queueChanged());
@@ -578,7 +582,15 @@ export class OwnedSession {
   ready(): Promise<void> { return this.initialized; }
 
   snapshot(): OwnedSessionSnapshot {
-    return { ...this.ownerState(), sequence: this.sequence, conversation: this.conversation.snapshot(), commands: this.catalog.recentCommands(this.id), acceptedQueue: this.queueSnapshot() };
+    return { ...this.ownerState(), sequence: this.sequence, conversation: this.conversation.snapshot(), conversationRevisions: this.conversation.sectionRevisions(),
+      commands: this.catalog.recentCommands(this.id), acceptedQueue: this.queueSnapshot() };
+  }
+
+  snapshotSince(known?: SnapshotCursor): OwnedSessionSnapshot | OwnedSessionPatch {
+    // Never reuse sections across a service or runtime replacement.
+    if (!known || known.sessionId !== this.id || known.serviceEpoch !== this.catalog.epoch || known.runtimeRevision !== this.runtimeRevision) return this.snapshot();
+    return { ...this.ownerState(), sequence: this.sequence, conversationSections: this.conversation.changedSections(known.conversationRevisions),
+      conversationRevisions: this.conversation.sectionRevisions(), commands: this.catalog.recentCommands(this.id), acceptedQueue: this.queueSnapshot() };
   }
 
   /** No conversation, queued text, interaction contents or control secrets. */
@@ -1371,7 +1383,7 @@ export class OwnedSession {
       ...this.activity(), sessionId: this.id, serviceEpoch: this.catalog.epoch, runtimeRevision: this.runtimeRevision,
       phase: this.phase, trust: this.trust, workspace: this.workspace, piState: this.conversation.sessionState,
       interactions: this.worker?.interactionSnapshot() ?? { revision: 0, pending: [] }, controller: this.control.snapshot(),
-      error: this.error?.message, exit: this.exit,
+      error: this.error?.message, exit: this.exit, startupTimings: this.startupTimings,
     });
   }
 
@@ -1605,6 +1617,8 @@ export class OwnedSession {
   }
 
   private async runOnce(): Promise<void> {
+    const started = performance.now();
+    this.startupTimings = { validationMs: 0, workerMs: 0, historyMs: 0 };
     let owned = false;
     try {
       const header = await this.catalog.validateSessionFile(this.id);
@@ -1612,6 +1626,7 @@ export class OwnedSession {
       await this.catalog.claimOwnership(this.id);
       owned = true;
       this.checkRunning();
+      this.startupTimings.validationMs = performance.now() - started;
       // Only one trust-driven process replacement is permitted per startup.
       for (let replacement = 0; ; replacement++) {
         await this.catalog.validateSessionFile(this.id);
@@ -1639,9 +1654,11 @@ export class OwnedSession {
             this.changed();
           },
         };
+        const workerStarted = performance.now();
         this.worker = new PiProcess(workerOptions);
         this.changed();
         const restart = await this.initialize(this.worker);
+        this.startupTimings.workerMs += performance.now() - workerStarted;
         this.checkRunning();
         if (!restart) break;
         if (replacement >= 1) throw new Error("Project trust repeatedly requested a Pi restart");
@@ -1650,7 +1667,9 @@ export class OwnedSession {
         if (exit.error || exit.code !== 0 || exit.descendantsUnresolved) throw new Error("Pi managed work did not finish cleanly for project trust replacement");
         this.exit = undefined;
       }
+      const historyStarted = performance.now();
       await this.refreshConversation();
+      this.startupTimings.historyMs = performance.now() - historyStarted;
       this.checkRunning();
       if (!this.conversation.hydrated) throw new Error("Pi conversation did not reach a stable startup snapshot");
       this.phase = "ready";

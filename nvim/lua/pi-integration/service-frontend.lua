@@ -12,6 +12,7 @@ local resources = require("pi-integration.service-resources")
 local pending_picker = require("pi-integration.pending-picker")
 local feedback_ui = require("pi-integration.service-feedback")
 local logs = require("pi-integration.logs")
+local snapshots = require("pi-integration.service-snapshot")
 local side_view = require("pi-integration.side")
 local feedback = {}
 state.show_nested_tools = false
@@ -52,6 +53,7 @@ local selected_cwd, starting, auto_control_selection, startup_options, startup_s
 local startup_options_context, startup_options_pending
 local frontend_focused = false
 local action_connection, close_bridge
+local load_metrics
 local function status_data(key)
 	local raw = snapshot and snapshot.conversation.statuses[key]
 	local ok, value = pcall(vim.json.decode, raw or "")
@@ -262,7 +264,8 @@ local record_command
 local function request(method, payload, callback)
 	if not job then notify("Disconnected. Use :PiReconnect; no mutation was retried.", vim.log.levels.WARN); return end
 	local id = uid()
-	callbacks[id] = { callback = callback or function() end, quiet = method == "heartbeat", method = method }
+	callbacks[id] = { callback = callback or function() end, quiet = method == "heartbeat", method = method,
+		operation = payload and payload.operation, started = vim.uv.hrtime() / 1e6 }
 	local ok, sent = pcall(vim.fn.chansend, job, vim.json.encode({ id = id, method = method, payload = object_payload(payload) }) .. "\n")
 	if not ok or sent == 0 then
 		-- A failed pipe write can still have partially delivered a mutation.
@@ -609,6 +612,9 @@ local function update_status_state()
 	state.session_activity = attachment and snapshot and snapshot.status or nil
 	state.is_loading = job ~= nil and (not hello or session_status == "checking" or session_status == "attaching"
 		or session_status == "restoring" or attachment ~= nil and snapshot and snapshot.phase == "initializing")
+	local stages = { checking = "checking session", attaching = "receiving session", restoring = "starting worker" }
+	state.loading_stage = state.is_loading and (not hello and "connecting" or stages[session_status]
+		or snapshot and snapshot.trust and snapshot.trust.state == "pending" and "waiting for trust" or "initializing worker") or nil
 	state.is_agent_running = state.session_activity == "Working" or state.session_activity == "Compacting"
 	state.is_streaming = attachment ~= nil and pi_state.isStreaming == true
 	state.is_retrying = state.session_activity == "Retrying"
@@ -627,7 +633,7 @@ local function update_status_state()
 	if approval_request and state.pending_ui_requests[approval_request] then state.active_ui_request_id = approval_request end
 end
 ctx.transcript.metadata_lines = function() return transcript.metadata_lines(ctx) end
-render = function()
+render = function(metadata_only)
 	-- A pending open may detach this frontend. Finish the current state update first.
 	if pending_new_session then vim.schedule(function() sync_new_session() end) end
 	if not valid(state.transcript_buf) then return end
@@ -637,23 +643,32 @@ render = function()
 	if sync_pending then vim.schedule(sync_pending) end
 	if not state.frontend_visible then return end
 	layout.update_input_sidebar(ctx)
-	local visible, unplaced = feedback_ui.timeline_messages(feedback, session_id, snapshot)
-	if #unplaced > 0 and state.unplaced_submissions ~= #unplaced then
-		notify(tostring(#unplaced) .. " unpositioned submissions (:PiLogs)", vim.log.levels.WARN)
-	end
-	state.unplaced_submissions = #unplaced
-	local inputs = { messages = visible, tools = conversation and conversation.tools,
+	local inputs = { messages = conversation and conversation.messages, keys = conversation and conversation.messageKeys,
+		partial = conversation and conversation.partialAssistant, tools = conversation and conversation.tools,
+		permissions = conversation and conversation.permissions, omittedPermissions = conversation and conversation.omittedPermissions,
+		omittedMessages = conversation and conversation.omittedMessages, diagnostics = conversation and conversation.diagnostics,
+		feedback = feedback, queue = snapshot and snapshot.acceptedQueue.items,
 		buf = state.transcript_buf, nested = state.show_nested_tools, workspace = state.workspace,
 		selection = selection, revision = current_revision(), generation = generation }
 	local metadata = transcript.metadata_lines(ctx)
-	local body_changed = not vim.deep_equal(inputs, rendered_transcript)
+	local body_changed = not (metadata_only and rendered_transcript) and not vim.deep_equal(inputs, rendered_transcript)
 	local metadata_changed = not vim.deep_equal(metadata, rendered_metadata)
 	if body_changed then
+		local visible, unplaced = feedback_ui.timeline_messages(feedback, session_id, snapshot)
+		if #unplaced > 0 and state.unplaced_submissions ~= #unplaced then
+			notify(tostring(#unplaced) .. " unpositioned submissions (:PiLogs)", vim.log.levels.WARN)
+		end
+		state.unplaced_submissions = #unplaced
 		local lines, items = messages.collect_message_lines(ctx, visible, conversation and conversation.tools, transcript_cache)
 		local split = {}
-		for _, line in ipairs(lines) do vim.list_extend(split, vim.split(line, "\n", { plain = true })) end
+		for _, line in ipairs(lines) do
+			if line:find("\n", 1, true) then vim.list_extend(split, vim.split(line, "\n", { plain = true }))
+			else split[#split + 1] = line end
+		end
 		transcript.update_lines(ctx, split)
 		transcript.apply_collected_transcript_items(ctx, items)
+		-- Feedback is local mutable state; owner snapshot sections are immutable.
+		inputs.feedback = vim.deepcopy(feedback)
 		rendered_transcript = inputs
 	elseif metadata_changed then
 		transcript.update_metadata(ctx)
@@ -744,7 +759,8 @@ local function apply_snapshot(value)
 	if value.sessionId ~= session_id then return end
 	observe_authority(value, true)
 	local previous = snapshot
-	if not snapshot or value.serviceEpoch ~= snapshot.serviceEpoch or value.sequence >= snapshot.sequence then snapshot = value end
+	if snapshot and value.serviceEpoch == snapshot.serviceEpoch and value.sequence < snapshot.sequence then return end
+	snapshot = snapshots.merge(snapshot, value)
 	local same_runtime = previous and previous.serviceEpoch == snapshot.serviceEpoch
 		and previous.runtimeRevision == snapshot.runtimeRevision
 	state.completion_seq = snapshot.completionSeq or 0
@@ -765,7 +781,18 @@ local function apply_snapshot(value)
 	feedback_ui.reconcile(feedback, snapshot)
 	-- History received while hidden is aligned only when it is first drawn.
 	if snapshot.conversation.hydrated and (not previous or not previous.conversation.hydrated) then initial_scroll_pending = true end
+	local render_started = vim.uv.hrtime() / 1e6
 	render()
+	if load_metrics then
+		load_metrics.renderMs = (load_metrics.renderMs or 0) + vim.uv.hrtime() / 1e6 - render_started
+		if snapshot.phase == "ready" and snapshot.conversation.hydrated then
+			local details = vim.tbl_extend("force", {}, load_metrics, { elapsedMs = vim.uv.hrtime() / 1e6 - load_metrics.started,
+				worker = snapshot.startupTimings, messages = #snapshot.conversation.messages })
+			details.started = nil
+			logs.add("info", "Session loading timings", details, { session = session_id, key = "load:" .. generation .. ":" .. selection })
+			load_metrics = nil
+		end
+	end
 	if auto_control_selection then
 		local runtime = snapshot.interactions.runtime
 		if not same_selection(auto_control_selection) or current_controller() or snapshot.error then
@@ -804,7 +831,7 @@ refresh = function(immediate, callback)
 		refresh_callbacks = {}
 		dirty, refreshing, refresh_urgent = false, flight, false
 		last_refresh = vim.uv.hrtime() / 1000000
-		request("snapshot", {}, function(ok, value)
+		request("snapshot", snapshots.query(snapshot, hello), function(ok, value)
 			if refreshing ~= flight then return end
 			refreshing = false
 			if gen == generation and target == attachment and selected == session_id and selected_selection == selection then
@@ -816,7 +843,7 @@ refresh = function(immediate, callback)
 		end)
 	end))
 end
-local function reset_refresh(detached)
+local function reset_refresh(detached, preserve_body)
 	if refresh_timer then refresh_timer:stop() end
 	-- Selection changes retain ownership of an outstanding read until its reply;
 	-- only a disconnected bridge guarantees that reply can never arrive.
@@ -824,8 +851,10 @@ local function reset_refresh(detached)
 	refresh_scheduled, dirty, refresh_urgent = false, false, false
 	refresh_callbacks = {}
 	refresh_ticket, refresh_due, last_refresh = nil, nil, -math.huge
-	transcript_cache, rendered_transcript, rendered_metadata = {}, nil, nil
-	rendered_side, rendered_side_buf, initial_scroll_pending = nil, nil, false
+	if not preserve_body then
+		transcript_cache, rendered_transcript, rendered_metadata = {}, nil, nil
+		rendered_side, rendered_side_buf, initial_scroll_pending = nil, nil, false
+	end
 end
 local function disconnected(reason, details, intentional)
 	local entry
@@ -871,10 +900,12 @@ attach = function(id)
 	if pending_host then pending_host_select = false end
 	resources.invalidate()
 	selection = selection + 1
-	reset_refresh()
+	-- Keep the current body/cache while the replacement snapshot is in flight.
+	reset_refresh(false, true)
+	if not load_metrics then load_metrics = { started = vim.uv.hrtime() / 1e6 } end
 	local gen, selected = generation, selection
 	session_status, session_error, state.control_loss_reason = "attaching", nil, nil
-	render()
+	render(true)
 	request("attach", { sessionId = id, label = "neovim@" .. vim.fn.hostname() }, function(ok, value)
 		if gen ~= generation or selected ~= selection then return end
 		if not ok then
@@ -1051,7 +1082,8 @@ connect = function()
 		vim.list_extend(args, { "--remote", M.config.service_remote })
 	elseif M.config.service_root and M.config.service_root ~= "" then vim.list_extend(args, { "--root", M.config.service_root }) end
 	if M.config.expected_host then vim.list_extend(args, { "--expected-host", M.config.expected_host }) end
-	local partial, stderr = "", ""
+	load_metrics = { started = vim.uv.hrtime() / 1e6 }
+	local stderr = ""
 	local disconnect_entry
 	local function update_disconnect(details)
 		disconnect_entry = disconnect_entry or logs.get("connection:" .. gen)
@@ -1060,7 +1092,7 @@ connect = function()
 				{ session = disconnect_entry.session, key = disconnect_entry.key })
 		end
 	end
-	local function record(value)
+	local function record(value, frame)
 		if gen ~= generation then return end
 		if value.type == "hello" then
 			local result = value.result
@@ -1074,6 +1106,7 @@ connect = function()
 				notify("Host identity changed; confirm in Hosts before selecting."); M.detach(); return
 			end
 			hello = result
+			if load_metrics then load_metrics.connectionMs = vim.uv.hrtime() / 1e6 - load_metrics.started end
 			M.config.expected_host = result.hostId
 			if not session_id then host_options() end
 			render()
@@ -1085,6 +1118,11 @@ connect = function()
 			end
 		elseif value.type == "response" then
 			local pending = callbacks[value.id]; callbacks[value.id] = nil
+			if load_metrics and pending and (pending.method == "attach" or pending.method == "snapshot") then
+				load_metrics.snapshotWaitMs = (load_metrics.snapshotWaitMs or 0) + vim.uv.hrtime() / 1e6 - pending.started
+				load_metrics.bytes = (load_metrics.bytes or 0) + frame.bytes
+				load_metrics.decodeMs = (load_metrics.decodeMs or 0) + frame.decodeMs
+			end
 			if value.success == false and not (pending and (pending.method == "command" or pending.method == "host.command")) then
 				local report = pending and pending.quiet and log or notify
 				local message = value.error.code .. ": " .. value.error.message
@@ -1172,24 +1210,15 @@ connect = function()
 			disconnect_entry = disconnected(value.message or "Service disconnected", { code = value.code, connection_id = value.connectionId })
 		end
 	end
+	local consume = require("pi-integration.service-frames").new(function(value, frame)
+		local handled, err = xpcall(function() record(value, frame) end, debug.traceback)
+		if not handled then notify("Service UI error: " .. tostring(err), vim.log.levels.ERROR); M.detach(); return false end
+		return gen == generation
+	end, function(message) notify(message); M.detach() end)
 	local started = vim.fn.jobstart(args, {
 		stdin = "pipe",
 		on_stdout = function(_, chunks)
-			if gen ~= generation then return end
-			for i, chunk in ipairs(chunks) do
-				partial = partial .. chunk
-				if #partial > 80 * 1024 * 1024 then notify("Bridge frame too large"); M.detach(); return end
-				if i < #chunks then
-					local line = partial
-					partial = ""
-					if line ~= "" then
-						local ok, value = pcall(vim.json.decode, line)
-						if not ok then notify("Invalid bridge frame"); M.detach(); return end
-						local handled, err = xpcall(function() record(value) end, debug.traceback)
-						if not handled then notify("Service UI error: " .. tostring(err), vim.log.levels.ERROR); M.detach(); return end
-					end
-				end
-			end
+			if gen == generation then consume(chunks) end
 		end,
 		on_stderr = function(_, chunks)
 			stderr = (stderr .. table.concat(chunks, "\n")):sub(-4096)
@@ -2524,10 +2553,15 @@ action_connection = require("pi-integration.service-action-connection").new({
 		if session_status == "checking" or session_status == "attaching" or session_status == "restoring" then return false, session_status end
 		if not attachment then return true end -- Unstarted or unavailable; the action reports its own prerequisites.
 		if not snapshot then return false, "initial snapshot pending" end
-		if refreshing or refresh_scheduled then return false, "snapshot refresh pending" end
-		if auto_control_selection then return false, "control acquisition pending" end
+		if snapshot.serviceEpoch ~= hello.serviceEpoch or snapshot.runtimeRevision ~= current_revision() then
+			return false, "runtime synchronization pending"
+		end
+		if auto_control_selection then return false, "initial control acquisition pending" end
 		for _, pending in pairs(callbacks) do
-			if pending.method == "grant" or pending.method == "command" or pending.method == "command.status" then return false, pending.method .. " reply pending" end
+			if pending.method == "grant" or pending.method == "command"
+				and (pending.operation == "control.acquire" or pending.operation == "control.takeover") then
+				return false, "control acquisition pending"
+			end
 		end
 		return true -- Authority checks remain in the action; a viewer can still request control.
 	end,

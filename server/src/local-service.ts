@@ -4,7 +4,8 @@ import type { Duplex } from "node:stream";
 import { RemoteListener, listenerPort, listenerAddresses } from "./remote-transport.js";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { HostOwner, type HostOwnerOptions, type HostSummaries, type OwnedSession, type OwnedSessionUpdate, type OriginNotification } from "./host-owner.js";
+import { HostOwner, type HostOwnerOptions, type HostSummaries, type OwnedSession, type OwnedSessionUpdate, type OriginNotification, type SnapshotCursor } from "./host-owner.js";
+import { CONVERSATION_SECTIONS } from "./pi-conversation.js";
 import { RemoteNotifications } from "./remote-notifications.js";
 import type { SessionSubscription } from "./session-subscription.js";
 import { CommandError } from "./session-commands.js";
@@ -18,6 +19,19 @@ import { readExtensionSettings } from "../../pi/extensions/shared/read-extension
 export const endpoint = (root: string): string => join(root, "service.sock");
 function exact(value: Record<string, unknown>, keys: string[]): void {
   if (Object.keys(value).some((key) => !keys.includes(key))) throw new CommandError("invalid_command", "Unknown IPC field");
+}
+
+function snapshotCursor(value: unknown): SnapshotCursor | undefined {
+  if (value === undefined) return;
+  if (!object(value)) throw new CommandError("invalid_command", "Invalid snapshot cursor");
+  exact(value, ["sessionId", "serviceEpoch", "runtimeRevision", "conversationRevisions"]);
+  const revisions = value.conversationRevisions;
+  if (!identifier(value.sessionId) || !identifier(value.serviceEpoch) || !Number.isSafeInteger(value.runtimeRevision) || (value.runtimeRevision as number) < 0 || !object(revisions)
+    || Object.keys(revisions).length !== Object.keys(CONVERSATION_SECTIONS).length
+    || Object.keys(CONVERSATION_SECTIONS).some((key) => !Number.isSafeInteger(revisions[key]) || (revisions[key] as number) < 0)) {
+    throw new CommandError("invalid_command", "Invalid snapshot cursor");
+  }
+  return value as SnapshotCursor;
 }
 
 /** Same-user local IPC. Filesystem ownership/modes are the authentication boundary.
@@ -289,7 +303,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
             const view = subscription;
             if (!target || !view) throw new CommandError("attachment_closed", "Attach before using session operations");
             switch (record.method) {
-              case "snapshot": exact(p, []); result = target.snapshot(); break;
+              case "snapshot": exact(p, ["known"]); result = target.snapshotSince(snapshotCursor(p.known)); break;
               case "session.read":
                 result = await target.read(p, () => {
                   if (socket.destroyed || subscription !== view || session !== target) throw new CommandError("attachment_closed", "Read attachment changed");

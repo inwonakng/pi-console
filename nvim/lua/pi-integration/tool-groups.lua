@@ -95,6 +95,28 @@ function M.apply_folds(state, win)
 	if not win or not vim.api.nvim_win_is_valid(win) then
 		return
 	end
+	local folds = {}
+	for _, group in ipairs(state.transcript_items or {}) do
+		if group.kind == "tool_group" then
+			local choice = (state.tool_group_expanded or {})[group.key]
+			local running = false
+			for _, child in ipairs(group.children) do
+				local output = state.tool_outputs[child.output_id]
+				local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
+				if call and call.execution_status == "running" then
+					running = true
+					break
+				end
+			end
+			group.expanded = choice == true or (choice == nil and running)
+			table.insert(folds, { group.start_line, group.end_line, group.expanded })
+		end
+	end
+	local buf = vim.api.nvim_win_get_buf(win)
+	local previous = vim.w[win].pi_transcript_folds
+	local tick = vim.api.nvim_buf_get_changedtick(buf)
+	if previous and previous.buf == buf and previous.tick == tick and vim.deep_equal(previous.folds, folds)
+		and vim.wo[win].foldmethod == "manual" and vim.wo[win].foldenable then return end
 	vim.api.nvim_win_call(win, function()
 		local view = vim.fn.winsaveview()
 		vim.wo.foldmethod = "manual"
@@ -104,29 +126,18 @@ function M.apply_folds(state, win)
 		vim.wo.foldtext = ""
 		vim.opt_local.fillchars:append({ fold = " " })
 		vim.cmd("normal! zE")
-		for _, group in ipairs(state.transcript_items or {}) do
-			if group.kind == "tool_group" then
-				local choice = (state.tool_group_expanded or {})[group.key]
-				local running = false
-				for _, child in ipairs(group.children) do
-					local output = state.tool_outputs[child.output_id]
-					local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
-					if call and call.execution_status == "running" then
-						running = true
-						break
-					end
-				end
-				group.expanded = choice == true or (choice == nil and running)
-				vim.cmd(string.format("%d,%dfold", group.start_line, group.end_line))
-				if group.expanded then
-					vim.cmd(tostring(group.start_line) .. "foldopen")
-				elseif view.lnum > group.start_line and view.lnum <= group.end_line then
-					view.lnum, view.col = group.start_line, 0
-				end
+		for _, fold in ipairs(folds) do
+			local first, last, expanded = unpack(fold)
+			vim.cmd(string.format("%d,%dfold", first, last))
+			if expanded then
+				vim.cmd(tostring(first) .. "foldopen")
+			elseif view.lnum > first and view.lnum <= last then
+				view.lnum, view.col = first, 0
 			end
 		end
 		vim.fn.winrestview(view)
 	end)
+	vim.w[win].pi_transcript_folds = { buf = buf, tick = tick, folds = folds }
 end
 
 function M.toggle(ctx, group)
