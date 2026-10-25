@@ -11,67 +11,72 @@
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-  <header class="app-header">
-    <a class="wordmark" href="#"><img src="./logo.svg" width="36" height="36" alt="">pi-console</a>
-    <form id="connection-form" class="connection-form">
-      <span id="channel" aria-label="Server channel"></span>
-      <button id="connect" type="submit">Connect</button>
-    </form>
-  </header>
   <div id="notice" class="notice" role="alert" hidden></div>
-  <nav id="tabs" aria-label="Open conversations">
-    <a id="overview-tab" href="#" aria-current="page">Overview</a>
-    <button id="tab-switcher" type="button" aria-expanded="false" aria-controls="conversation-tabs">Open tabs (0)</button>
-    <div id="conversation-tabs"><p id="empty-tabs" class="empty">No open tabs. Open a session from Overview.</p></div>
-  </nav>
   <main id="panels">
     <section id="overview" aria-label="Session overview" tabindex="-1">
-      <div class="overview-heading"><h1>Open sessions <span id="session-count">0</span></h1><div class="actions"><button id="history">History</button><button id="new-session" disabled>New session</button></div></div>
+      <div class="overview-heading"><h1>Sessions <span id="session-count">0</span></h1><div class="actions"><button id="history">History</button><button id="new-session" disabled>New session</button></div></div>
       <div class="filters">
         <label for="search">Filter sessions<input id="search" type="search" placeholder="Title, directory or host" autocomplete="off"></label>
         <label for="host-filter">Host<select id="host-filter"><option value="">All hosts</option></select></label>
       </div>
       <details class="hosts-panel">
         <summary>Hosts <span id="connection-state" role="status">Disconnected</span></summary>
+        <form id="connection-form" class="connection-form"><span id="channel" aria-label="Server channel"></span><button id="connect" type="submit">Connect</button></form>
         <div id="hosts" aria-label="Registered hosts"></div>
       </details>
       <nav id="session-list" aria-label="Open sessions"><p class="empty">Connect to see sessions across registered hosts.</p></nav>
     </section>
   </main>
   <template id="conversation-template">
-    <section class="conversation" aria-label="Conversation" tabindex="-1" hidden>
+    <section class="conversation" aria-label="Session" hidden>
       <div data-id="notice" class="notice" role="alert" hidden></div>
-      <header class="session-header">
-        <div class="session-heading"><div class="session-title-row"><h2 data-id="session-title"></h2><span data-id="session-status" class="status"></span></div><p data-id="session-directory"></p></div>
-        <button data-id="reconnect" hidden>Reconnect</button>
-        <details data-id="session-actions" class="session-actions">
-          <summary>Actions</summary>
-          <div class="actions">
-            <button data-id="new-workspace">New in this workspace</button>
-            <button data-id="rename" disabled>Rename session</button>
-            <button data-id="stop" class="danger" disabled>Stop session</button>
+      <section data-id="chat-screen" class="chat-screen" aria-label="Conversation" tabindex="-1">
+        <header class="screen-header">
+          <button data-id="back" type="button" aria-label="Back to overview">Back</button>
+          <div class="session-heading"><h2 data-id="session-title"></h2><span data-id="session-status" class="status" role="status"></span></div>
+          <button data-id="options" type="button">Options</button>
+        </header>
+        <div class="transcript-area">
+          <div data-id="transcript" class="transcript" tabindex="0" aria-label="Conversation transcript">
+            <div data-id="messages"></div>
+            <section data-id="interactions" class="interactions" aria-label="Questions and approvals" hidden>
+              <h3 data-id="interaction-summary">Questions and approvals</h3>
+              <div data-id="interaction-list"></div>
+            </section>
           </div>
-        </details>
-      </header>
-      <div class="control-bar"><span data-id="controller" role="status">Read only</span><button data-id="control" disabled>Take control</button><button data-id="abort" disabled>Stop turn</button></div>
-      <details data-id="settings" class="settings-panel">
-        <summary>Model and settings <span data-id="settings-model" class="muted"></span></summary>
-        <div data-id="settings-fields" class="settings-fields"></div>
-        <div class="settings-footer"><span data-id="settings-hint" role="status">Take control to change settings.</span><button data-id="refresh-settings" type="button">Refresh options</button></div>
-      </details>
-      <div data-id="transcript" class="transcript" tabindex="0" aria-label="Conversation transcript"></div>
-      <button data-id="latest" class="latest" hidden>Jump to latest</button>
-      <details data-id="interactions" class="interactions" hidden>
-        <summary data-id="interaction-summary">Questions and approvals</summary>
-        <div data-id="interaction-list"></div>
-      </details>
-      <details data-id="queue-panel" class="queue-panel" hidden><summary data-id="queue-summary">Queued prompts</summary><div data-id="queue"></div></details>
-      <form data-id="composer" class="composer">
-        <label data-id="prompt-label">Prompt</label>
-        <textarea data-id="prompt" rows="3" placeholder="Write a prompt..." disabled></textarea>
-        <div class="composer-footer"><span data-id="composer-hint">Take control to send a prompt.</span><button data-id="send" type="submit" disabled>Send</button></div>
-      </form>
-      <p data-id="command-status" class="command-status" role="status"></p>
+          <button data-id="latest" class="latest" hidden>Jump to latest</button>
+        </div>
+        <form data-id="composer" class="composer">
+          <label data-id="prompt-label" class="sr-only">Prompt</label>
+          <div class="composer-row">
+            <textarea data-id="prompt" rows="1" placeholder="Write a prompt..." disabled></textarea>
+            <button data-id="abort" type="button" disabled hidden>Stop</button>
+            <button data-id="send" type="submit" disabled>Send</button>
+          </div>
+          <div data-id="composer-hint" class="composer-hint" role="status">Take control in Options to send a prompt.</div>
+        </form>
+      </section>
+      <section data-id="options-screen" class="options-screen" aria-label="Session options" tabindex="-1" hidden>
+        <header class="screen-header"><button data-id="options-back" type="button" aria-label="Back to conversation">Back</button><h2>Session options</h2></header>
+        <div class="options-content">
+          <section class="option-section">
+            <h3>Session</h3><p data-id="options-title"></p>
+            <div class="control-bar"><span data-id="controller" role="status">Read only</span><button data-id="control" disabled>Take control</button><button data-id="reconnect" hidden>Reconnect</button></div>
+          </section>
+          <section class="option-section">
+            <h3>Model and settings</h3><p data-id="settings-model" class="muted"></p>
+            <div data-id="settings-fields" class="settings-fields"></div>
+            <div class="settings-footer"><span data-id="settings-hint" role="status">Take control to change settings.</span><button data-id="refresh-settings" type="button">Refresh options</button></div>
+          </section>
+          <section class="option-section">
+            <h3>Directory</h3>
+            <p data-id="session-directory" class="muted"></p><button data-id="choose-directory" type="button">New session in another directory</button><p class="muted">Changing directory starts a new session.</p>
+          </section>
+          <details data-id="queue-panel" class="queue-panel" hidden><summary data-id="queue-summary">Queued prompts</summary><div data-id="queue"></div></details>
+          <section class="option-section"><h3>Session actions</h3><div class="session-actions"><button data-id="new-workspace">New in this workspace</button><button data-id="rename" disabled>Rename session</button><button data-id="detach">Disconnect from session</button><button data-id="stop" class="danger" disabled>Stop session</button></div></section>
+          <p data-id="command-status" class="command-status" role="status"></p>
+        </div>
+      </section>
     </section>
   </template>
   <dialog id="create-dialog">

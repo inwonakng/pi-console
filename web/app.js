@@ -21,10 +21,10 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const sessionName = row => row?.name || row?.cwd?.split("/").filter(Boolean).pop() || "Untitled session";
 const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
-let hosts = [], tabs = new Map(), activeKey = null, connecting = false, generation = 0;
+let hosts = [], conversations = new Map(), activeKey = null, activeScreen = "overview", connecting = false, generation = 0;
 let controllerLabel = "webui";
 const completionStates = new Map(), expandedSubagents = new Set();
-// Automatic controller-tab closure keeps unsent text available in this page.
+// Disconnecting a session keeps unsent text available in this page.
 const stoppedPromptDrafts = new Map();
 function sessionStatus(host, row, activity = row.live, resetSeen = false, viewed = false) {
   if (!host.connected) return "Unknown";
@@ -92,13 +92,13 @@ function setSummaries(host, value) {
   }
   host.sessions = value.sessions;
   for (const row of host.sessions) sessionStatus(host, row);
-  for (const tab of tabs.values()) {
-    if (tab.identity === host.hello.hostId && (!tab.host.connected || !hosts.includes(tab.host))) tab.rebind(host);
+  for (const conversation of conversations.values()) {
+    if (conversation.identity === host.hello.hostId && (!conversation.host.connected || !hosts.includes(conversation.host))) conversation.rebind(host);
   }
   if (host.historyRows) host.historyRows = value.sessions.map(row => ({ ...host.historyRows.find(saved => saved.id === row.id), ...row, live: row.live }));
   renderOverview();
   if ($("history-dialog").open) renderHistory();
-  renderTabs();
+  renderScreens();
 }
 async function connectHost(host) {
   if (host.connecting || host.enabled === false) return;
@@ -110,7 +110,7 @@ async function connectHost(host) {
       host.connected = false;
       host.error = record.message;
       renderOverview();
-      renderTabs();
+      renderScreens();
       if ($("history-dialog").open) renderHistory();
     } else if (record.type === "summaries" && host.hello) setSummaries(host, record.result);
   });
@@ -152,7 +152,7 @@ async function connectAll() {
     for (const host of previous) {
       if (!hosts.includes(host) || host.enabled === false) {
         host.client?.close("Host registration removed, disabled or changed.");
-        for (const tab of tabs.values()) if (tab.host === host) tab.disconnect();
+        for (const conversation of conversations.values()) if (conversation.host === host) conversation.disconnect();
       }
     }
     renderHostOptions();
@@ -233,7 +233,6 @@ function renderOverview() {
     setStatus(status, state);
     heading.append(text("span", sessionName(row), "row-title"), status);
     link.append(heading, text("span", `${host.alias} / ${row.live?.cwd || row.cwd}`, "row-directory"));
-    if (tabs.has(key)) link.append(text("span", "Tab open", "row-open"));
     const runs = host.connected ? row.live?.subagentRuns || [] : [];
     if (!runs.length) return link;
     const group = text("div", "", "session-entry"), details = text("details", "", "subagent-runs");
@@ -265,7 +264,7 @@ function renderHistory() {
           setSummaries(host, await host.client.request("sessions.subscribe"));
         }
         $("history-dialog").close();
-        const old = tabs.get(sessionKey(host.hello.hostId, row.id));
+        const old = conversations.get(sessionKey(host.hello.hostId, row.id));
         if (old && !old.connected()) await old.reconnect();
         navigate(sessionRoute(host, row));
       } finally { host.busy = false; renderHistory(); }
@@ -290,104 +289,89 @@ function showHistory() {
 }
 function showCreate(inWorkspace = false) {
   renderHostOptions();
-  const tab = tabs.get(activeKey);
-  const host = tab ? uniqueHosts().find(host => host.connected && hostIdentity(host) === tab.identity)
+  const conversation = conversations.get(activeKey);
+  const host = conversation ? uniqueHosts().find(host => host.connected && hostIdentity(host) === conversation.identity)
     : uniqueHosts().find(host => host.connected);
   if (!host) { notice("Connect to an execution host first."); return; }
   $("create-host").value = host.key;
-  $("cwd").value = inWorkspace ? tab?.cwd() || "" : "";
+  $("cwd").value = inWorkspace ? conversation?.cwd() || "" : "";
   $("create-dialog").showModal();
 }
-const mobileTabs = window.matchMedia("(max-width: 700px)");
-function setTabsExpanded(expanded, restoreFocus = false) {
-  $("tab-switcher").setAttribute("aria-expanded", String(expanded));
-  if (restoreFocus) $("tab-switcher").focus({ preventScroll: true });
-}
-$("tab-switcher").addEventListener("click", () => {
-  setTabsExpanded($("tab-switcher").getAttribute("aria-expanded") !== "true");
-});
-$("tabs").addEventListener("click", event => {
-  if (mobileTabs.matches && event.target.closest("a")) setTabsExpanded(false, true);
-});
-document.addEventListener("pointerdown", event => {
-  if (!$("tabs").contains(event.target)) setTabsExpanded(false);
-});
-document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && $("tab-switcher").getAttribute("aria-expanded") === "true") {
-    event.preventDefault();
-    setTabsExpanded(false, true);
-  }
-});
-$("tabs").addEventListener("focusout", event => {
-  if (event.relatedTarget && !$("tabs").contains(event.relatedTarget)) setTabsExpanded(false);
-  // A breakpoint can hide the focused control before the media change event.
-  else if (!event.relatedTarget && mobileTabs.matches && $("conversation-tabs").contains(event.target)
-    && getComputedStyle($("conversation-tabs")).display === "none") $("tab-switcher").focus({ preventScroll: true });
-  else if (!event.relatedTarget && !mobileTabs.matches && event.target === $("tab-switcher")) {
-    (tabs.get(activeKey)?.link || $("overview-tab")).focus({ preventScroll: true });
-  }
-});
-mobileTabs.addEventListener("change", () => setTabsExpanded(false));
-function renderTabs() {
-  $("overview-tab").setAttribute("aria-current", activeKey ? "false" : "page");
-  $("tab-switcher").textContent = `Open tabs (${tabs.size})`;
-  $("empty-tabs").hidden = tabs.size > 0;
-  for (const [key, tab] of tabs) {
-    const row = tab.host.sessions.find(row => row.id === tab.id);
-    tab.syncRow(row);
-    tab.tabTitle.textContent = sessionName(row || tab.row);
-    tab.tabHost.textContent = tab.host.alias;
-    tab.link.setAttribute("aria-current", key === activeKey ? "page" : "false");
-    setStatus(tab.statusBadge, tab.status());
-    tab.closeButton.setAttribute("aria-label", `Close tab: ${sessionName(row || tab.row)}`);
-    tab.element.hidden = key !== activeKey;
+function renderScreens() {
+  for (const [key, conversation] of conversations) {
+    conversation.setScreen(key === activeKey, activeScreen === "options");
+    conversation.syncRow(conversation.host.sessions.find(row => row.id === conversation.id));
   }
   $("overview").hidden = Boolean(activeKey);
 }
-function navigate(hash) {
-  if (location.hash === hash || (!hash && !location.hash)) route();
-  else location.hash = hash;
+function navigate(hash, replace = false) {
+  if (location.hash !== hash) {
+    history[replace ? "replaceState" : "pushState"]({ back: replace ? null : location.hash }, "", hash || location.pathname + location.search);
+  }
+  route();
+}
+function backTo(hash) {
+  if (history.state?.back === hash) history.back();
+  else navigate(hash, true);
 }
 function route() {
-  const match = /^#sessions\/([\w-]{1,128})\/([\w-]{1,128})$/.exec(location.hash);
+  const match = /^#sessions\/([\w-]{1,128})\/([\w-]{1,128})(\/options)?$/.exec(location.hash);
+  const previousKey = activeKey, previousScreen = activeScreen;
   if (!match) {
     // Keep old single-host bookmarks usable, without implicitly resuming history.
     const legacy = /^#sessions\/([\w-]{1,128})$/.exec(location.hash);
     const local = hosts.find(host => host.key === "local" && host.connected);
-    if (legacy && local) { navigate(sessionRoute(local, { id: legacy[1] })); return; }
-    activeKey = null; renderTabs(); return;
+    if (legacy && local) { navigate(sessionRoute(local, { id: legacy[1] }), true); return; }
+    activeKey = null; activeScreen = "overview";
+    renderScreens();
+    if (previousKey) {
+      ([...$("session-list").querySelectorAll("a")].find(link => link.dataset.key === previousKey) || $("overview")).focus({ preventScroll: true });
+    }
+    return;
   }
   const key = sessionKey(match[1], match[2]);
-  let tab = tabs.get(key);
-  if (!tab) {
+  let conversation = conversations.get(key);
+  if (!conversation) {
     const host = hosts.find(host => host.connected && host.hello.hostId === match[1]);
-    if (!host) { if (!connecting) notice("This host is unavailable. Reconnect it from Overview."); return; }
-    const row = host.sessions.find(row => row.id === match[2]);
-    if (!row?.live) { notice("This session is inactive or unavailable. Open History to resume it explicitly."); return; }
-    tab = createConversation(host, row);
-    tabs.set(key, tab);
-    $("panels").append(tab.element);
-    $("conversation-tabs").append(tab.tabElement);
-    void tab.reconnect();
+    const row = host?.sessions.find(row => row.id === match[2]);
+    if (!host || !row?.live) {
+      activeKey = null; activeScreen = "overview"; renderScreens();
+      if (!connecting) notice(!host ? "This host is unavailable. Reconnect it from Overview."
+        : "This session is inactive or unavailable. Open History to resume it explicitly.");
+      return;
+    }
+    conversation = createConversation(host, row);
+    conversations.set(key, conversation);
+    $("panels").append(conversation.element);
+    void conversation.reconnect();
   }
-  const changed = activeKey !== key;
   activeKey = key;
-  renderTabs();
-  if (changed) tab.show();
+  activeScreen = match[3] ? "options" : "conversation";
+  renderScreens();
+  if (previousKey !== key || previousScreen !== activeScreen) conversation.show();
   renderOverview();
 }
-function closeTab(key) {
-  const tab = tabs.get(key);
-  if (!tab) return;
-  const nextLink = (tab.tabElement.nextElementSibling || tab.tabElement.previousElementSibling)?.querySelector("a");
-  tab.dispose();
-  tab.element.remove(); tab.tabElement.remove(); tabs.delete(key);
-  if (activeKey === key) navigate("");
-  renderTabs(); renderOverview();
-  if (mobileTabs.matches && $("tab-switcher").getAttribute("aria-expanded") === "true") {
-    (nextLink || $("tab-switcher")).focus({ preventScroll: true });
-  } else if (!activeKey) $("overview-tab").focus();
+function detachConversation(key) {
+  const conversation = conversations.get(key);
+  if (!conversation) return;
+  if (conversation.draft()) stoppedPromptDrafts.set(key, conversation.draft());
+  conversation.dispose();
+  conversation.element.remove(); conversations.delete(key);
+  if (activeKey === key) navigate("", true);
+  renderScreens(); renderOverview();
 }
+
+// Safari keeps the layout viewport tall while the software keyboard is open.
+// Fit the app shell to the visible viewport rather than letting the page pan.
+function fitViewport() {
+  const viewport = window.visualViewport;
+  if (!viewport || viewport.scale !== 1) return;
+  document.documentElement.style.setProperty("--viewport-height", `${viewport.height}px`);
+  document.documentElement.style.setProperty("--viewport-top", `${viewport.offsetTop}px`);
+}
+window.visualViewport?.addEventListener("resize", fitViewport);
+window.visualViewport?.addEventListener("scroll", fitViewport);
+fitViewport();
 
 $("connection-form").addEventListener("submit", event => { event.preventDefault(); perform(connectAll); });
 $("new-session").addEventListener("click", () => showCreate());
@@ -418,21 +402,22 @@ $("close-history").addEventListener("click", () => $("history-dialog").close());
 $("history-search").addEventListener("input", renderHistory);
 $("history-host").addEventListener("change", renderHistory);
 function refreshViewedStatus() {
-  tabs.get(activeKey)?.viewed();
-  renderOverview(); renderTabs();
+  conversations.get(activeKey)?.viewed();
+  renderOverview(); renderScreens();
 }
 window.addEventListener("focus", refreshViewedStatus);
 document.addEventListener("visibilitychange", refreshViewedStatus);
 window.addEventListener("hashchange", route);
+window.addEventListener("popstate", route);
 window.addEventListener("pagehide", event => {
   for (const host of hosts) host.client?.close();
-  for (const tab of tabs.values()) {
-    if (event.persisted) tab.disconnect("Page suspended. Reconnect explicitly to continue.");
-    else tab.dispose();
+  for (const conversation of conversations.values()) {
+    if (event.persisted) conversation.disconnect("Page suspended. Reconnect explicitly to continue.");
+    else conversation.dispose();
   }
 });
 window.addEventListener("pageshow", event => {
-  if (event.persisted) notice("Page restored. Refresh hosts, then reconnect conversation tabs explicitly. Commands were not replayed.");
+  if (event.persisted) notice("Page restored. Refresh hosts, then reconnect sessions from Options. Commands were not replayed.");
 });
 void perform(connectAll);
 
@@ -450,22 +435,14 @@ function createConversation(host, row) {
   const key = sessionKey(identity, selectedId);
   $("prompt").value = stoppedPromptDrafts.get(key) || "";
   stoppedPromptDrafts.delete(key);
-  const tabElement = text("div", "", "conversation-tab");
-  const link = text("a");
-  const tabTitle = text("span", sessionName(row), "tab-title");
-  const tabHost = text("span", host.alias, "tab-host");
-  link.append(tabTitle, text("span", " / ", "tab-separator"), tabHost);
-  link.href = sessionRoute(host, row);
-  link.setAttribute("aria-controls", panelId);
-  link.addEventListener("click", event => { event.preventDefault(); navigate(link.hash); });
-  const closeButton = button("x", () => closeTab(key));
-  const statusBadge = text("span", "", "status");
-  tabElement.append(link, statusBadge, closeButton);
+  $("options-title").textContent = sessionName(row);
   let client, hello, snapshot, attachment, grant, owner;
   let busy = false, connected = false, disposed = false;
   let streamSequence = 0, authoritySequence = 0, runtimeRevision = 0;
   let refreshTimer, refreshing = false, dirty = false;
   let transcriptKey = "", interactionKey = "";
+  let following = true, savedScrollTop = 0;
+  const transcriptEntries = new Map();
   const answerDrafts = new Map(), submittedAnswers = new Set();
   const settingFields = new Map();
   let models = [], thinkingLevels = [], optionsKey = "", optionsLoad = null, optionsError = "";
@@ -554,8 +531,7 @@ function createConversation(host, row) {
       }
       streamSequence = update.sequence;
       if (update.closeFrontend && update.closeFrontend.attachmentId === attachment) {
-        if ($("prompt").value) stoppedPromptDrafts.set(key, $("prompt").value);
-        closeTab(key);
+        detachConversation(key);
         return;
       }
       // A snapshot can already include an update still waiting in the stream.
@@ -620,13 +596,17 @@ function createConversation(host, row) {
     $("controller").textContent = !host.connected ? "Unknown / read only" : !row.live ? "Inactive / read only"
       : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
+    $("abort").hidden = !snapshot?.conversation.execution.running;
     $("abort").disabled = !controlled || busy || !snapshot?.conversation.execution.running;
+    $("choose-directory").disabled = !host.connected;
+    $("new-workspace").disabled = !host.connected;
     $("rename").disabled = !controlled || busy;
     const ready = owner?.phase === "ready";
     $("prompt").disabled = !controlled || !ready;
     $("send").disabled = !controlled || !ready || busy || !$("prompt").value.trim();
-    $("composer-hint").textContent = !controlled ? "Take control to send a prompt." : !ready ? "Waiting for session setup."
-      : snapshot?.conversation.execution.running ? "Prompts sent while working are queued." : "Tap Send when your prompt is ready.";
+    $("composer-hint").textContent = !host.connected || !connected ? "Disconnected. Open Options to reconnect."
+      : !row.live ? "Session inactive. Resume it from History." : !controlled ? "Take control in Options to send a prompt."
+      : !ready ? "Waiting for session setup." : snapshot?.conversation.execution.running ? "Prompts sent while working are queued." : "";
     renderSettings();
     if (snapshot) renderInteractions();
   }
@@ -662,7 +642,7 @@ function createConversation(host, row) {
     $("settings-model").textContent = currentModel ? `${currentModel.provider} / ${currentModel.id}` : "";
     if (optionsKey !== key) {
       models = []; thinkingLevels = []; optionsError = "";
-      if ($("settings").open) void loadSettings();
+      if (!element.hidden && !$("options-screen").hidden) void loadSettings();
     }
     const values = {
       model: modelValue, thinking: state?.thinkingLevel,
@@ -701,13 +681,13 @@ function createConversation(host, row) {
   function renderSession() {
     const currentRow = host.sessions.find(item => item.id === selectedId) || row;
     $("session-title").textContent = snapshot.piState?.sessionName || sessionName(currentRow);
+    $("options-title").textContent = $("session-title").textContent;
     $("session-directory").textContent = `${host.alias} / ${owner?.interactions.runtime?.cwd || currentRow.cwd || ""}`;
     if (host.connected && row.live && connected && owner?.error) notice(owner.error);
     renderTranscript();
     if (connected) sessionStatus(host, row, snapshot, false, true);
     const state = displayStatus();
     setStatus($("session-status"), state);
-    setStatus(statusBadge, state);
     renderQueue();
     renderControls();
   }
@@ -730,62 +710,102 @@ function createConversation(host, row) {
     });
   }
   function renderTranscript() {
-    if (element.hidden) return;
+    if (element.hidden || $("chat-screen").hidden) return;
     const conversation = snapshot.conversation;
     const live = Boolean(host.connected && row.live && connected);
     const key = JSON.stringify([conversation, live]);
     if (key === transcriptKey) return;
     transcriptKey = key;
-    const target = $("transcript");
-    const follow = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
+    const target = $("transcript"), container = $("messages");
     const scrollTop = target.scrollTop;
-    const expanded = new Set([...target.querySelectorAll("details[open]")].map(node => node.dataset.key));
+    const top = target.getBoundingClientRect().top;
+    const anchor = [...container.children].find(node => node.getBoundingClientRect().bottom > top);
+    const anchorTop = anchor?.getBoundingClientRect().top;
     const diagnostics = conversation.diagnostics || [];
-    const diagnosticMessages = items => items.map(item => ({ role: "error", content: item.message }));
+    const diagnosticMessages = items => items.map(item => ({ key: `diagnostic-${item.id}`, message: { role: "error", content: item.message } }));
     const keys = conversation.messageKeys || [];
+    const toolAnchors = new Map();
     const messages = diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp == null
       && item.afterMessage == null && !conversation.omittedMessages));
     conversation.messages.forEach((message, index) => {
-      messages.push(message);
       const anchor = keys[index];
-      if (anchor && keys.indexOf(anchor) === keys.lastIndexOf(anchor)) {
+      const unique = anchor && keys.indexOf(anchor) === keys.lastIndexOf(anchor);
+      if (message.role === "assistant" && Array.isArray(message.content)) {
+        for (const block of message.content) {
+          if (block.type === "toolCall") toolAnchors.set(block.id, anchor);
+        }
+      }
+      const partialKey = `partial-${message.timestamp}`;
+      const toolAnchor = toolAnchors.get(message.toolCallId);
+      const entryKey = message.role === "toolResult" && toolAnchor ? `tool-${toolAnchor}-${message.toolCallId}`
+        : message.role === "assistant" && transcriptEntries.has(partialKey) ? partialKey
+        : unique ? `message-${anchor}` : `message-index-${conversation.omittedMessages + index}`;
+      messages.push({ key: entryKey, message });
+      if (unique) {
         messages.push(...diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp == null && item.afterMessage === anchor)));
       }
     });
     if (conversation.partialAssistant) {
       const partial = conversation.partialAssistant.message;
-      messages.push(partial, ...diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp != null
+      messages.push({ key: `partial-${partial.timestamp}`, message: partial }, ...diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp != null
         && item.assistantTimestamp === partial.timestamp)));
     }
-    const nodes = messages.filter(visibleMessage).map((message, index) => {
-      const article = text("article", "", "message");
-      article.dataset.role = message.role;
-      if (message.role === "toolResult") {
-        const details = document.createElement("details");
-        details.className = "tool-output";
-        details.dataset.key = `tool-${message.toolCallId || index}`;
-        details.append(text("summary", `${message.toolName || "Tool"} / ${message.isError ? "error" : "output"}`));
-        details.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, String(index), false));
-        if (message.errorMessage) details.append(text("p", message.errorMessage));
-        article.append(details);
-      } else {
-        article.append(text("div", message.role === "assistant" ? "Pi" : message.role, "message-label"));
-        article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, String(index)));
-        if (message.errorMessage) article.append(text("p", message.errorMessage));
-      }
-      return article;
-    });
-    if (conversation.omittedMessages) nodes.unshift(text("p", `${conversation.omittedMessages} older messages are outside this snapshot.`, "muted"));
+    const entries = messages.filter(({ message }) => visibleMessage(message)).map(({ key, message }) => ({
+      key, value: message, render() {
+        const article = text("article", "", "message");
+        article.dataset.role = message.role;
+        if (message.role === "toolResult") {
+          const details = document.createElement("details");
+          details.className = "tool-output";
+          details.dataset.key = `output-${key}`;
+          details.append(text("summary", `${message.toolName || "Tool"} / ${message.isError ? "error" : "output"}`));
+          details.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key, false));
+          if (message.errorMessage) details.append(text("p", message.errorMessage));
+          article.append(details);
+        } else {
+          article.append(text("div", message.role === "assistant" ? "Pi" : message.role, "message-label"));
+          article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key));
+          if (message.errorMessage) article.append(text("p", message.errorMessage));
+        }
+        return article;
+      },
+    }));
+    if (conversation.omittedMessages) entries.unshift({ key: "omitted", value: conversation.omittedMessages,
+      render: () => text("p", `${conversation.omittedMessages} older messages are outside this snapshot.`, "muted") });
     for (const tool of conversation.tools.filter(tool => live && tool.state === "running")) {
-      const details = blockDetails(`${tool.toolName} / running`, tool.partialResult || tool.args, `tool-${tool.toolCallId}`);
-      details.className = "tool-output";
-      nodes.push(details);
+      const toolKey = `tool-${tool.messageKey}-${tool.toolCallId}`;
+      entries.push({ key: toolKey, value: tool, render() {
+        const article = text("article", "", "message");
+        article.dataset.role = "toolResult";
+        const details = blockDetails(`${tool.toolName} / running`, tool.partialResult || tool.args, `output-${toolKey}`);
+        details.className = "tool-output";
+        article.append(details);
+        return article;
+      } });
     }
-    if (!nodes.length) nodes.push(text("p", conversation.hydrated ? "No messages yet. Write your first prompt below." : "Loading conversation...", "empty"));
-    target.replaceChildren(...nodes);
-    for (const details of target.querySelectorAll("details")) details.open = expanded.has(details.dataset.key);
-    target.scrollTop = follow ? target.scrollHeight : scrollTop;
-    $("latest").hidden = follow;
+    if (!entries.length) entries.push({ key: "empty", value: conversation.hydrated,
+      render: () => text("p", conversation.hydrated ? "No messages yet. Write your first prompt below." : "Loading conversation...", "empty") });
+    const retained = new Set(entries.map(entry => entry.key));
+    for (const [key, entry] of transcriptEntries) {
+      if (!retained.has(key)) { entry.node.remove(); transcriptEntries.delete(key); }
+    }
+    entries.forEach((entry, index) => {
+      const signature = JSON.stringify(entry.value);
+      let cached = transcriptEntries.get(entry.key);
+      if (!cached) {
+        cached = { node: entry.render(), signature };
+        transcriptEntries.set(entry.key, cached);
+      } else if (cached.signature !== signature) {
+        cached.node = updateContent(cached.node, entry.render());
+        cached.signature = signature;
+      }
+      if (container.children[index] !== cached.node) container.insertBefore(cached.node, container.children[index] || null);
+    });
+    if (following) target.scrollTop = target.scrollHeight;
+    else if (anchor?.isConnected) target.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+    else target.scrollTop = scrollTop;
+    savedScrollTop = target.scrollTop;
+    $("latest").hidden = following;
   }
   function dialogDescription(title) {
     // Bundled dialogs put their preview and runtime tag inside a JSON title.
@@ -870,6 +890,7 @@ function createConversation(host, row) {
       form.append(fieldset);
       return form;
     }));
+    if (following && !element.hidden && !$("chat-screen").hidden) $("transcript").scrollTop = $("transcript").scrollHeight;
   }
   function renderQueue() {
     const accepted = snapshot.acceptedQueue?.items || [];
@@ -896,7 +917,6 @@ function createConversation(host, row) {
       if (sameContext(captured)) { grant = value; if (!controlsCurrent()) scheduleRefresh(); }
     }
   }));
-  $("settings").addEventListener("toggle", () => { if ($("settings").open) renderSettings(); });
   $("refresh-settings").addEventListener("click", () => { void loadSettings(); });
   $("abort").addEventListener("click", () => run(() => command("turn.abort")));
   $("rename").addEventListener("click", () => {
@@ -913,25 +933,53 @@ function createConversation(host, row) {
       const receipt = await command("prompt.submit", { text: value });
       if (sameContext(captured) && ["accepted", "completed"].includes(receipt.status) && $("prompt").value === value) {
         $("prompt").value = "";
+        resizePrompt();
       }
     });
   });
-  $("prompt").addEventListener("input", renderControls);
+  function resizePrompt() {
+    if (element.hidden || $("chat-screen").hidden) return;
+    const prompt = $("prompt");
+    prompt.style.height = "auto";
+    prompt.style.height = `${prompt.scrollHeight + 2}px`;
+    if (following) $("transcript").scrollTop = $("transcript").scrollHeight;
+  }
+  $("prompt").addEventListener("input", () => { resizePrompt(); renderControls(); });
   $("new-workspace").addEventListener("click", () => showCreate(true));
-  $("session-actions").addEventListener("click", event => {
-    if (event.target.closest("button")) $("session-actions").open = false;
-  });
+  $("choose-directory").addEventListener("click", () => showCreate());
+  $("back").addEventListener("click", () => backTo(""));
+  $("options").addEventListener("click", () => navigate(`${sessionRoute(host, row)}/options`));
+  $("options-back").addEventListener("click", () => backTo(sessionRoute(host, row)));
+  $("detach").addEventListener("click", () => detachConversation(key));
   $("stop").addEventListener("click", () => {
     if (confirm('Stop "' + sessionName(row) + '" on ' + host.alias + '? Active work will be interrupted; history is preserved.')) {
       run(() => command("session.kill", { confirmed: true }));
     }
   });
   $("reconnect").addEventListener("click", () => { void reconnect(); });
-  $("latest").addEventListener("click", () => { $("transcript").scrollTop = $("transcript").scrollHeight; $("latest").hidden = true; });
-  $("transcript").addEventListener("scroll", () => {
-    const target = $("transcript");
-    $("latest").hidden = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
+  $("latest").addEventListener("click", () => {
+    following = true;
+    $("transcript").scrollTop = $("transcript").scrollHeight;
+    $("latest").hidden = true;
   });
+  $("transcript").addEventListener("scroll", () => {
+    if (element.hidden || $("chat-screen").hidden) return;
+    const target = $("transcript");
+    savedScrollTop = target.scrollTop;
+    following = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
+    $("latest").hidden = following;
+  });
+  let promptWidth = 0;
+  const transcriptResize = new ResizeObserver(() => {
+    if (element.hidden || $("chat-screen").hidden) return;
+    if (promptWidth !== $("prompt").clientWidth) {
+      promptWidth = $("prompt").clientWidth;
+      resizePrompt();
+    }
+    if (following) $("transcript").scrollTop = $("transcript").scrollHeight;
+    $("latest").hidden = following;
+  });
+  transcriptResize.observe($("transcript"));
   const heartbeat = setInterval(() => {
     if (!controlsCurrent()) return;
     const captured = context();
@@ -969,9 +1017,8 @@ function createConversation(host, row) {
   }
   return {
     get host() { return host; },
-    get row() { return row; },
-    identity, id: selectedId, element, tabElement, link, tabTitle, tabHost, statusBadge, closeButton, reconnect,
-    status: displayStatus,
+    identity, id: selectedId, element, reconnect,
+    draft: () => $("prompt").value,
     viewed() { if (snapshot) renderSession(); },
     connected: () => connected,
     rebind(current) { host = current; if (snapshot) renderSession(); },
@@ -989,13 +1036,61 @@ function createConversation(host, row) {
       else { setStatus($("session-status"), displayStatus()); renderControls(); }
     },
     cwd: () => owner?.interactions.runtime?.cwd || row.cwd,
-    show() { if (snapshot) renderSession(); element.focus({ preventScroll: true }); },
+    setScreen(visible, options) {
+      const chat = $("chat-screen"), settings = $("options-screen");
+      const wasChat = !element.hidden && !chat.hidden;
+      const showChat = visible && !options;
+      if (wasChat && !showChat) savedScrollTop = $("transcript").scrollTop;
+      element.hidden = !visible;
+      chat.hidden = options;
+      settings.hidden = !options;
+      if (!wasChat && showChat) {
+        $("transcript").scrollTop = savedScrollTop;
+        resizePrompt();
+        if (snapshot) renderSession();
+        if (following) $("transcript").scrollTop = $("transcript").scrollHeight;
+      }
+    },
+    show() {
+      if (snapshot) renderSession();
+      (activeScreen === "options" ? $("options-screen") : $("chat-screen")).focus({ preventScroll: true });
+    },
     dispose() {
       disposed = true;
       clearInterval(heartbeat); clearTimeout(refreshTimer);
+      transcriptResize.disconnect();
       client?.close();
     },
   };
+}
+
+// Update streaming content in place, retaining selection and expanded details in
+// unchanged blocks instead of replacing the transcript on every snapshot.
+function updateContent(current, next) {
+  if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName
+    || current.nodeType === Node.ELEMENT_NODE && current.dataset.key !== next.dataset.key) {
+    current.replaceWith(next);
+    return next;
+  }
+  if (current.nodeType === Node.TEXT_NODE) {
+    if (current.data !== next.data) current.data = next.data;
+    return current;
+  }
+  if (current.nodeType !== Node.ELEMENT_NODE) return current;
+  for (const attribute of [...current.attributes]) {
+    if (current.tagName === "DETAILS" && attribute.name === "open") continue;
+    if (!next.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+  }
+  for (const attribute of next.attributes) {
+    if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
+  }
+  const children = [...next.childNodes];
+  children.forEach((child, index) => {
+    if (current.childNodes[index]) updateContent(current.childNodes[index], child);
+    else current.append(child);
+  });
+  while (current.childNodes.length > children.length) current.lastChild.remove();
+  return current;
 }
 
 // System prompt patches hold structured sections, not user-visible conversation text.
