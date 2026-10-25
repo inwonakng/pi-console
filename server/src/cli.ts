@@ -23,17 +23,73 @@ function terminalText(text: string, style: string, stream: NodeJS.WriteStream): 
     ? `\x1b[${style}m${text}\x1b[0m` : text;
 }
 
-async function reportStarted(hello: Record<string, unknown>, alreadyRunning = false): Promise<void> {
+function row(label: string, value: string, style?: string): void {
+  console.log(`  ${terminalText(label.padEnd(12), "2", process.stdout)} ${style ? terminalText(value, style, process.stdout) : value}`);
+}
+
+function displayVersion(hello: Record<string, unknown>): string {
+  const version = typeof hello.appRoot === "string" && basename(dirname(hello.appRoot)) === "versions"
+    ? basename(hello.appRoot) : String(hello.buildId ?? "Unknown");
+  return version.replace(/\b[a-f0-9]{40,64}\b/g, (hash) => hash.slice(0, 12));
+}
+
+function reportStartup(startup: Record<string, unknown>): void {
+  const manager = startup.supervisor === "launchd" ? "launchd" : startup.supervisor === "user-systemd" ? "user systemd" : undefined;
+  const description = startup.enabled ? `Enabled (at login${manager ? ` via ${manager}` : ""})`
+    : startup.registered ? `Disabled (${startup.definitionPresent ? "registration retained" : "startup file missing"})` : "Disabled";
+  row("Startup", description, startup.enabled ? "32" : "33");
+}
+
+function reportStatus(status: Record<string, unknown>, root: string): void {
+  console.log(terminalText(`pi-console ${status.channel}`, "1", process.stdout));
+  row("Server", status.running ? status.stopping ? "Stopping" : "Running" : status.claimPresent ? "Unreachable (owner lock remains)" : "Stopped",
+    status.running && !status.stopping ? "32" : "33");
+  reportStartup(object(status.startup) ? status.startup : { enabled: false });
+  row("Version", displayVersion(status.running ? status : { buildId: status.selectedBuildId }));
+  if (status.running && object(status.state) && Array.isArray(status.state.sessions)) {
+    const sessions = status.state.sessions.filter(object);
+    const live = sessions.filter((session) => object(session.live));
+    row("Sessions", `${live.length} loaded, ${sessions.length - live.length} saved`);
+    const activity = new Map<string, number>();
+    for (const session of live) {
+      const label = String((session.live as Record<string, unknown>).status ?? "Unknown");
+      activity.set(label, (activity.get(label) ?? 0) + 1);
+    }
+    if (activity.size) row("Activity", [...activity].map(([label, count]) => `${count} ${label.toLowerCase()}`).join(", "));
+  }
+  if (status.running && object(status.network)) {
+    console.log();
+    row("URL", `http://localhost:${status.network.port}`, "36");
+    if (Array.isArray(status.network.urls)) {
+      for (const url of status.network.urls) if (typeof url === "string" && !/^http:\/\/(localhost|127\.[\d.]+):/.test(url)) row("Network", url, "36");
+    }
+    row("Listening", `${status.network.bind}:${status.network.port}`);
+    row("Access", "Unauthenticated HTTP; use a trusted network", "33");
+  }
+  console.log();
+  row("Profile", root);
+  row("Log", join(root, "service.log"));
+  if (object(status.startup) && typeof status.startup.definition === "string") row("Startup file", status.startup.definition);
+  if (status.restartRequired) {
+    console.log();
+    console.log(terminalText("Selected build differs. Run server restart to apply it (active work blocks restart).", "33", process.stdout));
+  }
+  if (status.claimPresent) {
+    console.log();
+    console.log(terminalText("Inspect the service log and remaining processes before using server reconcile. No recovery was attempted.", "33", process.stdout));
+  }
+}
+
+async function reportStarted(hello: Record<string, unknown>, alreadyRunning = false, startup?: Record<string, unknown>): Promise<void> {
   if (!object(hello.network) || typeof hello.network.port !== "number") throw new Error("Service did not report a listener port");
   const selectedBuildId = await serviceBuild();
   const url = `http://localhost:${listenerPort(hello.network.port)}`;
-  const version = typeof hello.appRoot === "string" && basename(dirname(hello.appRoot)) === "versions"
-    ? basename(hello.appRoot) : String(hello.buildId);
-  const message = alreadyRunning ? "Server is already running." : "Server started successfully.";
-  const styledVersion = version.replace(/\b[a-f0-9]{40,64}\b/, (hash) => terminalText(hash, "1", process.stdout));
-  console.log(terminalText(message, "32", process.stdout));
-  console.log(`  Version: ${styledVersion}`);
-  console.log(`  URL:     ${terminalText(url, "36", process.stdout)}`);
+  const message = startup ? startup.enabled ? "Login startup enabled." : "Startup registration saved; login startup is not enabled."
+    : alreadyRunning ? "Server is already running." : "Server started successfully.";
+  console.log(terminalText(message, startup && !startup.enabled ? "33" : "32", process.stdout));
+  if (startup) row("Server", alreadyRunning ? "Already running (not restarted)" : "Started", "32");
+  row("Version", displayVersion(hello));
+  row("URL", url, "36");
   if (hello.buildId !== selectedBuildId) {
     console.error(terminalText("Warning: running build differs from the selected build. Use server restart to apply it.", "33", process.stderr));
   }
@@ -45,10 +101,12 @@ async function main(): Promise<void> {
   const action = args.shift();
   const flags = new Map<string, string>();
   let force = false;
+  let json = false;
   let startupBinary: string | undefined;
   while (args.length) {
     const key = args.shift()!;
     if (key === "--force") { force = true; continue; }
+    if (key === "--json" && action === "status" && !json) { json = true; continue; }
     // Existing startup definitions pinned Pi in argv. New definitions use the
     // captured environment; retain run-only decoding so updates still boot.
     if (action === "run" && key === "--binary" && args.length && startupBinary === undefined) {
@@ -202,7 +260,7 @@ async function main(): Promise<void> {
         if (view) {
           view.client.close(); await assertManagementOwner(view.hello);
           if (view.hello.stopping) throw new Error("Discovered service is stopping; no replacement started");
-          await reportStarted(view.hello, action === "enable" && !!existing); return;
+          await reportStarted(view.hello, action === "enable" && !!existing, action === "enable" ? await supervisor!.status() : undefined); return;
         }
         await delay(100);
       }
@@ -216,11 +274,16 @@ async function main(): Promise<void> {
     if (!view) {
       let claimPresent = false;
       try { await lstat(join(root, "owner.lock")); claimPresent = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      console.log(JSON.stringify({ running: false, channel, endpoint: join(root, "service.sock"), selectedBuildId, claimPresent, startup: supervisor ? await supervisor.status() : { enabled: false } })); return;
+      const status = { running: false, channel, endpoint: join(root, "service.sock"), selectedBuildId, claimPresent, startup: supervisor ? await supervisor.status() : { enabled: false } };
+      if (json) console.log(JSON.stringify(status)); else reportStatus(status, root);
+      return;
     }
-    try { console.log(JSON.stringify({ ...view.hello, running: true, state: await view.client.request("sessions"), selectedBuildId,
-      restartRequired: view.hello.buildId !== selectedBuildId, startup: supervisor ? await supervisor.status() : { enabled: false },
-      stopNotice: "Normal stop suspends idle sessions for frontend reconnect; active work refuses unless --force is intentional." })); }
+    try {
+      const status = { ...view.hello, running: true, state: await view.client.request("sessions"), selectedBuildId,
+        restartRequired: view.hello.buildId !== selectedBuildId, startup: supervisor ? await supervisor.status() : { enabled: false },
+        stopNotice: "Normal stop suspends idle sessions for frontend reconnect; active work refuses unless --force is intentional." };
+      if (json) console.log(JSON.stringify(status)); else reportStatus(status, root);
+    }
     finally { view.client.close(); }
     return;
   }

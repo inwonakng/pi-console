@@ -147,9 +147,11 @@ A stale management lock still requires the inspection described above.
 
 Startup definitions reference the installation's `current` selection for the next
 process; a running owner resolves and pins its release. Updates change neither
-the registration nor live processes. Status shows `buildId` (running),
-`selectedBuildId`, `restartRequired`, endpoint/channel, sessions and startup
-registration. A stopped profile reports `running: false` and `claimPresent`.
+the registration nor live processes. Status summarizes the server, login startup,
+version, sessions, connection URLs and file paths. `server status --json` retains
+full details, including `buildId` (running), `selectedBuildId`, `restartRequired`
+and startup registration. A stopped profile reports `running: false` and
+`claimPresent` in JSON; the summary warns when an owner lock remains.
 Restart waits for the departing endpoint and supervisor process before starting
 selected code. Old runtime trees must remain while their processes run.
 
@@ -192,8 +194,10 @@ pi-console does not limit the listener to VPN interfaces or provide authenticati
 
 `server start`, `restart` and `enable` confirm the running version and print a
 localhost URL, with a warning if the running build differs from the selected build.
+`server enable` confirms login startup separately from the running process and
+states when an existing server was left running without a restart.
 `server stop` confirms successful shutdown, or reports that the server is already
-stopped. `server status` retains the full JSON,
+stopped. `server status` shows a readable summary; `server status --json` retains the full JSON,
 including `network.bind`, `network.port` and candidate HTTP URLs using the machine
 hostname and IPv4 addresses. Use a hostname or VPN IP reachable from the client;
 hostname resolution and firewall access are external.
