@@ -442,7 +442,7 @@ function createConversation(host, row) {
   let refreshTimer, refreshing = false, dirty = false;
   let transcriptKey = "", interactionKey = "";
   let following = true, savedScrollTop = 0;
-  const transcriptEntries = new Map();
+  const transcriptEntries = new Map(), assistantGroups = new Map();
   const answerDrafts = new Map(), submittedAnswers = new Set();
   const settingFields = new Map();
   let models = [], thinkingLevels = [], optionsKey = "", optionsLoad = null, optionsError = "";
@@ -719,13 +719,14 @@ function createConversation(host, row) {
     const target = $("transcript"), container = $("messages");
     const scrollTop = target.scrollTop;
     const top = target.getBoundingClientRect().top;
-    const anchor = [...container.children].find(node => node.getBoundingClientRect().bottom > top);
+    const anchor = [...container.children].flatMap(node => node.dataset.role === "assistant" ? [...node.children].slice(1) : [node])
+      .find(node => node.getBoundingClientRect().bottom > top);
     const anchorTop = anchor?.getBoundingClientRect().top;
     const diagnostics = conversation.diagnostics || [];
     const diagnosticMessages = items => items.map(item => ({ key: `diagnostic-${item.id}`, message: { role: "error", content: item.message } }));
     const keys = conversation.messageKeys || [];
     const toolAnchors = new Map();
-    const messages = diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp == null
+    const history = diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp == null
       && item.afterMessage == null && !conversation.omittedMessages));
     conversation.messages.forEach((message, index) => {
       const anchor = keys[index];
@@ -740,21 +741,65 @@ function createConversation(host, row) {
       const entryKey = message.role === "toolResult" && toolAnchor ? `tool-${toolAnchor}-${message.toolCallId}`
         : message.role === "assistant" && transcriptEntries.has(partialKey) ? partialKey
         : unique ? `message-${anchor}` : `message-index-${conversation.omittedMessages + index}`;
-      messages.push({ key: entryKey, message });
+      history.push({ key: entryKey, message, anchor: unique ? anchor : undefined });
       if (unique) {
-        messages.push(...diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp == null && item.afterMessage === anchor)));
+        history.push(...diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp == null && item.afterMessage === anchor)));
       }
     });
     if (conversation.partialAssistant) {
       const partial = conversation.partialAssistant.message;
-      messages.push({ key: `partial-${partial.timestamp}`, message: partial }, ...diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp != null
+      history.push({ key: `partial-${partial.timestamp}`, message: partial }, ...diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp != null
         && item.assistantTimestamp === partial.timestamp)));
     }
-    const entries = messages.filter(({ message }) => visibleMessage(message)).map(({ key, message }) => ({
-      key, value: message, render() {
-        const article = text("article", "", "message");
+    // Keep live executions beside their owner, including completed records until
+    // the corresponding history result arrives. Reuse its key and expanded DOM.
+    const historyKeys = new Set(history.map(entry => entry.key));
+    const messages = history.flatMap(entry => {
+      const tools = live ? conversation.tools.filter(tool => tool.messageKey ? entry.anchor === tool.messageKey
+        : entry.message.role === "assistant" && Array.isArray(entry.message.content)
+          && entry.message.content.some(block => block.type === "toolCall" && block.id === tool.toolCallId)) : [];
+      return [entry, ...tools.flatMap(tool => {
+        const key = `tool-${tool.messageKey || entry.anchor}-${tool.toolCallId}`;
+        if (historyKeys.has(key)) return [];
+        const message = tool.result ? { ...tool.result, role: "toolResult", toolName: tool.toolName,
+          toolCallId: tool.toolCallId, isError: tool.isError || tool.result.isError } : { role: "toolResult" };
+        return [{ key, message, tool: tool.result ? undefined : tool }];
+      })];
+    });
+    const supersededErrors = new Set();
+    let retryError;
+    for (const { key, message } of messages) {
+      if (message.role === "assistant" && message.stopReason !== "aborted" && (message.stopReason === "error" || message.errorMessage)) {
+        if (retryError) supersededErrors.add(retryError);
+        retryError = key;
+      } else retryError = undefined;
+    }
+    const visible = [];
+    for (const entry of messages) {
+      const { key, message } = entry;
+      if (!visibleMessage(message)) continue;
+      // Empty streaming responses should not create an assistant heading yet.
+      if (message.role !== "assistant" || !Array.isArray(message.content) || message.content.some(block =>
+        block.type === "text" ? Boolean(block.text) : block.type === "thinking" ? Boolean(block.thinking) : true)) visible.push(entry);
+      if (message.role === "assistant" && !supersededErrors.has(key)
+        && (message.stopReason === "error" || message.stopReason === "aborted" || message.errorMessage)) {
+        visible.push({ key: `error-${key}`, message: {
+          role: message.stopReason === "aborted" ? "aborted" : "error",
+          content: message.errorMessage || (message.stopReason === "aborted" ? "Response aborted." : "Model request failed."),
+        } });
+      }
+    }
+    const entries = visible.map(({ key, message, tool }) => {
+      const assistant = ["assistant", "toolResult", "bashExecution"].includes(message.role)
+        || message.role === "custom" && ["spawn_completion", "spawn_control_result"].includes(message.customType);
+      return { key, assistant, value: tool || message, render() {
+        const article = text(assistant ? "div" : "article", "", assistant ? "assistant-part" : "message");
         article.dataset.role = message.role;
-        if (message.role === "toolResult") {
+        if (tool) {
+          const details = blockDetails(`${tool.toolName} / ${tool.state}`, tool.partialResult || tool.args, `output-${key}`);
+          details.className = "tool-output";
+          article.append(details);
+        } else if (message.role === "toolResult") {
           const details = document.createElement("details");
           details.className = "tool-output";
           details.dataset.key = `output-${key}`;
@@ -763,33 +808,26 @@ function createConversation(host, row) {
           if (message.errorMessage) details.append(text("p", message.errorMessage));
           article.append(details);
         } else {
-          article.append(text("div", message.role === "assistant" ? "Pi" : message.role, "message-label"));
+          if (!assistant) article.append(text("div", message.role, "message-label"));
           article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key));
-          if (message.errorMessage) article.append(text("p", message.errorMessage));
+          if (message.role !== "assistant" && message.errorMessage) article.append(text("p", message.errorMessage));
         }
         return article;
-      },
-    }));
+      } };
+    });
     if (conversation.omittedMessages) entries.unshift({ key: "omitted", value: conversation.omittedMessages,
       render: () => text("p", `${conversation.omittedMessages} older messages are outside this snapshot.`, "muted") });
-    for (const tool of conversation.tools.filter(tool => live && tool.state === "running")) {
-      const toolKey = `tool-${tool.messageKey}-${tool.toolCallId}`;
-      entries.push({ key: toolKey, value: tool, render() {
-        const article = text("article", "", "message");
-        article.dataset.role = "toolResult";
-        const details = blockDetails(`${tool.toolName} / running`, tool.partialResult || tool.args, `output-${toolKey}`);
-        details.className = "tool-output";
-        article.append(details);
-        return article;
-      } });
-    }
     if (!entries.length) entries.push({ key: "empty", value: conversation.hydrated,
       render: () => text("p", conversation.hydrated ? "No messages yet. Write your first prompt below." : "Loading conversation...", "empty") });
     const retained = new Set(entries.map(entry => entry.key));
     for (const [key, entry] of transcriptEntries) {
       if (!retained.has(key)) { entry.node.remove(); transcriptEntries.delete(key); }
     }
-    entries.forEach((entry, index) => {
+    // Match Neovim's assistant_block_open: tool activity and later assistant
+    // messages share one heading until a visible standalone message or error.
+    const roots = [], groups = new Map();
+    let group;
+    entries.forEach(entry => {
       const signature = JSON.stringify(entry.value);
       let cached = transcriptEntries.get(entry.key);
       if (!cached) {
@@ -799,7 +837,33 @@ function createConversation(host, row) {
         cached.node = updateContent(cached.node, entry.render());
         cached.signature = signature;
       }
-      if (container.children[index] !== cached.node) container.insertBefore(cached.node, container.children[index] || null);
+      if (!entry.assistant) {
+        group = undefined;
+        roots.push(cached.node);
+        return;
+      }
+      if (!group) {
+        let node = assistantGroups.get(entry.key);
+        if (!node) {
+          node = text("article", "", "message");
+          node.dataset.role = "assistant";
+          node.append(text("div", "Pi", "message-label"));
+          assistantGroups.set(entry.key, node);
+        }
+        group = { node, count: 1 };
+        groups.set(entry.key, group);
+        roots.push(node);
+      }
+      if (group.node.children[group.count] !== cached.node) group.node.insertBefore(cached.node, group.node.children[group.count] || null);
+      group.count++;
+    });
+    for (const [key, node] of assistantGroups) {
+      const group = groups.get(key);
+      if (!group) { node.remove(); assistantGroups.delete(key); }
+      else while (node.children.length > group.count) node.lastChild.remove();
+    }
+    roots.forEach((node, index) => {
+      if (container.children[index] !== node) container.insertBefore(node, container.children[index] || null);
     });
     if (following) target.scrollTop = target.scrollHeight;
     else if (anchor?.isConnected) target.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
