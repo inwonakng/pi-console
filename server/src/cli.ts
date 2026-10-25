@@ -173,7 +173,10 @@ async function main(): Promise<void> {
     const unlock = await managementLock(root);
     try {
       let supervisor = await ServiceSupervisor.load(root, channel, options.appRoot, flags.get("--supervisor-dir"));
-      if (supervisor) await supervisor.loaded();
+      if (supervisor) {
+        await supervisor.loaded();
+        await supervisor.repairDefinition();
+      }
       const existing = await connect();
       let startupExit: string | undefined;
       if (existing) {
