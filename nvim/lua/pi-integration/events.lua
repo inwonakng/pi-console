@@ -29,6 +29,13 @@ local function approval_select_opts(payload, prompt)
 		end
 	end
 	if payload.sideConversationId then field("Conversation", "Side") end
+	local origin = type(payload.provenance) == "table" and payload.provenance or {}
+	if origin.workerId then
+		field("Worker", origin.workerId)
+		field("Assignment", origin.assignmentId)
+		field("Workspace", origin.workspaceId or "(none)")
+		field("Request ID", origin.requestId)
+	end
 	field("Tool", payload.tool or "tool")
 	field("Request", payload.request or prompt)
 	field("Access scope", payload.path)

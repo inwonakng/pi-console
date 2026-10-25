@@ -31,7 +31,7 @@ end
 local labels = { pending = "Pending", allowed = "Allowed", denied = "Denied", cancelled = "Cancelled" }
 local function field(lines, label, value)
 	if type(value) ~= "string" or value == "" then return end
-	table.insert(lines, string.format("%-9s%s", label, value:gsub("%s+", " ")))
+	table.insert(lines, string.format("%-12s%s", label, value:gsub("%s+", " ")))
 end
 
 function M.append(ctx, lines, items, permission)
@@ -43,6 +43,13 @@ function M.append(ctx, lines, items, permission)
 	if permission.tool == "bash" and type(scope) == "string" and vim.trim(scope) ~= ""
 		and vim.trim(scope) == vim.trim(preview) then
 		scope = "This command"
+	end
+	local origin = type(permission.provenance) == "table" and permission.provenance or {}
+	if origin.workerId then
+		field(detail, "Worker", origin.workerId)
+		field(detail, "Assignment", origin.assignmentId)
+		field(detail, "Workspace", origin.workspaceId or "(none)")
+		field(detail, "Request ID", origin.requestId)
 	end
 	field(detail, "Tool", permission.tool)
 	field(detail, "Mode", permission.mode)

@@ -18,11 +18,11 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { accessRevision, getAccessMode, onAccessInvalidated } from "./shared/access-state";
-import { canonicalPath, getSessionGrants, hasPermission, requestPermission, validPermissionAttempt, permissionWasDenied, type PermissionAuthorization } from "./shared/permissions";
+import { canonicalPath, getSessionGrants, hasPermission, requestPermission, validPermissionAttempt, permissionWasDenied, type PermissionAuthorization, type PermissionPreview } from "./shared/permissions";
 import { saveSessionSetting } from "./shared/session-settings";
 import { registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
 import { spawnRunIds } from "./shared/session-deletion";
-import { agentContext, newAssignment, registerWorkerProtocol, SPAWN_PROTOCOL_TITLE, SPAWN_PERMISSION_CANCEL, WORKER_TOOLS, type Assignment, type WorkerExecution, type WorkerLifetime, type WorkerOperation, type WorkerRequest, type WorkerPermissionOperation, type WorkerPermissionRequest } from "./shared/spawn-protocol";
+import { agentContext, newAssignment, registerWorkerProtocol, SPAWN_PROTOCOL_TITLE, SPAWN_PERMISSION_CANCEL, SPAWN_PERMISSION_FINISH, WORKER_TOOLS, type Assignment, type WorkerExecution, type WorkerLifetime, type WorkerOperation, type WorkerRequest, type WorkerPermissionOperation, type WorkerPermissionRequest } from "./shared/spawn-protocol";
 import {
   createWorkspace,
   findGitRoot,
@@ -614,7 +614,6 @@ Instructions:
 - Ask for missing information with spawn_question. Parent answers are agent-authored, not user consent.
 - Request permissions through tool arguments. The runtime routes requests to the parent and, when needed, the existing user approval UI. Clarification replies never grant authority. Denial or cancellation ends that attempt; do not bypass it through another agent or path.
 - If access mode is readonly, do not attempt to modify files.
-- If access mode is ask, approval-required actions will be blocked because spawned subagents cannot prompt the parent.
 - Call spawn_report exactly once with outcome=completed or blocked, summary, findings, verification, and uncertainty. Final text, DONE, or process exit does not complete the assignment.
 - Do not delegate to other workers.
 - Include key evidence: files inspected, commands run, findings, and any artifact paths.
@@ -944,8 +943,16 @@ function restoredRun(statusPath: string, parentSessionFile: string | undefined):
           value.preview?.text, value.preview?.filetype].every((field) => typeof field === "string")
         || !["read", "write", "network", "tool", "unix-socket", "unsandboxed"].includes(value.permission?.kind)) continue;
       // Preserve provenance, never a live handle or a pending executable approval.
-      permissionRequests.push({ ...value, state: ["consumed", "denied"].includes(value.state) ? value.state : "cancelled",
-        resolvedAt: typeof value.resolvedAt === "string" ? value.resolvedAt : new Date().toISOString() });
+      permissionRequests.push({
+        permission: value.permission, tool: value.tool, cwd: value.cwd, remember: value.remember === true,
+        // Older records did not distinguish private file diffs from action text.
+        preview: { text: `${value.tool}: ${value.permission.kind} ${value.permission.scope}`, filetype: "text" },
+        id: value.id, workerId: value.workerId, assignmentId: value.assignmentId, runtimeId: value.runtimeId,
+        parentRuntimeId: value.parentRuntimeId, attemptId: value.attemptId, workspaceId: value.workspaceId,
+        authorityRevision: value.authorityRevision, createdAt: value.createdAt, consumedAt: value.consumedAt,
+        state: ["consumed", "denied"].includes(value.state) ? value.state : "cancelled", decision: value.decision,
+        resolvedAt: typeof value.resolvedAt === "string" ? value.resolvedAt : new Date().toISOString(),
+      });
     }
   }
   const storedStatus: RunStatus = data.status === "completed" && assignments.at(-1)?.outcome === "completed" ? "completed"
@@ -1036,10 +1043,15 @@ export default function spawnExtension(pi: ExtensionAPI) {
   let parentRuntimeId = randomUUID();
   let unsubscribeAuthority: (() => void) | undefined;
   const permissionDialogs = new Set<string>();
-  const permissionWaits = new Map<string, {
+  type PermissionWait = {
     run: SpawnRun; request: WorkerPermissionRequest; dialog: string; revision: number;
-    cancellation: AbortController; authorization?: PermissionAuthorization; deciding?: boolean; responded?: boolean;
-  }>();
+    userPreview: PermissionPreview; // Live user UI only, never status/history/model context.
+    cancellation: AbortController; authorization?: PermissionAuthorization; deciding?: boolean; responded?: boolean; checking?: boolean;
+    executionId?: string;
+  };
+  const permissionWaits = new Map<string, PermissionWait>();
+  const permissionExecutions = new Map<string, PermissionWait>();
+  const permissionRecords = () => [...permissionWaits, ...permissionExecutions];
   const pendingJoins = new Set<{ runIds: Set<string>; delivery: "tool" | "command"; cancellation: AbortController; finished: Promise<void> }>();
   const eventQueue = new Map<string, { run: SpawnRun; content: string; details: Record<string, unknown> }>();
   let runtimeContext: ExtensionContext | undefined;
@@ -1119,6 +1131,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       for (const run of runs.values()) if (!run.settled) stopRun(run, "authority_changed");
     });
     permissionWaits.clear();
+    permissionExecutions.clear();
     permissionDialogs.clear();
     sessionManager = ctx.sessionManager;
     refreshSpawnTool(ctx);
@@ -1208,7 +1221,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     if (run.settled) return;
     if (reason === "parent_abort" || reason === "stopped_by_parent" || reason === "session_switch") run.cancellationRequested = true;
     run.stopReason ??= reason;
-    for (const [id, wait] of permissionWaits) {
+    for (const [id, wait] of permissionRecords()) {
       if (wait.run !== run) continue;
       wait.cancellation.abort();
       wait.request.state = "cancelled";
@@ -1219,7 +1232,8 @@ export default function spawnExtension(pi: ExtensionAPI) {
         try { run.child?.respond(wait.dialog); } catch { /* Process disposal settles the wait. */ }
       }
       permissionWaits.delete(id);
-      eventQueue.delete(id);
+      permissionExecutions.delete(id);
+      eventQueue.delete(wait.request.id);
     }
     run.closing = true;
     run.execution = "closing";
@@ -1563,7 +1577,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       || wait.revision !== accessRevision() || request.parentRuntimeId !== parentRuntimeId
       || request.runtimeId !== run.runtimeId || request.assignmentId !== run.assignments.at(-1)?.id
       || run.assignments.at(-1)?.outcome !== "pending" || canonicalPath(run.childCwd) !== request.cwd
-      || run.accessMode === "readonly") throw new Error("Worker permission authority expired or request context changed");
+      || run.accessMode === "readonly" || (wait.executionId && permissionExecutions.get(wait.executionId) !== wait)) throw new Error("Worker permission authority expired or request context changed");
     if (run.worktree) {
       const workspace = loadWorkspace(run.worktree.workspaceId);
       if (!workspace?.retained || workspace.runId !== run.id || workspace.workspaceCwd !== request.cwd || isWorkspaceFinalized(workspace)) {
@@ -1577,7 +1591,8 @@ export default function spawnExtension(pi: ExtensionAPI) {
       wait.responded = true; // Never retry an ambiguous transport write.
       run.child?.respond(wait.dialog, JSON.stringify({ version: 1, sender: { kind: "parent", id: run.parentId },
         workerId: run.id, assignmentId: request.assignmentId, requestId: request.id,
-        runtimeId: request.runtimeId, parentRuntimeId: request.parentRuntimeId, allowed, decision: request.state }));
+        runtimeId: request.runtimeId, parentRuntimeId: request.parentRuntimeId, allowed, decision: request.state,
+        executionId: wait.executionId }));
     }
     run.execution = run.pendingDialog || run.permissionRequests.some((request) => request.state === "pending") ? "waiting_parent" : "working";
     writeStatus(run);
@@ -1585,18 +1600,27 @@ export default function spawnExtension(pi: ExtensionAPI) {
     signalChange(run);
   };
   const cancelWorkerPermission = (run: SpawnRun, event: RpcEvent) => {
-    if (event.type !== "extension_ui_request" || event.method !== "setStatus" || event.statusKey !== SPAWN_PERMISSION_CANCEL || typeof event.statusText !== "string") return;
+    if (event.type !== "extension_ui_request" || event.method !== "setStatus"
+      || (event.statusKey !== SPAWN_PERMISSION_CANCEL && event.statusKey !== SPAWN_PERMISSION_FINISH) || typeof event.statusText !== "string") return;
     let address: WorkerPermissionOperation;
     try { address = JSON.parse(event.statusText) as WorkerPermissionOperation; } catch { return; }
     if (address.version !== 1 || address.workerId !== run.id || address.runtimeId !== run.runtimeId
       || address.parentRuntimeId !== parentRuntimeId || address.assignmentId !== run.assignments.at(-1)?.id) return;
-    for (const [id, wait] of permissionWaits) {
+    for (const [id, wait] of permissionRecords()) {
       if (wait.run !== run || wait.request.attemptId !== address.attemptId) continue;
+      if (event.statusKey === SPAWN_PERMISSION_FINISH) {
+        if (address.executionId === wait.executionId && permissionExecutions.get(id) === wait) {
+          permissionExecutions.delete(id);
+          wait.cancellation.abort();
+        }
+        return;
+      }
       wait.request.state = "cancelled";
       wait.request.resolvedAt = new Date().toISOString();
       wait.request.decision = { actor: "worker", outcome: "cancelled", reason: "Worker permission attempt aborted." };
       permissionWaits.delete(id);
-      eventQueue.delete(id);
+      permissionExecutions.delete(id);
+      eventQueue.delete(wait.request.id);
       wait.cancellation.abort();
       if (!run.closing) permissionResponse(wait, false);
       break;
@@ -1611,13 +1635,20 @@ export default function spawnExtension(pi: ExtensionAPI) {
     if (retired || run.closing || run.settled || operation.version !== 1 || operation.workerId !== run.id
       || operation.assignmentId !== assignment?.id || assignment.outcome !== "pending" || run.accessMode === "readonly"
       || operation.runtimeId !== run.runtimeId || operation.parentRuntimeId !== parentRuntimeId || typeof operation.attemptId !== "string" || !operation.attemptId
-      || !validPermissionAttempt(operation.attempt) || operation.attempt.cwd !== canonicalPath(run.childCwd)) return reject();
-    if (operation.operation === "permission_execute") {
-      const wait = permissionWaits.get(operation.requestId ?? "");
-      if (!wait || wait.run !== run || wait.request.state !== "approved" || !wait.authorization || wait.request.attemptId !== operation.attemptId
+      || !validPermissionAttempt(operation.attempt) || operation.attempt.cwd !== canonicalPath(run.childCwd)
+      || (operation.continuing !== undefined && (operation.operation !== "permission_execute" || typeof operation.continuing !== "boolean"))
+      || (operation.executionId !== undefined && (operation.operation !== "permission_recheck" || typeof operation.executionId !== "string"))
+      || (operation.operation !== "permission" && operation.userPreview !== undefined)) return reject();
+    if (operation.operation === "permission_execute" || operation.operation === "permission_recheck") {
+      const rechecking = operation.operation === "permission_recheck";
+      const wait = rechecking ? permissionExecutions.get(operation.executionId ?? "") : permissionWaits.get(operation.requestId ?? "");
+      if (!wait || wait.run !== run || wait.request.id !== operation.requestId || wait.request.state !== (rechecking ? "consumed" : "approved")
+        || !wait.authorization || wait.checking || wait.request.attemptId !== operation.attemptId
+        || (operation.continuing && (wait.request.permission.kind !== "write" || !["write", "edit"].includes(wait.request.tool)))
         || JSON.stringify(operation.attempt) !== JSON.stringify({ permission: wait.request.permission, tool: wait.request.tool,
           preview: wait.request.preview, cwd: wait.request.cwd, remember: wait.request.remember })) return reject();
-      permissionWaits.delete(wait.request.id); // Linear consumption, including failed validation.
+      if (!rechecking) permissionWaits.delete(wait.request.id); // Admission is consumed exactly once, including failed validation.
+      wait.checking = true;
       wait.dialog = event.id as string;
       wait.responded = false;
       void (async () => {
@@ -1625,10 +1656,19 @@ export default function spawnExtension(pi: ExtensionAPI) {
           permissionCurrent(wait);
           await wait.authorization!.validate();
           permissionCurrent(wait);
-          wait.request.state = "consumed";
-          wait.request.consumedAt = new Date().toISOString();
+          if (!rechecking) {
+            wait.request.state = "consumed";
+            wait.request.consumedAt = new Date().toISOString();
+            if (operation.continuing) {
+              wait.executionId = randomUUID();
+              permissionExecutions.set(wait.executionId, wait);
+            }
+          }
+          wait.checking = false;
           permissionResponse(wait, true);
         } catch (error) {
+          wait.checking = false;
+          if (wait.executionId) permissionExecutions.delete(wait.executionId);
           wait.request.state = "cancelled";
           wait.request.decision = { actor: "parent", outcome: "cancelled", reason: String(error) };
           if (!run.closing) permissionResponse(wait, false);
@@ -1637,11 +1677,14 @@ export default function spawnExtension(pi: ExtensionAPI) {
       return true;
     }
     if (operation.requestId !== undefined || run.permissionRequests.some((request) => request.attemptId === operation.attemptId)) return reject();
-    const request: WorkerPermissionRequest = { ...operation.attempt, id: randomUUID(), workerId: run.id, assignmentId: assignment.id,
-      runtimeId: run.runtimeId!, parentRuntimeId, attemptId: operation.attemptId, workspaceId: run.worktree?.workspaceId,
+    if (!operation.userPreview || typeof operation.userPreview.text !== "string" || typeof operation.userPreview.filetype !== "string") return reject();
+    const { permission, tool, preview, cwd, remember } = operation.attempt;
+    const request: WorkerPermissionRequest = { permission, tool, preview, cwd, remember, id: randomUUID(), workerId: run.id, assignmentId: assignment.id,
+      runtimeId: run.runtimeId!, parentRuntimeId, attemptId: operation.attemptId,
+      workspaceId: run.worktree?.workspaceId ?? workspaceForContext(run.childCwd, run.parentSessionFile)?.id,
       authorityRevision: accessRevision(), state: "pending", createdAt: new Date().toISOString() };
     run.permissionRequests.push(request);
-    permissionWaits.set(request.id, { run, request, dialog: event.id as string, revision: accessRevision(), cancellation: new AbortController() });
+    permissionWaits.set(request.id, { run, request, userPreview: operation.userPreview, dialog: event.id as string, revision: accessRevision(), cancellation: new AbortController() });
     run.execution = "waiting_parent";
     writeStatus(run);
     publishSpawnStatus();
@@ -1656,7 +1699,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     let operation: WorkerOperation | WorkerPermissionOperation;
     try { operation = JSON.parse(event.title.slice(SPAWN_PROTOCOL_TITLE.length)) as WorkerOperation | WorkerPermissionOperation; }
     catch { return reject(); }
-    if (operation.operation === "permission" || operation.operation === "permission_execute") return handlePermissionDialog(run, event, operation);
+    if (operation.operation === "permission" || operation.operation === "permission_execute" || operation.operation === "permission_recheck") return handlePermissionDialog(run, event, operation);
     const assignment = run.assignments.at(-1);
     if (retired || run.closing || operation.version !== 1 || operation.workerId !== run.id || operation.assignmentId !== assignment?.id
       || assignment.outcome !== "pending" || run.pendingDialog) return reject();
@@ -1729,6 +1772,25 @@ export default function spawnExtension(pi: ExtensionAPI) {
       }, delay);
     };
     const transcript = (event: RpcEvent) => {
+      if (event.type === "extension_ui_request" && event.method === "input"
+        && typeof event.title === "string" && event.title.startsWith(SPAWN_PROTOCOL_TITLE)) {
+        // The child RPC frame may carry a user-only diff. Never persist it in
+        // run artifacts, which agents can inspect independently of that file.
+        try {
+          const { userPreview: _privatePreview, ...operation } = JSON.parse(event.title.slice(SPAWN_PROTOCOL_TITLE.length));
+          if (["permission", "permission_execute", "permission_recheck"].includes(operation.operation)) {
+            // Raw protocol frames are not a model-preview channel, including
+            // frames from older workers that used preview for private diffs.
+            const attempt = operation.attempt;
+            event = { ...event, title: SPAWN_PROTOCOL_TITLE + JSON.stringify({ version: operation.version,
+              operation: operation.operation, workerId: operation.workerId, assignmentId: operation.assignmentId,
+              runtimeId: operation.runtimeId, parentRuntimeId: operation.parentRuntimeId, attemptId: operation.attemptId,
+              requestId: operation.requestId, executionId: operation.executionId,
+              attempt: attempt && { permission: attempt.permission, tool: attempt.tool, cwd: attempt.cwd, remember: attempt.remember },
+            }) };
+          } else event = { ...event, title: SPAWN_PROTOCOL_TITLE + JSON.stringify(operation) };
+        } catch { event = { ...event, title: SPAWN_PROTOCOL_TITLE + "[invalid frame omitted]" }; }
+      }
       appendFileSync(run.transcriptPath, `${JSON.stringify({ version: 1, sender: { kind: "worker", id: run.id }, assignmentId: run.assignments.at(-1)?.id, timestamp: new Date().toISOString(), event })}\n`, "utf8");
     };
     const summarizeChildEvent = (event: RpcEvent): string | undefined => {
@@ -1917,13 +1979,14 @@ export default function spawnExtension(pi: ExtensionAPI) {
         writeFileSync(run.resultPath, `${run.error}\n`, "utf8");
       } finally {
         run.execution = "closing";
-        for (const [id, wait] of permissionWaits) {
+        for (const [id, wait] of permissionRecords()) {
           if (wait.run !== run) continue;
           wait.cancellation.abort();
           wait.request.state = "cancelled";
           wait.request.resolvedAt = new Date().toISOString();
           permissionWaits.delete(id);
-          eventQueue.delete(id);
+          permissionExecutions.delete(id);
+          eventQueue.delete(wait.request.id);
         }
         run.armTimeout = undefined;
         for (const request of run.requests.filter((request) => request.state === "pending")) {
@@ -2298,9 +2361,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
             // belongs to the parent; children receive a single execution handle.
             wait.authorization = await requestPermission({ ...ctx, cwd: request.cwd,
               signal: AbortSignal.any([runtimeCancellation.signal, wait.cancellation.signal, ...(signal ? [signal] : [])]) },
-              request.permission, request.tool, request.preview, () => saveSessionSetting(pi, "access", {
+              request.permission, request.tool, wait.userPreview, () => saveSessionSetting(pi, "access", {
                 mode: getAccessMode(), permissions: getSessionGrants().filter((grant) => grant.kind !== "unsandboxed" && grant.kind !== "unix-socket"),
-              }), request.remember, { authorityCwd, provenance: {
+              }), request.remember, { authorityCwd, modelPreview: request.preview, provenance: {
                 workerId: run.id, parentId: run.parentId, assignmentId: request.assignmentId, requestId: request.id,
                 runtimeId: request.runtimeId, parentRuntimeId, workspaceId: request.workspaceId, directory: request.cwd,
               } });

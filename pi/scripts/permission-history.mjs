@@ -47,7 +47,12 @@ export function permissionSnapshot(branch) {
   const items = [];
   let bytes = 0;
   for (let index = history.length - 1; index >= 0 && items.length < 128; index--) {
-    const next = history[index];
+    const record = history[index];
+    // Pre-separation audit records can contain user-only file diffs. Status
+    // frames are not a read-authorized channel for those contents.
+    const next = record.previewAudience === "model" ? record : {
+      ...record, preview: `${record.tool}: ${record.scope}`, previewFiletype: "text",
+    };
     const length = Buffer.byteLength(JSON.stringify(next));
     if (bytes + length > 4 * 1024 * 1024) break;
     items.unshift(next);

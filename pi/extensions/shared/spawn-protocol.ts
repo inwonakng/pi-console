@@ -1,11 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
-import { registerPermissionRouter, type PermissionAttempt } from "./permissions";
+import { registerPermissionRouter, type PermissionAttempt, type PermissionPreview } from "./permissions";
 
 export const SPAWN_PROTOCOL_VERSION = 1;
 export const SPAWN_PROTOCOL_TITLE = "pi-spawn-protocol:";
 export const SPAWN_PERMISSION_CANCEL = "pi-spawn-permission-cancel";
+export const SPAWN_PERMISSION_FINISH = "pi-spawn-permission-finish";
 export const WORKER_TOOLS = ["spawn_report", "spawn_question"];
 export type WorkerLifetime = "bounded" | "conversational";
 export type WorkerExecution = "working" | "waiting_parent" | "idle" | "closing" | "closed" | "failed" | "cancelled";
@@ -59,7 +60,7 @@ export type WorkerPermissionRequest = PermissionAttempt & {
 };
 export type WorkerPermissionOperation = {
   version: 1;
-  operation: "permission" | "permission_execute";
+  operation: "permission" | "permission_execute" | "permission_recheck";
   workerId: string;
   assignmentId: string;
   runtimeId: string;
@@ -67,6 +68,9 @@ export type WorkerPermissionOperation = {
   attemptId: string;
   attempt: PermissionAttempt;
   requestId?: string;
+  userPreview?: PermissionPreview; // Private transport only; never part of a persisted/model-visible request.
+  continuing?: boolean;
+  executionId?: string;
 };
 
 /** Agent-authored context always carries its runtime-assigned provenance. */
@@ -111,16 +115,18 @@ export function registerWorkerProtocol(pi: ExtensionAPI): void {
   };
   const runtimeId = process.env.PI_SPAWN_RUNTIME_ID;
   const parentRuntimeId = process.env.PI_SPAWN_PARENT_RUNTIME_ID;
-  if (runtimeId && parentRuntimeId) registerPermissionRouter(async (ctx, attempt) => {
+  if (runtimeId && parentRuntimeId) registerPermissionRouter(async (ctx, attempt, userPreview) => {
     if (!assignmentId || reported) throw new Error("No active assignment for permission routing");
     const address = { version: 1 as const, workerId, assignmentId, runtimeId, parentRuntimeId, attemptId: randomUUID(), attempt };
     // A dialog can abort before its parent-assigned request ID comes back.
     // The private attempt address cancels only that wait, never grants access.
     const cancel = () => ctx.ui.setStatus(SPAWN_PERMISSION_CANCEL, JSON.stringify(address));
     ctx.signal?.addEventListener("abort", cancel, { once: true });
-    const exchangePermission = async (operation: "permission" | "permission_execute", requestId?: string) => {
+    const exchangePermission = async (operation: WorkerPermissionOperation["operation"], requestId?: string, continuing?: boolean, executionId?: string) => {
       if (ctx.mode !== "rpc" || !ctx.hasUI) throw new Error("Permission routing requires the managed RPC runtime");
-      const raw = await ctx.ui.input(SPAWN_PROTOCOL_TITLE + JSON.stringify({ ...address, operation, requestId }), undefined, { signal: ctx.signal });
+      const raw = await ctx.ui.input(SPAWN_PROTOCOL_TITLE + JSON.stringify({ ...address, operation, requestId, continuing, executionId,
+        ...(operation === "permission" ? { userPreview } : {}),
+      }), undefined, { signal: ctx.signal });
       if (!raw) throw new Error("Permission request denied, cancelled, or transport closed");
       const reply = JSON.parse(raw);
       if (reply.version !== 1 || reply.workerId !== workerId || reply.assignmentId !== address.assignmentId
@@ -128,18 +134,47 @@ export function registerWorkerProtocol(pi: ExtensionAPI): void {
         || reply.sender.id !== parentId || typeof reply.requestId !== "string"
         || (requestId !== undefined && reply.requestId !== requestId)) throw new Error("Invalid permission decision");
       if (reply.allowed !== true) throw new Error(`Permission attempt ${reply.decision ?? "cancelled"}; no action was authorized.`);
-      return reply.requestId as string;
+      if (executionId !== undefined && reply.executionId !== executionId) throw new Error("Incorrect active file action");
+      return reply as { requestId: string; executionId?: string };
     };
     let requestId: string;
-    try { requestId = await exchangePermission("permission"); }
+    try { requestId = (await exchangePermission("permission")).requestId; }
     catch (error) { ctx.signal?.removeEventListener("abort", cancel); throw error; }
     let consumed = false;
-    return { validate: async () => {
+    const assertUnconsumed = () => {
       if (consumed || reported || assignmentId !== address.assignmentId) throw new Error("Permission authorization already consumed or assignment changed");
+    };
+    const consume = async (continuing: boolean) => {
+      assertUnconsumed();
       consumed = true;
-      try { await exchangePermission("permission_execute", requestId); }
-      finally { ctx.signal?.removeEventListener("abort", cancel); }
-    } };
+      return exchangePermission("permission_execute", requestId, continuing);
+    };
+    return {
+      validate: async () => {
+        assertUnconsumed();
+        try { await consume(false); }
+        finally { ctx.signal?.removeEventListener("abort", cancel); }
+      },
+      begin: async () => {
+        assertUnconsumed();
+        let executionId: string;
+        try {
+          const reply = await consume(true);
+          if (typeof reply.executionId !== "string" || !reply.executionId) throw new Error("Missing active file action");
+          executionId = reply.executionId;
+        } catch (error) { ctx.signal?.removeEventListener("abort", cancel); throw error; }
+        let finished = false;
+        return { recheck: async () => {
+          if (finished || reported || assignmentId !== address.assignmentId) throw new Error("File action has finished or assignment changed");
+          await exchangePermission("permission_recheck", requestId, undefined, executionId);
+        }, finish: () => {
+          if (finished) return;
+          finished = true;
+          ctx.signal?.removeEventListener("abort", cancel);
+          ctx.ui.setStatus(SPAWN_PERMISSION_FINISH, JSON.stringify({ ...address, executionId }));
+        } };
+      },
+    };
   });
   pi.registerTool({
     name: "spawn_report", label: "Report assignment", executionMode: "sequential",

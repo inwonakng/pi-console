@@ -115,7 +115,7 @@ async function runUnsandboxed(
 ): Promise<{ exitCode: number | null }> {
   assertAuthority();
   const authorization = await requestPermission(ctx, { kind: "unsandboxed", scope: command, cwd }, "bash",
-    { text: command, filetype: "sh" }, onSessionGrant);
+    { text: command, filetype: "sh" }, onSessionGrant, true, { modelPreview: { text: command, filetype: "sh" } });
   await authorization.validate();
   assertAuthority();
   if (options.signal?.aborted) throw new Error("aborted");
@@ -238,15 +238,15 @@ async function executeRestricted(
   const preview = { text: command, filetype: "sh" };
   const authorizations: PermissionAuthorization[] = [];
   for (const scope of writes) {
-    authorizations.push(await requestPermission(context, { kind: "write", scope }, "bash", preview, onSessionGrant));
+    authorizations.push(await requestPermission(context, { kind: "write", scope }, "bash", preview, onSessionGrant, true, { modelPreview: preview }));
   }
   for (const scope of reads) {
     if (!writes.some((path) => pathInside(path, scope))) {
-      authorizations.push(await requestPermission(context, { kind: "read", scope }, "bash", preview, onSessionGrant));
+      authorizations.push(await requestPermission(context, { kind: "read", scope }, "bash", preview, onSessionGrant, true, { modelPreview: preview }));
     }
   }
   if (request.broadReadAccess) {
-    authorizations.push(await requestPermission(context, { kind: "read", scope: "/" }, "bash", preview, onSessionGrant, false));
+    authorizations.push(await requestPermission(context, { kind: "read", scope: "/" }, "bash", preview, onSessionGrant, false, { modelPreview: preview }));
     reads.push("/");
   }
   reads.push(...getGrantedScopes("read").filter((path) => !globShaped(path)));
@@ -260,11 +260,11 @@ async function executeRestricted(
     return runUnsandboxed(command, root, options, context, onSessionGrant, assertAuthority);
   }
   for (const scope of sockets) {
-    authorizations.push(await requestPermission(context, { kind: "unix-socket", scope }, "bash", preview, onSessionGrant));
+    authorizations.push(await requestPermission(context, { kind: "unix-socket", scope }, "bash", preview, onSessionGrant, true, { modelPreview: preview }));
   }
   sockets.push(...getGrantedScopes("unix-socket"));
   if (request.networkAccess) {
-    authorizations.push(await requestPermission(context, { kind: "network", scope: "*" }, "bash", preview, onSessionGrant));
+    authorizations.push(await requestPermission(context, { kind: "network", scope: "*" }, "bash", preview, onSessionGrant, true, { modelPreview: preview }));
   }
   if (options.signal?.aborted) throw new Error("aborted");
   const networkAccess = request.networkAccess === true || hasPermission({ kind: "network", scope: "*" }, root);

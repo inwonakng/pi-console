@@ -1027,6 +1027,13 @@ function createConversation(host, row) {
     const data = dialogDescription(title);
     const label = data.prompt || data.request || data.title || data.summary;
     if (label) target.append(text(heading ? "h3" : "p", label));
+    const origin = data.provenance;
+    if (origin && typeof origin === "object" && typeof origin.workerId === "string") {
+      for (const [name, value] of [["Worker", origin.workerId], ["Assignment", origin.assignmentId],
+        ["Workspace", origin.workspaceId || "(none)"], ["Request ID", origin.requestId]]) {
+        if (typeof value === "string") target.append(text("p", `${name}: ${value}`));
+      }
+    }
     for (const key of ["tool", "summary", "path", "directory", "mode"]) {
       if (typeof data[key] === "string" && data[key] !== label) target.append(text("p", `${key}: ${data[key]}`));
     }

@@ -1490,6 +1490,12 @@ end
 local function dialog_preview(value, lines, label)
 	local data = dialog_description(value)
 	if not data then fields(lines, { text = value }, { { "text", label } }); return end
+	local origin = type(data.provenance) == "table" and data.provenance or {}
+	if origin.workerId then
+		fields(lines, { worker = origin.workerId, assignment = origin.assignmentId,
+			workspace = origin.workspaceId or "(none)", request = origin.requestId },
+			{ { "worker", "Worker" }, { "assignment", "Assignment" }, { "workspace", "Workspace" }, { "request", "Request ID" } })
+	end
 	fields(lines, data, { { "title", "Title" }, { "prompt", "Prompt" }, { "tool", "Tool" },
 		{ "request", "Request" }, { "summary", "Summary" }, { "path", "Access scope" },
 		{ "directory", "Command directory" }, { "mode", "Mode" }, { "preview", "Preview" } })

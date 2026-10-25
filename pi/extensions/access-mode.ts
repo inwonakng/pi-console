@@ -28,6 +28,7 @@ import {
   resolveToolPath,
   restorePermissionGrants,
   type Permission,
+  type PermissionExecution,
 } from "./shared/permissions";
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 import { loadExtensionSettings } from "./shared/extension-settings";
@@ -192,42 +193,50 @@ export default function accessModeExtension(pi: ExtensionAPI) {
   // File mutations queue inside Pi. Authorize at their first filesystem
   // operation, after that queue, rather than releasing a stale hook approval.
   const mutationGuard = (ctx: ExtensionContext, name: "edit" | "write", input: Record<string, unknown>, signal?: AbortSignal) => {
-    let started = false;
-    return async (target: string) => {
+    let execution: PermissionExecution | undefined;
+    const revision = accessRevision();
+    return { finish: () => execution?.finish(), check: async (target: string) => {
       if (signal?.aborted) throw new Error("aborted");
       if (canonicalPath(target) !== target || target !== input.path) throw new Error("File target changed before execution");
       const blocked = workspaceToolBlock(name, input, ctx);
       if (blocked) throw new Error(blocked.reason);
-      if (started) return;
-      const revision = accessRevision();
-      const scope = pathInside(canonicalPath(ctx.cwd), target) && !hasPermission({ kind: "write", scope: target }, ctx.cwd)
-        ? canonicalPath(ctx.cwd) : target;
-      const authorization = await requestPermission({ ...ctx, signal: signal ?? ctx.signal }, { kind: "write", scope }, name,
-        () => name === "edit" ? { text: exactEditPreview(ctx.cwd, input), filetype: "diff" } : writePreview(ctx.cwd, input),
-        () => saveAccessState(pi));
-      await authorization.validate();
+      if (accessRevision() !== revision) throw new Error("File permission authority changed");
+      if (!execution) {
+        const scope = pathInside(canonicalPath(ctx.cwd), target) && !hasPermission({ kind: "write", scope: target }, ctx.cwd)
+          ? canonicalPath(ctx.cwd) : target;
+        const authorization = await requestPermission({ ...ctx, signal: signal ?? ctx.signal }, { kind: "write", scope }, name,
+          () => previewForTool({ toolName: name, input } as ToolCallEvent, ctx), () => saveAccessState(pi), true,
+          { modelPreview: { text: jsonPreview(input), filetype: "json" } });
+        execution = await authorization.begin();
+      }
+      // Every operation checks the live action, including writes following an
+      // awaited read/mkdir. Admission itself remains single-use.
+      await execution.recheck();
       if (signal?.aborted || accessRevision() !== revision || canonicalPath(target) !== target) throw new Error("File operation cancelled or target changed");
-      started = true;
-    };
+    } };
   };
   const defaultEdit = createEditToolDefinition(process.cwd());
   pi.registerTool({ ...defaultEdit, async execute(id, params, signal, update, ctx) {
     params.path = canonicalPath(resolveToolPath(params.path, ctx.cwd));
     const guard = mutationGuard(ctx, "edit", params, signal);
-    return createEditToolDefinition(ctx.cwd, { operations: {
-      access: async (path) => { await guard(path); await access(path, constants.R_OK | constants.W_OK); },
-      readFile: async (path) => { await guard(path); return readFile(path); },
-      writeFile: async (path, contents) => { await guard(path); await writeFile(path, contents); },
-    } }).execute(id, params, signal, update, ctx);
+    try {
+      return await createEditToolDefinition(ctx.cwd, { operations: {
+        access: async (path) => { await guard.check(path); await access(path, constants.R_OK | constants.W_OK); },
+        readFile: async (path) => { await guard.check(path); return readFile(path); },
+        writeFile: async (path, contents) => { await guard.check(path); await writeFile(path, contents); },
+      } }).execute(id, params, signal, update, ctx);
+    } finally { guard.finish(); }
   } });
   const defaultWrite = createWriteToolDefinition(process.cwd());
   pi.registerTool({ ...defaultWrite, async execute(id, params, signal, update, ctx) {
     params.path = canonicalPath(resolveToolPath(params.path, ctx.cwd));
     const guard = mutationGuard(ctx, "write", params, signal);
-    return createWriteToolDefinition(ctx.cwd, { operations: {
-      mkdir: async (directory) => { await guard(params.path); await mkdir(directory, { recursive: true }); },
-      writeFile: async (path, contents) => { await guard(path); await writeFile(path, contents); },
-    } }).execute(id, params, signal, update, ctx);
+    try {
+      return await createWriteToolDefinition(ctx.cwd, { operations: {
+        mkdir: async (directory) => { await guard.check(params.path); await mkdir(directory, { recursive: true }); },
+        writeFile: async (path, contents) => { await guard.check(path); await writeFile(path, contents); },
+      } }).execute(id, params, signal, update, ctx);
+    } finally { guard.finish(); }
   } });
   const defaultBash = createBashToolDefinition(process.cwd());
   pi.registerTool({

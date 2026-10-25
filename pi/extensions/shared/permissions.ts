@@ -24,7 +24,12 @@ export type Permission = {
 
 export type PermissionPreview = { text: string; filetype: string };
 
-export type PermissionAuthorization = { validate: () => Promise<void> };
+/** An active file action, distinct from its single-use admission handle. */
+export type PermissionExecution = { recheck: () => Promise<void>; finish: () => void };
+export type PermissionAuthorization = {
+  validate: () => Promise<void>;
+  begin: () => Promise<PermissionExecution>;
+};
 
 export function permissionWasDenied(error: unknown): boolean {
   return !!error && typeof error === "object" && "permissionDecision" in error && error.permissionDecision === "denied";
@@ -32,11 +37,12 @@ export function permissionWasDenied(error: unknown): boolean {
 export type PermissionAttempt = {
   permission: Permission;
   tool: string;
+  // Agent-supplied action text only. File contents belong in the private user preview.
   preview: PermissionPreview;
   cwd: string;
   remember: boolean;
 };
-type PermissionRouter = (ctx: ExtensionContext, attempt: PermissionAttempt) => Promise<PermissionAuthorization>;
+type PermissionRouter = (ctx: ExtensionContext, attempt: PermissionAttempt, userPreview: PermissionPreview) => Promise<PermissionAuthorization>;
 
 type Decision = "allowed" | "denied" | "cancelled";
 type HistoryRuntime = {
@@ -254,48 +260,70 @@ export function requestPermission(
   ctx: ExtensionContext,
   permission: Permission,
   tool: string,
-  preview: PermissionPreview | (() => PermissionPreview),
+  userPreview: PermissionPreview | (() => PermissionPreview),
   onSessionGrant: () => void,
   remember = true,
-  delegated?: { authorityCwd: string; provenance: Record<string, unknown> },
+  options?: { authorityCwd?: string; provenance?: Record<string, unknown>; modelPreview?: PermissionPreview },
 ): Promise<PermissionAuthorization> {
   const requestedGeneration = accessRevision();
   const scopeLabel = permission.kind === "network" && permission.scope === "*"
     ? "outbound network access to any host" : permission.scope;
   const signal = ctx.signal ? AbortSignal.any([ctx.signal, state.lifetime.signal]) : state.lifetime.signal;
-  const authorityCwd = delegated?.authorityCwd ?? ctx.cwd;
+  const authorityCwd = options?.authorityCwd ?? ctx.cwd;
+  const modelPreview = options?.modelPreview ?? { text: `${tool}: ${permission.kind} ${permission.scope}`, filetype: "text" };
   const run = async () => {
     const assertCurrent = () => {
       if (accessRevision() !== requestedGeneration) throw new Error("Permission request cancelled because the active session or branch changed.");
       if (signal.aborted) throw new Error("aborted");
     };
     assertCurrent();
-    const authorization = (allowOnce = false): PermissionAuthorization => ({ validate: async () => {
-      assertCurrent();
-      if (!allowOnce && !hasPermission(permission, authorityCwd)) throw new Error("Supporting permission is no longer effective");
-      if (permission.kind === "read" || permission.kind === "write" || permission.kind === "unix-socket") {
-        if (canonicalPath(permission.scope) !== permission.scope) throw new Error("Permission path changed before execution");
-      }
-    } });
+    const authorization = (allowOnce = false): PermissionAuthorization => {
+      const check = () => {
+        assertCurrent();
+        if (!allowOnce && !hasPermission(permission, authorityCwd)) throw new Error("Supporting permission is no longer effective");
+        if (permission.kind === "read" || permission.kind === "write" || permission.kind === "unix-socket") {
+          if (canonicalPath(permission.scope) !== permission.scope) throw new Error("Permission path changed before execution");
+        }
+      };
+      let begun = false;
+      return { validate: async () => check(), begin: async () => {
+        if (permission.kind !== "write" || !["write", "edit"].includes(tool)) throw new Error("Active action checks are limited to file mutations");
+        if (begun) throw new Error("File action already admitted");
+        begun = true;
+        check();
+        let finished = false;
+        return { recheck: async () => {
+          if (finished) throw new Error("File action has finished");
+          check();
+        }, finish: () => { finished = true; } };
+      } };
+    };
     if (hasPermission(permission, authorityCwd)) return authorization();
     if (getAccessMode() === "readonly") throw new Error(`${permission.kind} access is blocked in readonly mode: ${scopeLabel}`);
     if (state.router && process.env.PI_SPAWN_WORKER_ID) {
-      const contents = typeof preview === "function" ? preview() : preview;
-      const routed = await state.router({ ...ctx, signal }, { permission, tool, preview: contents, cwd: canonicalPath(ctx.cwd), remember });
+      const contents = typeof userPreview === "function" ? userPreview() : userPreview;
+      const routed = await state.router({ ...ctx, signal }, { permission, tool, preview: modelPreview, cwd: canonicalPath(ctx.cwd), remember }, contents);
       assertCurrent();
-      return { validate: async () => { assertCurrent(); await routed.validate(); assertCurrent(); } };
+      return {
+        validate: async () => { assertCurrent(); await routed.validate(); assertCurrent(); },
+        begin: async () => {
+          assertCurrent();
+          const execution = await routed.begin();
+          return { recheck: async () => { assertCurrent(); await execution.recheck(); assertCurrent(); }, finish: execution.finish };
+        },
+      };
     }
     if (getInteractionMode(ctx) !== "interactive") {
       throw new Error(`${permission.kind} access requires approval, but interaction mode is noninteractive: ${scopeLabel}`);
     }
     const summary = permissionSummary(permission);
-    const contents = typeof preview === "function" ? preview() : preview;
+    const contents = typeof userPreview === "function" ? userPreview() : userPreview;
     const title = JSON.stringify({
       kind: "pi_approval_preview", notify: false, resumable: true, tool, mode: getAccessMode(), summary: scopeLabel,
       request: summary, directory: ctx.cwd,
       path: permission.kind === "read" || permission.kind === "write" || permission.kind === "unix-socket"
         ? permission.scope : undefined,
-      preview_filetype: contents.filetype, preview: contents.text, provenance: delegated?.provenance,
+      preview_filetype: contents.filetype, preview: contents.text, provenance: options?.provenance,
     });
     notifyPiToolApproval(ctx);
     const sessionChoice = permission.kind === "unsandboxed"
@@ -311,7 +339,8 @@ export function requestPermission(
     const choices = remember ? ["Allow once", ...sessionChoices.keys(), "Deny"] : ["Allow once", "Deny"];
     const finish = recordPermission(ctx, {
       tool, mode: getAccessMode(), scope: scopeLabel, request: summary, directory: ctx.cwd,
-      preview: contents.text, previewFiletype: contents.filetype, options: choices, provenance: delegated?.provenance,
+      preview: modelPreview.text, previewFiletype: modelPreview.filetype, previewAudience: "model",
+      options: choices, provenance: options?.provenance,
     });
     const cancel = () => finish("cancelled", undefined, "Permission request aborted.");
     signal.addEventListener("abort", cancel, { once: true });
