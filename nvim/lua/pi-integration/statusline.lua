@@ -602,18 +602,7 @@ local function header_formats(state, width)
 	right = truncate_plain_to_width(right, math.max(0, width - 2))
 	local cwd_width = math.max(0, width - vim.fn.strdisplaywidth(right) - 4)
 	local cwd = truncate_plain_to_width(single_line(state.session_cwd or "--"), cwd_width)
-	local detail, highlight = cwd, "PiUsageStats"
-	if state.status_error then
-		detail = "Error (:PiLogs): " .. single_line(state.status_error)
-		highlight = "DiagnosticError"
-	elseif state.control_loss_reason then
-		detail = "Control lost (:PiLogs): " .. single_line(state.control_loss_reason)
-		highlight = "DiagnosticWarn"
-	elseif (state.unplaced_submissions or 0) > 0 then
-		detail = tostring(state.unplaced_submissions) .. " unpositioned submissions (:PiLogs)"
-		highlight = "DiagnosticWarn"
-	end
-	local details = statusline_text(" " .. truncate_plain_to_width(detail, cwd_width), highlight)
+	local details = statusline_text(" " .. cwd, "PiUsageStats")
 		.. "%=" .. statusline_text(right .. " ", "PiUsageStats") .. "%*"
 	return statusline_text(" " .. truncate_plain_to_width(title, math.max(0, width - 2)), "PiSessionTitle") .. "%*", details
 end

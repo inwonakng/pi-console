@@ -128,7 +128,7 @@ function M.display(message, level)
 		local width = math.max(0, math.min(vim.o.columns - 1, vim.v.echospace - 1))
 		if width == 0 then return end
 		local highlight = item.level == "error" and "ErrorMsg" or item.level == "warn" and "WarningMsg" or "None"
-		vim.api.nvim_echo({ { M.truncate(item.message, width), highlight } }, false, {})
+		vim.api.nvim_echo({ { M.truncate(item.message, width), highlight } }, true, {})
 	end)
 end
 

@@ -663,6 +663,9 @@ render = function()
 	if not state.frontend_visible then return end
 	layout.update_input_sidebar(ctx)
 	local visible, unplaced = feedback_ui.timeline_messages(feedback, session_id, snapshot)
+	if #unplaced > 0 and state.unplaced_submissions ~= #unplaced then
+		notify(tostring(#unplaced) .. " unpositioned submissions (:PiLogs)", vim.log.levels.WARN)
+	end
 	state.unplaced_submissions = #unplaced
 	local inputs = { messages = visible, tools = conversation and conversation.tools,
 		buf = state.transcript_buf, nested = state.show_nested_tools, workspace = state.workspace,
@@ -1173,7 +1176,7 @@ connect = function()
 				grant = nil
 				control_loss_generation = control_loss_generation + 1
 				state.control_loss_reason = tostring(value.reason)
-				log("Control lost: " .. state.control_loss_reason, vim.log.levels.WARN)
+				notify("Control lost: " .. state.control_loss_reason, vim.log.levels.WARN)
 				close_approval()
 				render()
 			end
