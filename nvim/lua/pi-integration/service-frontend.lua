@@ -2486,7 +2486,7 @@ vim.api.nvim_create_autocmd("VimLeavePre", { callback = function()
 	end
 end })
 action_connection = require("pi-integration.service-action-connection").new({
-	connected = function() return job ~= nil and hello ~= nil end,
+	connected = function() return job ~= nil end,
 	request = request,
 	forget = function(id) if id then callbacks[id] = nil end end,
 	render = function() if render and ctx and state.input_buf then render() end end,
@@ -2497,7 +2497,6 @@ action_connection = require("pi-integration.service-action-connection").new({
 		recovery_requested = true
 		connect()
 	end,
-	sync = function() if attachment then refresh(true) end end,
 	ready = function()
 		if not job then return false, "bridge not running" end
 		if not hello then return false, "service handshake pending" end

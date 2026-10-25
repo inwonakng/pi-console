@@ -1,9 +1,10 @@
--- User actions check their own bridge. Discovery and background reads never reconnect it.
+-- User actions reuse their bridge. Discovery and background reads never reconnect it.
 local M = {}
 function M.new(ctx)
 	local gate = { status = nil }
 	local action, monitoring, executing
 	local function status(value)
+		if gate.status == value then return end
 		gate.status = value
 		ctx.render()
 	end
@@ -55,23 +56,15 @@ function M.new(ctx)
 				finish(false)
 			else vim.defer_fn(function() wait_ready(deadline) end, 25) end
 		end
-		local function reconnect(reason)
-			if action ~= waiting then return end
+		if not ctx.connected() then
 			status("Reconnecting")
-			ctx.reconnect(reason)
-			-- The bridge handshake has a 10-second deadline; allow attachment recovery too.
-			wait_ready(vim.uv.hrtime() / 1e6 + 15000)
+			ctx.reconnect("Conversation bridge is not connected")
 		end
-		status("Checking connection")
-		probe(function(ok, reason)
-			if action ~= waiting then return end
-			if ok then
-				ctx.sync()
-				wait_ready(vim.uv.hrtime() / 1e6 + 15000)
-			else reconnect(reason) end
-		end)
+		-- Reuse an existing bridge even while its handshake or attachment is pending.
+		-- The bridge handshake has a 10-second deadline; allow attachment recovery too.
+		wait_ready(vim.uv.hrtime() / 1e6 + 15000)
 	end
-	-- A request can outlive its preflight check. Probe only while user work awaits a reply;
+	-- Probe only while user work awaits a reply;
 	-- losing that connection never retries the request or starts a background reconnect.
 	function gate.monitor()
 		if monitoring then return end
