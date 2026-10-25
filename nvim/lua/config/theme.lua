@@ -122,6 +122,7 @@ require("catppuccin").setup({
 		for _, name in ipairs({
 			"ModeFull", "ModeEdit", "ModeAsk", "ModeReadonly", "ModeUnknown",
 			"IntegrationAsk", "IntegrationAllowed", "NotifyOn", "NotifyOff", "UsageStats",
+			"WorkspaceLocal", "WorkspaceActive",
 		}) do
 			highlights["PiOverview" .. name] = vim.tbl_extend("force", highlights["Pi" .. name], { bg = "NONE" })
 		end

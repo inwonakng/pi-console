@@ -94,7 +94,7 @@ end
 local function metadata_line(values)
 	return table.concat({
 		values.status,
-		values.project .. " / " .. values.workspace,
+		values.project .. "@" .. values.workspace,
 		"host: " .. values.host,
 		"controller: " .. values.controller,
 	}, " · ")
@@ -288,7 +288,11 @@ function M.open(config)
 				local metadata_text = metadata_prefix .. metadata_line(values)
 				table.insert(lines, metadata_text)
 				highlight(row + 1, #metadata_prefix, #metadata_prefix + #values.status, icons.highlight(entry.status))
-				highlight(row + 1, #metadata_prefix + #values.status, #metadata_text, "PiOverviewMetadata")
+				local workspace_start = #metadata_prefix + #values.status + #" · " + #values.project + #"@"
+				local workspace_end = workspace_start + #values.workspace
+				highlight(row + 1, #metadata_prefix + #values.status, workspace_start, "PiOverviewMetadata")
+				highlight(row + 1, workspace_start, workspace_end, values.workspace == "local" and "PiOverviewWorkspaceLocal" or "PiOverviewWorkspaceActive")
+				highlight(row + 1, workspace_end, #metadata_text, "PiOverviewMetadata")
 				for _, span in ipairs(spans) do
 					highlight(row + 1, 7 + span.start_col, 7 + span.end_col, span.highlight)
 				end
