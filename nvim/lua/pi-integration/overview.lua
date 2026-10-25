@@ -284,7 +284,7 @@ function M.open(config)
 				if suffix ~= "" then highlight(row, #lines[row] - #suffix, #lines[row], "PiSubagent") end
 				local values = metadata(entry)
 				local indicators, spans = indicator_columns(entry)
-				local metadata_prefix = "       " .. indicators .. "  "
+				local metadata_prefix = "     " .. indicators .. "  "
 				local metadata_text = metadata_prefix .. metadata_line(values)
 				table.insert(lines, metadata_text)
 				highlight(row + 1, #metadata_prefix, #metadata_prefix + #values.status, icons.highlight(entry.status))
@@ -294,7 +294,7 @@ function M.open(config)
 				highlight(row + 1, workspace_start, workspace_end, values.workspace == "local" and "PiOverviewWorkspaceLocal" or "PiOverviewWorkspaceActive")
 				highlight(row + 1, workspace_end, #metadata_text, "PiOverviewMetadata")
 				for _, span in ipairs(spans) do
-					highlight(row + 1, 7 + span.start_col, 7 + span.end_col, span.highlight)
+					highlight(row + 1, 5 + span.start_col, 5 + span.end_col, span.highlight)
 				end
 				rows[row + 1] = node
 				if focus_target and entry.id == focus_target.id then focused_row = row end
