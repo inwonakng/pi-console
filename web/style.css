@@ -1,15 +1,25 @@
 :root {
-  --bg: #171b1a;
-  --surface: #1e2422;
-  --text: #e7e8de;
-  --accent: #b8d58a;
-  --muted: #a4ada6;
-  --border: #39433d;
-  --danger: #f0a09a;
-  --hover: #2b352e;
-  --collapse-surface: #253029;
-  --collapse-header: #1c2520;
-  --collapse-hover: #222d25;
+  /* Catppuccin Frappe with the overrides in nvim/lua/config/theme.lua. */
+  --bg: #080808;
+  --surface: #141414;
+  --text: #c6d0f5;
+  --accent: #8caaee;
+  --muted: #a5adce;
+  --border: #2a2a2a;
+  --danger: #e78284;
+  --danger-surface: #2a1014;
+  --hover: #242424;
+  --collapse-surface: var(--surface);
+  --collapse-header: #1b1b1b;
+  --collapse-hover: var(--hover);
+  --user: var(--accent);
+  --user-surface: #102033;
+  --assistant: #ca9ee6;
+  --assistant-surface: #1b1424;
+  --thinking: #e5c890;
+  --tool: #ef9f76;
+  --approval: #babbf1;
+  --approval-surface: #201b2d;
   --status-working: #8caaee;
   --status-waiting: #e5c890;
   --status-compacting: #ca9ee6;
@@ -45,7 +55,7 @@ label { font-size: 12px; color: var(--muted); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .danger { color: var(--danger); }
 #viewport-diagnostics { position: fixed; left: 6px; z-index: 2147483647; width: calc(100% - 12px); margin: 0; padding: 6px; border: 1px solid var(--accent); background: var(--bg); color: var(--text); font-size: 10px; line-height: 1.3; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none; }
-.notice { flex-shrink: 0; background: #392a28; color: var(--danger); border-bottom: 1px solid var(--danger); padding: 10px 16px; max-height: 20%; overflow: auto; overflow-wrap: anywhere; }
+.notice { flex-shrink: 0; background: var(--danger-surface); color: var(--danger); border-bottom: 1px solid var(--danger); padding: 10px 16px; max-height: 20%; overflow: auto; overflow-wrap: anywhere; }
 #panels { flex: 1; min-height: 0; min-width: 0; }
 #overview { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; padding-bottom: env(safe-area-inset-bottom); }
 #overview > * { flex-shrink: 0; }
@@ -63,7 +73,7 @@ label { font-size: 12px; color: var(--muted); }
 .hosts-panel > summary { padding: 10px 12px; color: var(--muted); }
 .hosts-panel:not([open]) > summary { min-height: 32px; padding: 6px 12px; }
 #connection-state { float: right; margin-left: 8px; color: var(--muted); }
-#connection-state.connected { color: var(--accent); }
+#connection-state.connected { color: var(--status-done); }
 .connection-form { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 0 12px 12px; font-size: 12px; }
 #channel { color: var(--accent); }
 #hosts { display: grid; padding: 0 12px; color: var(--muted); font-size: 12px; }
@@ -100,8 +110,10 @@ label { font-size: 12px; color: var(--muted); }
 .message { padding: 18px 0; }
 .message-label { font-size: 11px; color: var(--accent); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .08em; }
 .assistant-part + .assistant-part { margin-top: 12px; }
-.message[data-role="user"] { margin: 12px 0 12px auto; padding: 12px 16px; width: fit-content; max-width: 92%; background: var(--surface); border-radius: 12px 12px 3px 12px; }
-.message[data-role="user"] .message-label { color: var(--muted); }
+.message[data-role="user"] { margin: 12px 0 12px auto; padding: 12px 16px; width: fit-content; max-width: 92%; background: var(--user-surface); border-radius: 12px 12px 3px 12px; }
+.message[data-role="user"] > .message-label { color: var(--user); }
+.message[data-role="assistant"] > .message-label { color: var(--assistant); background: var(--assistant-surface); }
+.message[data-role="error"], .message[data-role="error"] > .message-label { color: var(--danger); }
 .message-text { white-space: pre-wrap; }
 .markdown { white-space: normal; }
 .markdown > * { margin: 0 0 12px; }
@@ -129,6 +141,9 @@ label { font-size: 12px; color: var(--muted); }
 .markdown [data-align="right"] { text-align: right; }
 .transcript details { margin: 10px 0; border-radius: 5px; overflow: hidden; background: var(--collapse-surface); color: var(--muted); }
 .transcript details > summary { padding: 10px 14px; background: var(--collapse-header); color: var(--text); }
+.transcript details[data-kind="thinking"] > summary { color: var(--thinking); }
+.transcript details[data-kind="toolCall"] > summary, .transcript .tool-output > summary { color: var(--tool); }
+.transcript .tool-output[data-error="true"] > summary { color: var(--danger); }
 .transcript details > :not(summary) { margin: 0; padding: 12px 14px; }
 .transcript details > details { margin: 10px 14px; padding: 0; }
 @media (hover: hover) {
@@ -138,10 +153,10 @@ summary { cursor: pointer; min-height: 44px; padding: 10px 0; font-size: 12px; }
 pre { font: inherit; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; }
 .assistant-part[data-role="toolResult"] .tool-output { margin: 0; }
 .latest { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); box-shadow: 0 3px 16px #0006; font-size: 12px; white-space: nowrap; }
-.interactions { margin-top: 20px; padding: 16px; background: var(--surface); border: 1px solid var(--accent); border-radius: 8px; }
-.interactions > h3 { color: var(--accent); margin-bottom: 12px; }
+.interactions { margin-top: 20px; padding: 16px; background: var(--approval-surface); border: 1px solid var(--approval); border-radius: 8px; }
+.interactions > h3 { color: var(--approval); margin-bottom: 12px; }
 .interactions fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
-.interactions legend { color: var(--accent); font-size: 11px; margin-bottom: 8px; }
+.interactions legend { color: var(--approval); font-size: 11px; margin-bottom: 8px; }
 .interactions form + form { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px; }
 .interactions h3 { margin: 0 0 8px; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .interactions p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; margin-bottom: 10px; }

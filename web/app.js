@@ -766,8 +766,16 @@ function createConversation(host, row) {
     if (!Array.isArray(content)) return [text("pre", JSON.stringify(content, null, 2))];
     return content.map((block, index) => {
       if (block.type === "text") return messageText(block.text);
-      if (block.type === "thinking") return blockDetails("Thinking", block.thinking, `${prefix}-thinking-${index}`, markdown);
-      if (block.type === "toolCall") return blockDetails(block.name, block.arguments, `${prefix}-call-${block.id}`);
+      if (block.type === "thinking") {
+        const details = blockDetails("Thinking", block.thinking, `${prefix}-thinking-${index}`, markdown);
+        details.dataset.kind = block.type;
+        return details;
+      }
+      if (block.type === "toolCall") {
+        const details = blockDetails(block.name, block.arguments, `${prefix}-call-${block.id}`);
+        details.dataset.kind = block.type;
+        return details;
+      }
       if (block.type === "image") return text("p", "[Image attachment]", "muted");
       return blockDetails(block.type || "Content", block, `${prefix}-${index}`);
     });
@@ -861,11 +869,13 @@ function createConversation(host, row) {
         if (tool) {
           const details = blockDetails(`${tool.toolName} / ${tool.state}`, tool.partialResult || tool.args, `output-${key}`);
           details.className = "tool-output";
+          details.dataset.error = String(Boolean(tool.isError));
           article.append(details);
         } else if (message.role === "toolResult") {
           const details = document.createElement("details");
           details.className = "tool-output";
           details.dataset.key = `output-${key}`;
+          details.dataset.error = String(Boolean(message.isError));
           details.append(text("summary", `${message.toolName || "Tool"} / ${message.isError ? "error" : "output"}`));
           details.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key, false));
           if (message.errorMessage) details.append(text("p", message.errorMessage));
