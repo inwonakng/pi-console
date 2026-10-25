@@ -73,7 +73,11 @@ function M.append(ctx, lines, items, permission)
 		status_label = status, preview_start = preview_start, preview_end = preview_end,
 		preview_filetype = permission.previewFiletype,
 	})
-	local summary = tostring(permission.tool or "tool") .. ": " .. response
+	local decision = status:lower()
+	if permission.state == "allowed" and response:lower():find("for%s+.-session") then
+		decision = "allowed for session"
+	end
+	local summary = "permission: " .. tostring(permission.tool or "tool") .. " - " .. decision
 	table.insert(lines, "> " .. tool_output.summary_icon("permission") .. " " .. summary:gsub("[\r\n]", " "))
 	table.insert(items, { kind = "tool", output_id = output_id, start_line = #lines, end_line = #lines })
 	table.insert(lines, "")
