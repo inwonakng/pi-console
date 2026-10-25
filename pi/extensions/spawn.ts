@@ -1009,7 +1009,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
   const owner = Symbol("spawn runtime");
   let retired = false;
   let runtimeCancellation = new AbortController();
-  const pendingJoins = new Set<{ runIds: Set<string>; cancellation: AbortController; finished: Promise<void> }>();
+  const pendingJoins = new Set<{ runIds: Set<string>; delivery: "tool" | "command"; cancellation: AbortController; finished: Promise<void> }>();
   const eventQueue = new Map<string, { run: SpawnRun; content: string; details: Record<string, unknown> }>();
   let runtimeContext: ExtensionContext | undefined;
   let compacting = false;
@@ -1036,6 +1036,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
   const flushEvents = () => {
     if (retired || compacting || !runtimeContext || (!runtimeContext.isIdle() && !parentActive)) return;
     for (const [key, event] of eventQueue) {
+      // Model-tool joins deliver these events in their result. Commands only
+      // display a summary, so their events must still wake an idle parent.
+      if ([...pendingJoins].some((join) => join.delivery === "tool" && join.runIds.has(event.run.id))) continue;
       eventQueue.delete(key);
       if (event.run.cancellationRequested || event.run.deliveredEvents.includes(key)) continue;
       event.run.deliveredEvents.push(key);
@@ -1049,14 +1052,16 @@ export default function spawnExtension(pi: ExtensionAPI) {
   };
   const queueEvent = (run: SpawnRun, key: string, content: string) => {
     signalChange(run);
-    if (retired || run.cancellationRequested || run.joinRequested || run.deliveredEvents.includes(key)) return;
+    if (retired || run.cancellationRequested || run.deliveredEvents.includes(key)) return;
     eventQueue.set(key, { run, content, details: artifactDetails(run) });
     flushEvents();
   };
   const announceCompletion = (run: SpawnRun) => {
     if (run.execution === "working" || run.execution === "waiting_parent" || run.execution === "closing") return;
-    queueEvent(run, `${run.id}:${run.assignments.at(-1)?.id}:result`, agentContext({ kind: "worker", id: run.id }, {
-      event: "assignment_result", ...artifactDetails(run), report: resultSummary(run),
+    const failed = run.execution === "failed";
+    const key = failed ? `${run.id}:execution:failed` : `${run.id}:${run.assignments.at(-1)?.id}:result`;
+    queueEvent(run, key, agentContext({ kind: "worker", id: run.id }, {
+      event: failed ? "execution_failure" : "assignment_result", ...artifactDetails(run), report: resultSummary(run),
       next: "Inspect with join/report/diff. Acceptance is explicit. Follow up with a conversational readonly worker, or close it. Incomplete turns are not success.",
     }));
   };
@@ -1261,6 +1266,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
   const finalizeJoin = async <T>(
     selected: SpawnRun[],
     signal: AbortSignal | undefined,
+    delivery: "tool" | "command",
     report: () => T,
     onWaiting?: () => void,
   ): Promise<T> => {
@@ -1268,7 +1274,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     signal = AbortSignal.any([runtimeCancellation.signal, cancellation.signal, ...(signal ? [signal] : [])]);
     const previouslyJoined = new Map(selected.map((run) => [run.id, run.joined]));
     let finishJoin!: () => void;
-    const join = { runIds: new Set(selected.map((run) => run.id)), cancellation,
+    const join = { runIds: new Set(selected.map((run) => run.id)), delivery, cancellation,
       finished: new Promise<void>((resolve) => { finishJoin = resolve; }) };
     pendingJoins.add(join);
     try {
@@ -1290,8 +1296,19 @@ export default function spawnExtension(pi: ExtensionAPI) {
         run.joined = run.settled || run.execution === "idle";
         writeStatus(run);
       }
+      const result = report();
+      if (delivery === "tool") {
+        // Consume only after collection succeeds. Failed joins leave events
+        // queued for automatic delivery once the tool stops owning them.
+        for (const [key, event] of eventQueue) {
+          if (!join.runIds.has(event.run.id)) continue;
+          eventQueue.delete(key);
+          event.run.deliveredEvents.push(key);
+          writeStatus(event.run);
+        }
+      }
       publishSpawnStatus();
-      return report();
+      return result;
     } catch (error) {
       const failures: unknown[] = [error];
       for (const run of selected) {
@@ -1315,6 +1332,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     } finally {
       pendingJoins.delete(join);
       finishJoin();
+      flushEvents();
     }
   };
 
@@ -1833,7 +1851,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       const run = runs.get(id);
       if (!run || retired) return;
       if (operation === "spawn.join") {
-        await finalizeJoin([run], ctx.signal, () => emitCommandResult(resultSummary(run), artifactDetails(run)));
+        await finalizeJoin([run], ctx.signal, "command", () => emitCommandResult(resultSummary(run), artifactDetails(run)));
       } else {
         stopRun(run, "stopped_by_parent");
         await waitForRun(run, undefined, false);
@@ -1864,7 +1882,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         }
         if (action === "join") {
           const run = getRunById(id);
-          await finalizeJoin([run], ctx.signal, () => emitCommandResult(resultSummary(run), artifactDetails(run)));
+          await finalizeJoin([run], ctx.signal, "command", () => emitCommandResult(resultSummary(run), artifactDetails(run)));
           return;
         }
         if (action === "stop") {
@@ -2008,7 +2026,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       }
 
       onUpdate?.({ content: [{ type: "text", text: `${runLabel(run)} ${run.id} running in foreground (${accessMode}).` }], details: artifactDetails(run) });
-      return finalizeJoin([run], signal, () => ({
+      return finalizeJoin([run], signal, "tool", () => ({
         content: [{ type: "text" as const, text: resultSummary(run) }],
         isError: runHasError(run),
         details: artifactDetails(run),
@@ -2168,7 +2186,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
 
       if (params.action === "join") {
         const run = getRun(params.id);
-        return finalizeJoin([run], signal, () => ({
+        return finalizeJoin([run], signal, "tool", () => ({
           content: [{ type: "text" as const, text: resultSummary(run) }],
           isError: runHasError(run),
           details: artifactDetails(run),
@@ -2186,7 +2204,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         if (selected.length === 0) {
           return { content: [{ type: "text", text: "No spawned subagents to join." }], details: { runs: [] } };
         }
-        return finalizeJoin(selected, signal, () => ({
+        return finalizeJoin(selected, signal, "tool", () => ({
           content: [{ type: "text" as const, text: selected.map((run) => `## ${run.id}\n\n${resultSummary(run)}`).join("\n\n---\n\n") }],
           isError: selected.some(runHasError),
           details: { runs: selected.map(statusJson) },
