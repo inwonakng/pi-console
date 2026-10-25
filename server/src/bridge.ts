@@ -27,11 +27,15 @@ async function main(): Promise<void> {
   const writer = new RecordWriter(process.stdout);
   const abort = new AbortController();
   let failure: Error | undefined, client: LocalClient | undefined, control: BridgeControl | undefined;
-  let closed = false;
+  let closed = false, diagnosticSent = false;
   const shutdown = (error?: Error) => {
     if (closed) return;
     closed = true;
     failure = error;
+    if (error && !diagnosticSent) {
+      diagnosticSent = true;
+      void writer.send({ type: "disconnected", code: "bridge_error", message: error.message }).catch(() => undefined);
+    }
     clearInterval(parentWatch);
     control?.reset(error?.message ?? "Frontend disconnected");
     abort.abort(); client?.close(); process.stdin.destroy();
@@ -63,7 +67,10 @@ async function main(): Promise<void> {
   const event = (record: Record<string, unknown>) => {
     if (closed) return;
     if (record.type === "update") control?.update(record.update);
-    if (record.type === "disconnected") control?.reset(String(record.message));
+    if (record.type === "disconnected") {
+      diagnosticSent = true;
+      control?.reset(String(record.message));
+    }
     output(record);
     if (record.type === "disconnected") shutdown(new Error(String(record.message)));
   };

@@ -16,7 +16,7 @@ export class LocalClient {
   private disconnected = false;
   private constructor(private readonly socket: Duplex, private readonly event: (record: Record<string, unknown>) => void) {
     this.writer = new RecordWriter(socket);
-    socket.on("error", () => undefined);
+    socket.on("error", (error: Error) => this.failed(error));
     void this.read().catch((error) => this.failed(error)).finally(() => this.failed(Object.assign(new Error("Service disconnected; accepted mutations were not replayed. Reconnect and inspect command status."), { code: "service_disconnected" })));
   }
   static async open(root: string, channel: Channel, event: (record: Record<string, unknown>) => void = () => undefined,
@@ -61,7 +61,12 @@ export class LocalClient {
       await new Promise<void>((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
     } catch (error) { ws.terminate(); throw error; }
     const client = new LocalClient(createWebSocketStream(ws, { highWaterMark: 64 * 1024 }), event);
-    const deadline = setTimeout(() => client.close(), 10000);
+    ws.on("error", (error: Error) => client.failed(error));
+    ws.once("close", (code, reason) => client.failed(Object.assign(
+      new Error(`WebSocket closed (${code})${reason.length ? `: ${reason.toString("utf8").slice(0, 512)}` : "; no server reason received"}`),
+      { code: "websocket_closed" })));
+    const deadline = setTimeout(() => client.failed(Object.assign(new Error("Service handshake timed out after 10 seconds"),
+      { code: "handshake_timeout" })), 10000);
     try {
       const hello = await client.request("hello", { version: PROTOCOL, channel });
       if (!object(hello) || hello.version !== PROTOCOL || hello.channel !== channel || typeof hello.hostId !== "string"
@@ -89,6 +94,13 @@ export class LocalClient {
   close(): void { this.disconnected = true; this.socket.destroy(); }
   private async read(): Promise<void> {
     for await (const record of records(this.socket, MAX_RESPONSE)) {
+      if (record.type === "disconnected") {
+        this.failed(Object.assign(new Error(typeof record.message === "string" ? record.message : "Service disconnected"), {
+          code: typeof record.code === "string" ? record.code : "service_disconnected",
+          connectionId: typeof record.connectionId === "string" ? record.connectionId : undefined,
+        }));
+        return;
+      }
       if (record.type !== "response") { this.event(record); continue; }
       const request = typeof record.id === "string" && this.pending.get(record.id);
       if (!request) throw new Error("Uncorrelated service response");
@@ -98,10 +110,13 @@ export class LocalClient {
         object(record.error) ? record.error : { code: "service_error" }));
     }
   }
-  private failed(error: Error): void {
+  private failed(error: Error & { code?: string; connectionId?: string }): void {
     for (const request of this.pending.values()) request.reject(error);
     this.pending.clear();
     if (!this.socket.destroyed) this.socket.destroy();
-    if (!this.disconnected) { this.disconnected = true; this.event({ type: "disconnected", message: error.message }); }
+    if (!this.disconnected) {
+      this.disconnected = true;
+      this.event({ type: "disconnected", message: error.message, code: error.code, connectionId: error.connectionId });
+    }
   }
 }

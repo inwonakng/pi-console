@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
@@ -30,11 +31,11 @@ export class RemoteListener {
   private readonly server: Server;
   private readonly websocket = new WebSocketServer({ noServer: true, maxPayload: MAX_REQUEST,
     perMessageDeflate: false, allowSynchronousEvents: false, clientTracking: true });
-  private readonly peers = new Map<Duplex, { detach: () => void }>();
+  private readonly peers = new Map<Duplex, { detach: (error?: Error) => void }>();
   private readonly sockets = new Set<Duplex>();
   private readonly timer: NodeJS.Timeout;
   constructor(private readonly port: number,
-    connection: (stream: Duplex, onDetach: (detach: () => void) => void) => Promise<void>,
+    connection: (stream: Duplex, onDetach: (detach: (error?: Error) => void) => void, connectionId: string) => Promise<void>,
     web?: { root: string; serviceRoot: string; channel: Channel; hostId: string; allowedOrigins?: readonly string[] }) {
     // Load the fixed asset set at startup; never resolve request paths on disk.
     const assets = new Map<string, { body: Buffer; type: string }>();
@@ -120,17 +121,25 @@ export class RemoteListener {
         request.socket.setTimeout(0);
         const stream = createWebSocketStream(ws, { highWaterMark: 64 * 1024 });
         stream.on("error", () => undefined); ws.on("error", () => undefined);
-        const peer = { detach: () => undefined as void };
+        const connectionId = randomUUID();
+        const peer = { detach: (_error?: Error) => undefined as void };
         this.peers.set(stream, peer);
         const connected = target && web
           ? webRelay(stream, target, web.channel, (detach) => { peer.detach = detach; })
-          : connection(stream, (detach) => { peer.detach = detach; });
+          : connection(stream, (detach) => { peer.detach = detach; }, connectionId);
         void connected
           .catch(() => stream.destroy()).finally(() => { peer.detach(); this.peers.delete(stream); ws.terminate(); });
         // Detect dead connections, including half-open controllers. No reconnect/replay.
         let alive = true;
         ws.on("pong", () => { alive = true; });
-        const ping = () => { if (!alive) { peer.detach(); stream.destroy(); ws.terminate(); } else { alive = false; ws.ping(); } };
+        const ping = () => {
+          if (!alive) {
+            const error = Object.assign(new Error("WebSocket heartbeat expired: no pong within 15 seconds"), { code: "heartbeat_timeout" });
+            console.error(JSON.stringify({ type: "disconnected", timestamp: new Date().toISOString(), connectionId,
+              code: error.code, message: error.message, transport: "ws", remoteAddress: request.socket.remoteAddress }));
+            peer.detach(error); stream.destroy(); ws.terminate();
+          } else { alive = false; ws.ping(); }
+        };
         this.pings.add(ping); ws.once("close", () => { peer.detach(); this.pings.delete(ping); });
       }); } catch { release(); socket.destroy(); }
     });

@@ -852,7 +852,15 @@ local function reset_refresh(detached)
 	transcript_cache, rendered_transcript, rendered_metadata = {}, nil, nil
 	rendered_side, rendered_side_buf, initial_scroll_pending = nil, nil, false
 end
-local function disconnected()
+local function disconnected(reason, details, intentional)
+	local entry
+	if reason then
+		entry = logs.add(intentional and vim.log.levels.INFO or vim.log.levels.WARN, "Connection closed: " .. tostring(reason),
+			vim.tbl_extend("force", { host = current_owner_label(), endpoint = M.config.service_remote or M.config.service_root or "local",
+				host_id = M.config.expected_host, service_epoch = hello and hello.serviceEpoch, connection_id = hello and hello.connectionId,
+				attachment = attachment, generation = generation }, details or {}),
+			{ session = session_id, key = "connection:" .. generation })
+	end
 	cancel_new_session("Connection lost while loading session directory. No new frontend was opened.")
 	if action_connection then action_connection.disconnected() end
 	-- Creation may have succeeded remotely while its reply was lost. Keep only
@@ -877,6 +885,7 @@ local function disconnected()
 	reset_refresh(true)
 	close_approval()
 	render()
+	return entry
 end
 attach = function(id)
 	if not job then return end
@@ -1067,7 +1076,15 @@ connect = function()
 		vim.list_extend(args, { "--remote", M.config.service_remote })
 	elseif M.config.service_root and M.config.service_root ~= "" then vim.list_extend(args, { "--root", M.config.service_root }) end
 	if M.config.expected_host then vim.list_extend(args, { "--expected-host", M.config.expected_host }) end
-	local partial = ""
+	local partial, stderr = "", ""
+	local disconnect_entry
+	local function update_disconnect(details)
+		disconnect_entry = disconnect_entry or logs.get("connection:" .. gen)
+		if disconnect_entry then
+			logs.add(disconnect_entry.level, disconnect_entry.message, vim.tbl_extend("force", disconnect_entry.details, details),
+				{ session = disconnect_entry.session, key = disconnect_entry.key })
+		end
+	end
 	local function record(value)
 		if gen ~= generation then return end
 		if value.type == "hello" then
@@ -1180,7 +1197,9 @@ connect = function()
 				close_approval()
 				render()
 			end
-		elseif value.type == "disconnected" then disconnected() end
+		elseif value.type == "disconnected" then
+			disconnect_entry = disconnected(value.message or "Service disconnected", { code = value.code, connection_id = value.connectionId })
+		end
 	end
 	local started = vim.fn.jobstart(args, {
 		stdin = "pipe",
@@ -1201,23 +1220,31 @@ connect = function()
 				end
 			end
 		end,
-		on_stderr = function(_, chunks) if gen == generation then for _, line in ipairs(chunks) do if line ~= "" then notify(line, vim.log.levels.WARN) end end end end,
-		on_exit = function() if gen == generation then disconnected() end end,
+		on_stderr = function(_, chunks)
+			stderr = (stderr .. table.concat(chunks, "\n")):sub(-4096)
+			update_disconnect({ stderr = stderr })
+		end,
+		on_exit = function(_, code)
+			if gen == generation then
+				disconnect_entry = disconnected("Bridge exited unexpectedly (exit " .. tostring(code) .. ")")
+			end
+			update_disconnect({ exit_code = code, stderr = stderr })
+		end,
 	})
-	if started <= 0 then notify("Could not start Node bridge"); disconnected(); return end
+	if started <= 0 then disconnected("Could not start Node bridge", { jobstart_result = started }); return end
 	job = started
 end
 
-close_bridge = function()
+close_bridge = function(reason, intentional)
 	local old = job
-	disconnected()
+	disconnected(reason, nil, intentional)
 	if old then vim.fn.jobstop(old) end -- Only the relay, never a Pi worker.
 end
-function M.detach()
+function M.detach(reason)
 	cancel_new_session()
 	action_connection.cancel()
 	fail_start("Startup cancelled; submitted text remains in :PiDrafts.")
-	close_bridge()
+	close_bridge(type(reason) == "string" and reason or nil, true)
 end
 function M.reconnect()
 	action_connection.cancel()
@@ -1225,12 +1252,11 @@ function M.reconnect()
 	recovery_requested = true
 	connect()
 end
-function M.host_disconnected(identity, target, explicit)
-	local source = identity and require("pi-integration.service-hosts").find(identity)
+function M.host_disabled(identity, target, reason)
 	local endpoint_match = target and target.service_remote == M.config.service_remote and target.service_root == M.config.service_root
 		and (not identity or M.config.expected_host == identity)
-	if endpoint_match or identity and M.config.expected_host == identity and not (source and source.connected) then
-		if explicit then M.detach() else close_bridge() end
+	if endpoint_match or identity and M.config.expected_host == identity then
+		M.detach(job and reason or nil)
 	end
 end
 function M.select_owner(target, id, resume, cwd)
@@ -2485,18 +2511,22 @@ action_connection = require("pi-integration.service-action-connection").new({
 	render = function() if render and ctx and state.input_buf then render() end end,
 	notify = notify,
 	disconnect = close_bridge,
-	reconnect = function()
-		close_bridge()
+	reconnect = function(reason)
+		close_bridge(reason)
 		recovery_requested = true
 		connect()
 	end,
 	sync = function() if attachment then refresh(true) end end,
 	ready = function()
-		if not job or not hello or session_status == "checking" or session_status == "attaching" or session_status == "restoring" then return false end
+		if not job then return false, "bridge not running" end
+		if not hello then return false, "service handshake pending" end
+		if session_status == "checking" or session_status == "attaching" or session_status == "restoring" then return false, session_status end
 		if not attachment then return true end -- Unstarted or unavailable; the action reports its own prerequisites.
-		if not snapshot or refreshing or refresh_scheduled or auto_control_selection then return false end
+		if not snapshot then return false, "initial snapshot pending" end
+		if refreshing or refresh_scheduled then return false, "snapshot refresh pending" end
+		if auto_control_selection then return false, "control acquisition pending" end
 		for _, pending in pairs(callbacks) do
-			if pending.method == "grant" or pending.method == "command" or pending.method == "command.status" then return false end
+			if pending.method == "grant" or pending.method == "command" or pending.method == "command.status" then return false, pending.method .. " reply pending" end
 		end
 		return true -- Authority checks remain in the action; a viewer can still request control.
 	end,

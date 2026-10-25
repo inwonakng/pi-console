@@ -9,17 +9,19 @@ function M.new(ctx)
 	end
 	local function probe(done)
 		local finished = false
-		local function finish(ok)
+		local function finish(ok, reason)
 			if finished then return end
 			finished = true
-			done(ok)
+			done(ok, reason)
 		end
-		if not ctx.connected() then finish(false); return end
-		local id = ctx.request("health", {}, function(ok) finish(ok) end)
+		if not ctx.connected() then finish(false, "Conversation bridge is not connected"); return end
+		local id = ctx.request("health", {}, function(ok, result)
+			finish(ok, not ok and ("Health request failed: " .. tostring(result and result.message or "Unknown error")) or nil)
+		end)
 		vim.defer_fn(function()
 			if finished then return end
 			ctx.forget(id)
-			finish(false)
+			finish(false, "Health check timed out after 5 seconds")
 		end, 5000)
 	end
 	function gate.cancel()
@@ -46,26 +48,27 @@ function M.new(ctx)
 		end
 		local function wait_ready(deadline)
 			if action ~= waiting then return end
-			if ctx.ready() then finish(true)
+			local ready, reason = ctx.ready()
+			if ready then finish(true)
 			elseif vim.uv.hrtime() / 1e6 >= deadline then
-				ctx.disconnect()
+				ctx.disconnect("Readiness timed out after 15 seconds: " .. tostring(reason or "Unknown pending state"))
 				finish(false)
 			else vim.defer_fn(function() wait_ready(deadline) end, 25) end
 		end
-		local function reconnect()
+		local function reconnect(reason)
 			if action ~= waiting then return end
 			status("Reconnecting")
-			ctx.reconnect()
+			ctx.reconnect(reason)
 			-- The bridge handshake has a 10-second deadline; allow attachment recovery too.
 			wait_ready(vim.uv.hrtime() / 1e6 + 15000)
 		end
 		status("Checking connection")
-		probe(function(ok)
+		probe(function(ok, reason)
 			if action ~= waiting then return end
 			if ok then
 				ctx.sync()
 				wait_ready(vim.uv.hrtime() / 1e6 + 15000)
-			else reconnect() end
+			else reconnect(reason) end
 		end)
 	end
 	-- A request can outlive its preflight check. Probe only while user work awaits a reply;
@@ -77,10 +80,10 @@ function M.new(ctx)
 		local function check()
 			if monitoring ~= ticket then return end
 			if not ctx.pending() then monitoring = nil; return end
-			probe(function(ok)
+			probe(function(ok, reason)
 				if monitoring ~= ticket then return end
 				if not ctx.pending() then monitoring = nil; return end
-				if not ok then monitoring = nil; ctx.disconnect(); return end
+				if not ok then monitoring = nil; ctx.disconnect(reason); return end
 				vim.defer_fn(check, 5000)
 			end)
 		end

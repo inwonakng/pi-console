@@ -1,4 +1,5 @@
 import { createServer, type Socket } from "node:net";
+import { randomUUID } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { RemoteListener, listenerPort, listenerAddresses } from "./remote-transport.js";
 import { chmod, lstat, unlink } from "node:fs/promises";
@@ -60,7 +61,8 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       throw error;
     }
   };
-  async function connection(socket: Duplex, isRemote = false, onDetach?: (detach: () => void) => void): Promise<void> {
+  async function connection(socket: Duplex, isRemote = false, onDetach?: (detach: (error?: Error) => void) => void,
+    connectionId: string = randomUUID()): Promise<void> {
     const writer = new RecordWriter(socket);
     let handshaken = false;
     let subscription: SessionSubscription | undefined;
@@ -74,15 +76,30 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       summaryStops.delete(stopSummaries);
     };
     const closeViews = () => { stopSummaries(); detach(); };
-    onDetach?.(closeViews);
-    const remoteAdmission = isRemote ? () => {
-      if (socket.destroyed) throw new CommandError("attachment_closed", "Remote connection closed");
-    } : undefined;
-    const handshakeDeadline = setTimeout(() => socket.destroy(), 10000);
-    socket.once("close", () => clearTimeout(handshakeDeadline));
-    socket.on("error", () => undefined);
+    let closing = false;
+    let closeDeadline: NodeJS.Timeout | undefined;
+    const closed = new Promise<void>((resolve) => socket.once("close", resolve));
+    const disconnect = (error: Error & { code?: string }, code = "service_connection_error") => {
+      if (closing) return;
+      closing = true;
+      const record = { type: "disconnected", connectionId, code: error.code ?? code, message: error.message.slice(0, 1024) };
+      console.error(JSON.stringify({ ...record, timestamp: new Date().toISOString(), transport: isRemote ? "ws" : "local",
+        hostId: owner.hostId, serviceEpoch: owner.serviceEpoch, sessionId: session?.id, attachmentId: subscription?.attachmentId }));
+      // Revoke authority immediately. A diagnostic must never keep a dead/slow viewer alive.
+      closeViews();
+      if (socket.destroyed) return;
+      closeDeadline = setTimeout(() => socket.destroy(), 100);
+      void writer.send(record).then(() => socket.end(), () => socket.destroy());
+    };
+    onDetach?.((error) => { if (error) disconnect(error); else closeViews(); });
+    const remoteAdmission = () => {
+      if (closing || socket.destroyed) throw new CommandError("attachment_closed", "Connection closed");
+    };
+    const handshakeDeadline = setTimeout(() => disconnect(new Error("Service handshake timed out after 10 seconds"), "handshake_timeout"), 10000);
+    socket.once("close", () => { clearTimeout(handshakeDeadline); clearTimeout(closeDeadline); });
+    socket.on("error", (error: Error) => disconnect(error, "transport_error"));
     socket.once("close", closeViews);
-    const send = (value: unknown) => writer.send(value).catch((error) => { socket.destroy(); throw error; });
+    const send = (value: unknown) => writer.send(value).catch((error: Error) => { disconnect(error, "output_error"); throw error; });
     async function pumpSummaries(feed: NonNullable<typeof summaryFeed>, initial?: HostSummaries): Promise<void> {
       if (summaryFeed !== feed) return;
       if (socket.destroyed || owner.shutdownStarted) { stopSummaries(); return; }
@@ -96,7 +113,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
         // Schedule only after the previous write drains. Slow peers retain at
         // most one summary write, and intermediate changes coalesce naturally.
         if (summaryFeed === feed) feed.timer = setTimeout(() => { void pumpSummaries(feed); }, 750);
-      } catch { stopSummaries(); socket.destroy(); }
+      } catch (error) { disconnect(error instanceof Error ? error : new Error("Session discovery failed"), "discovery_error"); }
     }
     async function pump(view: SessionSubscription): Promise<void> {
       try {
@@ -105,12 +122,13 @@ export async function runService(options: HostOwnerOptions & { root: string; por
           if (subscription !== view) break;
           await send({ type: "update", update });
         }
-      } catch {
-        if (subscription === view && !socket.destroyed) socket.destroy();
+      } catch (error) {
+        if (subscription === view) disconnect(error instanceof Error ? error : new Error("Session update stream failed"));
       }
     }
     async function request(record: Record<string, unknown>): Promise<void> {
       let stopAfterReply = false;
+      if (closing) return;
       try {
         exact(record, ["id", "method", "payload"]);
         if (!identifier(record.id) || typeof record.method !== "string" || !object(record.payload)) throw new CommandError("invalid_command", "Invalid IPC request");
@@ -128,7 +146,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
             handshaken = true;
             clearTimeout(handshakeDeadline);
             result = { version: PROTOCOL, capabilities: isRemote ? CAPABILITIES.filter((c) => c !== "service.stop") : CAPABILITIES,
-              transport: isRemote ? "ws" : "local", hostId: owner.hostId, channel: options.channel,
+              transport: isRemote ? "ws" : "local", connectionId, hostId: owner.hostId, channel: options.channel,
               buildId, runtimeBuildId: owner.buildId, appRoot: options.appRoot, serviceEpoch: owner.serviceEpoch, stopping: owner.shutdownStarted,
               network: listenerAddresses(port), ...(!isRemote ? { endpoint: path } : {}) };
             break;
@@ -218,7 +236,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
             session = target;
             const view = target.subscribe(p.label);
             subscription = view;
-            void view.closed.then(() => { if (subscription === view) socket.destroy(); });
+            void view.closed.then((reason) => { if (subscription === view) disconnect(reason, "subscription_closed"); });
             await send({ type: "response", id: record.id, success: true,
               result: { attachmentId: view.attachmentId, snapshot: view.snapshot } });
             void pump(view);
@@ -297,10 +315,21 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       await ready;
       if (socket.destroyed) return;
       for await (const record of records(socket, MAX_REQUEST)) {
-        if (++pending > 32) throw new Error("Too many concurrent IPC requests");
-        void request(record).catch(() => socket.destroy()).finally(() => { pending--; });
+        if (closing) continue;
+        if (++pending > 32) {
+          disconnect(new Error("Too many concurrent IPC requests"), "request_limit");
+          break;
+        }
+        void request(record).catch((error: Error) => disconnect(error)).finally(() => { pending--; });
       }
-    } finally { clearTimeout(handshakeDeadline); closeViews(); socket.destroy(); }
+    } catch {
+      // Parser errors can quote input; never put request contents in diagnostics.
+      if (!stopping) disconnect(new Error(socket.destroyed ? "Transport closed while reading IPC input" : "Invalid or oversized IPC input"),
+        socket.destroyed ? "transport_closed" : "input_error");
+    } finally {
+      if (closing && !socket.destroyed) await closed;
+      clearTimeout(handshakeDeadline); clearTimeout(closeDeadline); closeViews(); socket.destroy();
+    }
   }
   function finish(): void {
     for (const stop of summaryStops) stop();
@@ -321,7 +350,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       server.listen(path, () => { server.off("error", reject); resolve(); });
     });
     await chmod(path, 0o600);
-    remote = new RemoteListener(port, (stream, onDetach) => connection(stream, true, onDetach),
+    remote = new RemoteListener(port, (stream, onDetach, connectionId) => connection(stream, true, onDetach, connectionId),
       webRoot ? { root: webRoot, serviceRoot: options.root, channel: options.channel, hostId: owner.hostId,
         allowedOrigins: webSettings?.["allowed-origins"] } : undefined);
     await remote.listen();

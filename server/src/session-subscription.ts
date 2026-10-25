@@ -6,9 +6,9 @@ export class SessionSubscription {
   private bytes = 0;
   private waiting?: { resolve: (update: OwnedSessionUpdate) => void; reject: (error: Error) => void };
   private failure?: Error;
-  private resolveClosed!: () => void;
+  private resolveClosed!: (reason: Error) => void;
   /** Independent of next()/socket writes, so a dropped backpressured view can be evicted. */
-  readonly closed = new Promise<void>((resolve) => { this.resolveClosed = resolve; });
+  readonly closed = new Promise<Error>((resolve) => { this.resolveClosed = resolve; });
 
   constructor(readonly attachmentId: string, readonly snapshot: OwnedSessionSnapshot, private readonly detached: () => void,
     private readonly filter: (update: OwnedSessionUpdate) => OwnedSessionUpdate = (update) => update) {}
@@ -31,7 +31,7 @@ export class SessionSubscription {
     if (this.failure) return;
     const bytes = Buffer.byteLength(line);
     if (this.queue.length >= 256 || this.bytes + bytes > 8 * 1024 * 1024) {
-      this.drop(new Error("Session viewer fell behind; resubscribe with a fresh snapshot"));
+      this.drop(Object.assign(new Error("Session viewer fell behind; resubscribe with a fresh snapshot"), { code: "slow_viewer" }));
       return;
     }
     const waiting = this.waiting;
@@ -47,7 +47,7 @@ export class SessionSubscription {
   private drop(error: Error): void {
     if (this.failure) return;
     this.failure = error;
-    this.resolveClosed();
+    this.resolveClosed(error);
     this.queue = [];
     this.bytes = 0;
     const waiting = this.waiting;

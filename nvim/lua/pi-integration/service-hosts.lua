@@ -135,15 +135,17 @@ local function cache(host, rows)
 	host.rows, host.cache_dirty, host.pins_dirty = rows, true, true
 	flush_cache(host)
 end
-local function stop(host, force)
-	local was_connected = host.connected
+local function stop(host)
 	if host.connection then host.connection.close() end
 	host.connection, host.connected, host.connecting = nil, false, false
 	local waiters = host.waiters or {}; host.waiters = nil
 	for _, callback in ipairs(waiters) do callback(false) end
-	-- Fence an attachment immediately, including local controller callbacks.
+end
+-- Discovery transport failure says nothing about the independent conversation bridge.
+-- Only registry changes and deliberate host actions revoke that attachment.
+local function detach_frontend(host, reason)
 	local frontend = package.loaded["pi-integration.service-frontend"]
-	if (was_connected or force) and frontend and frontend.host_disconnected then frontend.host_disconnected(host.host_id, M.target(host), force == true) end
+	if frontend and frontend.host_disabled then frontend.host_disabled(host.host_id, M.target(host), reason) end
 end
 local function connect(host)
 	if host.connection or host.connecting or host.retry_at and vim.uv.now() < host.retry_at then return end
@@ -173,6 +175,9 @@ local function connect(host)
 		elseif record.type == "summaries" then
 			if record.result.hostId == host.host_id and record.result.channel == channel then cache(host, record.result.sessions) end
 		elseif record.type == "disconnected" then
+			require("pi-integration.logs").add(vim.log.levels.WARN, "Discovery disconnected: " .. tostring(record.message),
+				{ host = host_label(host), host_id = host.host_id, code = record.code,
+					connection_id = record.connectionId or host.hello and host.hello.connectionId })
 			host.error, host.attempts = record.message, (host.attempts or 0) + 1
 			host.retry_at = vim.uv.now() + math.min(30000, 1000 * 2 ^ math.min(host.attempts - 1, 5))
 			stop(host)
@@ -216,7 +221,12 @@ function M.refresh()
 			if host.root == target.root and host.remote == target.remote and host.host_id == target.host_id and host.target.enabled == target.enabled then
 				host.alias, host.target = target.alias, vim.deepcopy(target)
 				host.pins_dirty = true
-			else stop(host); host = nil end
+			else
+				if target.enabled == false or host.root ~= target.root or host.remote ~= target.remote or host.host_id ~= target.host_id then
+					detach_frontend(host, "Host disabled or endpoint/identity configuration changed")
+				end
+				stop(host); host = nil
+			end
 		end
 		if not host then
 			host = vim.deepcopy(target); host.target = vim.deepcopy(target)
@@ -228,7 +238,9 @@ function M.refresh()
 		if target.enabled ~= false then connect(host) else stop(host) end
 		if host.host_id then flush_cache(host) end
 	end
-	for key, host in pairs(hosts) do if not retained[key] then stop(host); hosts[key] = nil end end
+	for key, host in pairs(hosts) do
+		if not retained[key] then detach_frontend(host, "Host removed from configuration"); stop(host); hosts[key] = nil end
+	end
 end
 function M.start()
 	if started then return end
@@ -896,7 +908,11 @@ function M.picker(on_attach)
 					end
 					return true
 				end) then
-					for _, source in pairs(hosts) do if source == host or host.host_id and source.host_id == host.host_id then stop(source, true) end end
+					for _, source in pairs(hosts) do
+						if source == host or host.host_id and source.host_id == host.host_id then
+							detach_frontend(source, "Host explicitly disconnected"); stop(source)
+						end
+					end
 					M.refresh()
 				end
 			elseif action == "Restart server" then restart_server(host, false)
@@ -917,7 +933,7 @@ function M.picker(on_attach)
 						return true
 					end) then
 						forgotten_explicit[host.key] = true
-						stop(host, true)
+						detach_frontend(host, "Host explicitly forgotten"); stop(host)
 						M.refresh()
 					end
 				end)
