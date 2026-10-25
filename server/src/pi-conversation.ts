@@ -7,9 +7,7 @@ type Success<C extends string> = Extract<RpcResponse, { command: C; success: tru
 export type PiMessage = Success<"get_messages">["data"]["messages"][number];
 
 type Assistant = Extract<PiMessage, { role: "assistant" }>;
-type SessionStats = Success<"get_session_stats">["data"] & {
-  tokens: { sessionCacheRead?: number; sessionCacheWrite?: number };
-};
+type SessionStats = Success<"get_session_stats">["data"];
 type ToolStart = Extract<JsonAgentSessionEvent, { type: "tool_execution_start" }>;
 type ToolEnd = Extract<JsonAgentSessionEvent, { type: "tool_execution_end" }>;
 export type ToolState = Omit<ToolStart, "type"> & {
@@ -114,18 +112,8 @@ export class PiConversation {
   private readonly liveSizes = new Map<string, number>();
   private liveBytes = 0;
 
-  private cacheRead = 0;
-  private cacheWrite = 0;
-
   snapshot(): ConversationSnapshot {
-    const snapshot = structuredClone(this.state);
-    if (snapshot.stats) {
-      // Match the legacy footer: largest single-turn cache footprint, not
-      // cumulative cache tokens. Compute before bounded history drops messages.
-      snapshot.stats.tokens.sessionCacheRead = this.cacheRead;
-      snapshot.stats.tokens.sessionCacheWrite = this.cacheWrite;
-    }
-    return snapshot;
+    return structuredClone(this.state);
   }
   /** Exact owner-observed output metadata, without copying a conversation per chunk. */
   outputPaths(): string[] {
@@ -242,8 +230,6 @@ export class PiConversation {
         this.messageBytes.length = 0;
         this.historyBytes = 0;
         this.state.omittedMessages = 0;
-        this.cacheRead = 0;
-        this.cacheWrite = 0;
         for (const message of change.messages) this.append(message);
         this.state.historyRevision++;
         this.state.hydrated = true;
@@ -316,8 +302,6 @@ export class PiConversation {
         this.state.title = undefined;
         this.state.piState = undefined;
         this.state.stats = undefined;
-        this.cacheRead = 0;
-        this.cacheWrite = 0;
         this.reserve("session_stats", undefined);
         for (const key of this.liveSizes.keys()) {
           if (key.startsWith("status:") || key.startsWith("widget:") || key === "title" || key === "pi_state" || key === "queue" || key.startsWith("execution:")) this.reserve(key, undefined);
@@ -346,8 +330,6 @@ export class PiConversation {
 
   private append(message: PiMessage): void {
     if (message.role === "assistant") {
-      this.cacheRead = Math.max(this.cacheRead, message.usage.cacheRead);
-      this.cacheWrite = Math.max(this.cacheWrite, message.usage.cacheWrite);
       for (const diagnostic of this.state.diagnostics) {
         if (diagnostic.assistantTimestamp !== undefined && diagnostic.assistantTimestamp === message.timestamp) {
           diagnostic.afterMessage = messageKey(message);

@@ -78,11 +78,9 @@ local function format_session_stats(state)
 		})
 	end
 
-	-- Pi core currently reports cacheRead/cacheWrite as cumulative per-request
-	-- token events. For statusline purposes, show the session cache footprint
-	-- instead: the largest cache read/write reported by any single model turn.
-	local cache_read = tonumber(tokens.sessionCacheRead or tokens.cacheRead) or 0
-	local cache_write = tonumber(tokens.sessionCacheWrite or tokens.cacheWrite) or 0
+	-- Use the same cumulative session totals as input/output and cost.
+	local cache_read = tonumber(tokens.cacheRead) or 0
+	local cache_write = tonumber(tokens.cacheWrite) or 0
 	if cache_read > 0 or cache_write > 0 then
 		table.insert(secondary_parts, { text = "R" .. format_count(cache_read), highlight = "PiUsageStats" })
 		table.insert(secondary_parts, { text = "W" .. format_count(cache_write), highlight = "PiUsageStats" })
