@@ -656,7 +656,6 @@ function createConversation(host, row) {
     $("stop").disabled = !controlled || busy;
     $("control").hidden = controlled;
     $("control").disabled = controlled || !host.connected || !row.live || !connected || !snapshot || busy;
-    $("control").textContent = owner?.controller ? "Take over" : "Take control";
     $("controller").textContent = !host.connected ? "Unknown / read only" : !row.live ? "Inactive / read only"
       : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
