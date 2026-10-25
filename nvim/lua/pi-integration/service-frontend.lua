@@ -54,6 +54,8 @@ local startup_options_context, startup_options_pending
 local frontend_focused = false
 local viewed_response
 local action_connection, close_bridge
+local reconnect_enabled, reconnect_ticket, reconnect_attempts = false, nil, 0
+local passive_connection = false
 local load_metrics
 local function status_data(key)
 	local raw = snapshot and snapshot.conversation.statuses[key]
@@ -868,6 +870,8 @@ local function reset_refresh(detached, preserve_body)
 	end
 end
 local function disconnected(reason, details, intentional)
+	reconnect_ticket = nil
+	if intentional then reconnect_enabled = false end
 	local entry
 	if reason then
 		entry = logs.add(intentional and vim.log.levels.INFO or vim.log.levels.WARN, "Connection closed: " .. tostring(reason),
@@ -877,7 +881,10 @@ local function disconnected(reason, details, intentional)
 			{ session = session_id, key = "connection:" .. generation })
 	end
 	cancel_new_session("Connection lost while loading session directory. No new frontend was opened.")
-	if action_connection then action_connection.disconnected() end
+	if action_connection then
+		action_connection.disconnected()
+		action_connection.cancel()
+	end
 	-- Creation may have succeeded remotely while its reply was lost. Keep only
 	-- a prompt that has never reached prompt.submit; reconcile creation first.
 	local waiting_start = pending_host and starting and not starting.context and not starting.busy
@@ -900,9 +907,18 @@ local function disconnected(reason, details, intentional)
 	reset_refresh(true)
 	close_approval()
 	render()
+	if reconnect_enabled and M.config.role == "conversation" then
+		reconnect_attempts = reconnect_attempts + 1
+		local ticket = {}
+		reconnect_ticket = ticket
+		vim.defer_fn(function()
+			if reconnect_ticket ~= ticket or not reconnect_enabled or job then return end
+			connect(true)
+		end, math.min(30000, 1000 * 2 ^ math.min(reconnect_attempts - 1, 5)))
+	end
 	return entry
 end
-attach = function(id)
+attach = function(id, acquire)
 	if not job then return end
 	if pending_new_session and pending_new_session.session ~= id then cancel_new_session() end
 	auto_control_selection = nil
@@ -929,7 +945,7 @@ attach = function(id)
 		close_approval()
 		reset_refresh()
 		session_id, attachment, grant, snapshot, authority = id, value.attachmentId, nil, nil, nil
-		auto_control_selection = stamp()
+		auto_control_selection = acquire ~= false and stamp() or nil
 		apply_snapshot(value.snapshot)
 		local lookups, seen = {}, {}
 		for command_id, envelope in pairs(unresolved) do
@@ -1020,7 +1036,7 @@ local function host_operation(operation, payload)
 		end
 	end)
 end
-recover_selection = function(allow_restore)
+recover_selection = function(allow_restore, passive)
 	local captured = stamp()
 	session_status, session_error = "checking", nil
 	render()
@@ -1032,7 +1048,7 @@ recover_selection = function(allow_restore)
 			local row
 			for _, entry in ipairs(value.sessions or {}) do if entry.id == session_id then row = entry; break end end
 			if row and not row.archived and not row.deleted then
-				if row.live then attach(session_id); return end
+				if row.live then attach(session_id, not passive); return end
 				if row.stopReason == "service_shutdown" and allow_restore and vim.tbl_contains(hello.capabilities, "host.recover") then
 					host_operation("host.recover", { sessionId = session_id }); return
 				end
@@ -1043,7 +1059,7 @@ recover_selection = function(allow_restore)
 		render()
 	end)
 end
-local function recover_host(allow_restore)
+local function recover_host(allow_restore, passive)
 	if not pending_host then return false end
 	local envelope, captured = pending_host, stamp()
 	session_status, session_error = "checking", nil
@@ -1057,7 +1073,7 @@ local function recover_host(allow_restore)
 			if select_result and same_selection(captured) then
 				session_id = receipt.result.sessionId
 				feedback_ui.bind(feedback, envelope.id, session_id)
-				recover_selection(allow_restore)
+				recover_selection(allow_restore, passive)
 			elseif same_selection(captured) then
 				session_status, session_error = nil, nil
 			end
@@ -1072,12 +1088,13 @@ local function recover_host(allow_restore)
 		-- Recovery can resolve an ID after another selection, never revive its
 		-- original right to select. Reattach the user's selected view instead.
 		if not select_result and same_selection(captured) and not attachment and session_id then
-			recover_selection(allow_restore and pending_host == nil)
+			recover_selection(allow_restore and pending_host == nil, passive)
 		end
 	end)
 	return true
 end
-connect = function()
+connect = function(automatic)
+	if automatic and not reconnect_enabled then return end
 	if not M.config.expected_host then
 		local ok, identity = pcall(require("pi-integration.service-hosts").expected_identity, M.config)
 		if not ok then notify(identity); return end
@@ -1086,6 +1103,14 @@ connect = function()
 	local source = M.config.expected_host and require("pi-integration.service-hosts").find(M.config.expected_host)
 	if source and source.target.enabled == false then notify("Host is disconnected. Enable it in :PiHosts before attaching."); return end
 	if job then notify("Already connected."); return end
+	reconnect_enabled, reconnect_ticket = true, nil
+	passive_connection = automatic == true
+	if automatic then
+		-- Transport recovery only observes existing work. Explicit restore/resume
+		-- and an unsent startup prompt must not become background mutations.
+		recovery_requested, resume_requested = false, false
+		fail_start("Connection lost during startup; submitted text remains in :PiDrafts. Submit it explicitly after reconnecting.")
+	end
 	generation = generation + 1
 	local gen = generation
 	local args = { "node", vim.fs.joinpath(vim.g.pi_console_root, "server", "dist", "bridge.js"), "--channel", vim.env.PI_CONSOLE_CHANNEL or "stable" }
@@ -1117,15 +1142,16 @@ connect = function()
 				notify("Host identity changed; confirm in Hosts before selecting."); M.detach(); return
 			end
 			hello = result
+			reconnect_attempts = 0
 			if load_metrics then load_metrics.connectionMs = vim.uv.hrtime() / 1e6 - load_metrics.started end
 			M.config.expected_host = result.hostId
-			if not session_id then host_options() end
+			if not session_id and not automatic then host_options() end
 			render()
 			local restore = recovery_requested; recovery_requested = false
-			if recover_host(restore) then return end
+			if recover_host(restore, automatic) then return end
 			if session_id then
 				if resume_requested then resume_requested = false; host_operation("host.resume", { sessionId = session_id })
-				else recover_selection(restore) end
+				else recover_selection(restore, automatic) end
 			end
 		elseif value.type == "response" then
 			local pending = callbacks[value.id]; callbacks[value.id] = nil
@@ -1259,7 +1285,7 @@ function M.detach(reason)
 end
 function M.reconnect()
 	action_connection.cancel()
-	close_bridge()
+	close_bridge(nil, true)
 	recovery_requested = true
 	connect()
 end
@@ -2406,7 +2432,9 @@ local function follow_resumed_selection()
 			if resume_check == captured then resume_check = nil end
 			if not ok or not same_selection(captured) then return end
 			for _, row in ipairs(result.sessions or {}) do
-				if row.id == session_id and row.live and not row.archived and not row.deleted then attach(session_id); return end
+				if row.id == session_id and row.live and not row.archived and not row.deleted then
+					attach(session_id, not passive_connection); return
+				end
 			end
 		end)
 	end
@@ -2560,8 +2588,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 	render = function() if render and ctx and state.input_buf then render() end end,
 	notify = notify,
 	disconnect = close_bridge,
-	reconnect = function(reason)
-		close_bridge(reason)
+	reconnect = function()
 		recovery_requested = true
 		connect()
 	end,
@@ -2590,8 +2617,8 @@ action_connection = require("pi-integration.service-action-connection").new({
 		return false
 	end,
 })
--- Wrap entry points, not command callbacks: dialogs keep their original stamps,
--- and background refresh/completion paths must never reconnect or replay work.
+-- Wrap entry points, not command callbacks: dialogs keep their original stamps.
+-- Transport recovery is passive; refresh/completion paths never replay work.
 for _, name in ipairs({ "submit_prompt", "take_control", "change_cwd", "restart", "kill_session", "abort",
 	"rename_session", "pick_queue", "restore_pending_action", "show_offers", "show_host_request", "refresh_options",
 	"pick_model", "pick_thinking", "steer", "follow_up", "side_prompt", "toggle_side", "new_side", "abort_side",

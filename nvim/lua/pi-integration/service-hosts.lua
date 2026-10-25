@@ -103,8 +103,11 @@ local function persist(target, previous_key)
 	end)
 end
 local function save_identity(target, identity, replace)
-	local ok, err = store.update("host-identities", vim.empty_dict(), function(data)
-		local key = target_key(target)
+	local key = target_key(target)
+	local loaded, saved = pcall(identities)
+	if not loaded then return nil, tostring(saved) end
+	if saved[key] == identity then return true end
+	return store.update("host-identities", vim.empty_dict(), function(data)
 		local previous = data[key] or target.host_id
 		if previous and previous ~= identity and not replace then
 			return nil, "Endpoint service identity changed; confirm the replacement in Hosts before attaching"
@@ -112,8 +115,6 @@ local function save_identity(target, identity, replace)
 		data[key] = identity
 		return true
 	end)
-	if not ok then notify(err) end
-	return ok, err
 end
 local function flush_cache(host)
 	if host.cache_dirty and (not host.cache_retry_at or vim.uv.hrtime() / 1e6 >= host.cache_retry_at) then
@@ -136,7 +137,7 @@ local function cache(host, rows)
 end
 local function stop(host)
 	if host.connection then host.connection.close() end
-	host.connection, host.connected, host.connecting = nil, false, false
+	host.connection, host.connected, host.connecting, host.pending_identity = nil, false, false, nil
 	local waiters = host.waiters or {}; host.waiters = nil
 	for _, callback in ipairs(waiters) do callback(false) end
 end
@@ -157,20 +158,36 @@ local function connect(host)
 			if hello.channel ~= channel or not vim.tbl_contains(hello.capabilities or {}, "sessions.subscribe") then
 				host.error = "Incompatible discovery protocol/channel"; host.retry_at = vim.uv.now() + 30000; stop(host); return
 			end
-			local saved, err = save_identity(host, hello.hostId)
-			if not saved then host.error = err; host.retry_at = vim.uv.now() + 30000; stop(host); return end
-			host.host_id, host.hello, host.connected, host.connecting = hello.hostId, hello, true, false
-			host.target.host_id = hello.hostId
-			host.attempts, host.retry_at = 0, nil
-			local waiters = host.waiters or {}; host.waiters = nil
-			for _, callback in ipairs(waiters) do callback(true) end
-			connection.request("sessions.subscribe", {}, function(ok, result)
+			host.pending_identity = hello.hostId
+			local delay = 100
+			local function accept_hello()
 				if host.connection ~= connection then return end
-				if ok and result.hostId == host.host_id then
-					cache(host, result.sessions)
-					M.maybe_prompt_archive(host.host_id)
-				else host.error = result.message or "Invalid session summaries"; host.retry_at = vim.uv.now() + 30000; stop(host) end
-			end)
+				local saved, err, code = save_identity(host, hello.hostId)
+				if not saved then
+					if code == "busy" then
+						vim.defer_fn(accept_hello, delay)
+						delay = math.min(1000, delay * 2)
+						return
+					end
+					notify(err)
+					host.error = err; host.retry_at = vim.uv.now() + 30000; stop(host); return
+				end
+				host.host_id, host.hello, host.connected, host.connecting = hello.hostId, hello, true, false
+				host.pending_identity = nil
+				host.target.host_id = hello.hostId
+				host.attempts, host.retry_at = 0, nil
+				local waiters = host.waiters or {}; host.waiters = nil
+				for _, callback in ipairs(waiters) do callback(true) end
+				if host.connection ~= connection then return end
+				connection.request("sessions.subscribe", {}, function(ok, result)
+					if host.connection ~= connection then return end
+					if ok and result.hostId == host.host_id then
+						cache(host, result.sessions)
+						M.maybe_prompt_archive(host.host_id)
+					else host.error = result.message or "Invalid session summaries"; host.retry_at = vim.uv.now() + 30000; stop(host) end
+				end)
+			end
+			accept_hello()
 		elseif record.type == "summaries" then
 			if record.result.hostId == host.host_id and record.result.channel == channel then cache(host, record.result.sessions) end
 		elseif record.type == "disconnected" then
@@ -217,7 +234,11 @@ function M.refresh()
 		target.host_id = target.host_id or saved[target.key]
 		local host = hosts[target.key]
 		if host and not vim.deep_equal(host.target, target) then
-			if host.root == target.root and host.remote == target.remote and host.host_id == target.host_id and host.target.enabled == target.enabled then
+			-- Another frontend may publish the same first pin while this hello
+			-- waits for the store lock. That does not revoke an attachment.
+			local same_identity = host.host_id == target.host_id
+				or host.pending_identity and host.pending_identity == target.host_id
+			if host.root == target.root and host.remote == target.remote and same_identity and host.target.enabled == target.enabled then
 				host.alias, host.target = target.alias, vim.deepcopy(target)
 				host.pins_dirty = true
 			else
@@ -764,7 +785,9 @@ local function confirm_target(target, previous)
 		vim.ui.select({ "Save confirmed identity", "Cancel" }, { prompt = (changed and "REPLACEMENT service. Old pins remain separate. " or "") .. host_label(target) .. " / " .. hello.channel }, function(choice)
 			if choice ~= "Save confirmed identity" then return end
 			target.host_id, target.enabled = hello.hostId, true
-			if save_identity(target, hello.hostId, true) and persist(target, previous and previous.key) then M.refresh() end
+			local saved, err = save_identity(target, hello.hostId, true)
+			if not saved then notify(err); return end
+			if persist(target, previous and previous.key) then M.refresh() end
 		end)
 	end)
 end

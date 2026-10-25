@@ -65,7 +65,8 @@ function M.new(ctx)
 		wait_ready(vim.uv.hrtime() / 1e6 + 15000)
 	end
 	-- Probe only while user work awaits a reply;
-	-- losing that connection never retries the request or starts a background reconnect.
+	-- losing that connection never retries the request. Passive transport recovery
+	-- is owned by the frontend, independently of this action.
 	function gate.monitor()
 		if monitoring then return end
 		local ticket = {}
