@@ -120,12 +120,12 @@ end
 function M.render_statusline()
 	local win = vim.g.statusline_winid or vim.api.nvim_get_current_win()
 	return build_info.statusline(vim.api.nvim_win_get_width(win), {
-		" 󰕮", "Enter open", "Tab expand", "J/K move", "g group", "p pin", "dd stop/delete group", "<leader>pi interrupt", "/ filter", "<leader>? keys",
+		" 󰕮", "Enter open", "Tab expand", "J/K move", "g group", "p pin", "dd stop/delete group", "/ filter", "<leader>? keys",
 	})
 end
 
 local function window_options(win, statusline)
-	for name, value in pairs({ number = false, relativenumber = false, signcolumn = "no", wrap = false, spell = false, fillchars = "stl:─,stlnc:─", statusline = statusline }) do
+	for name, value in pairs({ number = false, relativenumber = false, signcolumn = "no", wrap = false, spell = false, fillchars = "stl: ,stlnc: ", statusline = statusline }) do
 		vim.api.nvim_set_option_value(name, value, { win = win })
 	end
 end
