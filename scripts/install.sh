@@ -25,13 +25,21 @@ install_progress() {
 
 install_finish() {
     local status=$1
+    if [ "$install_tty" = yes ]; then printf '\r\033[K' >&3; fi
     if [ "$status" -ne 0 ]; then
-        if [ "$install_tty" = yes ]; then printf '\r\033[K' >&3; fi
-        printf 'Installation failed (exit %s). Recent output:\n' "$status" >&3
+        printf '%sInstallation failed (exit %s).%s\n\nRecent output:\n' "$install_error" "$status" "$install_reset" >&3
         tail -n 40 "$install_log" >&3
         printf '\nFull installation log: %s\n' "$install_log" >&3
     else
         rm -f -- "$install_log"
+        exec 1>&4 2>&3
+        local success= bold= reset= hash=
+        if [ -t 1 ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
+            success=$'\033[32m' bold=$'\033[1m' reset=$'\033[0m'
+        fi
+        hash=${install_snapshot%%-*}
+        printf '%sInstallation successful.%s\n' "$success" "$reset"
+        printf '  Snapshot: %s%s%s%s\n' "$bold" "$hash" "$reset" "${install_snapshot#"$hash"}"
     fi
     exit "$status"
 }
@@ -41,9 +49,9 @@ install_start() {
     install_log=$(mktemp "${TMPDIR:-/tmp}/pi-console-install-log.XXXXXX")
     install_tty=no
     if [ -t 3 ] && [ "${TERM:-}" != dumb ]; then install_tty=yes; fi
-    install_color= install_reset=
+    install_color= install_error= install_reset=
     if [ "$install_tty" = yes ] && [ -z "${NO_COLOR:-}" ]; then
-        install_color=$'\033[1;36m' install_reset=$'\033[0m'
+        install_color=$'\033[36m' install_error=$'\033[31m' install_reset=$'\033[0m'
     fi
     trap 'install_finish "$?"' EXIT
     trap 'exit 130' INT
@@ -53,13 +61,8 @@ install_start() {
 }
 
 install_complete() {
-    if [ "$install_tty" = yes ]; then printf '\r\033[K' >&3; fi
-    exec 1>&4 2>&3
-    if [ -t 1 ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
-        printf '\033[1mSnapshot:\033[0m \033[1;36m%s\033[0m\n' "$1"
-    else
-        printf 'Snapshot: %s\n' "$1"
-    fi
+    # Report success from the EXIT trap, after cleanup has also succeeded.
+    install_snapshot=$1
 }
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }

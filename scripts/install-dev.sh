@@ -6,7 +6,6 @@ project_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 . "$script_dir/_install-common.sh"
 bin_dir=${PI_CONSOLE_BIN_DIR:-"$HOME/.local/bin"}
 bin_dir=${bin_dir%/}
-validate_directory "$bin_dir"
 mode=
 case "$#:${1-}" in
     0:) ;;
@@ -15,6 +14,7 @@ case "$#:${1-}" in
     *) fail 'Usage: install-dev.sh [--full | --server-only]' ;;
 esac
 install_start
+validate_directory "$bin_dir"
 dev_install_root
 mkdir -p "$(dirname -- "$install_root")"
 install_lock="$install_root.install-lock"

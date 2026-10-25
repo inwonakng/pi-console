@@ -28,12 +28,14 @@ async function reportStarted(hello: Record<string, unknown>, alreadyRunning = fa
   const selectedBuildId = await serviceBuild();
   const url = `http://localhost:${listenerPort(hello.network.port)}`;
   const version = typeof hello.appRoot === "string" && basename(dirname(hello.appRoot)) === "versions"
-    ? basename(hello.appRoot) : hello.buildId;
-  const message = alreadyRunning ? "Server is already running" : "Server started successfully";
-  console.log(terminalText(`${message} (version ${version}).`, "1;32", process.stdout));
-  console.log(terminalText(url, "1;36", process.stdout));
+    ? basename(hello.appRoot) : String(hello.buildId);
+  const message = alreadyRunning ? "Server is already running." : "Server started successfully.";
+  const styledVersion = version.replace(/\b[a-f0-9]{40,64}\b/, (hash) => terminalText(hash, "1", process.stdout));
+  console.log(terminalText(message, "32", process.stdout));
+  console.log(`  Version: ${styledVersion}`);
+  console.log(`  URL:     ${terminalText(url, "36", process.stdout)}`);
   if (hello.buildId !== selectedBuildId) {
-    console.error(terminalText("Warning: running build differs from the selected build. Use server restart to apply it.", "1;33", process.stderr));
+    console.error(terminalText("Warning: running build differs from the selected build. Use server restart to apply it.", "33", process.stderr));
   }
 }
 
@@ -164,7 +166,7 @@ async function main(): Promise<void> {
         if (action !== "restart") {
           const message = action === "disable" ? "Server shut down successfully; startup disabled."
             : existing ? "Server shut down successfully." : "Server is already stopped.";
-          console.log(terminalText(message, "1;32", process.stdout)); return;
+          console.log(terminalText(message, "32", process.stdout)); return;
         }
       } else if (existing) {
         existing.client.close();
