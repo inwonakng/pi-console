@@ -141,15 +141,6 @@ function M.open(config)
 	window_options(list_win, "%!v:lua.require('pi-integration.overview').render_statusline()")
 	vim.wo[list_win].cursorline = true
 	vim.wo[list_win].cursorlineopt = "line"
-	vim.cmd("botright 9split")
-	local detail_win = vim.api.nvim_get_current_win()
-	local detail_buf = scratch("pi://overview-details")
-	vim.api.nvim_win_set_buf(detail_win, detail_buf)
-	window_options(detail_win, "%#PiOverviewStatusLine# Selected conversation %#PiPaneBorder#%=")
-	vim.wo[detail_win].cursorline = false
-	vim.wo[detail_win].wrap = true
-	vim.wo[detail_win].winfixheight = true
-	vim.api.nvim_set_current_win(list_win)
 	list_cursor.attach(list_buf)
 
 	local list = session_list.new()
@@ -179,60 +170,6 @@ function M.open(config)
 			})
 		end
 	end
-	local function details()
-		if not vim.api.nvim_buf_is_valid(detail_buf) then
-			return
-		end
-		local node = selected()
-		local entry = node and node.kind == "session" and node.entry or nil
-		local lines = { "", " Select a conversation to see its details." }
-		if node and node.kind == "group" then
-			lines = { " " .. node.name, "", " Sessions:  " .. #node.entries .. " visible · " .. node.count .. " remembered", " Tab: expand/collapse · J/K: move group · g: create group", " dd: delete group, keeping its sessions in Ungrouped" }
-		end
-		if entry then
-			local waiting = type(entry.waiting) == "table" and entry.waiting or nil
-			local activity = not waiting and entry.activity and entry.activity ~= "" and (" · " .. text(entry.activity)) or ""
-			lines = {
-				" " .. (entry.pinned and " " or "") .. text(entry.title),
-				"",
-				" Status:    " .. text(entry.status) .. activity,
-			}
-			if type(entry.build) == "table" and (entry.build.channel == "dev" or entry.build.channel == "stable") then
-				table.insert(lines, " Build:     " .. build_info.detail_text(entry.build))
-			elseif entry.channel == "dev" or entry.channel == "stable" then
-				table.insert(lines, " Build:     " .. (entry.channel == "dev" and "DEV" or "stable"))
-			end
-			if waiting then
-				table.insert(lines, " Request:   " .. (text(waiting.label) ~= "" and text(waiting.label) or "Input requested"))
-				table.insert(lines, " Question:  " .. (text(waiting.question) ~= "" and text(waiting.question) or "Pi needs input."))
-				if text(waiting.context) ~= "" then
-					table.insert(lines, " Context:   " .. text(waiting.context))
-				end
-			end
-			table.insert(lines, " Project:   " .. text(project(entry)))
-			table.insert(lines, " Workspace: " .. workspace_path(entry))
-			if entry.host_id then
-				table.insert(lines, " Host:      " .. text(entry.host_name) .. (entry.connected == false and " (unreachable)" or ""))
-				table.insert(lines, " Controller: " .. controller_label(entry))
-			end
-			table.insert(lines, " Location:  " .. text(entry.location))
-			table.insert(lines, " Model:     " .. (text(entry.model) ~= "" and text(entry.model) or "—"))
-			table.insert(lines, " Subagents: " .. tostring(tonumber(entry.subagents) or 0))
-			table.insert(lines, " Session:   " .. (text(entry.session_id) ~= "" and text(entry.session_id) or text(entry.path) ~= "" and text(entry.path) or "No session yet"))
-		end
-		set_lines(detail_buf, lines)
-		vim.api.nvim_buf_clear_namespace(detail_buf, ns, 0, -1)
-		if entry then
-			local title_group = entry.is_new_session and "PiOverviewNewSession" or "PiOverviewDetailTitle"
-			vim.api.nvim_buf_set_extmark(detail_buf, ns, 0, 1, { end_col = #lines[1], hl_group = title_group })
-			for row = 3, #lines do
-				local _, value_start = lines[row]:find(":%s*")
-				if value_start then
-					vim.api.nvim_buf_set_extmark(detail_buf, ns, row - 1, value_start, { end_col = #lines[row], hl_group = "PiOverviewValue" })
-				end
-			end
-		end
-	end
 	local function render(instances, err)
 		if closed or not vim.api.nvim_buf_is_valid(list_buf) or not vim.api.nvim_win_is_valid(list_win) then
 			return
@@ -244,7 +181,7 @@ function M.open(config)
 		if instances then nodes, entries = list.build(instances, query, focus_target) end
 		-- Keep the last successful list on backend or persistence failures.
 		if not nodes then
-			set_lines(detail_buf, { " Could not refresh sessions:", " " .. text(entries or err) })
+			require("pi-integration.logs").notify("Could not refresh sessions: " .. text(entries or err), vim.log.levels.WARN, { key = "overview-refresh", title = "Pi overview" })
 			return
 		end
 		select_last_focused = false
@@ -329,7 +266,6 @@ function M.open(config)
 		navigation.set_rows(starts)
 		highlight_selection()
 		updating = false
-		details()
 	end
 	local function refresh()
 		if closed or refreshing or not vim.api.nvim_buf_is_valid(list_buf) or not vim.api.nvim_win_is_valid(list_win) then return end
@@ -446,7 +382,6 @@ function M.open(config)
 				end
 				navigation.snap()
 				highlight_selection()
-				details()
 			end
 		end,
 	})
