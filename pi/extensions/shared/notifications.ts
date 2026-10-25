@@ -20,7 +20,6 @@ const DISABLED_SOUND_VALUES = new Set(["0", "false", "no", "none", "off", "silen
 
 type NotificationState = {
 	desktopNotificationsEnabled: boolean;
-	missingNotifierWarned?: boolean;
 };
 
 const notificationStateKey = Symbol.for("pi.extensions.notifications.state");
@@ -92,10 +91,6 @@ function desktopNotifier(): { command: string; kind: "alerter" | "notify-send" }
 	const found = spawnSync("/bin/zsh", ["-lc", "command -v alerter"], { encoding: "utf-8" });
 	const command = found.status === 0 && found.stdout?.trim();
 	return command ? { command, kind: "alerter" } : undefined;
-}
-
-export function desktopNotificationsAvailable(): boolean {
-	return desktopNotifier() !== undefined;
 }
 
 export function notificationIconPath(): string | undefined {
@@ -193,20 +188,12 @@ export function sendDesktopNotification(
 	return true;
 }
 
-function reportNotificationResult(ctx: ExtensionContext, notified: boolean): boolean {
-	if (!notified && !notificationState.missingNotifierWarned) {
-		notificationState.missingNotifierWarned = true;
-		ctx.ui.notify("Pi notifications are on, but no desktop notifier was found on this host (alerter on macOS, notify-send on Linux).", "warning");
-	}
-	return notified;
-}
-
 export function notifyPiNeedsInput(ctx: ExtensionContext, title = "Pi needs input", allowNotification = true): boolean {
 	if (!allowNotification || !notificationsEnabled()) {
 		return false;
 	}
 
-	return reportNotificationResult(ctx, sendDesktopNotification(ctx, {
+	return sendDesktopNotification(ctx, {
 		title,
 		group: "pi-coding-agent-input",
 		soundEnv: "PI_PERMISSION_SOUND",
@@ -216,7 +203,7 @@ export function notifyPiNeedsInput(ctx: ExtensionContext, title = "Pi needs inpu
 		onError: (error) => {
 			ctx.ui.notify(`Could not send Pi notification: ${error.message}`, "warning");
 		},
-	}));
+	});
 }
 
 export function notifyPiToolApproval(ctx: ExtensionContext): boolean {
@@ -235,7 +222,7 @@ export function notifyPiFinished(ctx: ExtensionContext, force = false): boolean 
 		return false;
 	}
 
-	return reportNotificationResult(ctx, sendDesktopNotification(ctx, {
+	return sendDesktopNotification(ctx, {
 		title: "Pi finished",
 		group: "pi-coding-agent",
 		soundEnv: "PI_COMPLETION_SOUND",
@@ -245,5 +232,5 @@ export function notifyPiFinished(ctx: ExtensionContext, force = false): boolean 
 		onError: (error) => {
 			ctx.ui.notify(`Could not send Pi notification: ${error.message}`, "warning");
 		},
-	}));
+	});
 }
