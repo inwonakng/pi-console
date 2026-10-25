@@ -548,7 +548,7 @@ function M.history_picker(identity, opts)
 			local function mutate(chosen, operation) saved_actions(host, chosen, operation, not opts.archived, reopen) end
 			require("pi-integration.history-picker").pick(host, rows, function(row)
 				local timestamp = tostring(row.lastActivityAt or row.createdAt or "Unknown time"):gsub("T", " "):gsub("%.%d+Z$", " UTC")
-				return timestamp .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " (" .. (row.live and row.live.status or "Stopped") .. ")"
+				return timestamp .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " | " .. row.id .. " (" .. (row.live and row.live.status or "Stopped") .. ")"
 			end, function(chosen, preview_opts)
 				if not current() or #chosen == 0 then return end
 				if not opts.archived then
