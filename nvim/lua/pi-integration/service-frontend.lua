@@ -209,7 +209,7 @@ local function current_controller()
 end
 local function current_revision() return authority and authority.revision or snapshot and snapshot.runtimeRevision end
 local function observe_authority(value, full)
-	if authority and value.serviceEpoch == authority.epoch and value.sequence < authority.sequence then return end
+	if authority and value.serviceEpoch == authority.epoch and value.sequence < authority.sequence then return false end
 	local owner = full and value or value.owner
 	local controller = current_controller()
 	if owner then controller = owner.controller end
@@ -219,6 +219,7 @@ local function observe_authority(value, full)
 		if authority then tree.close(tree_ctx) end
 	end
 	authority = { epoch = value.serviceEpoch, sequence = value.sequence, revision = value.runtimeRevision, controller = controller }
+	return true
 end
 local function control_current()
 	local controller = current_controller()
@@ -1102,7 +1103,7 @@ connect = function()
 				return
 			end
 			local old_revision = current_revision()
-			observe_authority(value.update, false)
+			local authority_updated = observe_authority(value.update, false)
 			if old_revision ~= current_revision() then close_approval() end
 			local receipt = value.update.command
 			if receipt then
@@ -1114,9 +1115,10 @@ connect = function()
 				local outcome = outcomes[receipt.id]; outcomes[receipt.id] = nil
 				if outcome_current(outcome, receipt) then outcome.callback(receipt) end
 			end
-			if value.update.owner then
-				-- Revoke local callbacks immediately, not after the coalesced read.
-				if grant and (not value.update.owner.controller or value.update.owner.controller.grantId ~= grant.grantId) then
+			if authority_updated and value.update.owner then
+				-- Snapshots can overtake queued updates. Only accepted authority may
+				-- revoke local callbacks before the coalesced read.
+				if grant and not control_current() then
 					grant = nil
 					close_approval()
 					update_status_state()
