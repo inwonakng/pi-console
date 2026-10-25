@@ -284,7 +284,7 @@ preserving drafts. `<leader>qq` only closes the frontend; the worker keeps runni
 In the Neovim overview, `dd` stops the selected session and closes the controller
 attachment captured when the stop is accepted. Other attachments remain open.
 `<leader>pi` interrupts the selected turn without stopping the worker or taking control.
-Pinned sessions without a runtime display `Inactive`; an unreachable host displays
+Pinned sessions without a runtime display `Stopped`; an unreachable host displays
 `(unreachable)` in the Host column and its session activity is `Unknown`.
 `:PiOperations` inspects outcomes/recovered history text; `:PiHostRequest` reviews an
 unresolved create/resume ID. These do not replay work. See the C report for exact

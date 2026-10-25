@@ -37,7 +37,7 @@ type RenameFlight = {
   message: string; dispatched: boolean; requestId?: string; result?: RenameResult;
 };
 type SessionActivity = {
-  status: "Starting" | "Stopping" | "Inactive" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Idle";
+  status: "Starting" | "Stopping" | "Stopped" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Idle";
   completionSeq: number;
   turnOutcome?: ConversationSnapshot["execution"]["outcome"];
   subagentRuns: { runId: string; status: "running"; agent?: string; role?: string; progress?: string }[];
@@ -232,7 +232,7 @@ export class HostOwner {
     const record = this.catalog.get(id);
     if (record.deleted) throw new CommandError("session_unavailable", "Session was deleted; receipts and workspace recovery data remain available");
     if (record.ownerEpoch || this.sessions.get(id) && !this.sessions.get(id)!.finished) {
-      throw new CommandError("session_busy", "Open conversations are protected. Use current control to explicitly kill the session before archiving/deleting it.");
+      throw new CommandError("session_busy", "Open conversations are protected. Use current control to explicitly stop the session before archiving/deleting it.");
     }
     return record;
   }
@@ -1331,7 +1331,7 @@ export class OwnedSession {
 
   private activity(): SessionActivity {
     const pending = this.worker?.interactionSnapshot().pending.some((item) => !item.submitted);
-    const status = this.done ? "Inactive"
+    const status = this.done ? "Stopped"
       : this.error || this.phase === "failed" ? "Error"
       : this.phase === "stopping" ? "Stopping"
       : pending ? "Waiting"

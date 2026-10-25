@@ -77,9 +77,10 @@ local function publish_attachment(heartbeat_only)
 	elseif not session_id then status = starting and "Starting" or "Unstarted"
 	elseif not attachment then status = session_status or "Unattached"
 	elseif snapshot then
-		status = snapshot.status
+		status = snapshot.phase == "stopped" and "Stopped" or snapshot.status
 		if status == "Idle" and snapshot.turnOutcome == "completed" and state.completion_seq > state.seen_seq then status = "Done" end
 	end
+	if status == "Stopped" then name, slug = "Stopped session", "Stopped session" end
 	tmux.publish({ version = 1, frontend_attachment = true, host_id = identity, session_id = session_id,
 		pid = vim.uv.os_getpid(), updated = os.time(), cwd = not session_id and selected_cwd or state.session_cwd or selected_cwd,
 		title = name, slug = slug,
@@ -548,8 +549,8 @@ local function update_status_state()
 	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active" or "view only")
 		or (session_id and ("session " .. (session_status or "unattached")) or starting and "starting" or "unstarted")
 	if action_connection and action_connection.status then state.client_status = action_connection.status end
-	if kill_pending and kill_pending.status == "stopping" then state.client_status = "Stopping conversation..."
-	elseif kill_pending and kill_pending.status == "unknown" then state.client_status = "kill outcome unknown" end
+	if kill_pending and kill_pending.status == "stopping" then state.client_status = "Stopping session..."
+	elseif kill_pending and kill_pending.status == "unknown" then state.client_status = "stop outcome unknown" end
 	state.can_kill_session = not kill_pending and not not can_kill_session()
 	require("pi-integration.keymaps").update_kill({ state = state, actions = M, buffer = ctx.buffer })
 	state.access_mode = (statuses["pi-access-mode"] or ""):match("^Mode: (%w+)$") or defaults.accessMode
@@ -992,7 +993,7 @@ recover_selection = function(allow_restore)
 					host_operation("host.recover", { sessionId = session_id }); return
 				end
 			end
-			session_status = not row and "unavailable" or row.archived and "archived" or row.deleted and "deleted" or "Inactive"
+			session_status = not row and "unavailable" or row.archived and "archived" or row.deleted and "deleted" or "Stopped"
 			session_error = "Session " .. session_status .. ". Use :PiSessions to inspect or explicitly reopen it."
 		end
 		render()
@@ -1705,10 +1706,10 @@ function M.restart()
 	end)
 end
 function M.kill_session()
-	if kill_pending then notify("Kill already pending; no duplicate request sent."); return end
-	if not can_kill_session() then notify("Kill requires control of a live session (:PiControl)."); return end
+	if kill_pending then notify("Stop already pending; no duplicate request sent."); return end
+	if not can_kill_session() then notify("Stop requires control of a live session (:PiControl)."); return end
 	if not can_close_frontend() then return end
-	local captured, label = stamp(), "Kill conversation and close"
+	local captured, label = stamp(), "Stop session"
 	kill_pending = captured
 	captured.status = "confirming"
 	render()
@@ -1737,7 +1738,7 @@ function M.kill_session()
 				if preserved and can_close_frontend() then vim.cmd("qall!") end
 			else render() end
 		end)
-		if sent then notify("Stopping conversation...")
+		if sent then notify("Stopping session...")
 		else kill_pending = nil; render() end
 	end)
 end
@@ -2241,7 +2242,7 @@ function M.refresh_messages() refresh(true) end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; Ctrl+Enter saves; editing pauses dispatch while connected)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (workspace diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects saved file content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle (generate session title)\n:PiLogs / <leader>pl (notifications, action outcomes and recovery text; Enter inspects details)\n:PiHostRequest (unresolved session creation/resume)\n:PiSessions (archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (close frontend; conversation keeps running)\n:PiKill / <leader>pk (confirm kill conversation and close; preserves history and local drafts)\n:PiConsoleRestart / <leader>pr: restart the frontend (installed dev uses the latest selected build).\n:PiRestart / <leader>pR: restart this conversation worker using the running server build; interrupts active work.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history apply to the attached session.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; Restart server applies the installed build on a chosen host/channel. Confirm separately to force interrupted work; saved sessions stay stopped. Last server restart inspects the latest outcome.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the original directory. First prompt creates the session.\n:PiRefreshOptions: refresh cached pre-start models, defaults, and commands (otherwise expire after 60 seconds).\n:PiTranscript: session history (all branches, read-only).\nTranscript Enter inspects thinking/tools/skills/artifacts and file links; @ completion uses the session directory.\nPaged text: n next / p first / r reload. Skill f reads the current skill file.\nSlash commands run on the session host through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService restart is also available in Hosts; installation and frontend restart remain separate. Service stop stays CLI-only: pi-console server stop [--force].")
+	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; Ctrl+Enter saves; editing pauses dispatch while connected)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / :PiWorkspaceReviews (workspace diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects saved file content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle (generate session title)\n:PiLogs / <leader>pl (notifications, action outcomes and recovery text; Enter inspects details)\n:PiHostRequest (unresolved session creation/resume)\n:PiSessions (archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (close frontend; conversation keeps running)\n:PiKill / <leader>pk (confirm stop session and close frontend; preserves history and local drafts)\n:PiConsoleRestart / <leader>pr: restart the frontend (installed dev uses the latest selected build).\n:PiRestart / <leader>pR: restart this conversation worker using the running server build; interrupts active work.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history apply to the attached session.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; Restart server applies the installed build on a chosen host/channel. Confirm separately to force interrupted work; saved sessions stay stopped. Last server restart inspects the latest outcome.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the original directory. First prompt creates the session.\n:PiRefreshOptions: refresh cached pre-start models, defaults, and commands (otherwise expire after 60 seconds).\n:PiTranscript: session history (all branches, read-only).\nTranscript Enter inspects thinking/tools/skills/artifacts and file links; @ completion uses the session directory.\nPaged text: n next / p first / r reload. Skill f reads the current skill file.\nSlash commands run on the session host through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService restart is also available in Hosts; installation and frontend restart remain separate. Service stop stays CLI-only: pi-console server stop [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()

@@ -52,7 +52,7 @@ local function indicator_columns(entry)
 	local cells = {}
 	local spans = {}
 	local byte_offset = 0
-	local visible = entry.connected ~= false and entry.status ~= "Inactive"
+	local visible = entry.connected ~= false and entry.status ~= "Stopped"
 	for index, indicator in ipairs(statusline.status_indicators(entry)) do
 		if index > 1 then
 			table.insert(cells, " ")

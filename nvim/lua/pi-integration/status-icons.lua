@@ -22,7 +22,7 @@ local styles = {
 	Idle = { icon = "󰽥", color = colors.muted },
 	Unstarted = { icon = "", color = colors.apricot },
 	Error = { icon = "", color = colors.red },
-	Inactive = { icon = "", color = colors.muted },
+	Stopped = { icon = "■", color = colors.muted },
 	Unknown = { icon = "?", color = colors.muted },
 	Stopping = { icon = "", color = colors.muted },
 }

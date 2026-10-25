@@ -1,7 +1,7 @@
 local M = {}
 
 local which_key = require("which-key")
-local kill_spec = { lhs = "<leader>pk", action = "kill_session", desc = "Kill conversation and close frontend" }
+local kill_spec = { lhs = "<leader>pk", action = "kill_session", desc = "Stop session" }
 
 M.specs = {
 	input = {

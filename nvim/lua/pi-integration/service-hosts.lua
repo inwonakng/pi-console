@@ -383,7 +383,7 @@ function M.open(entry, in_place)
 		local opened, failure = tmux.launch_service(frontend.config.launcher, M.target(host), entry.session_id, nil, resume)
 		if not opened then notify(failure) end
 	end
-	select(entry.status == "Inactive")
+	select(entry.status == "Stopped")
 	return true
 end
 saved_request = function(host, envelope, callback)
@@ -548,7 +548,7 @@ function M.history_picker(identity, opts)
 			local function mutate(chosen, operation) saved_actions(host, chosen, operation, not opts.archived, reopen) end
 			require("pi-integration.history-picker").pick(host, rows, function(row)
 				local timestamp = tostring(row.lastActivityAt or row.createdAt or "Unknown time"):gsub("T", " "):gsub("%.%d+Z$", " UTC")
-				return timestamp .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " (" .. (row.live and row.live.status or "Inactive") .. ")"
+				return timestamp .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " (" .. (row.live and row.live.status or "Stopped") .. ")"
 			end, function(chosen, preview_opts)
 				if not current() or #chosen == 0 then return end
 				if not opts.archived then
@@ -558,7 +558,7 @@ function M.history_picker(identity, opts)
 						for _, row in ipairs(chosen) do
 							if not current() then notify("Host connection changed; remaining sessions were not opened"); return end
 							local ok, err = M.open({ host_id = host.host_id, session_id = row.id,
-								status = row.live and "Idle" or "Inactive" }, in_place)
+								status = row.live and "Idle" or "Stopped" }, in_place)
 							if not ok then notify(err) end
 						end
 					end
@@ -703,7 +703,7 @@ function M.management_operations()
 end
 function M.manage(entry, action, argument)
 	if not entry.session_id then return nil, "Frontend has no session yet" end
-	if entry.status == "Inactive" then return nil, "Session is inactive" end
+	if entry.status == "Stopped" then return nil, "Session is stopped" end
 	local host = M.find(entry.host_id)
 	if not host or not host.connected then return nil, "Host disconnected; mutations disabled" end
 	if not vim.tbl_contains(host.hello.capabilities or {}, "session.manage") then return nil, "Server does not support session management" end

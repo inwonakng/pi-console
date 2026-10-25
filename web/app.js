@@ -29,7 +29,7 @@ const stoppedPromptDrafts = new Map();
 function sessionStatus(host, row, activity = row.live, resetSeen = false, viewed = false) {
   if (!host.connected) return "Unknown";
   const key = sessionKey(host.hello.hostId, row.id);
-  if (!row.live) { completionStates.delete(key); return "Inactive"; }
+  if (!row.live) { completionStates.delete(key); return "Stopped"; }
   if (!activity) return "Unknown";
   const epoch = host.hello.serviceEpoch;
   const viewedCompletion = viewed ? activity.completionSeq || 0 : 0;
@@ -403,7 +403,7 @@ function route() {
     if (!host || !row?.live) {
       activeKey = null; activeScreen = "overview"; renderScreens();
       if (!connecting) notice(!host ? "This host is unavailable. Reconnect it from Overview."
-        : "This session is inactive or unavailable. Open History to resume it explicitly.");
+        : "This session is stopped or unavailable. Open History to resume it explicitly.");
       return;
     }
     conversation = createConversation(host, row);
@@ -723,7 +723,7 @@ function createConversation(host, row) {
     $("stop").disabled = !controlled || busy;
     $("control").textContent = controlled ? "Detach" : "Take control";
     $("control").disabled = !host.connected || !row.live || !connected || !snapshot || busy;
-    $("controller").textContent = !host.connected ? "Unknown / read only" : !row.live ? "Inactive / read only"
+    $("controller").textContent = !host.connected ? "Unknown / read only" : !row.live ? "Stopped / read only"
       : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
     $("abort").hidden = !snapshot?.conversation.execution.running;
@@ -735,7 +735,7 @@ function createConversation(host, row) {
     $("prompt").disabled = !controlled || !ready;
     $("send").disabled = !controlled || !ready || busy || !$("prompt").value.trim();
     $("composer-hint").textContent = !host.connected || !connected ? "Disconnected. Open Options to reconnect."
-      : !row.live ? "Session inactive. Resume it from History." : !controlled ? "Take control in Options to send a prompt."
+      : !row.live ? "Session stopped. Resume it from History." : !controlled ? "Take control in Options to send a prompt."
       : !ready ? "Waiting for session setup." : snapshot?.conversation.execution.running ? "Prompts sent while working are queued." : "";
     renderSettings();
     if (snapshot) renderInteractions();
@@ -797,14 +797,14 @@ function createConversation(host, row) {
       field.select.disabled = !enabled || !choices.length || !hello?.capabilities.includes(field.operation) || Boolean(optionsLoad);
     }
     $("refresh-settings").disabled = !host.connected || !row.live || !connected || owner?.phase !== "ready" || Boolean(optionsLoad) || !hello?.capabilities.includes("session.read");
-    $("settings-hint").textContent = !host.connected ? "Host unavailable. Current settings are unknown." : !row.live ? "Session inactive. Resume it from History."
+    $("settings-hint").textContent = !host.connected ? "Host unavailable. Current settings are unknown." : !row.live ? "Session stopped. Resume it from History."
       : optionsLoad ? "Loading model options..." : optionsError ? `${optionsError} Tap Refresh options to retry.`
       : !connected ? "Reconnect to read current settings." : owner?.phase !== "ready" ? "Waiting for session setup."
       : !controlsCurrent() ? "Take control to change settings." : "Changes apply to this session on the execution host.";
   }
   function displayStatus() {
     if (!host.connected) return "Unknown";
-    if (!row.live) return "Inactive";
+    if (!row.live) return "Stopped";
     if (!connected) return "Unknown";
     return sessionStatus(host, row, owner || row.live);
   }
@@ -1203,7 +1203,7 @@ function createConversation(host, row) {
       setSummaries(host, summaries);
       if (disposed) return;
       const currentRow = host.sessions.find(item => item.id === selectedId);
-      if (!currentRow?.live) throw new Error("This session is inactive. Open History to resume it explicitly.");
+      if (!currentRow?.live) throw new Error("This session is stopped. Open History to resume it explicitly.");
       client?.close();
       const next = new ServiceClient(record => { if (!disposed && client === next) receive(record); });
       client = next;

@@ -20,7 +20,7 @@ function M.same(left, right)
 	return false
 end
 
-local summary_order = { "Working", "Waiting", "Idle", "Done", "Loading", "Compacting", "Stopping", "Error", "Inactive", "Unknown", "Unstarted" }
+local summary_order = { "Working", "Waiting", "Idle", "Done", "Loading", "Compacting", "Stopping", "Error", "Stopped", "Unknown", "Unstarted" }
 local summary_status = { Retrying = "Working", Starting = "Loading", Unresponsive = "Unknown", Disconnected = "Unknown" }
 
 function M.group_summary(node)
