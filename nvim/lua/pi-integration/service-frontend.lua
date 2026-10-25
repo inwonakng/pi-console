@@ -1726,7 +1726,6 @@ function M.kill_session()
 	local captured, label = stamp(), "Stop session"
 	kill_pending = captured
 	captured.status = "confirming"
-	render()
 	vim.ui.select({ label, "Cancel" }, { prompt = "Stop session and close its controller?" }, function(choice)
 		if kill_pending ~= captured then return end
 		if choice ~= label or not current(captured) or not can_kill_session() or not can_close_frontend() then
