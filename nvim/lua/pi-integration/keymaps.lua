@@ -16,7 +16,7 @@ M.specs = {
 		{ lhs = "<leader>pa", action = "restore_pending_action", desc = "Restore pending action" },
 		{ lhs = "<leader>pc", action = "take_control", desc = "Take control" },
 		{ lhs = "<leader>pC", action = "change_cwd", desc = "Choose directory on current host" },
-		{ lhs = "<leader>pD", action = "show_workspace_diff", desc = "Diff" },
+		{ lhs = "<leader>pd", action = "show_workspace_diff", desc = "Diff" },
 		{ lhs = "<leader>pr", action = "restart_console", desc = "Restart frontend" },
 		{ lhs = "<leader>pR", action = "restart", desc = "Restart conversation worker" },
 		{ lhs = "<leader>pt", action = "show_transcript", desc = "Show Pi transcript" },
@@ -143,7 +143,6 @@ function M.help_key_lines()
 	local lines = {
 		"- `<C-CR>` submit the input buffer.",
 		"- `<leader>qq` choose Detach, Stop or Cancel.",
-		"- `<leader>pd` detach the frontend; conversation keeps running.",
 		"- `" .. kill_spec.lhs .. "` " .. kill_spec.desc .. " (requires control of a live session).",
 	}
 	for _, spec in ipairs(M.specs.shared) do

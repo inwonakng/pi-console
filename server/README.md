@@ -280,9 +280,9 @@ native steering / `:PiFollowUp`, retry/compaction settings through the command p
 history navigation/fork/clone/delete, `:PiWorkspace` enter/integrate/discard,
 side/spawn controls, retitle/notifications/usage and confirmed owner-session restart.
 `:PiKill` / `<leader>pk` stops the session worker and closes this frontend after
-preserving drafts. `<leader>pd` detaches and closes the frontend; the worker keeps
-running. `<leader>qq` offers Stop, Detach and Cancel, in that order. Stop uses the
-same confirmation as `<leader>pk`. `<leader>pD` opens the workspace diff.
+preserving drafts. `<leader>qq` offers Stop, Detach and Cancel, in that order.
+Detach closes the frontend while the worker keeps running. Stop uses the
+same confirmation as `<leader>pk`. `<leader>pd` opens the workspace diff.
 In the Neovim overview, `dd` stops the selected session and closes the controller
 attachment captured when the stop is accepted. Other attachments remain open.
 `<leader>pi` interrupts the selected turn without stopping the worker or taking control.
