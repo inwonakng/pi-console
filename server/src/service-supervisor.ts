@@ -33,6 +33,28 @@ const definitionPath = (config: Startup): string => join(config.directory, confi
 const domain = (): string => `gui/${process.getuid!()}`;
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === "ENOENT";
 
+async function systemctl(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  const env = { ...process.env };
+  // Supervised servers use env -i; older registrations may have no bus context.
+  // Discover it only for this command, without changing the saved environment.
+  if (!env.XDG_RUNTIME_DIR && !env.DBUS_SESSION_BUS_ADDRESS) {
+    const uid = process.getuid!();
+    const runtimeDirectory = `/run/user/${uid}`;
+    try {
+      const directory = await lstat(runtimeDirectory);
+      const socket = await lstat(join(runtimeDirectory, "systemd/private"));
+      if (!directory.isDirectory() || directory.uid !== uid || !socket.isSocket() || socket.uid !== uid) {
+        throw new Error("Runtime directory and systemd socket must belong to the current user");
+      }
+    } catch (cause) {
+      throw new Error(`User-systemd manager unavailable: cannot discover its runtime directory/socket at ${runtimeDirectory}. Set XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS if the manager uses another location.`, { cause });
+    }
+    env.XDG_RUNTIME_DIR = runtimeDirectory;
+    delete env.DBUS_SESSION_BUS_ADDRESS; // Treat an empty address as unset.
+  }
+  return exec("systemctl", ["--user", ...args], { env });
+}
+
 // Management holds the profile lock. Publish complete files only; a temporary
 // file left by interruption is never a registration or a startup definition.
 async function publish(path: string, text: string): Promise<void> {
@@ -151,7 +173,7 @@ export class ServiceSupervisor {
       if (!loadedPath || await this.canonicalDefinition(loadedPath) !== await this.canonicalDefinition()) throw new Error("Loaded launchd label belongs to another definition; refusing management");
       return true;
     }
-    const { stdout } = await exec("systemctl", ["--user", "show", `${config.label}.service`, "--property=FragmentPath", "--value"]);
+    const { stdout } = await systemctl(["show", `${config.label}.service`, "--property=FragmentPath", "--value"]);
     if (!stdout.trim()) return false;
     if (await this.canonicalDefinition(stdout.trim()) !== await this.canonicalDefinition()) throw new Error("Loaded systemd unit belongs to another definition; refusing management");
     return true;
@@ -160,7 +182,7 @@ export class ServiceSupervisor {
     if (!await this.loaded()) return false;
     const { stdout } = this.config.platform === "darwin"
       ? await exec("launchctl", ["print", `${domain()}/${this.config.label}`])
-      : await exec("systemctl", ["--user", "show", `${this.config.label}.service`, "--property=ActiveState", "--value"]);
+      : await systemctl(["show", `${this.config.label}.service`, "--property=ActiveState", "--value"]);
     return this.config.platform === "darwin" ? /^\s*pid = \d+/m.test(stdout) : !["inactive", "failed"].includes(stdout.trim());
   }
   async assertStopped(): Promise<void> {
@@ -194,17 +216,17 @@ export class ServiceSupervisor {
       else await exec("launchctl", ["kickstart", `${domain()}/${config.label}`]); // no -k: never kill a running owner
     } else {
       await this.loaded();
-      await exec("systemctl", ["--user", "link", definitionPath(config)]);
-      await exec("systemctl", ["--user", "daemon-reload"]);
-      await exec("systemctl", ["--user", "start", `${config.label}.service`]);
+      await systemctl(["link", definitionPath(config)]);
+      await systemctl(["daemon-reload"]);
+      await systemctl(["start", `${config.label}.service`]);
     }
   }
   async enable(start: boolean): Promise<void> {
     await this.ensureDefinition();
     await this.loaded();
     if (this.config.platform === "linux") {
-      await exec("systemctl", ["--user", "enable", definitionPath(this.config)]);
-      await exec("systemctl", ["--user", "daemon-reload"]);
+      await systemctl(["enable", definitionPath(this.config)]);
+      await systemctl(["daemon-reload"]);
     }
     // A live detached owner needs only future-login registration. Do not launch
     // a candidate which might outlive it and acquire its released claim later.
@@ -219,7 +241,7 @@ export class ServiceSupervisor {
       if (await this.loaded()) await exec("launchctl", ["bootout", `${domain()}/${config.label}`]);
     } else {
       await this.loaded();
-      try { await exec("systemctl", ["--user", "disable", `${config.label}.service`]); }
+      try { await systemctl(["disable", `${config.label}.service`]); }
       catch (error) {
         if (!/Failed to disable unit: Unit .* does not exist\./.test(String((error as { stderr?: string }).stderr))) throw error;
       }
@@ -228,7 +250,7 @@ export class ServiceSupervisor {
       await unlink(definitionPath(config));
       await syncDirectory(config.directory);
     }
-    if (config.platform === "linux") await exec("systemctl", ["--user", "daemon-reload"]);
+    if (config.platform === "linux") await systemctl(["daemon-reload"]);
     await unlink(configPath(config.root));
     await syncDirectory(config.root);
   }
@@ -238,7 +260,7 @@ export class ServiceSupervisor {
     let enabled = definitionPresent && this.config.platform === "darwin" && (loaded || this.config.directory === join(homedir(), "Library/LaunchAgents"));
     if (definitionPresent && this.config.platform === "linux") {
       let output: string;
-      try { output = (await exec("systemctl", ["--user", "is-enabled", `${this.config.label}.service`])).stdout.trim(); }
+      try { output = (await systemctl(["is-enabled", `${this.config.label}.service`])).stdout.trim(); }
       catch (error) {
         output = String((error as { stdout?: string }).stdout ?? "").trim();
         if (!["disabled", "linked", "linked-runtime", "static", "indirect", "not-found", "masked", "masked-runtime"].includes(output)) throw error;
