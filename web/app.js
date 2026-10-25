@@ -654,8 +654,8 @@ function createConversation(host, row) {
     $("reconnect").hidden = connected;
     $("reconnect").disabled = busy || !host.connected || !row.live;
     $("stop").disabled = !controlled || busy;
-    $("control").hidden = controlled;
-    $("control").disabled = controlled || !host.connected || !row.live || !connected || !snapshot || busy;
+    $("control").textContent = controlled ? "Detach" : "Take control";
+    $("control").disabled = !host.connected || !row.live || !connected || !snapshot || busy;
     $("controller").textContent = !host.connected ? "Unknown / read only" : !row.live ? "Inactive / read only"
       : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
@@ -1044,8 +1044,12 @@ function createConversation(host, row) {
   }
 
   $("control").addEventListener("click", () => run(async () => {
-    if (controlsCurrent()) return;
     const captured = context();
+    if (controlsCurrent()) {
+      await command("control.release");
+      if (sameContext(captured)) grant = null;
+      return;
+    }
     const takeover = Boolean(owner?.controller);
     if (takeover && !confirm(`Take control from ${owner.controller.label}?`)) return;
     await command(takeover ? "control.takeover" : "control.acquire", takeover ? { confirmed: true } : {});
