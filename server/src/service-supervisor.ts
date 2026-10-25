@@ -18,13 +18,13 @@ const xml = (s: string): string => s.replaceAll("&", "&amp;").replaceAll("<", "&
 // systemd specifiers and environment expansion must remain literal, including in paths.
 const unitValue = (s: string): string => '"' + s.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%") + '"';
 const unitArg = (s: string): string => unitValue(s.replaceAll("$", "$$"));
-function definition(config: Startup, legacyWorkingDirectory = false): string {
+function definition(config: Startup): string {
   const argv = ["/usr/bin/env", "-i", ...Object.entries(config.environment).map(([key, value]) => `${key}=${value}`),
     config.node, join(config.application, "server/dist/cli.js"), "run", ...config.args];
   if (config.platform === "linux") {
     // WorkingDirectory is a raw path, not a quoted command argument. The trailing
     // slash preserves literal trailing whitespace/backslashes in the INI value.
-    const workingDirectory = legacyWorkingDirectory ? unitValue(homedir()) : homedir().replaceAll("%", "%%") + "/";
+    const workingDirectory = homedir().replaceAll("%", "%%") + "/";
     return `[Unit]\nDescription=pi-console ${config.channel} (${config.root.replaceAll("%", "%%")})\n\n[Service]\nType=exec\nExecStart=${argv.map(unitArg).join(" ")}\nWorkingDirectory=${workingDirectory}\nRestart=no\nKillMode=process\nTimeoutStopSec=infinity\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
   }
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${xml(config.label)}</string>\n<key>ProgramArguments</key><array>${argv.map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>\n<key>WorkingDirectory</key><string>${xml(homedir())}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><false/>\n<key>StandardOutPath</key><string>${xml(join(config.root, "service.log"))}</string>\n<key>StandardErrorPath</key><string>${xml(join(config.root, "service.log"))}</string>\n</dict></plist>\n`;
@@ -35,17 +35,19 @@ const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException).co
 
 // Management holds the profile lock. Publish complete files only; a temporary
 // file left by interruption is never a registration or a startup definition.
-async function publish(path: string, text: string, replace = false): Promise<void> {
+async function publish(path: string, text: string): Promise<void> {
   const temporary = join(dirname(path), `.pi-console-startup-${randomUUID()}.tmp`);
   try {
     const file = await open(temporary, "wx", 0o600);
     try { await file.writeFile(text); await file.sync(); } finally { await file.close(); }
-    if (!replace) {
-      try { await lstat(path); throw new Error(`Startup path already exists; refusing to replace: ${path}`); }
-      catch (error) { if (!missing(error)) throw error; }
+    try { await lstat(path); }
+    catch (error) {
+      if (!missing(error)) throw error;
+      await rename(temporary, path);
+      await syncDirectory(dirname(path));
+      return;
     }
-    await rename(temporary, path);
-    await syncDirectory(dirname(path));
+    throw new Error(`Startup path already exists; refusing to replace: ${path}`);
   } finally {
     try { await unlink(temporary); } catch (error) { if (!missing(error)) throw error; }
   }
@@ -111,27 +113,17 @@ export class ServiceSupervisor {
   private async ensureDefinition(): Promise<void> {
     if (!await this.assertDefinition(true)) await publish(definitionPath(this.config), definition(this.config));
   }
-  /** Call with the management lock held, after verifying the loaded definition. */
-  async repairDefinition(): Promise<void> {
-    if (await this.assertDefinition(true) !== "legacy") return;
-    await publish(definitionPath(this.config), definition(this.config), true);
-    await exec("systemctl", ["--user", "daemon-reload"]);
-  }
-  private async assertDefinition(allowMissing = false): Promise<"current" | "legacy" | undefined> {
+  private async assertDefinition(allowMissing = false): Promise<boolean> {
     const path = definitionPath(this.config);
     let file;
     try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
-    catch (error) { if (allowMissing && missing(error)) return; throw error; }
+    catch (error) { if (allowMissing && missing(error)) return false; throw error; }
     try {
       const stat = await file.stat();
-      if (stat.isFile() && stat.nlink === 1 && stat.uid === process.getuid?.() && !(stat.mode & 0o022)) {
-        const text = await file.readFile("utf8");
-        if (text === definition(this.config)) return "current";
-        // Accept only the exact previous renderer, never arbitrary unit edits.
-        if (this.config.platform === "linux" && text === definition(this.config, true)) return "legacy";
-      }
-      throw new Error(`Supervisor definition was changed or is unowned; refusing: ${path}`);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || stat.mode & 0o022
+        || await file.readFile("utf8") !== definition(this.config)) throw new Error(`Supervisor definition was changed or is unowned; refusing: ${path}`);
     } finally { await file.close(); }
+    return true;
   }
   private async canonicalDefinition(path = definitionPath(this.config)): Promise<string> {
     try { return await realpath(path); }
@@ -236,7 +228,7 @@ export class ServiceSupervisor {
     await syncDirectory(config.root);
   }
   async status(): Promise<Record<string, unknown>> {
-    const definitionPresent = !!await this.assertDefinition(true);
+    const definitionPresent = await this.assertDefinition(true);
     const loaded = await this.loaded();
     let enabled = definitionPresent && this.config.platform === "darwin" && (loaded || this.config.directory === join(homedir(), "Library/LaunchAgents"));
     if (definitionPresent && this.config.platform === "linux") {
