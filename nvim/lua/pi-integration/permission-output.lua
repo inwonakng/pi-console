@@ -74,7 +74,7 @@ function M.append(ctx, lines, items, permission)
 		preview_filetype = permission.previewFiletype,
 	})
 	local summary = tostring(permission.tool or "tool") .. ": " .. response
-	table.insert(lines, "> " .. summary:gsub("[\r\n]", " "))
+	table.insert(lines, "> " .. tool_output.summary_icon("permission") .. " " .. summary:gsub("[\r\n]", " "))
 	table.insert(items, { kind = "tool", output_id = output_id, start_line = #lines, end_line = #lines })
 	table.insert(lines, "")
 end

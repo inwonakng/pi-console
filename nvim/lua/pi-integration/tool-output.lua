@@ -842,6 +842,27 @@ local function failure_summary(output)
 	return "✗ failed", text
 end
 
+local summary_icons = {
+	read = "",
+	edit = "",
+	write = "",
+	bash = "",
+	codemode = "󰅩",
+	web_search = "",
+	web_fetch = "󰖟",
+	spawn = "󰇥",
+	spawn_control = "󰇥",
+	workspace = "",
+	todowrite = "",
+	todo_write = "",
+	question = "",
+	permission = "󰌾",
+}
+
+function M.summary_icon(name)
+	return summary_icons[name] or ""
+end
+
 -- Group headers and children share the same presentation policy.
 function M.summary_highlight(state, output_id)
 	local output = state.tool_outputs[output_id]

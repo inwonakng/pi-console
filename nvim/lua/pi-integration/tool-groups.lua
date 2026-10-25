@@ -23,7 +23,8 @@ local function summary(state, group)
 	end
 	local call_count = #group.children
 	local file_count = vim.tbl_count(files)
-	local text = "> 󰇥 " .. group.name .. " (" .. call_count .. (call_count == 1 and " call" or " calls")
+	local text = "> " .. tool_output.summary_icon(group.name) .. " " .. group.name
+		.. " (" .. call_count .. (call_count == 1 and " call" or " calls")
 		.. ", " .. file_count .. (file_count == 1 and " file" or " files") .. ")"
 	if running > 0 then
 		text = text .. " · " .. running .. " running"

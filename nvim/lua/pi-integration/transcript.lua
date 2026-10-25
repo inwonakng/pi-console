@@ -198,9 +198,7 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 	for index, line in ipairs(lines) do
 		local row = rows[index]
 		local highlight = row and tool_output.summary_highlight(state, row.output_id)
-		if not highlight and line:find("> 󰇥 ", 1, true) == 1 then
-			highlight = "PiToolQuote"
-		elseif not highlight and line:find("> 󰔛 ", 1, true) == 1 then
+		if not highlight and line:find("> 󰔛 ", 1, true) == 1 then
 			highlight = "PiThinkingQuote"
 		elseif not highlight and line:find("> 󰗨 Session compacted here", 1, true) == 1 then
 			highlight = "PiThinkingQuote"
