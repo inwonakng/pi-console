@@ -16,21 +16,60 @@ end
 local function contents(buf)
 	return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") .. (vim.bo[buf].endofline and "\n" or "")
 end
-local function readonly(options, title, value, filetype, new_tab)
+local function readonly(options, title, value, filetype, new_tab, target_win)
 	local buf = require("pi-integration.layout").create_buffer(nil, title, filetype or "text", true)
 	local value_lines, eol = lines(value)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, value_lines)
 	vim.bo[buf].endofline, vim.bo[buf].fixendofline, vim.bo[buf].modified = eol, false, false
 	vim.bo[buf].buftype, vim.bo[buf].modifiable, vim.bo[buf].readonly = "nofile", false, true
 	vim.bo[buf].modeline, vim.bo[buf].filetype = false, filetype or "text"
-	vim.cmd(new_tab and "tabnew" or "botright split")
+	if target_win then vim.api.nvim_set_current_win(target_win) else vim.cmd(new_tab and "tabnew" or "botright split") end
 	vim.api.nvim_win_set_buf(0, buf)
 	return buf
 end
 
 function M.open(options, workspace_id, pinned)
 	local captured, resource = options.stamp(), options.resource
-	local review_tab
+	local review_tab, list_win, before_win, after_win
+	local files, selection = {}, 0
+	local function anchor_list()
+		if not review_tab or not vim.api.nvim_tabpage_is_valid(review_tab)
+			or not list_win or not vim.api.nvim_win_is_valid(list_win)
+			or vim.api.nvim_get_current_tabpage() ~= review_tab then return end
+		local layout = vim.fn.winlayout()
+		if layout[1] ~= "leaf" and not (layout[1] == "row" and layout[2][1][1] == "leaf" and layout[2][1][2] == list_win) then
+			local width = vim.api.nvim_win_get_width(list_win)
+			vim.api.nvim_win_call(list_win, function() vim.cmd("wincmd H") end)
+			vim.api.nvim_win_set_width(list_win, width)
+		end
+	end
+	local function ensure_windows()
+		if not vim.api.nvim_win_is_valid(list_win) then options.notify("File list closed; reopen the review. Drafts are unchanged."); return false end
+		if not before_win or not vim.api.nvim_win_is_valid(before_win) then
+			local blank = vim.api.nvim_create_buf(false, true)
+			vim.bo[blank].bufhidden = "wipe"
+			before_win = vim.api.nvim_open_win(blank, true, { split = "right", win = list_win })
+			vim.wo[before_win].winfixwidth = false
+		end
+		if not after_win or not vim.api.nvim_win_is_valid(after_win) then
+			local blank = vim.api.nvim_create_buf(false, true)
+			vim.bo[blank].bufhidden = "wipe"
+			after_win = vim.api.nvim_open_win(blank, true, { split = "below", win = before_win })
+			vim.wo[after_win].winfixwidth = false
+		end
+		anchor_list()
+		return true
+	end
+	local function display_file(pair)
+		if not ensure_windows() then return end
+		vim.api.nvim_win_set_buf(before_win, pair.before)
+		vim.api.nvim_win_set_buf(after_win, pair.after)
+		for _, win in ipairs({ before_win, after_win }) do
+			vim.api.nvim_win_call(win, function() vim.cmd("diffthis"); vim.wo.wrap = false end)
+		end
+		vim.api.nvim_set_current_win(after_win)
+		vim.cmd("diffupdate")
+	end
 	local function alive() return options.current(captured) end
 	local function query(payload, callback)
 		if not alive() then options.notify("Review context changed; reopen it. Local drafts are unchanged."); return end
@@ -97,8 +136,17 @@ function M.open(options, workspace_id, pinned)
 		else send() end
 	end
 	local function show_file(review, path)
+		selection = selection + 1
+		local ticket = selection
+		local pair = files[path]
+		if pair then
+			if vim.api.nvim_buf_is_valid(pair.before) and vim.api.nvim_buf_is_valid(pair.after) then display_file(pair)
+			else options.notify("Review buffer closed; reopen the review. Other drafts are unchanged.") end
+			return
+		end
 		local payload = { kind = "workspaceReviewFile", reviewId = review.reviewId, path = path }
 		query(payload, function(page)
+			if selection ~= ticket or not ensure_windows() then return end
 			local prefix = scratch_name(path) .. "/"
 			local editable = present(page.resourceId) and not page.historical and not present(page.unsupported)
 			local save_id, submitted, version, resource_id = nil, nil, page.version, page.resourceId
@@ -133,12 +181,9 @@ function M.open(options, workspace_id, pinned)
 				end, options.control_stamp(), status)
 				if save_id then vim.b[target].pi_review_command_id, vim.b[target].pi_review_command_epoch = save_id, captured.epoch end
 			end
-			readonly(options, prefix .. "before", page.before, resources.filetype(path))
-			local before_win = vim.api.nvim_get_current_win()
-			buf = editable and options.draft(prefix .. "after", page.after, save) or readonly(options, prefix .. "after", page.after, resources.filetype(path))
-			local after_win = vim.api.nvim_get_current_win()
-			-- draft() uses a horizontal split; place the after view next to before.
-			vim.cmd("wincmd L")
+			local before_buf = readonly(options, prefix .. "before", page.before, resources.filetype(path), false, before_win)
+			buf = editable and options.draft(prefix .. "after", page.after, save, nil, after_win)
+				or readonly(options, prefix .. "after", page.after, resources.filetype(path), false, after_win)
 			local value, eol = lines(page.after)
 			vim.bo[buf].modeline, vim.bo[buf].filetype = false, resources.filetype(path)
 			if editable then vim.api.nvim_buf_set_lines(buf, 0, -1, false, value) end
@@ -146,7 +191,8 @@ function M.open(options, workspace_id, pinned)
 			if not editable then vim.bo[buf].buftype, vim.bo[buf].modifiable, vim.bo[buf].readonly = "nofile", false, true end
 			vim.b[buf].pi_review_path = path -- display metadata only
 			vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel
-			for _, win in ipairs({ before_win, after_win }) do vim.api.nvim_win_call(win, function() vim.cmd("diffthis"); vim.wo.wrap = false end) end
+			files[path] = { before = before_buf, after = buf }
+			display_file(files[path])
 			vim.keymap.set("n", "gO", function()
 				-- Always open a separate view. Never refresh/replace an unsaved buffer.
 				query(vim.tbl_extend("force", payload, { resourceId = resource_id }), function(latest)
@@ -188,7 +234,19 @@ function M.open(options, workspace_id, pinned)
 		if present(review.stageUnsupported) then table.insert(output, "Stage all: " .. review.stageUnsupported) end
 		if present(review.unstageUnsupported) then table.insert(output, "Unstage all: " .. review.unstageUnsupported) end
 		local buf = readonly(options, scratch_name("summary"), table.concat(output, "\n"), "markdown", true)
-		review_tab = vim.api.nvim_get_current_tabpage()
+		review_tab, list_win = vim.api.nvim_get_current_tabpage(), vim.api.nvim_get_current_win()
+		vim.wo[list_win].winfixwidth = true
+		local anchoring = false
+		vim.api.nvim_create_autocmd({ "WinNew", "WinClosed", "WinResized", "WinEnter", "TabEnter" }, { callback = function()
+			if not vim.api.nvim_tabpage_is_valid(review_tab) or not vim.api.nvim_win_is_valid(list_win) then return true end
+			if anchoring then return end
+			anchoring = true
+			vim.schedule(function() anchor_list(); anchoring = false end)
+		end })
+		-- Reserve the comparison area so the file list starts narrow even before selection.
+		ensure_windows()
+		vim.api.nvim_win_set_width(list_win, math.min(36, math.max(1, math.floor(vim.o.columns / 4))))
+		vim.api.nvim_set_current_win(list_win)
 		require("pi-integration.workspace-summary").highlight(buf)
 		vim.keymap.set("n", "<CR>", function() local path = entries[vim.api.nvim_win_get_cursor(0)[1]]; if path then show_file(review, path) end end, { buffer = buf, desc = "Open workspace review file" })
 		vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel

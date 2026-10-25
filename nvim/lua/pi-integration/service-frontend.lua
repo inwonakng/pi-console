@@ -435,7 +435,7 @@ local function command(operation, payload, callback, captured, terminal, submiss
 	end)
 	return envelope.id
 end
-local function draft_buffer(name, contents, on_save, on_hide)
+local function draft_buffer(name, contents, on_save, on_hide, target_win)
 	local buf = layout.create_buffer(nil, name, "markdown", true)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(contents or "", "\n", { plain = true }))
 	vim.bo[buf].modified = false
@@ -459,7 +459,7 @@ local function draft_buffer(name, contents, on_save, on_hide)
 			on_hide()
 		end })
 	end
-	vim.cmd("botright split")
+	if target_win then vim.api.nvim_set_current_win(target_win) else vim.cmd("botright split") end
 	vim.api.nvim_win_set_buf(0, buf)
 	return buf
 end
