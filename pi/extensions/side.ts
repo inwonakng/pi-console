@@ -273,14 +273,6 @@ export default function sideExtension(pi: ExtensionAPI) {
   function event(g: Generation, child: SideRpc, data: SideRpcEvent): void {
     if (g.child !== child) return;
     if (data.type === "extension_ui_request") {
-      if (process.env.PI_CONSOLE_SERVICE === "1" && current === g && !g.cancelled
-        && data.method === "setStatus" && data.statusKey === "pi-desktop-notification" && typeof data.statusText === "string") {
-        try {
-          const intent = JSON.parse(data.statusText);
-          if (intent && typeof intent === "object") g.ctx.ui.setStatus("pi-desktop-notification", JSON.stringify({ ...intent, sideConversationId: g.id }));
-        } catch { /* Invalid child effects never become parent actions. */ }
-        return;
-      }
       if (data.method === "setStatus" && data.statusKey === SERVICE_DIALOG_STATUS && typeof data.statusText === "string") {
         try {
           const status: unknown = JSON.parse(data.statusText);

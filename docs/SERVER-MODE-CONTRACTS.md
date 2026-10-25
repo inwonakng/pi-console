@@ -315,9 +315,9 @@ and persisted cleanup error prevent later join/capture/integration/removal from
 bypassing failed cleanup; a failed metadata publication can require inspection.
 Service cleanup Git is directly awaited with a 10s bound. Unknown escaped filters
 or outside writers can still invalidate a snapshot; patches are not exhaustive
-quiescence evidence. Desktop alerter is disabled on service workers (notification
-policy belongs to clients); sanitized TMUX prevents host UI review launches while
-retaining review data. Existing external services are not adopted/killed.
+quiescence evidence. Service workers deliver desktop notifications on the server
+host independently of frontend attachments. Sanitized TMUX prevents host UI review
+launches while retaining review data. Existing external services are not adopted/killed.
 
 Host resources default to `HOME/.local/state/pi-console/service/<channel>`, preserve
 host credentials/settings and use explicit sanitized environment/PATH. Bundled and

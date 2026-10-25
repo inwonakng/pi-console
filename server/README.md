@@ -178,6 +178,11 @@ selected code. Old runtime trees must remain while their processes run.
 
 Supervised processes run without a shell under `env -i`: HOME, PATH and available
 USER/LOGNAME/LANG/LC_ALL/TMPDIR/PI_CODING_AGENT_DIR are captured at enable time.
+Desktop session variables (including DBUS_SESSION_BUS_ADDRESS and XDG_RUNTIME_DIR),
+ALERTER and PI_NOTIFICATION_*/PI_COMPLETION_*/PI_PERMISSION_* notification settings
+are also captured. Desktop notifications run on the execution host without requiring
+an open frontend or overview; Linux requires `notify-send` and access to the user's
+notification service, and macOS requires `alerter`.
 `--path` overrides PATH and must include Node (for Pi's shebang) and required tool
 executables. Pi is discovered from the invoking PATH, and Pi/Node paths are resolved
 and saved internally for startup. Provider, model and TLS configuration paths

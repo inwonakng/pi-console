@@ -91,7 +91,7 @@ export type ConversationChange =
 const HISTORY_BYTES = 16 * 1024 * 1024;
 const LIVE_BYTES = 32 * 1024 * 1024;
 const OUTPUT_BYTES = 1024 * 1024;
-const EFFECT_STATUSES = new Set(["pi-side-response", "pi-tree-clone", "pi-history-changed", "pi-desktop-notification", "pi-spawn-notification"]);
+const EFFECT_STATUSES = new Set(["pi-side-response", "pi-tree-clone", "pi-history-changed", "pi-spawn-notification"]);
 const LIFECYCLE_STATUSES = new Set(["pi-console-runtime", "pi-console-dialog"]);
 
 /** Always reduced by the owner, even with no subscribers. No frontend actions here. */

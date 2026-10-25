@@ -522,7 +522,7 @@ and into `webSearch.providers` in Pi's `settings.json`.
 
 | Feature | Additional setup |
 |---|---|
-| Desktop notifications | `alerter` (macOS only) |
+| Desktop notifications | `alerter` (macOS) or `notify-send` (Linux), installed on the server host with access to its desktop notification service |
 | Workspace diff review | `diffview.nvim` in your regular Neovim configuration |
 | Faster file completion | `fd` or `fdfind` |
 | Send deleted sessions to the OS trash | `trash` or `gio trash`; otherwise deletion is permanent |

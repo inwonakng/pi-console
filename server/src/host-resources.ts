@@ -88,7 +88,7 @@ function hostEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     if (value === undefined) continue;
     if (/^(?:NVIM|VIM|TMUX)/.test(key)
       || /^(?:ITERM|KITTY)_/.test(key)
-      || /^(?:PI_CONSOLE_|PI_SIDE_|PI_SPAWN_|PI_WORKSPACE_|PI_SUBAGENT_|PI_NOTIFICATION_|PI_COMPLETION_|PI_PERMISSION_)/.test(key)
+      || /^(?:PI_CONSOLE_|PI_SIDE_|PI_SPAWN_|PI_WORKSPACE_|PI_SUBAGENT_)/.test(key)
       || ["PI_BINARY", "PI_SESSION_DIR", "PI_INTERACTION_MODE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM", "WINDOWID"].includes(key)) continue;
     environment[key] = value;
   }

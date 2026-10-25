@@ -360,34 +360,6 @@ local function owner_resources()
 	resource.edit = function(query, title, filetype, anchor) open_owner_file(resource, query, title, filetype, anchor) end
 	return resource
 end
-local function desktop_notification(intent, captured)
-	local label = "[" .. current_owner_label() .. "] " .. intent.title
-	notify(intent.title)
-	-- Executables, icon paths and sound/timeout settings belong to this frontend.
-	local alerter = vim.env.ALERTER or "alerter"
-	local args
-	if vim.fn.executable(alerter) == 1 then
-		args = { alerter, "--title", label, "--message", intent.message, "--group", "pi-console-" .. session_id }
-		local completed = intent.title == "Pi finished"
-		local sound = vim.env[completed and "PI_COMPLETION_SOUND" or "PI_PERMISSION_SOUND"] or vim.env.PI_NOTIFICATION_SOUND
-		if sound == nil then sound = completed and "Glass" or "Ping" end
-		sound = vim.trim(sound)
-		if sound ~= "" and not vim.tbl_contains({ "0", "false", "no", "none", "off", "silent" }, sound:lower()) then vim.list_extend(args, { "--sound", sound }) end
-		local timeout = vim.env[completed and "PI_COMPLETION_NOTIFICATION_TIMEOUT" or "PI_PERMISSION_NOTIFICATION_TIMEOUT"] or vim.env.PI_NOTIFICATION_TIMEOUT
-		local seconds
-		if timeout == nil or vim.trim(timeout) == "" then seconds = completed and 8 or 15 else seconds = tonumber(timeout) end
-		if seconds and seconds > 0 and seconds < math.huge then vim.list_extend(args, { "--timeout", tostring(seconds) }) end
-		local icon = vim.env.PI_NOTIFICATION_ICON or vim.g.pi_console_root .. "/pi/assets/pi-logo.png"
-		if vim.fn.filereadable(icon) == 1 then vim.list_extend(args, { "--app-icon", icon }) end
-	elseif vim.fn.executable("notify-send") == 1 then
-		args = { "notify-send", "--app-name=pi-console", "--", label, intent.message }
-	end
-	if not args then return end
-	local ok, err = pcall(vim.system, args, {}, function(result)
-		if result.code ~= 0 then vim.schedule(function() if current(captured) then notify("Frontend desktop notifier failed: " .. tostring(result.stderr), vim.log.levels.WARN) end end) end
-	end)
-	if not ok then notify("Could not launch frontend desktop notifier: " .. tostring(err), vim.log.levels.WARN) end
-end
 function M.complete_files(prefix, callback)
 	if session_id then
 		if not job or not snapshot or not attachment then callback({ entries = {} }); return end
@@ -1166,11 +1138,6 @@ connect = function()
 							-- A separate recoverable draft never replaces unsent local input.
 							local buf = draft_buffer(scratch_name("owner-editor-draft"), effect.text)
 							owner_resources().bind(buf)
-						elseif effect.type == "extension_signal" and effect.key == "pi-desktop-notification" then
-							local decoded, intent = pcall(vim.json.decode, effect.value or "")
-							if not decoded or type(intent) ~= "table" or type(intent.title) ~= "string" or type(intent.message) ~= "string"
-								or #intent.title > 256 or #intent.message > 4096 then return end
-							desktop_notification(intent, captured)
 						elseif effect.type == "extension_signal" and effect.key == "pi-spawn-notification" then
 							local decoded, intent = pcall(vim.json.decode, effect.value or "")
 							if decoded and type(intent) == "table" and type(intent.message) == "string" and #intent.message <= 4096 then
@@ -1530,7 +1497,7 @@ local function effect_summary(effect)
 	local lines = { "# Offer", "" }
 	fields(lines, effect, { { "type", "Type" }, { "text", "Editor text" }, { "message", "Message" }, { "level", "Level" }, { "key", "Signal" } })
 	if effect.type == "extension_signal" then
-		if effect.key == "pi-desktop-notification" or effect.key == "pi-spawn-notification" then
+		if effect.key == "pi-spawn-notification" then
 			local ok, data = pcall(vim.json.decode, effect.value or "")
 			if ok then fields(lines, data, { { "title", "Title" }, { "message", "Message" }, { "level", "Level" } }) end
 		elseif effect.key ~= "pi-history-changed" then fields(lines, effect, { { "value", "Value" } }) end

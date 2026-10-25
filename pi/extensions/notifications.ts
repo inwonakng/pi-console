@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerServiceOperation } from "./shared/service-operation";
 import {
-	alerterPath,
+	desktopNotificationsAvailable,
 	notificationsEnabled,
 	notifyPiFinished,
 	notifyPiNeedsInput,
@@ -117,8 +117,8 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 			}
 			if (enabled !== wasEnabled) saveSessionSetting(pi, NOTIFICATIONS_SETTING, enabled);
 			setStatus(ctx);
-			if (enabled && !alerterPath()) {
-				ctx.ui.notify("Pi notifications: on, but alerter was not found", "warning");
+			if (enabled && !desktopNotificationsAvailable()) {
+				ctx.ui.notify("Pi notifications: on, but no desktop notifier was found on this host (alerter on macOS, notify-send on Linux).", "warning");
 			} else {
 				ctx.ui.notify(`Pi notifications: ${enabled ? "on" : "off"}`, "info");
 			}

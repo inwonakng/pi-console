@@ -521,8 +521,6 @@ export class OwnedSession {
   private offerBytes = 0;
   private turnRecipient: Controller | null | undefined;
   private mainEffectsAmbiguous = false;
-  private sideRecipient?: Controller;
-  private sideId?: string;
   private readonly spawnRecipients = new Map<string, Controller | undefined>();
   private readonly publications: string[] = [];
   private publishing = false;
@@ -626,7 +624,7 @@ export class OwnedSession {
       this.checkIdentity();
       const runtime = this.worker?.interactionSnapshot().runtime;
       const notification = stored.offer.data.type === "notification" || stored.offer.data.type === "extension_signal"
-        && ["pi-desktop-notification", "pi-spawn-notification"].includes(stored.offer.data.key);
+        && stored.offer.data.key === "pi-spawn-notification";
       return (this.phase === "ready" || notification && this.phase === "initializing") && !this.stopRequested && !this.exit
         && (notification || this.usableWorkspace()) && runtime?.active === true && runtime.id === stored.offer.runtimeId && runtime.cwd === stored.offer.cwd;
     } catch { return false; }
@@ -640,19 +638,12 @@ export class OwnedSession {
     if (active?.operation === "history.navigate" && data.type === "editor_text") return;
     let recipient = active ? active.recipient : this.turnRecipient !== undefined ? this.turnRecipient ?? undefined : this.control.current();
     let independent = false;
-    if (data.type === "extension_signal" && ["pi-desktop-notification", "pi-spawn-notification"].includes(data.key)) {
+    if (data.type === "extension_signal" && data.key === "pi-spawn-notification") {
       try {
         const payload: unknown = JSON.parse(data.value ?? "null");
         if (!object(payload)) return;
-        if (data.key === "pi-spawn-notification") {
-          recipient = typeof payload.runId === "string" ? this.spawnRecipients.get(payload.runId) : undefined;
-          independent = true;
-        } else if (payload.sideConversationId !== undefined) {
-          recipient = payload.sideConversationId === this.sideId ? this.sideRecipient : undefined;
-          independent = true;
-        } else if (payload.group === "pi-coding-agent") recipient = this.turnRecipient ?? undefined;
-        else if (active && this.turnRecipient !== undefined && active.recipient?.grantId !== this.turnRecipient?.grantId
-          && (!this.conversation.executionSettled || this.queueFlight?.dispatched)) return; // Ambiguous overlapping dialog sources are never retargeted.
+        recipient = typeof payload.runId === "string" ? this.spawnRecipients.get(payload.runId) : undefined;
+        independent = true;
       } catch { return; }
     }
     // Native input can be transformed/handled or consumed inside Pi's existing
@@ -1812,10 +1803,6 @@ export class OwnedSession {
         || result.sessionId !== this.record.piSessionId || result.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Unmatched managed operation result");
       flight.result = result;
       flight.resultRevision = this.runtimeRevision;
-      if (result.status === "completed" && result.data?.disposition === "accepted") {
-        if (flight.operation === "side.prompt") this.sideRecipient = flight.recipient;
-        if (flight.operation === "side.reset") this.sideRecipient = undefined;
-      }
       return;
     }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === RENAME_RESULT) {
@@ -1823,11 +1810,10 @@ export class OwnedSession {
       return; // Private result: neither snapshot state nor a frontend effect.
     }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && typeof event.statusText === "string") {
-      if (event.statusKey === "pi-side" || event.statusKey === "pi-spawn-runs") {
+      if (event.statusKey === "pi-spawn-runs") {
         try {
           const payload: unknown = JSON.parse(event.statusText);
-          if (object(payload) && event.statusKey === "pi-side" && typeof payload.id === "string") this.sideId = payload.id;
-          if (object(payload) && event.statusKey === "pi-spawn-runs" && Array.isArray(payload.runs)) {
+          if (object(payload) && Array.isArray(payload.runs)) {
             const ids = new Set<string>();
             for (const run of payload.runs) if (object(run) && typeof run.runId === "string") {
               ids.add(run.runId);
@@ -2015,8 +2001,6 @@ export class OwnedSession {
       this.turnRecipient = undefined;
       this.mainEffectsAmbiguous = false;
       this.queueRecipients.clear();
-      this.sideRecipient = undefined;
-      this.sideId = undefined;
       this.spawnRecipients.clear();
     }
     this.runtimeRevision += revision - this.workerRevision;

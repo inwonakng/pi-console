@@ -1,11 +1,11 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, constants, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-type AlerterNotificationOptions = {
+type DesktopNotificationOptions = {
 	title: string;
 	group: string;
 	soundEnv?: string;
@@ -20,7 +20,7 @@ const DISABLED_SOUND_VALUES = new Set(["0", "false", "no", "none", "off", "silen
 
 type NotificationState = {
 	desktopNotificationsEnabled: boolean;
-	missingAlerterWarned?: boolean;
+	missingNotifierWarned?: boolean;
 };
 
 const notificationStateKey = Symbol.for("pi.extensions.notifications.state");
@@ -70,21 +70,32 @@ export function parseNotificationMode(input: string | undefined): boolean | "tog
 	return undefined;
 }
 
-export function alerterPath(): string | undefined {
-	const configured = process.env.ALERTER;
-	if (configured && existsSync(configured)) {
-		return configured;
-	}
+function executablePath(command: string): string | undefined {
+	const candidates = command.includes("/") ? [command]
+		: (process.env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join(directory, command));
+	return candidates.find((path) => {
+		try { accessSync(path, constants.X_OK); return true; }
+		catch { return false; }
+	});
+}
 
-	for (const candidate of ["/opt/homebrew/bin/alerter", "/usr/local/bin/alerter"]) {
-		if (existsSync(candidate)) {
-			return candidate;
-		}
+function desktopNotifier(): { command: string; kind: "alerter" | "notify-send" } | undefined {
+	if (process.platform === "linux") {
+		const command = executablePath("notify-send");
+		return command ? { command, kind: "notify-send" } : undefined;
 	}
-
+	if (process.platform !== "darwin") return;
+	for (const candidate of [process.env.ALERTER, "alerter", "/opt/homebrew/bin/alerter", "/usr/local/bin/alerter"]) {
+		const command = candidate && executablePath(candidate);
+		if (command) return { command, kind: "alerter" };
+	}
 	const found = spawnSync("/bin/zsh", ["-lc", "command -v alerter"], { encoding: "utf-8" });
-	const path = found.stdout?.trim();
-	return found.status === 0 && path ? path : undefined;
+	const command = found.status === 0 && found.stdout?.trim();
+	return command ? { command, kind: "alerter" } : undefined;
+}
+
+export function desktopNotificationsAvailable(): boolean {
+	return desktopNotifier() !== undefined;
 }
 
 export function notificationIconPath(): string | undefined {
@@ -148,51 +159,44 @@ export function notificationBody(ctx: ExtensionContext): string {
 	return `${ctx.sessionManager.getSessionName() || basename(ctx.cwd)}\n${readableCwd(ctx.cwd)}`;
 }
 
-export function sendAlerterNotification(
+export function sendDesktopNotification(
 	ctx: ExtensionContext,
-	options: AlerterNotificationOptions,
+	options: DesktopNotificationOptions,
 ): boolean {
-	// A service runtime publishes session/interaction events; desktop delivery
-	// belongs to attached clients, never a detached notifier on the host.
-	if (process.env.PI_CONSOLE_SERVICE === "1") {
-		ctx.ui.setStatus("pi-desktop-notification", JSON.stringify({ title: options.title, message: notificationBody(ctx), group: options.group }));
-		return true;
-	}
-	const alerter = alerterPath();
-	if (!alerter) {
-		return false;
-	}
+	const notifier = desktopNotifier();
+	if (!notifier) return false;
 
-	const args = ["--title", options.title, "--message", notificationBody(ctx), "--group", options.group];
-	const iconPath = notificationIconPath();
-	if (iconPath) {
-		args.push("--app-icon", iconPath);
-	}
+	const icon = notificationIconPath();
 	const sound = configuredNotificationSound(options.soundEnv, options.defaultSound);
-	if (sound) {
-		args.push("--sound", sound);
-	}
 	const timeout = configuredNotificationTimeout(options.timeoutEnv, options.defaultTimeoutSeconds);
-	if (timeout) {
-		args.push("--timeout", String(timeout));
+	let args: string[];
+	if (notifier.kind === "alerter") {
+		args = ["--title", options.title, "--message", notificationBody(ctx), "--group", options.group];
+		if (icon) args.push("--app-icon", icon);
+		if (sound) args.push("--sound", sound);
+		if (timeout) args.push("--timeout", String(timeout));
+	} else {
+		args = ["--app-name=pi-console"];
+		if (icon) args.push("--icon", icon);
+		args.push("--hint", sound ? `string:sound-name:${sound}` : "boolean:suppress-sound:true");
+		if (timeout) args.push("--expire-time", String(Math.round(timeout * 1000)));
+		args.push("--", options.title, notificationBody(ctx));
 	}
 
-	const child = spawn(alerter, args, {
-		detached: true,
-		stdio: "ignore",
-	});
-	child.on("error", (error) => {
-		options.onError?.(error);
+	// Delivery belongs to the worker's host, even without any connected clients.
+	const child = spawn(notifier.command, args, { detached: true, stdio: "ignore" });
+	child.on("error", (error) => options.onError?.(error));
+	child.on("exit", (code) => {
+		if (code !== null && code !== 0) options.onError?.(new Error(`${notifier.kind} exited with code ${code}`));
 	});
 	child.unref();
 	return true;
 }
 
 function reportNotificationResult(ctx: ExtensionContext, notified: boolean): boolean {
-	if (process.env.PI_CONSOLE_SERVICE === "1") return notified;
-	if (!notified && !notificationState.missingAlerterWarned) {
-		notificationState.missingAlerterWarned = true;
-		ctx.ui.notify("Pi notifications are on, but alerter was not found.", "warning");
+	if (!notified && !notificationState.missingNotifierWarned) {
+		notificationState.missingNotifierWarned = true;
+		ctx.ui.notify("Pi notifications are on, but no desktop notifier was found on this host (alerter on macOS, notify-send on Linux).", "warning");
 	}
 	return notified;
 }
@@ -202,11 +206,11 @@ export function notifyPiNeedsInput(ctx: ExtensionContext, title = "Pi needs inpu
 		return false;
 	}
 
-	return reportNotificationResult(ctx, sendAlerterNotification(ctx, {
+	return reportNotificationResult(ctx, sendDesktopNotification(ctx, {
 		title,
 		group: "pi-coding-agent-input",
 		soundEnv: "PI_PERMISSION_SOUND",
-		defaultSound: "Ping",
+		defaultSound: process.platform === "linux" ? "dialog-information" : "Ping",
 		timeoutEnv: "PI_PERMISSION_NOTIFICATION_TIMEOUT",
 		defaultTimeoutSeconds: 15,
 		onError: (error) => {
@@ -231,11 +235,11 @@ export function notifyPiFinished(ctx: ExtensionContext, force = false): boolean 
 		return false;
 	}
 
-	return reportNotificationResult(ctx, sendAlerterNotification(ctx, {
+	return reportNotificationResult(ctx, sendDesktopNotification(ctx, {
 		title: "Pi finished",
 		group: "pi-coding-agent",
 		soundEnv: "PI_COMPLETION_SOUND",
-		defaultSound: "Glass",
+		defaultSound: process.platform === "linux" ? "complete" : "Glass",
 		timeoutEnv: "PI_COMPLETION_NOTIFICATION_TIMEOUT",
 		defaultTimeoutSeconds: 8,
 		onError: (error) => {
