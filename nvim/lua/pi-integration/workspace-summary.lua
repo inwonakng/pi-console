@@ -17,9 +17,13 @@ function M.highlight(buf)
 			mark(i - 1, count_start, count_end, "PiWorkspaceSummaryCount")
 			mark(i - 1, added_start, added_end, "PiWorkspaceSummaryAdd")
 			mark(i - 1, deleted_start, deleted_end, "PiWorkspaceSummaryDelete")
-		elseif line:match("^[AMDT]  ") then
+		elseif line:match("^[AMDT?=] ") then
 			-- Match only the trailing counters, never numbers inside a filename.
 			added_start, added_end, deleted_start, deleted_end = line:match("  ()%+%d+()  ()%-%d+()$")
+			if not added_start then
+				local entry = line:gsub(" %[staged%]$", "")
+				added_start, added_end, deleted_start, deleted_end = entry:match(" %(()%+[%d?]+() ()%-[%d?]+()%)$")
+			end
 			if added_start then
 				mark(i - 1, added_start, added_end, "PiWorkspaceSummaryAdd")
 				mark(i - 1, deleted_start, deleted_end, "PiWorkspaceSummaryDelete")

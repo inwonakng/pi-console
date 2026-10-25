@@ -178,14 +178,15 @@ export class WorkspaceReviews {
       const included = Array.isArray(record.includedIgnoredFiles) ? record.includedIgnoredFiles.filter(object).map((entry) => entry.path).filter(path) : [];
       const unpreserved = binding.historical ? record.unpreservedFiles ?? []
         : text(await git(binding.root, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"], context.check), true).split("\0").filter((name) => name && !included.includes(name));
-      if (Array.isArray(unpreserved) && unpreserved.length > FILES) limit("Review exceeds 512 ignored-file notices");
+      const unpreservedFiles = Array.isArray(unpreserved) ? unpreserved : [];
       const ignored = binding.historical && object(record.integrationReview) && Array.isArray(record.integrationReview.ignoredFiles) ? record.integrationReview.ignoredFiles : included;
       if (!binding.historical && JSON.stringify(await this.changes(context, binding)) !== JSON.stringify(changes)) conflict();
       await this.revalidate(context, binding);
       this.recheckAction(context, binding, stage.actionId, stagePaths);
       this.recheckAction(context, binding, unstage.actionId, []);
       return { reviewId: this.seal(binding), workspaceId, historical: binding.historical, before: binding.before, after: binding.after,
-        files: changes, ignoredFiles: ignored, unpreservedFiles: unpreserved,
+        files: changes, ignoredFiles: ignored, unpreservedFiles: unpreservedFiles.slice(0, FILES),
+        unpreservedFilesOmitted: Math.max(0, unpreservedFiles.length - FILES),
         stageId: stage.actionId, stageUnsupported: stage.actionUnsupported, unstageId: unstage.actionId, unstageUnsupported: unstage.actionUnsupported,
         notice: "Ignored files are outside the Git diff. Historical ignored-file bytes are not retained. Stage/unstage act on reviewed workspace files; confirmed restore returns an existing baseline file and its index entry to that baseline, or removes an added working file without changing its index entry. Binary files support index actions and baseline restore, but not text editing. Stage/restore of symlink/submodule resources is unsupported. Unstage resets only the index. Text saves never stage files.",
         partial: record.integration === "failed" };

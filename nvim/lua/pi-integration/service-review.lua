@@ -16,26 +16,31 @@ end
 local function contents(buf)
 	return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") .. (vim.bo[buf].endofline and "\n" or "")
 end
-local function readonly(options, title, value, filetype)
+local function readonly(options, title, value, filetype, new_tab)
 	local buf = require("pi-integration.layout").create_buffer(nil, title, filetype or "text", true)
 	local value_lines, eol = lines(value)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, value_lines)
 	vim.bo[buf].endofline, vim.bo[buf].fixendofline, vim.bo[buf].modified = eol, false, false
 	vim.bo[buf].buftype, vim.bo[buf].modifiable, vim.bo[buf].readonly = "nofile", false, true
 	vim.bo[buf].modeline, vim.bo[buf].filetype = false, filetype or "text"
-	vim.cmd("botright split")
+	vim.cmd(new_tab and "tabnew" or "botright split")
 	vim.api.nvim_win_set_buf(0, buf)
 	return buf
 end
 
 function M.open(options, workspace_id, pinned)
 	local captured, resource = options.stamp(), options.resource
+	local review_tab
 	local function alive() return options.current(captured) end
 	local function query(payload, callback)
 		if not alive() then options.notify("Review context changed; reopen it. Local drafts are unchanged."); return end
 		options.request("resource.read", vim.tbl_extend("force", payload, { runtimeRevision = captured.revision }), function(ok, result)
 			if not alive() then return end
 			if not ok then options.notify(result.message or "Workspace review unavailable"); return end
+			if review_tab then
+				if not vim.api.nvim_tabpage_is_valid(review_tab) then return end
+				vim.api.nvim_set_current_tabpage(review_tab)
+			end
 			callback(result.data)
 		end)
 	end
@@ -175,11 +180,15 @@ function M.open(options, workspace_id, pinned)
 		for _, path in ipairs(review.ignoredFiles or {}) do table.insert(output, path); if not review.historical then entries[#output] = path end end
 		table.insert(output, ""); table.insert(output, "Other ignored files not preserved by workspace cleanup:")
 		for _, path in ipairs(review.unpreservedFiles or {}) do table.insert(output, path) end
+		if (review.unpreservedFilesOmitted or 0) > 0 then
+			table.insert(output, string.format("... %d more ignored files omitted", review.unpreservedFilesOmitted))
+		end
 		table.insert(output, ""); table.insert(output, "Enter opens a file diff: s stages, u unstages, X confirms baseline restore. S stages reviewed working files; U resets the entire workspace index to HEAD. r opens a fresh review without replacing drafts.")
 		table.insert(output, ":write saves only text. gO inspects saved file content; gS looks up the original command; gD shows the patch. = denotes an index-only difference against HEAD.")
 		if present(review.stageUnsupported) then table.insert(output, "Stage all: " .. review.stageUnsupported) end
 		if present(review.unstageUnsupported) then table.insert(output, "Unstage all: " .. review.unstageUnsupported) end
-		local buf = readonly(options, scratch_name("summary"), table.concat(output, "\n"), "markdown")
+		local buf = readonly(options, scratch_name("summary"), table.concat(output, "\n"), "markdown", true)
+		review_tab = vim.api.nvim_get_current_tabpage()
 		require("pi-integration.workspace-summary").highlight(buf)
 		vim.keymap.set("n", "<CR>", function() local path = entries[vim.api.nvim_win_get_cursor(0)[1]]; if path then show_file(review, path) end end, { buffer = buf, desc = "Open workspace review file" })
 		vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel
