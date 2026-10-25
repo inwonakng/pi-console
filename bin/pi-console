@@ -116,9 +116,32 @@ restart_dir=$(mktemp -d "${TMPDIR:-/tmp}/pi-console-restart.XXXXXX")
 trap 'rm -rf -- "$restart_dir"' EXIT
 export PI_CONSOLE_RESTART_FILE="$restart_dir/request.json"
 
+# Installed dev frontends follow this installation's selection on restart.
+# Stable releases stay pinned; source checkouts keep reading their own edits.
+frontend_channel=$PI_CONSOLE_CHANNEL
+frontend_selection=$app_root
+frontend_versions=
+if [ "$frontend_channel" = dev ] && [ -f "$app_root/.pi-console-install" ] && [ "$(basename -- "$(dirname -- "$app_root")")" = versions ]; then
+    frontend_versions=$(dirname -- "$app_root")
+    frontend_selection="$(dirname -- "$frontend_versions")/current"
+fi
+
 while :; do
-    # A full restart takes a fresh build snapshot, including checkout edits.
+    app_root=$(realpath -- "$frontend_selection")
+    if [ -n "$frontend_versions" ] && [ "$(dirname -- "$app_root")" != "$frontend_versions" ]; then
+        printf 'Selected frontend is outside this installation: %s\n' "$app_root" >&2
+        exit 1
+    fi
+    script_dir="$app_root/bin"
     source "$script_dir/channel-env.sh"
+    if [ "$PI_CONSOLE_CHANNEL" != "$frontend_channel" ] || [ "$PI_CONSOLE_INSTALL_MODE" != full ]; then
+        printf 'Frontend restart requires a full %s installation.\n' "$frontend_channel" >&2
+        exit 1
+    fi
+    [ -f "$app_root/nvim/init.lua" ] && [ -f "$app_root/server/dist/bridge.js" ] || {
+        printf 'Selected frontend build is incomplete. Rerun the installer.\n' >&2
+        exit 1
+    }
     pi_console_build_snapshot
     export NVIM_APPNAME="$PI_CONSOLE_NVIM_APPNAME"
     if nvim -u "$app_root/nvim/init.lua"; then

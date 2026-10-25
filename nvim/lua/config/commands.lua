@@ -85,7 +85,7 @@ end, { nargs = "?", desc = "Start a new conversation in a directory on the selec
 
 vim.api.nvim_create_user_command("PiRestart", function()
 	require("pi-integration").restart()
-end, { desc = "Restart Pi" })
+end, { desc = "Restart conversation worker" })
 
 vim.api.nvim_create_user_command("PiConsoleRestart", function()
 	require("pi-integration").restart_console()
