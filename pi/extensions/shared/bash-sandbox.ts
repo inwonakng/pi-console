@@ -5,6 +5,8 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { managedBash } from "./managed-bash";
+import { withRepositoryMutation, subagentProtectedRoots } from "./subagent-state";
+import { childWorkspaceWriteBlock } from "./workspace-policy";
 import { accessRevision, getAccessMode, getScratchDirectory, setScratchDirectory } from "./access-state";
 import { loadExtensionSettings } from "./extension-settings";
 import { baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, hasPermission, pathInside, requestPermission, resolveToolPath, type PermissionAuthorization } from "./permissions";
@@ -61,7 +63,9 @@ async function allowApprovedNetwork(): Promise<boolean> {
 }
 
 function filesystemConfig(cwd: string, reads: string[], writes: string[]): SandboxRuntimeConfig["filesystem"] {
-  const allowWrite = [...new Set([...baselineWritePaths(cwd), ...writes].map(canonicalPath))];
+  const protectedRoots = subagentProtectedRoots();
+  const allowWrite = [...new Set([...baselineWritePaths(cwd), ...writes].map(canonicalPath))]
+    .filter((path) => !protectedRoots.some((root) => pathInside(root, path)));
   const allowRead = [...new Set([...baselineReadPaths(cwd), ...reads, ...allowWrite].map(canonicalPath))];
   return {
     denyRead: allowRead.includes("/") ? [] : ["/"],
@@ -69,8 +73,8 @@ function filesystemConfig(cwd: string, reads: string[], writes: string[]): Sandb
     allowWrite,
     // Suppress the runtime's implicit writable caches unless covered by an
     // actual write grant. These are enforcement carve-outs, not ungrantable paths.
-    denyWrite: getDefaultWritePaths().filter((path) => !path.startsWith("/dev/")).map(canonicalPath)
-      .filter((path) => !allowWrite.some((allowed) => pathInside(allowed, path))),
+    denyWrite: [...protectedRoots, ...getDefaultWritePaths().filter((path) => !path.startsWith("/dev/")).map(canonicalPath)
+      .filter((path) => !allowWrite.some((allowed) => pathInside(allowed, path)))],
   };
 }
 
@@ -114,12 +118,13 @@ async function runUnsandboxed(
   assertAuthority: () => void,
 ): Promise<{ exitCode: number | null }> {
   assertAuthority();
+  if (subagentProtectedRoots().length) throw new Error("Unsandboxed Bash is blocked while a child owns an unresolved contribution.");
   const authorization = await requestPermission(ctx, { kind: "unsandboxed", scope: command, cwd }, "bash",
     { text: command, filetype: "sh" }, onSessionGrant, true, { modelPreview: { text: command, filetype: "sh" } });
   await authorization.validate();
   assertAuthority();
   if (options.signal?.aborted) throw new Error("aborted");
-  return localBash.exec(command, cwd, options);
+  return withRepositoryMutation(["/"], [], () => localBash.exec(command, cwd, options));
 }
 
 async function runSandboxed(
@@ -179,7 +184,8 @@ async function runSandboxed(
       for (const authorization of authorizations) await authorization.validate();
       assertAuthority();
       if (options.signal?.aborted) throw new Error("aborted");
-      const result = await localBash.exec(wrapped, cwd, { ...options, env });
+      const result = await withRepositoryMutation(filesystem.allowWrite, filesystem.denyWrite,
+        () => localBash.exec(wrapped, cwd, { ...options, env }));
       await report();
       return result;
     } catch (error) {
@@ -207,13 +213,19 @@ async function executeRestricted(
   onSessionGrant: () => void,
   onBlocked: () => void,
 ): Promise<{ exitCode: number | null }> {
-  if (getAccessMode() === "full") return localBash.exec(command, cwd, options);
+  const childBlock = childWorkspaceWriteBlock(ctx);
+  if (childBlock) throw new Error(childBlock);
+  const protectedRoots = JSON.stringify(subagentProtectedRoots());
+  if (getAccessMode() === "full" && !subagentProtectedRoots().length) {
+    return withRepositoryMutation(["/"], [], () => localBash.exec(command, cwd, options));
+  }
   const root = canonicalPath(cwd);
   const revision = accessRevision();
   const baseline = () => JSON.stringify([baselineReadPaths(root).map(canonicalPath), baselineWritePaths(root).map(canonicalPath)]);
   const initialBaseline = baseline();
   const assertAuthority = () => {
-    if (accessRevision() !== revision || baseline() !== initialBaseline || canonicalPath(cwd) !== root) {
+    if (accessRevision() !== revision || baseline() !== initialBaseline || canonicalPath(cwd) !== root
+      || JSON.stringify(subagentProtectedRoots()) !== protectedRoots || childWorkspaceWriteBlock(ctx)) {
       throw new Error("Command permission authority changed before execution. No command was started.");
     }
   };
@@ -256,7 +268,7 @@ async function executeRestricted(
   // The runtime's default write roots cannot be narrowed to an approved child
   // without a parent deny overriding that child. Offer the explicit fallback
   // before execution rather than silently widening or blocking the grant.
-  if (filesystem.allowWrite.some((write) => filesystem.denyWrite.some((denied) => pathInside(denied, write)))) {
+  if (filesystem.allowWrite.some((write) => filesystem.denyWrite.some((denied) => !subagentProtectedRoots().includes(denied) && pathInside(denied, write)))) {
     return runUnsandboxed(command, root, options, context, onSessionGrant, assertAuthority);
   }
   for (const scope of sockets) {

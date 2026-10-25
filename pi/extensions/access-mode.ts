@@ -8,6 +8,7 @@ import {
   type ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 import assert from "node:assert";
+import { beginRepositoryMutation } from "./shared/subagent-state";
 import { constants, existsSync, readFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { Type } from "typebox";
@@ -194,12 +195,14 @@ export default function accessModeExtension(pi: ExtensionAPI) {
   // operation, after that queue, rather than releasing a stale hook approval.
   const mutationGuard = (ctx: ExtensionContext, name: "edit" | "write", input: Record<string, unknown>, signal?: AbortSignal) => {
     let execution: PermissionExecution | undefined;
+    let releaseMutation: (() => void) | undefined;
     const revision = accessRevision();
-    return { finish: () => execution?.finish(), check: async (target: string) => {
+    return { finish: () => { execution?.finish(); releaseMutation?.(); }, check: async (target: string) => {
       if (signal?.aborted) throw new Error("aborted");
       if (canonicalPath(target) !== target || target !== input.path) throw new Error("File target changed before execution");
       const blocked = workspaceToolBlock(name, input, ctx);
       if (blocked) throw new Error(blocked.reason);
+      releaseMutation ??= beginRepositoryMutation([target]);
       if (accessRevision() !== revision) throw new Error("File permission authority changed");
       if (!execution) {
         const scope = pathInside(canonicalPath(ctx.cwd), target) && !hasPermission({ kind: "write", scope: target }, ctx.cwd)

@@ -42,7 +42,7 @@ type SessionActivity = {
   status: "Starting" | "Stopping" | "Stopped" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Done" | "Idle";
   completionSeq: number;
   turnOutcome?: ConversationSnapshot["execution"]["outcome"];
-  subagentRuns: { runId: string; status: "running"; agent?: string; role?: string; progress?: string }[];
+  subagentRuns: { runId: string; status: string; execution?: string; writerOwned?: boolean; readyForReview?: boolean; agent?: string; role?: string; progress?: string }[];
 };
 export type OwnedSessionState = SessionActivity & {
   sessionId: string;
@@ -1384,8 +1384,11 @@ export class OwnedSession {
         const value: unknown = JSON.parse(raw);
         if (object(value) && Array.isArray(value.runs)) {
           for (const run of value.runs) {
-            if (!object(run) || run.status !== "running" || typeof run.runId !== "string") continue;
-            subagentRuns.push({ runId: run.runId, status: "running",
+            if (!object(run) || typeof run.runId !== "string" || typeof run.status !== "string"
+              || (run.status !== "running" && run.writerOwned !== true)) continue;
+            subagentRuns.push({ runId: run.runId, status: run.status,
+              execution: typeof run.execution === "string" ? run.execution : undefined,
+              writerOwned: run.writerOwned === true, readyForReview: run.readyForReview === true,
               agent: typeof run.agent === "string" ? run.agent : undefined,
               role: typeof run.role === "string" ? run.role : undefined,
               progress: typeof run.progress === "string" ? run.progress : undefined });

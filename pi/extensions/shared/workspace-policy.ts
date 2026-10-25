@@ -2,6 +2,8 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { getAccessMode } from "./access-state";
 import { resolveToolPath } from "./paths";
+import { canonicalPath } from "./permissions";
+import { subagentWriteBlock } from "./subagent-state";
 import { findGitRoot, getExpectedWorkspaceMissing, getPendingWorkspaceId, isWorkspaceFinalized,
   listWorkspaces, pathInside, sameSessionFile, workspaceForContext } from "./workspace";
 
@@ -73,6 +75,21 @@ function workspaceBlockReason(
   return undefined;
 }
 
+/** Managed children have write authority only during an unfinished revision. */
+export function childWorkspaceWriteBlock(ctx: ExtensionContext): string | undefined {
+  const active = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile())
+    ?? listWorkspaces().filter((record) => record.kind === "child" && pathInside(record.worktreePath, canonicalPath(ctx.cwd)))
+      .sort((left, right) => right.worktreePath.length - left.worktreePath.length)[0];
+  if (active?.kind !== "child") return undefined;
+  if (isWorkspaceFinalized(active) || !active.retained || active.lifecycle === "discarded") {
+    return `Workspace ${active.id} is finalized or disposed; further writes are forbidden.`;
+  }
+  if (active.runId && !active.managedCleanupPending) {
+    return `Workspace ${active.id} is waiting for review; only a correction assignment can re-enable writing.`;
+  }
+  return undefined;
+}
+
 /** Run before approval and again before execution; extension load order is not policy. */
 export function workspaceToolBlock(toolName: string, input: Record<string, unknown>, ctx: ExtensionContext):
   { block: true; reason: string; terminate?: boolean } | undefined {
@@ -89,6 +106,12 @@ export function workspaceToolBlock(toolName: string, input: Record<string, unkno
       reason: `Workspace transition to ${pendingWorkspaceId} is queued. Wait for the cwd switch before using more tools.`,
       terminate: true,
     };
+  }
+  if (toolName === "edit" || toolName === "write") {
+    const childBlock = childWorkspaceWriteBlock(ctx);
+    const target = typeof input.path === "string" ? canonicalPath(resolveToolPath(input.path, ctx.cwd)) : canonicalPath(ctx.cwd);
+    const reason = childBlock ?? subagentWriteBlock(target);
+    if (reason) return { block: true, reason };
   }
   if (getAccessMode() === "full") return undefined;
   const reason = workspaceBlockReason(toolName, input, ctx);

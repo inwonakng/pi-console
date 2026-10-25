@@ -64,7 +64,7 @@ export type WorkspaceRecord = {
   targetSessionFile?: string;
   parentWorkspaceId?: string;
   runId?: string;
-  /** Service-owned child work must finish cleanup before capture/application/removal. */
+  /** A child revision must finish managed cleanup before capture/application/removal. */
   managedCleanupPending?: string;
   integration: WorkspaceIntegration;
   integrationReason?: string;
@@ -515,7 +515,7 @@ export function createWorkspace(input: {
     sourceSessionFile: canonicalSessionFile(input.sourceSessionFile),
     parentWorkspaceId: input.parentWorkspaceId,
     runId: input.runId,
-    managedCleanupPending: process.env.PI_CONSOLE_SERVICE === "1" && input.kind === "child" ? input.runId : undefined,
+    managedCleanupPending: input.kind === "child" ? input.runId : undefined,
     integration: "pending",
     changedFiles: [],
     includedIgnoredFiles,
@@ -528,6 +528,13 @@ export function createWorkspace(input: {
   };
   saveWorkspace(record);
   return record;
+}
+
+export function repositoryWriteRoots(cwd: string): string[] {
+  const roots = gitText(cwd, ["worktree", "list", "--porcelain", "-z"]).split("\0")
+    .filter((field) => field.startsWith("worktree ")).map((field) => canonicalPath(field.slice(9)));
+  roots.push(canonicalPath(gitText(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])));
+  return [...new Set(roots)];
 }
 
 export function isWorkspaceFinalized(record: WorkspaceRecord): boolean {

@@ -290,8 +290,8 @@ function renderOverview() {
     details.addEventListener("toggle", () => {
       if (details.open) expandedSubagents.add(key); else expandedSubagents.delete(key);
     });
-    details.append(text("summary", `${runs.length} running subagent${runs.length === 1 ? "" : "s"}`));
-    for (const run of runs) details.append(text("p", `${run.agent || run.role || "Subagent"}${run.progress ? " / " + run.progress : ""}`));
+    details.append(text("summary", `${runs.length} subagent${runs.length === 1 ? "" : "s"}`));
+    for (const run of runs) details.append(text("p", `${run.agent || run.role || "Subagent"} / ${run.readyForReview ? "ready for review" : run.execution || run.status}${run.progress ? " / " + run.progress : ""}`));
     group.append(link, details);
     return group;
   }));

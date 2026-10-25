@@ -3,7 +3,7 @@ import { registerServiceOperation } from "./shared/service-operation";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { managedSpawn, managedResult, stopManaged } from "../scripts/managed-process.mjs";
+import { beginEpoch, managedSpawn, managedResult, stopManaged } from "../scripts/managed-process.mjs";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { accessRevision, getAccessMode, onAccessInvalidated } from "./shared/access-state";
 import { canonicalPath, getSessionGrants, hasPermission, requestPermission, validPermissionAttempt, permissionWasDenied, type PermissionAuthorization, type PermissionPreview } from "./shared/permissions";
 import { saveSessionSetting } from "./shared/session-settings";
-import { registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
+import { assertRepositoryIdle, registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
 import { spawnRunIds } from "./shared/session-deletion";
 import { agentContext, newAssignment, registerWorkerProtocol, SPAWN_PROTOCOL_TITLE, SPAWN_PERMISSION_CANCEL, SPAWN_PERMISSION_FINISH, WORKER_TOOLS, type Assignment, type WorkerExecution, type WorkerLifetime, type WorkerOperation, type WorkerRequest, type WorkerPermissionOperation, type WorkerPermissionRequest } from "./shared/spawn-protocol";
 import {
@@ -31,6 +31,7 @@ import {
   loadWorkspace,
   prepareWorkspaceDiscard,
   removeWorkspace,
+  repositoryWriteRoots,
   sameSessionFile,
   updateWorkspace,
   workspaceForContext,
@@ -139,6 +140,10 @@ type SpawnRun = {
   worktree?: RunWorkspace;
   integrationBlock?: IntegrationBlock;
   cleanupError?: string;
+  protectedRoots?: string[];
+  childSessionFile?: string;
+  launch?: { model: string; provider?: string; timeoutSeconds?: number };
+  accepting?: boolean;
   timeout?: NodeJS.Timeout;
   abortListener?: () => void;
   abortSignal?: AbortSignal;
@@ -452,7 +457,7 @@ function parseIsolationMode(value: unknown, accessMode: AccessMode): IsolationMo
   if (value === "none" || value === "worktree") {
     return value;
   }
-  return accessMode === "edit" ? "worktree" : "none";
+  return accessMode !== "readonly" ? "worktree" : "none";
 }
 
 function isDirectory(path: string): boolean {
@@ -653,7 +658,7 @@ function worktreeInfo(run: SpawnRun): WorktreeInfo | undefined {
     gitRoot: record?.destinationRoot ?? null,
     path: record?.worktreePath ?? null,
     baseRef: record?.baselineCommit ?? null,
-    patchPath: patchPath && existsSync(patchPath) ? patchPath : null,
+    patchPath: run.settled && patchPath && existsSync(patchPath) ? patchPath : null,
     changedFiles: record?.changedFiles ?? [],
     unpreservedFiles: record?.unpreservedFiles ?? [],
     integration: finalizedIntegration ?? (unavailable ? "needs_parent"
@@ -678,6 +683,15 @@ function workspaceDetails(worktree: WorktreeInfo | undefined) {
   };
 }
 
+function ownsWriter(run: SpawnRun): boolean {
+  if (run.accessMode === "readonly" && run.isolation === "none") return false;
+  if (!run.worktree) return !run.settled || !!run.cleanupError;
+  const record = loadWorkspace(run.worktree.workspaceId);
+  // Missing records and failed cleanup are uncertainty, never released ownership.
+  return !run.settled || !!run.cleanupError || !record || record.retained
+    || !(isWorkspaceFinalized(record) || record.lifecycle === "discarded");
+}
+
 function artifactDetails(run: SpawnRun): Record<string, unknown> {
   return {
     version: 1,
@@ -686,6 +700,9 @@ function artifactDetails(run: SpawnRun): Record<string, unknown> {
     lifetime: run.lifetime,
     execution: run.execution,
     assignment: run.assignments.at(-1),
+    writerOwned: ownsWriter(run),
+    quiescent: run.settled && !run.cleanupError,
+    readyForReview: run.settled && !run.cleanupError && run.assignments.at(-1)?.outcome === "completed" && ownsWriter(run),
     assignments: run.assignments,
     permissionRequests: run.permissionRequests,
     runtimeId: run.runtimeId,
@@ -728,6 +745,11 @@ function statusJson(run: SpawnRun): Record<string, unknown> {
     requests: run.requests,
     deliveredEvents: run.deliveredEvents,
     ownerPid: process.pid,
+    writerOwned: ownsWriter(run),
+    quiescent: run.settled && !run.cleanupError,
+    readyForReview: run.settled && !run.cleanupError && run.assignments.at(-1)?.outcome === "completed" && ownsWriter(run),
+    protectedRoots: run.protectedRoots,
+    childSessionFile: run.childSessionFile,
     prompt: run.prompt,
     parentSessionFile: run.parentSessionFile ?? null,
     ownerEntryId: run.ownerEntryId,
@@ -824,13 +846,14 @@ async function prepareWorktreePatch(run: SpawnRun): Promise<void> {
 }
 
 async function applyWorktreeChanges(run: SpawnRun, signal?: AbortSignal): Promise<void> {
-  if (!run.settled || run.child && run.execution !== "closed") throw new Error("Worker must be closed and cleanup settled before acceptance");
+  if (!run.settled || run.child || !["closed", "idle"].includes(run.execution)) throw new Error("Worker must be quiescent and cleanup settled before acceptance");
   if (run.assignments.at(-1)?.outcome !== "completed") throw new Error("Acceptance requires explicit assignment completion");
   if (run.cleanupError) throw new Error(`Managed child cleanup unresolved: ${run.cleanupError}`);
   if (!run.worktree) return;
   const record = loadWorkspace(run.worktree.workspaceId);
   if (record && isWorkspaceFinalized(record)) {
     run.integrationBlock = undefined;
+    if (record.retained && (getAccessMode() === "edit" || getAccessMode() === "full")) await removeWorkspace(record.id, "integrated");
     return;
   }
   const unavailable = unavailableWorkspaceReason(record, run.worktree.workspaceId);
@@ -859,7 +882,7 @@ async function applyWorktreeChanges(run: SpawnRun, signal?: AbortSignal): Promis
 function formatSpawnStarted(run: SpawnRun): string {
   const worktree = worktreeInfo(run);
   const worktreeLine = worktree?.retained && worktree.path ? `\n- Worktree: ${worktree.path}` : "";
-  return `Spawned subagent.\n- id: ${run.id}\n- status: ${run.status}\n- agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n- accessMode: ${run.accessMode}\n- isolation: ${run.isolation}\n- brief: ${run.briefPath}\n- result: ${run.resultPath}\n- transcript: ${run.transcriptPath}\n- status file: ${run.statusPath}${worktreeLine}\n\nUse spawn_control join/status/report/diff to inspect without integration. join and foreground spawn yield questions and permissions. Use reply for clarification, or approve/deny with exact request and runtime IDs for permissions, then join again. accept explicitly integrates completed, closed workers. Conversational readonly workers support followup and close.`;
+  return `Spawned subagent.\n- id: ${run.id}\n- status: ${run.status}\n- agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n- accessMode: ${run.accessMode}\n- isolation: ${run.isolation}\n- brief: ${run.briefPath}\n- result: ${run.resultPath}\n- transcript: ${run.transcriptPath}\n- status file: ${run.statusPath}${worktreeLine}\n\nUse spawn_control join/status/report/diff to inspect without integration. join and foreground spawn yield questions and permissions. Use reply for clarification, or approve/deny with exact request and runtime IDs for permissions, then join again. accept explicitly integrates completed, quiescent workers. Conversational workers support followup corrections before acceptance and close. Only one unresolved writer is allowed; discard explicitly disposes an unwanted contribution.`;
 }
 
 function runHasError(run: SpawnRun): boolean {
@@ -992,6 +1015,8 @@ function restoredRun(statusPath: string, parentSessionFile: string | undefined):
     statusPath,
     agentPromptPath: existsSync(join(runDir, "subagent-prompt.md")) ? join(runDir, "subagent-prompt.md") : undefined,
     childCwd: record?.workspaceCwd ?? "",
+    protectedRoots: Array.isArray(data.protectedRoots) ? data.protectedRoots.filter((path): path is string => typeof path === "string" && path.startsWith("/"))
+      : record ? [record.destinationRoot, record.worktreePath] : ["/"],
     parentSessionFile,
     ownerEntryId: typeof data.ownerEntryId === "string" ? data.ownerEntryId : undefined,
     cancellationRequested: data.cancellationRequested === true
@@ -1105,7 +1130,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     const key = failed ? `${run.id}:execution:failed` : `${run.id}:${run.assignments.at(-1)?.id}:result`;
     queueEvent(run, key, agentContext({ kind: "worker", id: run.id }, {
       event: failed ? "execution_failure" : "assignment_result", ...artifactDetails(run), report: resultSummary(run),
-      next: "Inspect with join/report/diff. Acceptance is explicit. Follow up with a conversational readonly worker, or close it. Incomplete turns are not success.",
+      next: "Inspect with join/report/diff. Acceptance is explicit. Request corrections with followup before acceptance, or close the conversation. Discard explicitly disposes an unwanted contribution. Incomplete turns are not success.",
     }));
   };
 
@@ -1140,7 +1165,8 @@ export default function spawnExtension(pi: ExtensionAPI) {
     compacting = false;
     parentActive = false;
     eventQueue.clear();
-    registerSubagentRuntime(owner, () => Array.from(runs.values()).some((run) => !run.settled || run.status === "running" || run.joinRequested || run.cleanupError), historyBlockReason);
+    registerSubagentRuntime(owner, () => Array.from(runs.values()).some((run) => !run.settled || run.status === "running" || run.joinRequested || run.cleanupError || ownsWriter(run)), historyBlockReason,
+      () => [...new Set([...runs.values()].filter(ownsWriter).flatMap((run) => run.protectedRoots ?? [run.childCwd]))]);
     const references = new Map<string, string>();
     for (const entry of ctx.sessionManager.getEntries()) {
       for (const runId of spawnRunIds(entry)) {
@@ -1218,7 +1244,18 @@ export default function spawnExtension(pi: ExtensionAPI) {
   });
 
   const stopRun = (run: SpawnRun, reason: string) => {
-    if (run.settled) return;
+    if (run.settled) {
+      if (run.execution === "idle") {
+        run.stopReason = reason;
+        run.closing = true;
+        run.execution = reason === "closed_by_parent" ? "closed" : "cancelled";
+        run.cancellationRequested = reason !== "closed_by_parent";
+        writeStatus(run);
+        signalChange(run);
+        publishSpawnStatus();
+      }
+      return;
+    }
     if (reason === "parent_abort" || reason === "stopped_by_parent" || reason === "session_switch") run.cancellationRequested = true;
     run.stopReason ??= reason;
     for (const [id, wait] of permissionRecords()) {
@@ -1411,6 +1448,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
     if (all.some((run) => !run.settled || run.status === "running" || run.joinRequested)) {
       return "Subagents or their cleanup are still active. Wait for them, join them, or stop them before changing history. Open <leader>ps to manage them.";
     }
+    if (all.some(ownsWriter)) {
+      return "A writer still owns an unaccepted contribution. Accept or explicitly discard it before changing history or workspaces.";
+    }
     if (all.some((run) => !run.joined && !run.cancellationRequested)) {
       return "There are subagent results that haven't been collected. Join them before changing history. Open <leader>ps to manage them.";
     }
@@ -1427,6 +1467,10 @@ export default function spawnExtension(pi: ExtensionAPI) {
   pi.on("session_before_fork", blockHistoryChange);
 
   pi.on("session_before_switch", async (event, ctx) => {
+    if ([...runs.values()].some(ownsWriter)) {
+      ctx.ui.notify("Resolve writing contributions with accept or explicit discard before switching sessions. Stop active workers first if cancellation is needed.", "warning");
+      return { cancel: true };
+    }
     const running = Array.from(runs.values()).filter((run) => run.status === "running");
     if (!running.length) return;
     const action = event.reason === "new" ? "starting a new session" : "switching sessions";
@@ -1526,6 +1570,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       agentPromptPath,
       childCwd: input.cwd,
       parentSessionFile: input.parentSessionFile,
+      protectedRoots: input.isolation === "worktree" ? repositoryWriteRoots(input.cwd) : undefined,
       settled: false,
       notified: false,
       joined: false,
@@ -1534,29 +1579,30 @@ export default function spawnExtension(pi: ExtensionAPI) {
       resolveFinished,
     };
 
-    writeFileSync(briefPath, input.prompt, "utf8");
-    if (input.profile && agentPromptPath) {
-      writeFileSync(agentPromptPath, subagentSystemPrompt(input.profile), "utf8");
-    }
-
-    if (input.isolation === "worktree") {
-      const record = createWorktree(input.cwd, id, input.parentSessionFile);
-      run.worktree = { workspaceId: record.id, recoveryPatchPath: record.resultPatchPath };
-      run.childCwd = record.workspaceCwd;
-    }
-
-    const abortListener = () => stopRun(run, "parent_abort");
-    if (input.signal) {
-      run.abortSignal = input.signal;
-      run.abortListener = abortListener;
-      input.signal.addEventListener("abort", abortListener, { once: true });
-      if (input.signal.aborted) abortListener();
-    }
-
-    pi.appendEntry("pi-spawn-owner", { runId: id, workspaceId: run.worktree?.workspaceId });
-    run.ownerEntryId = sessionManager?.getLeafId() ?? undefined;
     runs.set(id, run);
     try {
+      writeFileSync(briefPath, input.prompt, "utf8");
+      if (input.profile && agentPromptPath) {
+        writeFileSync(agentPromptPath, subagentSystemPrompt(input.profile), "utf8");
+      }
+
+      if (input.isolation === "worktree") {
+        const record = createWorktree(input.cwd, id, input.parentSessionFile);
+        run.worktree = { workspaceId: record.id, recoveryPatchPath: record.resultPatchPath };
+        run.childCwd = record.workspaceCwd;
+        run.protectedRoots = repositoryWriteRoots(record.workspaceCwd);
+      }
+
+      const abortListener = () => stopRun(run, "parent_abort");
+      if (input.signal) {
+        run.abortSignal = input.signal;
+        run.abortListener = abortListener;
+        input.signal.addEventListener("abort", abortListener, { once: true });
+        if (input.signal.aborted) abortListener();
+      }
+
+      pi.appendEntry("pi-spawn-owner", { runId: id, workspaceId: run.worktree?.workspaceId });
+      run.ownerEntryId = sessionManager?.getLeafId() ?? undefined;
       writeStatus(run);
       publishSpawnStatus();
     } catch (error) {
@@ -1734,11 +1780,13 @@ export default function spawnExtension(pi: ExtensionAPI) {
 
   const startRun = async (run: SpawnRun, params: { model: string; provider?: string; timeoutSeconds?: number }) => {
     if (retired) throw new Error("Cannot launch subagent from a retired runtime");
+    run.launch = params;
     const binary = process.env.PI_BINARY || "pi";
     const argv = [binary, "--mode", "rpc", "-e", resolve(dirname(fileURLToPath(import.meta.url)), ".."), "--session-dir", join(run.runDir, "sessions"), "--model", params.model];
     if (params.provider) {
       argv.push("--provider", params.provider);
     }
+    if (run.childSessionFile) argv.push("--session", run.childSessionFile);
     if (run.profile?.tools && run.profile.tools.length > 0) {
       argv.push("--tools", [...new Set([...run.profile.tools.filter((name) => name !== "spawn" && name !== "spawn_control"), ...WORKER_TOOLS])].join(","));
     }
@@ -1847,6 +1895,16 @@ export default function spawnExtension(pi: ExtensionAPI) {
     let child: PiRpcChild;
     try {
       if (run.stopReason) throw new Error(`Subagent aborted before launch: ${run.stopReason}.`);
+      if (run.worktree) {
+        const record = loadWorkspace(run.worktree.workspaceId);
+        if (!record?.retained || isWorkspaceFinalized(record) || record.managedCleanupPending !== run.id) throw new Error("Child workspace is not writable for this revision");
+      }
+      if (run.worktree && (!childEnv.PI_CONSOLE_PROCESS_REGISTRY || !childEnv.PI_CONSOLE_OWNER_EPOCH)) {
+        childEnv.PI_CONSOLE_PROCESS_REGISTRY = join(run.runDir, "processes.sqlite");
+        childEnv.PI_CONSOLE_OWNER_EPOCH = randomUUID();
+        delete childEnv.PI_CONSOLE_PROCESS_JOB;
+        beginEpoch(childEnv.PI_CONSOLE_PROCESS_REGISTRY, childEnv.PI_CONSOLE_OWNER_EPOCH);
+      }
       child = new PiRpcChild(argv, {
         cwd: run.childCwd,
         env: childEnv,
@@ -1895,6 +1953,8 @@ export default function spawnExtension(pi: ExtensionAPI) {
         run.cleanupError = failure instanceof Error ? failure.message : String(failure);
       } finally {
         if (run.abortSignal && run.abortListener) run.abortSignal.removeEventListener("abort", run.abortListener);
+        run.abortSignal = undefined;
+        run.abortListener = undefined;
         run.settled = true;
         run.execution = run.status === "aborted" ? "cancelled" : "failed";
         signalChange(run);
@@ -1941,13 +2001,14 @@ export default function spawnExtension(pi: ExtensionAPI) {
             writeFileSync(run.resultPath, run.resultText, "utf8");
           }
           run.progress = `Assignment ${assignment.outcome}`;
-          if (run.lifetime === "bounded") {
+          if (run.lifetime === "bounded" || run.worktree) {
             run.status = assignment.outcome === "completed" ? "completed" : "error";
             if (assignment.outcome !== "completed") run.error = `Assignment ${assignment.outcome}`;
             break;
           }
-          // Conversational lifetime is readonly-only. The live process and same
-          // persisted conversation remain, with no model calls while idle.
+          // Readonly conversations can stay live. Writers instead leave this
+          // loop and stop their entire managed tree before review. Corrections
+          // resume the persisted conversation, never recycle its workspace.
           run.execution = "idle";
           if (run.timeout) { clearTimeout(run.timeout); run.timeout = undefined; }
           const next = new Promise<void>((resolve) => { run.resume = resolve; });
@@ -2002,12 +2063,15 @@ export default function spawnExtension(pi: ExtensionAPI) {
         if (run.abortSignal && run.abortListener) {
           run.abortSignal.removeEventListener("abort", run.abortListener);
         }
+        run.abortSignal = undefined;
+        run.abortListener = undefined;
         if (run.worktree) {
           try {
             const state = await child.send({ type: "get_state" });
             const data = state.data as { sessionFile?: unknown } | undefined;
             if (typeof data?.sessionFile === "string") {
               const childSessionFile = data.sessionFile;
+              run.childSessionFile = childSessionFile;
               await updateWorkspace(run.worktree.workspaceId, (record) => {
                 record.targetSessionFile = childSessionFile;
               });
@@ -2021,6 +2085,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
           // Unknown escaped processes remain outside the best-effort guarantee.
           try { await child.dispose(); }
           catch (error) { run.cleanupError = error instanceof Error ? error.message : String(error); throw error; }
+          run.child = undefined;
           if (run.worktree) await updateWorkspace(run.worktree.workspaceId, (record) => { delete record.managedCleanupPending; });
           await prepareWorktreePatch(run);
         } catch (error) {
@@ -2040,6 +2105,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         // and blocks every later join and shared workspace mutation.
         run.settled = true;
         run.execution = run.cleanupError ? "failed"
+          : run.worktree && run.lifetime === "conversational" && !run.stopReason && run.childSessionFile ? "idle"
           : run.status === "completed" || run.stopReason === "closed_by_parent" || (!run.stopReason && run.assignments.at(-1)?.outcome === "blocked")
             ? "closed" : run.status === "aborted" ? "cancelled" : "failed";
         signalChange(run);
@@ -2130,14 +2196,14 @@ export default function spawnExtension(pi: ExtensionAPI) {
     name: "spawn",
     defaultActive: false,
     label: "Spawn Subagent",
-    description: "Spawn a worker, bounded by default; opt-in conversational lifetime is readonly and non-isolated only. Workers explicitly report outcomes and may ask questions or request permissions. Foreground/join yield actionable requests without accepting changes. Named profiles and artifacts use existing Pi locations.",
+    description: "Spawn a worker, bounded by default; conversational lifetime supports readonly workers and isolated edit workers. Workers explicitly report outcomes and may ask questions or request permissions. Foreground/join yield actionable requests without accepting changes. Named profiles and artifacts use existing Pi locations.",
     promptSnippet: "Spawn background or foreground pi subagents, primarily for read-heavy research, investigation, summarization, review, and verification; worker handles self-contained tasks requiring file changes.",
     promptGuidelines: [
       "Use spawn when the user asks for subagents or when bounded read-heavy work would help: research, investigation, summarization, review, or verification.",
       "The main agent normally implements changes. Delegate writing only when the user approved implementation, requirements are settled, ownership is non-overlapping, the result can be verified independently, and the benefit outweighs briefing and integration overhead. Keep tightly coupled changes and evolving design decisions in the main session.",
       "spawn defaults to background. If your response depends on the subagent result, call spawn_control with action=join or join_all before answering.",
       "Prefer researcher for investigation and summarization, reviewer for review, verifier for verification, and worker for self-contained tasks requiring file changes.",
-      "Use accessMode=readonly for research, planning, review, and verification. Delegate file changes with accessMode=edit and worktree isolation; join inspects their results; accept explicitly integrates their changes. Use full only when the parent is in full mode and unrestricted access is required, not to bypass write isolation.",
+      "Use accessMode=readonly for research, planning, review, and verification. Delegate file changes with accessMode=edit and worktree isolation. One writer owns the slot through input waits, completion and review until acceptance/cleanup or explicit discard resolves it. Parent repository writes and unsandboxed Bash are blocked during ownership; sandboxed read commands remain available. There is no concurrent-writer override.",
       "For implementation tasks in a Git repository, enter the task workspace before spawning any subagents, including read-only researchers.",
       writingGuidance,
     ],
@@ -2145,7 +2211,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       prompt: Type.String({ description: "The complete bounded prompt/task for the subagent." }),
       agent: Type.Optional(Type.String({ description: "Named subagent profile to load from ~/.pi/agent/agents/*.md or trusted .pi/agents/*.md, e.g. researcher, reviewer, verifier, worker." })),
       role: Type.Optional(Type.String({ description: "Backward-compatible role/instructions label. If it matches a subagent profile and agent is omitted, that profile is loaded." })),
-      lifetime: Type.Optional(Type.Union([Type.Literal("bounded"), Type.Literal("conversational")], { description: "Bounded by default. Conversational keeps the same readonly conversation for follow-up; writing and worktree isolation are unsupported." })),
+      lifetime: Type.Optional(Type.Union([Type.Literal("bounded"), Type.Literal("conversational")], { description: "Bounded by default. Conversational keeps the same conversation for follow-up. Isolated edit workers stop all tracked processes for review and resume that conversation only for corrections before acceptance." })),
       mode: Type.Optional(Type.Union([
         Type.Literal("background"),
         Type.Literal("foreground"),
@@ -2159,7 +2225,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       isolation: Type.Optional(Type.Union([
         Type.Literal("none"),
         Type.Literal("worktree"),
-      ], { description: "Isolation mode. Defaults to worktree for edit access and none otherwise." })),
+      ], { description: "Isolation mode. Defaults to worktree for writing access and none for readonly." })),
       model: Type.Optional(Type.String({ description: "Optional pi --model value for the subagent. Defaults to the profile model; an omitted or inherit profile model uses the parent's current provider and model." })),
       timeoutSeconds: Type.Optional(Type.Number({ description: "Assignment timeout in seconds, including question waits. Defaults to 1800. Conversational review/idle time does not consume the timeout; each follow-up starts a new deadline." })),
     }),
@@ -2194,13 +2260,21 @@ export default function spawnExtension(pi: ExtensionAPI) {
       }
       const isolation = parseIsolationMode(params.isolation, accessMode);
       const lifetime = params.lifetime ?? "bounded";
-      if (lifetime === "conversational" && (accessMode !== "readonly" || isolation !== "none")) {
-        throw new Error("Conversational workers currently require accessMode=readonly and isolation=none; writing quiescence/workspace protections are not implemented.");
+      if (lifetime === "conversational" && !((accessMode === "readonly" && isolation === "none") || (accessMode === "edit" && isolation === "worktree"))) {
+        throw new Error("Conversational workers require readonly/no isolation or edit/worktree isolation.");
       }
-      if (accessMode === "edit" && isolation !== "worktree") {
-        throw new Error("edit-mode spawned subagents must use worktree isolation");
+      if (accessMode !== "readonly" && isolation !== "worktree") {
+        throw new Error("Writing subagents must use worktree isolation");
+      }
+      if (accessMode !== "readonly" || isolation === "worktree") {
+        const writer = [...runs.values()].find(ownsWriter);
+        if (writer) throw new Error(`Writer ${writer.id} owns an unresolved contribution. Accept or explicitly discard it before starting another writer. Concurrent writers are unavailable.`);
+        // Existing commands may have a writable ancestor (for example /tmp)
+        // covering the not-yet-created child tree, despite denying current trees.
+        assertRepositoryIdle([...repositoryWriteRoots(ctx.cwd), canonicalPath(join(workspaceStorageRoot(), "trees"))]);
       }
       if (isolation === "worktree") {
+        if (getAccessMode() !== "edit" && getAccessMode() !== "full") throw new Error("Isolated workers require parent edit or full access mode");
         if (!findGitRoot(ctx.cwd)) {
           throw new Error("Isolated writing subagents require a Git repository. Use read-only subagents; the parent applies edits directly.");
         }
@@ -2279,12 +2353,12 @@ export default function spawnExtension(pi: ExtensionAPI) {
     name: "spawn_control",
     defaultActive: false,
     label: "Control Subagents",
-    description: "Inspect workers without integration: list/status/report/diff, join/join_all (yield on questions and permissions). Use approve/deny with exact worker, assignment, request and both runtime IDs for permissions. Approval beyond the parent's current authority requires the existing user approval UI. Use reply only for clarification. Followup assigns a new task to an idle conversational readonly worker. Close ends a conversational worker; stop cancels. Only accept integrates explicitly completed, closed workers using existing safeguards.",
+    description: "Inspect workers without integration: list/status/report/diff, join/join_all (yield on questions and permissions). Use approve/deny with exact worker, assignment, request and both runtime IDs for permissions. Approval beyond the parent's current authority requires the existing user approval UI. Use reply only for clarification. Followup requests corrections from an idle unaccepted conversational edit worker, or another assignment from a readonly worker. Close ends the conversation; stop cancels but retains writer ownership. Discard disposes a quiescent contribution. Only accept integrates the current explicitly completed, quiescent revision. After acceptance, implementation requires a new worker and baseline.",
     promptSnippet: "Inspect worker results; reply to questions; followup or close conversational workers; accept changes explicitly.",
     promptGuidelines: [
       "Use spawn_control join or join_all before answering if your response depends on background subagent results.",
       "Use list/status/report/diff to inspect. join/join_all and foreground spawn yield pending requests; use reply for clarification or approve/deny for permissions, then join again. Never interpret an agent's reply as user consent or a permission grant.",
-      "Use followup only for idle conversational readonly workers, and close when finished. Use stop to cancel active work. accept is the only integration action; inspection never applies a patch.",
+      "Use followup for corrections to an idle unaccepted conversational edit worker, or further readonly assignments. After acceptance, start a new writer with a fresh workspace. Close ends the conversation; stop cancels work but does not release its contribution. Use discard to dispose a quiescent unwanted contribution. accept is the only integration action; inspection never applies a patch.",
       "If accept reports integration=needs_parent, inspect the retained patch/worktree before deciding how to resolve it. Acceptance retains existing parent-mode, baseline, cleanup, and conflict safeguards.",
     ],
     parameters: Type.Object({
@@ -2302,8 +2376,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
         Type.Literal("report"),
         Type.Literal("diff"),
         Type.Literal("accept"),
+        Type.Literal("discard"),
       ], { description: "Lifecycle action to perform." }),
-      assignmentId: Type.Optional(Type.String({ description: "Current assignment ID, required for reply/approve/deny/followup/accept." })),
+      assignmentId: Type.Optional(Type.String({ description: "Current assignment ID, required for reply/approve/deny/followup/accept/discard." })),
       requestId: Type.Optional(Type.String({ description: "Exact pending request ID for reply/approve/deny." })),
       runtimeId: Type.Optional(Type.String({ description: "Exact child runtime ID for approve/deny." })),
       parentRuntimeId: Type.Optional(Type.String({ description: "Exact parent runtime ID for approve/deny." })),
@@ -2391,7 +2466,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: `Permission ${request.id}: ${request.state}.` }], details: artifactDetails(run) };
       }
 
-      if (["reply", "followup", "accept", "report", "diff", "close"].includes(params.action)) {
+      if (["reply", "followup", "accept", "report", "diff", "close", "discard"].includes(params.action)) {
         const run = getRun(params.id);
         const assignment = run.assignments.at(-1)!;
         if (params.action === "reply") {
@@ -2423,19 +2498,46 @@ export default function spawnExtension(pi: ExtensionAPI) {
           return { content: [{ type: "text", text: agentContext(request.reply.sender, reply) }], details: artifactDetails(run) };
         }
         if (params.action === "followup") {
-          if (retired || run.closing || run.settled || run.lifetime !== "conversational" || run.accessMode !== "readonly" || run.isolation !== "none"
-            || run.execution !== "idle" || !run.resume || params.assignmentId !== assignment.id || !params.message?.trim()) throw new Error("Followup requires an idle conversational readonly worker and its current assignment ID");
+          const writer = !!run.worktree;
+          const record = writer ? loadWorkspace(run.worktree!.workspaceId) : undefined;
+          if (retired || run.closing || run.accepting || run.lifetime !== "conversational" || run.execution !== "idle"
+            || params.assignmentId !== assignment.id || !params.message?.trim()
+            || (writer ? !run.settled || !!run.cleanupError || !run.childSessionFile || !run.launch || !record?.retained || isWorkspaceFinalized(record) || !!record.managedCleanupPending
+              : run.settled || !run.resume)) throw new Error("Followup requires an idle, unaccepted conversational worker and its current assignment ID. Later implementation tasks require a new worker.");
+          if (writer && getAccessMode() !== "edit" && getAccessMode() !== "full") throw new Error("Corrections require parent edit or full access mode");
           run.assignments.push(newAssignment(params.message));
           run.execution = "working";
           run.joined = false;
           run.error = undefined;
           run.resultText = undefined;
+          run.integrationBlock = undefined;
+          if (writer) {
+            run.settled = false;
+            run.status = "running";
+            run.completedAt = undefined;
+            run.runtimeId = randomUUID();
+            run.finished = new Promise<SpawnRun>((resolve) => { run.resolveFinished = resolve; });
+            run.abortSignal = signal;
+            run.abortListener = () => stopRun(run, "parent_abort");
+            signal?.addEventListener("abort", run.abortListener, { once: true });
+            if (signal?.aborted) run.abortListener();
+          }
           try {
+            if (writer) await updateWorkspace(record!.id, (record) => { record.managedCleanupPending = run.id; });
             writeStatus(run);
             appendFileSync(run.transcriptPath, `${JSON.stringify({ timestamp: new Date().toISOString(), event: { type: "parent_assignment", sender: { kind: "parent", id: run.parentId }, workerId: run.id, assignment: run.assignments.at(-1) } })}\n`);
-            run.armTimeout?.();
-            run.resume();
-          } catch (error) { stopRun(run, "process_failure"); throw error; }
+            if (writer) await startRun(run, run.launch!);
+            else { run.armTimeout?.(); run.resume!(); }
+          } catch (error) {
+            stopRun(run, "process_failure");
+            if (writer && !run.child) {
+              run.cleanupError ??= error instanceof Error ? error.message : String(error);
+              run.settled = true;
+              run.execution = "failed";
+              run.resolveFinished(run);
+            }
+            throw error;
+          }
           publishSpawnStatus();
           return { content: [{ type: "text", text: formatSpawnStarted(run) }], details: artifactDetails(run) };
         }
@@ -2443,14 +2545,32 @@ export default function spawnExtension(pi: ExtensionAPI) {
           if (!run.settled && run.execution !== "idle") throw new Error("Close requires an idle worker; use stop to cancel active work");
           stopRun(run, "closed_by_parent");
           await waitForRun(run, undefined, false);
+          if (!run.cleanupError) { run.closing = true; run.execution = "closed"; writeStatus(run); }
         }
-        if (params.action === "accept") {
-          if (params.assignmentId !== assignment.id) throw new Error("accept requires the current assignment ID");
-          await applyWorktreeChanges(run, signal);
+        if (params.action === "discard") {
+          if (run.worktree && getAccessMode() !== "edit" && getAccessMode() !== "full") throw new Error("Contribution disposal requires parent edit or full access mode");
+          if (params.assignmentId !== assignment.id || !run.settled || run.child || run.cleanupError || run.accepting) throw new Error("Discard requires the current assignment and resolved process cleanup; stop active work first");
+          run.closing = true;
+          run.execution = "closed";
+          if (run.worktree) {
+            await prepareWorktreePatch(run);
+            const removed = await removeWorkspace(run.worktree.workspaceId, "discarded");
+            if (removed.retained) throw new Error(`Contribution cleanup unresolved: ${removed.integrationReason}`);
+          }
           writeStatus(run);
         }
+        if (params.action === "accept") {
+          if (params.assignmentId !== assignment.id || run.accepting) throw new Error("accept requires the current assignment ID and no acceptance in progress");
+          run.accepting = true;
+          try {
+            await applyWorktreeChanges(run, signal);
+            const record = run.worktree ? loadWorkspace(run.worktree.workspaceId) : undefined;
+            if (record && isWorkspaceFinalized(record)) { run.closing = true; run.execution = "closed"; }
+            writeStatus(run);
+          } finally { run.accepting = false; }
+        }
         if (params.action === "diff") {
-          const patch = worktreeInfo(run)?.patchPath;
+          const patch = run.settled && !run.cleanupError ? worktreeInfo(run)?.patchPath : undefined;
           return { content: [{ type: "text", text: patch && existsSync(patch) ? truncateText(readFileSync(patch, "utf8"), 24000) : "No prepared recovery patch. Inspection does not snapshot or integrate live workers." }], details: artifactDetails(run) };
         }
         publishSpawnStatus();
