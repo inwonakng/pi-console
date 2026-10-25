@@ -216,7 +216,6 @@ function renderOverview() {
     return node;
   }));
   const rows = filteredRows();
-  $("session-count").textContent = rows.length;
   $("session-list").replaceChildren(...rows.map(({ host, row }) => {
     const key = sessionKey(host.hello.hostId, row.id);
     const link = text("a", "", "session-row");
