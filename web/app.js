@@ -373,6 +373,8 @@ function fitViewport() {
   const top = Math.max(0, Math.min(viewport.offsetTop, layoutHeight - height));
   document.documentElement.style.setProperty("--viewport-height", `${height}px`);
   document.documentElement.style.setProperty("--viewport-top", `${top}px`);
+  // Treat a large viewport reduction as a keyboard, rather than browser chrome.
+  document.documentElement.classList.toggle("keyboard-open", layoutHeight - height > 150);
 }
 let viewportFrame;
 function scheduleViewportFit() {

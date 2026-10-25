@@ -145,6 +145,7 @@ pre { font: inherit; font-size: 12px; white-space: pre-wrap; overflow-wrap: anyw
 .answers { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .answers button { text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
 .composer { flex-shrink: 0; padding: 10px max(16px, calc((100% - 860px) / 2)) max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--bg); }
+.keyboard-open .composer { padding-bottom: 2px; }
 .composer-row { display: flex; align-items: flex-end; gap: 8px; }
 .composer textarea { flex: 1; resize: none; height: 46px; max-height: min(160px, 28dvh); line-height: 1.4; background: var(--surface); }
 .composer-hint { color: var(--muted); font-size: 11px; padding-top: 4px; }
