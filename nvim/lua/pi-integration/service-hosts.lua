@@ -862,7 +862,7 @@ restart_server = function(host, force)
 	local identity, epoch, connection = host.host_id, host.hello.serviceEpoch, host.connection
 	local label = force and "Force restart server" or "Restart server"
 	vim.ui.select({ "Cancel", label }, { prompt = label .. " on " .. host_label(host) .. " [" .. channel .. "]? "
-		.. (force and "Interrupts owned work. " or "Active work refuses. ") .. "Saved sessions stay stopped." }, function(choice)
+		.. (force and "Interrupts owned work." or "The server must be idle.") }, function(choice)
 		if choice ~= label then return end
 		if host.host_id ~= identity or host.connection ~= connection or host.hello.serviceEpoch ~= epoch then notify("Host connection changed; select restart again"); return end
 		local pending = { id = uid(), epoch = epoch, force = force == true, deadline = vim.uv.hrtime() / 1e6 + 120000 }
