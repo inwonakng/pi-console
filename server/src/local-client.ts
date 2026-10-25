@@ -61,6 +61,20 @@ export class LocalClient {
       await new Promise<void>((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
     } catch (error) { ws.terminate(); throw error; }
     const client = new LocalClient(createWebSocketStream(ws, { highWaterMark: 64 * 1024 }), event);
+    // A quiet notification subscription still needs to detect a vanished server.
+    // Server pings arrive every 15s; a blackholed TCP socket may never emit close.
+    let liveness: NodeJS.Timeout;
+    const alive = () => {
+      clearTimeout(liveness);
+      liveness = setTimeout(() => {
+        client.failed(Object.assign(new Error("Remote server heartbeat expired after 45 seconds"), { code: "heartbeat_timeout" }));
+        ws.terminate();
+      }, 45000);
+      liveness.unref();
+    };
+    ws.on("ping", alive);
+    ws.once("close", () => clearTimeout(liveness));
+    alive();
     ws.on("error", (error: Error) => client.failed(error));
     ws.once("close", (code, reason) => client.failed(Object.assign(
       new Error(`WebSocket closed (${code})${reason.length ? `: ${reason.toString("utf8").slice(0, 512)}` : "; no server reason received"}`),

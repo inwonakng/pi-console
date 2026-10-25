@@ -1,4 +1,6 @@
 import { open } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { DESKTOP_NOTIFICATION_STATUS, validDesktopNotification, type DesktopNotification } from "../../pi/extensions/shared/desktop-notification.mjs";
 import { completeHostFiles } from "./host-discovery.js";
 import { tmpdir } from "node:os";
 import { WorkspaceReviews, type ReviewMutation } from "./workspace-reviews.js";
@@ -68,6 +70,7 @@ export type HostSummaries = {
   channel: Channel;
   serviceEpoch: string;
 };
+export type OriginNotification = DesktopNotification & { hostId: string; serviceEpoch: string; sessionId: string };
 export type EffectOffer = {
   id: string; policy: "recipient_bound"; source: "owned_pi_stream";
   recipient: { attachmentId: string; grantId: string };
@@ -101,6 +104,7 @@ type CachedHostOptions = { options: HostOptions; expiresAt: number };
 
 /** Private host composition, not a daemon or an authenticated application API. */
 export class HostOwner {
+  readonly notifications = new EventEmitter<{ notification: [OriginNotification] }>();
   private readonly sessions = new Map<string, OwnedSession>();
   private creating = 0;
   private closing = false;
@@ -342,6 +346,8 @@ export class HostOwner {
     const previousState = previous?.snapshot();
     const session = new OwnedSession(this.catalog, record, this.options, previousState?.runtimeRevision ?? 0, previousState?.sequence ?? 0, () => {
       if (this.savedMutations.size) throw new CommandError("session_busy", "Saved-session lifecycle operation in progress; retry workspace changes explicitly after inspecting its outcome");
+    }, (notification) => {
+      if (!this.closing) this.notifications.emit("notification", { ...notification, hostId: this.hostId, serviceEpoch: this.serviceEpoch, sessionId: id });
     });
     this.sessions.set(id, session);
     return session;
@@ -555,7 +561,8 @@ export class OwnedSession {
   private resolveReady!: () => void;
   private rejectReady!: (error: Error) => void;
 
-  constructor(private readonly catalog: SessionCatalog, private readonly record: CatalogSession, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, revision: number, sequence = 0, private readonly assertSavedIdle: () => void = () => {}) {
+  constructor(private readonly catalog: SessionCatalog, private readonly record: CatalogSession, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, revision: number, sequence = 0, private readonly assertSavedIdle: () => void = () => {},
+    private readonly notify: (notification: DesktopNotification) => void = () => {}) {
     this.runtimeRevision = revision;
     this.sequence = sequence;
     this.initialized = new Promise<void>((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
@@ -1732,6 +1739,12 @@ export class OwnedSession {
   }
 
   private event(event: PiEvent): void {
+    if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === DESKTOP_NOTIFICATION_STATUS) {
+      let notification: unknown;
+      try { notification = JSON.parse(event.statusText ?? "null"); } catch { return; }
+      if (validDesktopNotification(notification)) this.notify({ id: notification.id, kind: notification.kind, title: notification.title, body: notification.body });
+      return; // Never retain or replay desktop intents as conversation statuses/effects.
+    }
     const previousRevision = this.runtimeRevision;
     this.syncRevision();
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-workspace-continuation"

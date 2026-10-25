@@ -1,22 +1,9 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { spawn, spawnSync } from "node:child_process";
-import { accessSync, constants, existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-type DesktopNotificationOptions = {
-	title: string;
-	group: string;
-	soundEnv?: string;
-	defaultSound?: string;
-	timeoutEnv?: string;
-	defaultTimeoutSeconds?: number;
-	onError?: (error: Error) => void;
-};
-
-const defaultIconPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../assets/pi-logo.png");
-const DISABLED_SOUND_VALUES = new Set(["0", "false", "no", "none", "off", "silent"]);
+import { basename } from "node:path";
+import { DESKTOP_NOTIFICATION_STATUS, deliverDesktopNotification, type DesktopDelivery } from "./desktop-notification.mjs";
+import { serviceManaged } from "./service-ui";
 
 type NotificationState = {
 	desktopNotificationsEnabled: boolean;
@@ -69,67 +56,6 @@ export function parseNotificationMode(input: string | undefined): boolean | "tog
 	return undefined;
 }
 
-function executablePath(command: string): string | undefined {
-	const candidates = command.includes("/") ? [command]
-		: (process.env.PATH ?? "").split(delimiter).filter(Boolean).map((directory) => join(directory, command));
-	return candidates.find((path) => {
-		try { accessSync(path, constants.X_OK); return true; }
-		catch { return false; }
-	});
-}
-
-function desktopNotifier(): { command: string; kind: "alerter" | "notify-send" } | undefined {
-	if (process.platform === "linux") {
-		const command = executablePath("notify-send");
-		return command ? { command, kind: "notify-send" } : undefined;
-	}
-	if (process.platform !== "darwin") return;
-	for (const candidate of [process.env.ALERTER, "alerter", "/opt/homebrew/bin/alerter", "/usr/local/bin/alerter"]) {
-		const command = candidate && executablePath(candidate);
-		if (command) return { command, kind: "alerter" };
-	}
-	const found = spawnSync("/bin/zsh", ["-lc", "command -v alerter"], { encoding: "utf-8" });
-	const command = found.status === 0 && found.stdout?.trim();
-	return command ? { command, kind: "alerter" } : undefined;
-}
-
-export function notificationIconPath(): string | undefined {
-	const configured = process.env.PI_NOTIFICATION_ICON;
-	if (configured && existsSync(configured)) {
-		return configured;
-	}
-	return existsSync(defaultIconPath) ? defaultIconPath : undefined;
-}
-
-export function configuredNotificationSound(envName: string | undefined, fallback: string | undefined): string | undefined {
-	const configured = (envName ? process.env[envName] : undefined) ?? process.env.PI_NOTIFICATION_SOUND;
-	if (configured === undefined) {
-		return fallback;
-	}
-
-	const value = configured.trim();
-	if (!value || DISABLED_SOUND_VALUES.has(value.toLowerCase())) {
-		return undefined;
-	}
-	return value;
-}
-
-export function configuredNotificationTimeout(
-	envName: string | undefined,
-	fallbackSeconds: number | undefined,
-): number | undefined {
-	const configured = (envName ? process.env[envName] : undefined) ?? process.env.PI_NOTIFICATION_TIMEOUT;
-	if (configured === undefined || configured.trim() === "") {
-		return fallbackSeconds;
-	}
-
-	const parsed = Number.parseFloat(configured);
-	if (!Number.isFinite(parsed) || parsed <= 0) {
-		return undefined;
-	}
-	return parsed;
-}
-
 export function readableCwd(cwd: string, maxLength = 48): string {
 	const home = homedir();
 	const path = cwd === home ? "~" : cwd.startsWith(`${home}/`) ? `~/${cwd.slice(home.length + 1)}` : cwd;
@@ -156,36 +82,16 @@ export function notificationBody(ctx: ExtensionContext): string {
 
 export function sendDesktopNotification(
 	ctx: ExtensionContext,
-	options: DesktopNotificationOptions,
+	options: Omit<DesktopDelivery, "body">,
 ): boolean {
-	const notifier = desktopNotifier();
-	if (!notifier) return false;
-
-	const icon = notificationIconPath();
-	const sound = configuredNotificationSound(options.soundEnv, options.defaultSound);
-	const timeout = configuredNotificationTimeout(options.timeoutEnv, options.defaultTimeoutSeconds);
-	let args: string[];
-	if (notifier.kind === "alerter") {
-		args = ["--title", options.title, "--message", notificationBody(ctx), "--group", options.group];
-		if (icon) args.push("--app-icon", icon);
-		if (sound) args.push("--sound", sound);
-		if (timeout) args.push("--timeout", String(timeout));
-	} else {
-		args = ["--app-name=pi-console"];
-		if (icon) args.push("--icon", icon);
-		args.push("--hint", sound ? `string:sound-name:${sound}` : "boolean:suppress-sound:true");
-		if (timeout) args.push("--expire-time", String(Math.round(timeout * 1000)));
-		args.push("--", options.title, notificationBody(ctx));
+	const notification = { id: randomUUID(), title: options.title, kind: options.kind, body: notificationBody(ctx).slice(0, 8192) };
+	const published = serviceManaged(ctx);
+	if (published) {
+		// Private live signal: the owner consumes it before conversation reduction.
+		// Publish even when this execution host has no desktop notifier installed.
+		ctx.ui.setStatus(DESKTOP_NOTIFICATION_STATUS, JSON.stringify(notification));
 	}
-
-	// Delivery belongs to the worker's host, even without any connected clients.
-	const child = spawn(notifier.command, args, { detached: true, stdio: "ignore" });
-	child.on("error", (error) => options.onError?.(error));
-	child.on("exit", (code) => {
-		if (code !== null && code !== 0) options.onError?.(new Error(`${notifier.kind} exited with code ${code}`));
-	});
-	child.unref();
-	return true;
+	return deliverDesktopNotification({ ...notification, onError: options.onError }) || published;
 }
 
 export function notifyPiNeedsInput(ctx: ExtensionContext, title = "Pi needs input", allowNotification = true): boolean {
@@ -195,11 +101,7 @@ export function notifyPiNeedsInput(ctx: ExtensionContext, title = "Pi needs inpu
 
 	return sendDesktopNotification(ctx, {
 		title,
-		group: "pi-coding-agent-input",
-		soundEnv: "PI_PERMISSION_SOUND",
-		defaultSound: process.platform === "linux" ? "dialog-information" : "Ping",
-		timeoutEnv: "PI_PERMISSION_NOTIFICATION_TIMEOUT",
-		defaultTimeoutSeconds: 15,
+		kind: "input",
 		onError: (error) => {
 			ctx.ui.notify(`Could not send Pi notification: ${error.message}`, "warning");
 		},
@@ -224,11 +126,7 @@ export function notifyPiFinished(ctx: ExtensionContext, force = false): boolean 
 
 	return sendDesktopNotification(ctx, {
 		title: "Pi finished",
-		group: "pi-coding-agent",
-		soundEnv: "PI_COMPLETION_SOUND",
-		defaultSound: process.platform === "linux" ? "complete" : "Glass",
-		timeoutEnv: "PI_COMPLETION_NOTIFICATION_TIMEOUT",
-		defaultTimeoutSeconds: 8,
+		kind: "completion",
 		onError: (error) => {
 			ctx.ui.notify(`Could not send Pi notification: ${error.message}`, "warning");
 		},

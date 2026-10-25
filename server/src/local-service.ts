@@ -4,7 +4,8 @@ import type { Duplex } from "node:stream";
 import { RemoteListener, listenerPort, listenerAddresses } from "./remote-transport.js";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { HostOwner, type HostOwnerOptions, type HostSummaries, type OwnedSession, type OwnedSessionUpdate } from "./host-owner.js";
+import { HostOwner, type HostOwnerOptions, type HostSummaries, type OwnedSession, type OwnedSessionUpdate, type OriginNotification } from "./host-owner.js";
+import { RemoteNotifications } from "./remote-notifications.js";
 import type { SessionSubscription } from "./session-subscription.js";
 import { CommandError } from "./session-commands.js";
 import { identifier } from "./host-commands.js";
@@ -30,6 +31,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
   const buildId = await serviceBuild();
   const owner = await HostOwner.open(options);
   const restarts = new ServiceRestart(options, owner.hostId, owner.serviceEpoch);
+  const remoteNotifications = new RemoteNotifications(options.channel, owner.hostId);
   const clients = new Set<Socket>();
   const summaryStops = new Set<() => void>();
   let remote: RemoteListener | undefined;
@@ -50,7 +52,10 @@ export async function runService(options: HostOwnerOptions & { root: string; por
     // HostOwner fences admissions in the same turn as the preflight.
     const task = owner.shutdown(force);
     stopping = true;
-    if (owner.shutdownStarted) for (const stop of summaryStops) stop();
+    if (owner.shutdownStarted) {
+      remoteNotifications.stop();
+      for (const stop of summaryStops) stop();
+    }
     try { await task; }
     catch (error) {
       // A preflight refusal leaves the owner usable. A cleanup failure retains
@@ -75,7 +80,13 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       summaryFeed = undefined;
       summaryStops.delete(stopSummaries);
     };
-    const closeViews = () => { stopSummaries(); detach(); };
+    let notificationListener: ((notification: OriginNotification) => void) | undefined;
+    const stopNotifications = () => {
+      if (notificationListener) owner.notifications.off("notification", notificationListener);
+      notificationListener = undefined;
+      summaryStops.delete(stopNotifications);
+    };
+    const closeViews = () => { stopSummaries(); stopNotifications(); detach(); };
     let closing = false;
     let closeDeadline: NodeJS.Timeout | undefined;
     const closed = new Promise<void>((resolve) => socket.once("close", resolve));
@@ -165,6 +176,17 @@ export async function runService(options: HostOwnerOptions & { root: string; por
             await send({ type: "response", id: record.id, success: true, result: summaries });
             if (initial) void pumpSummaries(feed, summaries);
             return;
+          }
+          case "notifications.subscribe": {
+            exact(p, []);
+            if (owner.shutdownStarted) throw new CommandError("session_unavailable", "Service is stopping");
+            if (!notificationListener) {
+              notificationListener = (notification) => { void send({ type: "desktop_notification", notification }).catch(() => undefined); };
+              owner.notifications.on("notification", notificationListener);
+              summaryStops.add(stopNotifications);
+            }
+            result = { hostId: owner.hostId, serviceEpoch: owner.serviceEpoch };
+            break;
           }
           case "host.options":
             exact(p, ["serviceEpoch", "cwd", "refresh"]);
@@ -332,6 +354,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
     }
   }
   function finish(): void {
+    remoteNotifications.stop();
     for (const stop of summaryStops) stop();
     remote?.close();
     server.close();
@@ -354,9 +377,10 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       webRoot ? { root: webRoot, serviceRoot: options.root, channel: options.channel, hostId: owner.hostId,
         allowedOrigins: webSettings?.["allowed-origins"] } : undefined);
     await remote.listen();
+    remoteNotifications.start();
     console.log(JSON.stringify({ network: listenerAddresses(port) }));
     startReady();
-  } catch (error) { startFailed(error); remote?.close(); server.close(); for (const socket of clients) socket.destroy(); await owner.close(); throw error; }
+  } catch (error) { startFailed(error); remoteNotifications.stop(); remote?.close(); server.close(); for (const socket of clients) socket.destroy(); await owner.close(); throw error; }
   const signal = () => { void shutdown(true).then(finish, (error) => { shutdownFailure = error; console.error(error); finish(); }); };
   process.once("SIGTERM", signal); process.once("SIGINT", signal);
   try { await stopped; }
