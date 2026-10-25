@@ -48,7 +48,7 @@ const KNOWN_TOOLS = new Set([
   "spawn_control",
 ]);
 const READONLY_WORKSPACE_ACTIONS = new Set(["status", "list"]);
-const READONLY_SPAWN_CONTROL_ACTIONS = new Set(["list", "status", "join", "join_all", "report", "diff", "reply", "followup", "close", "stop", "approve", "deny"]);
+const READONLY_SPAWN_CONTROL_ACTIONS = new Set(["models", "list", "status", "join", "join_all", "report", "diff", "reply", "followup", "close", "stop", "approve", "deny"]);
 const ACCESS_SETTING = "access";
 
 type PersistedAccessState = {
