@@ -326,7 +326,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
 
   pi.on("session_tree", (_event, ctx) => {
     restoreIntegrationMode(ctx);
-    refreshWorkspaceTool(ctx);
+    refreshWorkspaceTool(ctx, true);
   });
 
   pi.on("session_before_fork", (_event, ctx) => {
@@ -839,15 +839,25 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   });
 
   let toolContext: string | undefined;
-  function refreshWorkspaceTool(ctx: ExtensionContext): void {
-    const active = workspaceForContext(ctx.cwd, sessionFile(ctx));
+  let toolDirectory: { cwd: string; active?: WorkspaceRecord; gitAvailable: boolean; autoCommit: boolean } | undefined;
+  function refreshWorkspaceTool(ctx: ExtensionContext, reuseDirectory = false): void {
+    // Tree navigation restores branch settings, but does not change the runtime's directory.
+    if (!reuseDirectory || toolDirectory?.cwd !== ctx.cwd) {
+      toolDirectory = {
+        cwd: ctx.cwd,
+        active: workspaceForContext(ctx.cwd, sessionFile(ctx)),
+        gitAvailable: !!findGitRoot(ctx.cwd),
+        autoCommit: loadExtensionSettings().workspace?.["auto-commit"] === true,
+      };
+    }
+    const { active, gitAvailable, autoCommit } = toolDirectory;
     // Keep recovery available when a previously assigned workspace is missing.
-    const available = !!findGitRoot(ctx.cwd) || !!getExpectedWorkspaceMissing();
+    const available = gitAvailable || !!getExpectedWorkspaceMissing();
     const guidance = [
       active?.kind === "child"
         ? "Reuse the assigned child workspace. Do not enter or integrate a task workspace; the parent integrates your changes through spawn_control."
         : "After completing and verifying changes in an active task workspace, call workspace with action=integrate. Direct edits outside a task workspace need no integration.",
-      loadExtensionSettings().workspace?.["auto-commit"] === true || active?.reverts || active?.integrationCommit
+      autoCommit || active?.reverts || active?.integrationCommit
         ? "Integration commits are enabled. Supply a descriptive commitMessage; commits remain local. Revert integrations always create a commit."
         : "Automatic integration commits are disabled by user configuration; normal integration applies changes uncommitted.",
       getIntegrationMode() === "allowed"

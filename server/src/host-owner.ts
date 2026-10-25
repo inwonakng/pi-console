@@ -1128,6 +1128,7 @@ export class OwnedSession {
   private async executeBundled(receipt: CommandReceipt, flight: BundledFlight): Promise<void> {
     const outcome = structuredClone(receipt);
     let clone: CatalogSession | undefined;
+    let historyRefreshed = false;
     try {
       const guard = () => {
         if (contextOperation(flight.operation)) this.assertSavedIdle();
@@ -1189,12 +1190,21 @@ export class OwnedSession {
           }
           // State may still name the outgoing runtime. Refresh against the same
           // managed file, then validate identity; never accept a fork on this ID.
-          await flight.worker.request({ type: "get_state" }, () => {
+          const checkRuntime = () => {
             this.catalog.assertExecutionAllowed();
             const runtime = flight.worker.interactionSnapshot().runtime;
             if (flight.worker !== this.worker || !runtime?.active || runtime.sessionId !== this.record.piSessionId
               || runtime.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Operation changed managed identity");
-          });
+          };
+          if (flight.operation === "history.navigate") {
+            // Drain any pre-navigation capture, then hydrate the completed branch once.
+            await this.refresh;
+            checkRuntime();
+            await this.refreshConversation(checkRuntime);
+            historyRefreshed = !this.refreshAgain;
+          } else {
+            await flight.worker.request({ type: "get_state" }, checkRuntime);
+          }
           this.checkIdentity();
         } else outcome.error = { code: result.code ?? "operation_failed", message: result.status === "failed"
           ? "Operation was refused/cancelled before application" : "Operation may be partially applied; inspect before taking further action" };
@@ -1216,7 +1226,7 @@ export class OwnedSession {
       if (this.bundled === flight) this.bundled = undefined;
       if (this.bundledInterrupt === flight) this.bundledInterrupt = undefined;
       this.scheduleQueue();
-      this.scheduleRefresh();
+      if (!historyRefreshed || !this.conversation.hydrated) this.scheduleRefresh();
     }
   }
 
@@ -1990,7 +2000,7 @@ export class OwnedSession {
   /** Reconcile only at idle boundaries: get_messages has no atomic active-run
    * snapshot contract. The version fence rejects interleaving live events.
    */
-  private refreshConversation(): Promise<void> {
+  private refreshConversation(checkRuntime?: () => void): Promise<void> {
     if (this.refresh) { this.refreshAgain = true; return this.refresh; }
     const worker = this.worker;
     if (!worker || !this.conversation.idle || this.stopRequested || this.exit) return Promise.resolve();
@@ -1998,14 +2008,19 @@ export class OwnedSession {
       do {
         this.refreshAgain = false;
         const revision = this.runtimeRevision;
-        await worker.request({ type: "get_state" });
+        await worker.request({ type: "get_state" }, checkRuntime);
         if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
+        if (checkRuntime) {
+          checkRuntime();
+          this.checkIdentity();
+        }
         if (this.conversation.sessionState?.isStreaming || !this.conversation.idle) return;
         await worker.request({ type: "get_session_stats" });
         if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
         if (!this.conversation.idle) return;
         await worker.request({ type: "get_messages" });
-      } while (this.refreshAgain && worker === this.worker && this.conversation.idle && !this.stopRequested && !this.exit);
+      } while (this.refreshAgain && worker === this.worker && this.conversation.idle && !this.stopRequested && !this.exit
+        && (checkRuntime || !this.navigationRefreshPending()));
     })().catch((error: unknown) => { this.refreshAgain = false; throw error; }).finally(() => {
       this.refresh = undefined;
       // A settlement/runtime signal can arrive while get_state is pending or in
@@ -2018,12 +2033,20 @@ export class OwnedSession {
   private scheduleRefresh(): void {
     // Defer dispatch until the current stdout batch has finished reducing. A
     // rejected refresh fences the owner; it never retries an execution command.
-    void Promise.resolve().then(() => this.refreshConversation()).catch((error: unknown) => {
+    void Promise.resolve().then(() => {
+      // Navigation owns its completion refresh, including runtime-change/history signals.
+      if (!this.navigationRefreshPending()) return this.refreshConversation();
+      if (this.refresh) this.refreshAgain = true;
+    }).catch((error: unknown) => {
       if (this.stopRequested || this.exit) return;
       this.error = asError(error);
       if (this.worker) void this.worker.stop();
       this.changed();
     });
+  }
+
+  private navigationRefreshPending(): boolean {
+    return this.bundled?.operation === "history.navigate" && this.bundled.dispatched;
   }
 
   private retain(change: ConversationChange): void {

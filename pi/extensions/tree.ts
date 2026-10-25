@@ -1,14 +1,16 @@
 import { serviceUi } from "./shared/service-ui";
 import { registerServiceOperation } from "./shared/service-operation";
 import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, recordId, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
-import { withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withFileMutationQueue, type ExtensionAPI, type ExtensionCommandContext, type SessionManager } from "@earendil-works/pi-coding-agent";
 import { revertSubtree } from "./history";
 import { cloneThroughEntry } from "./shared/session-clone";
 import { selectNavigation } from "./shared/navigation";
 import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
+import { projectTrustReady } from "./shared/project-trust";
 import {
 	prepareWorkspaceDiscard,
 	removeWorkspace,
+	setExpectedWorkspaceMissing,
 	workspaceDiscardWarning,
 	type WorkspaceRecord,
 } from "./shared/workspace";
@@ -125,20 +127,29 @@ export default function treeExtension(pi: ExtensionAPI) {
 				ctx.ui.notify("Cross-workspace branch summaries are not supported; jump without summary instead.", "warning");
 				return;
 			}
-			if (summarize) {
-				const result = await ctx.navigateTree(entryId, { summarize: true });
-				if (result.cancelled) return;
-			}
-			const moved = await moveToLocation(ctx, location.cwd, ctx.sessionManager.getLeafId(), {
-				navigateTo: summarize ? undefined : entryId,
-				onArrival: (nextCtx) => {
+			const onArrival = (nextCtx: ExtensionCommandContext) => {
 				const editorText = editorTextForTreeEntry(entry);
 				if (editorText !== undefined) nextCtx.ui.setEditorText(editorText);
 				nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
 				nextCtx.ui.setStatus("pi-history-changed", new Date().toISOString());
 				nextCtx.ui.notify(`Tree: moved to ${entryId}${summarize ? " with summary" : ""}.`, "info");
-			},
-			});
+			};
+			let moved: boolean;
+			if (location.cwd === ctx.cwd) {
+				if (!ctx.sessionManager.getSessionFile()) throw new Error("Workspace switching requires a persisted session.");
+				if (!projectTrustReady()) throw new Error("Resolve project trust before switching workspaces");
+				const result = await ctx.navigateTree(entryId, { summarize });
+				if (result.cancelled) return;
+				(ctx.sessionManager as SessionManager).appendCustomEntry("pi-workspace-cursor", {});
+				setExpectedWorkspaceMissing(undefined);
+				onArrival(ctx);
+				moved = true;
+			} else {
+				moved = await moveToLocation(ctx, location.cwd, ctx.sessionManager.getLeafId(), {
+					navigateTo: entryId,
+					onArrival,
+				});
+			}
 			if (!moved) ctx.ui.notify("Tree navigation was cancelled.", "warning");
 			return moved ? { changed: true, editorText: editorTextForTreeEntry(entry) } : undefined;
 	};
