@@ -22,6 +22,7 @@ local control_loss_generation = 0
 local callbacks, unresolved, offers, drafts = {}, {}, {}, {}
 local outcomes = {}
 local kill_pending
+local pending_new_session, sync_new_session
 local pending_host, pending_host_select, resume_requested
 local generation, counter, refresh_scheduled, refreshing, dirty = 0, 0, false, false, false
 local refresh_timer, refresh_due, refresh_urgent, refresh_ticket
@@ -100,6 +101,13 @@ local function log(text, level)
 end
 local function notify(text, level)
 	logs.notify(text, level, { session = session_id })
+end
+local function cancel_new_session(message)
+	if not pending_new_session then return end
+	pending_new_session.timer:stop()
+	pending_new_session.timer:close()
+	pending_new_session = nil
+	if message then notify(message, vim.log.levels.WARN) end
 end
 local function valid(buf) return buf and vim.api.nvim_buf_is_valid(buf) end
 local function text(buf)
@@ -645,6 +653,8 @@ local function update_status_state()
 end
 ctx.transcript.metadata_lines = function() return transcript.metadata_lines(ctx) end
 render = function()
+	-- A pending open may detach this frontend. Finish the current state update first.
+	if pending_new_session then vim.schedule(function() sync_new_session() end) end
 	if not valid(state.transcript_buf) then return end
 	local conversation = snapshot and snapshot.conversation
 	update_status_state()
@@ -820,7 +830,8 @@ refresh = function(immediate, callback)
 			if refreshing ~= flight then return end
 			refreshing = false
 			if gen == generation and target == attachment and selected == session_id and selected_selection == selection then
-				if ok then apply_snapshot(value) end
+				if ok then apply_snapshot(value)
+				else cancel_new_session("Could not load session directory: " .. (value.message or "Snapshot request failed.")) end
 				for _, done in ipairs(completed) do done(ok, value) end
 			end
 			if dirty then refresh() end
@@ -839,6 +850,7 @@ local function reset_refresh(detached)
 	rendered_side, rendered_side_buf, initial_scroll_pending = nil, nil, false
 end
 local function disconnected()
+	cancel_new_session("Connection lost while loading session directory. No new frontend was opened.")
 	if action_connection then action_connection.disconnected() end
 	-- Creation may have succeeded remotely while its reply was lost. Keep only
 	-- a prompt that has never reached prompt.submit; reconcile creation first.
@@ -865,6 +877,7 @@ local function disconnected()
 end
 attach = function(id)
 	if not job then return end
+	if pending_new_session and pending_new_session.session ~= id then cancel_new_session() end
 	auto_control_selection = nil
 	tree.close(tree_ctx)
 	offers = {}
@@ -1198,6 +1211,7 @@ close_bridge = function()
 	if old then vim.fn.jobstop(old) end -- Only the relay, never a Pi worker.
 end
 function M.detach()
+	cancel_new_session()
 	action_connection.cancel()
 	fail_start("Startup cancelled; submitted text remains in :PiDrafts.")
 	close_bridge()
@@ -1629,17 +1643,43 @@ local function new_session_cwd()
 	else
 		cwd = selected_cwd
 	end
-	if type(cwd) ~= "string" or cwd == "" then
-		notify("Choose a directory with :PiCd first.")
-		return
-	end
-	return cwd
+	if type(cwd) == "string" and cwd ~= "" then return cwd end
+end
+sync_new_session = function()
+	local pending = pending_new_session
+	if not pending then return end
+	-- Attachment startup changes the attachment/selection stamps, but keeps this target.
+	if pending.generation ~= generation or pending.session ~= session_id then cancel_new_session(); return end
+	local failure = snapshot and (snapshot.error
+		or (snapshot.phase == "failed" or snapshot.phase == "stopped" or snapshot.phase == "stopping") and "Session is " .. snapshot.phase)
+		or not attachment and session_error
+	if failure then cancel_new_session("Could not load session directory: " .. failure); return end
+	local cwd = new_session_cwd()
+	if not cwd then return end
+	cancel_new_session()
+	pending.open(cwd)
+end
+local function with_new_session_cwd(open)
+	if pending_new_session then return end
+	local cwd = new_session_cwd()
+	if cwd then open(cwd); return end
+	if not session_id then notify("Choose a directory with :PiCd first."); return end
+	if not job then notify("Connect to the session host before loading its directory."); return end
+	local pending = { open = open, generation = generation, session = session_id, timer = vim.uv.new_timer() }
+	pending_new_session = pending
+	sync_new_session()
+	if pending_new_session ~= pending then return end
+	notify("Loading session directory...")
+	pending.timer:start(15000, 0, vim.schedule_wrap(function()
+		if pending_new_session == pending then
+			cancel_new_session("Timed out loading session directory. No new frontend was opened; try again after the session is ready.")
+		end
+	end))
+	refresh(true)
 end
 function M.new_session()
 	if M.config.role ~= "conversation" then return require("pi-integration.service-hosts").new_conversation() end
-	local cwd = new_session_cwd()
-	if not cwd then return end
-	M.select_owner(M.config, nil, false, cwd)
+	with_new_session_cwd(function(cwd) M.select_owner(M.config, nil, false, cwd) end)
 end
 function M.change_cwd(path)
 	if not hello or not job then notify("Connect to a host before choosing its directory."); return end
@@ -1706,10 +1746,10 @@ function M.kill_session()
 	end)
 end
 function M.new_session_window()
-	local cwd = new_session_cwd()
-	if not cwd then return end
-	local opened, err = require("pi-integration.backends.tmux").launch_service(M.config.launcher, M.config, nil, cwd)
-	if not opened then notify(err) end
+	with_new_session_cwd(function(cwd)
+		local opened, err = require("pi-integration.backends.tmux").launch_service(M.config.launcher, M.config, nil, cwd)
+		if not opened then notify(err) end
+	end)
 end
 local function owner_read(kind, callback, captured)
 	captured = captured or stamp()
