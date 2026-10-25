@@ -52,6 +52,7 @@ local owner_states, pending_settings = {}, {}
 local selected_cwd, starting, auto_control_selection, startup_options, startup_status
 local startup_options_context, startup_options_pending
 local frontend_focused = false
+local viewed_response
 local action_connection, close_bridge
 local load_metrics
 local function status_data(key)
@@ -62,10 +63,6 @@ end
 local function publish_attachment(heartbeat_only)
 	local tmux = require("pi-integration.backends.tmux")
 	if M.config.role ~= "conversation" or not tmux.available() then return end
-	if frontend_focused then
-		state.seen_seq = state.completion_seq
-		state.viewed_seq = state.completion_seq
-	end
 	local pi_state = snapshot and snapshot.piState or {}
 	local name = pi_state.sessionName ~= "" and pi_state.sessionName or "New Session"
 	local label = status_data("pi-session-label")
@@ -80,7 +77,6 @@ local function publish_attachment(heartbeat_only)
 	elseif not attachment then status = session_status or "Unattached"
 	elseif snapshot then
 		status = snapshot.phase == "stopped" and "Stopped" or snapshot.status
-		if status == "Idle" and snapshot.turnOutcome == "completed" and state.completion_seq > state.seen_seq then status = "Done" end
 	end
 	if status == "Stopped" then name, slug = "Stopped session", "Stopped session" end
 	tmux.publish({ version = 1, frontend_attachment = true, host_id = identity, session_id = session_id,
@@ -88,8 +84,7 @@ local function publish_attachment(heartbeat_only)
 		updated = os.time(), cwd = not session_id and selected_cwd or state.session_cwd or selected_cwd,
 		title = name, slug = slug,
 		status = status, last_focused_at = state.last_focused_at,
-		service_epoch = snapshot and snapshot.serviceEpoch, runtime_revision = snapshot and snapshot.runtimeRevision,
-		seen_seq = state.seen_seq, viewed_seq = state.viewed_seq }, heartbeat_only)
+		service_epoch = snapshot and snapshot.serviceEpoch, runtime_revision = snapshot and snapshot.runtimeRevision }, heartbeat_only)
 end
 local function owner_key() return M.config.expected_host or M.config.service_remote or M.config.service_root or "local" end
 local function owner_label(identity, remote, root)
@@ -264,7 +259,7 @@ local record_command
 local function request(method, payload, callback)
 	if not job then notify("Disconnected. Use :PiReconnect; no mutation was retried.", vim.log.levels.WARN); return end
 	local id = uid()
-	callbacks[id] = { callback = callback or function() end, quiet = method == "heartbeat", method = method,
+	callbacks[id] = { callback = callback or function() end, quiet = method == "heartbeat" or method == "response.viewed", method = method,
 		operation = payload and payload.operation, started = vim.uv.hrtime() / 1e6 }
 	local ok, sent = pcall(vim.fn.chansend, job, vim.json.encode({ id = id, method = method, payload = object_payload(payload) }) .. "\n")
 	if not ok or sent == 0 then
@@ -274,6 +269,23 @@ local function request(method, payload, callback)
 	end
 	if method == "command" or method == "host.command" then action_connection.monitor() end
 	return id
+end
+local function acknowledge_viewed_response()
+	if M.config.role ~= "conversation" or not frontend_focused or not state.frontend_visible or not control_current()
+		or not snapshot or snapshot.runtimeRevision ~= current_revision() or snapshot.status ~= "Done"
+		or not snapshot.conversation.hydrated or not rendered_transcript or not transcript.is_at_bottom(ctx) then return end
+	if vim.api.nvim_win_get_tabpage(state.transcript_win) ~= vim.api.nvim_get_current_tabpage() then return end
+	local captured, completion = stamp(), snapshot.completionSeq
+	local key = vim.json.encode({ captured.generation, captured.selection, captured.attachment, captured.epoch,
+		captured.revision, captured.token, completion })
+	if viewed_response == key then return end
+	viewed_response = key
+	request("response.viewed", { serviceEpoch = captured.epoch, runtimeRevision = captured.revision,
+		completionSeq = completion, controlToken = captured.token }, function(ok)
+		if not ok then
+			if viewed_response == key then viewed_response = nil end
+		elseif current(captured) then refresh(true) end
+	end)
 end
 local action_names = {
 	["prompt.submit"] = "Send message", ["shell.run"] = "Run shell command",
@@ -742,6 +754,8 @@ render = function(metadata_only)
 		transcript.scroll_to_bottom_unless_focused(ctx)
 	end
 	statusline.update(ctx)
+	-- Evaluate after layout/scroll work has finished, never on snapshot receipt alone.
+	vim.schedule(acknowledge_viewed_response)
 end
 local function refresh_workspace_stats()
 	if not state.frontend_visible or not job or not attachment or not snapshot or not state.workspace or not state.workspace.id then return end
@@ -763,12 +777,9 @@ local function apply_snapshot(value)
 	snapshot = snapshots.merge(snapshot, value)
 	local same_runtime = previous and previous.serviceEpoch == snapshot.serviceEpoch
 		and previous.runtimeRevision == snapshot.runtimeRevision
-	state.completion_seq = snapshot.completionSeq or 0
 	if not same_runtime then
 		state.pending_transcript_scroll = nil
-		-- Existing history on attach/reconnect or a replacement runtime is already seen.
-		state.seen_seq = state.completion_seq
-		state.viewed_seq = nil
+		viewed_response = nil
 	end
 	if grant and not control_current() then grant = nil; close_approval() end
 	if approval_request then
@@ -2463,7 +2474,13 @@ function M.open(restore)
 	end
 	vim.api.nvim_create_autocmd({ "FocusGained", "FocusLost" }, { callback = function(event)
 		frontend_focused = event.event == "FocusGained"
-		if frontend_focused then record_focus(); follow_resumed_selection(); check_visibility() end
+		if frontend_focused then
+			record_focus(); follow_resumed_selection(); check_visibility()
+			vim.schedule(acknowledge_viewed_response)
+		end
+	end })
+	vim.api.nvim_create_autocmd({ "WinScrolled", "WinEnter", "VimResized" }, { callback = function()
+		vim.schedule(acknowledge_viewed_response)
 	end })
 	if backend.available() then
 		visibility_timer = vim.uv.new_timer()
@@ -2506,6 +2523,7 @@ function M.open(restore)
 	heartbeat = vim.uv.new_timer()
 	heartbeat:start(5000, 5000, vim.schedule_wrap(function()
 		publish_attachment(true)
+		acknowledge_viewed_response()
 		follow_resumed_selection()
 		-- The bridge renews control independently of UI scheduling. Only the
 		-- visible queue editor's finite pause is renewed from this callback.

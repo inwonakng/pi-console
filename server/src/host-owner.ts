@@ -39,7 +39,7 @@ type RenameFlight = {
   message: string; dispatched: boolean; requestId?: string; result?: RenameResult;
 };
 type SessionActivity = {
-  status: "Starting" | "Stopping" | "Stopped" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Idle";
+  status: "Starting" | "Stopping" | "Stopped" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Done" | "Idle";
   completionSeq: number;
   turnOutcome?: ConversationSnapshot["execution"]["outcome"];
   subagentRuns: { runId: string; status: "running"; agent?: string; role?: string; progress?: string }[];
@@ -539,6 +539,7 @@ export class OwnedSession {
   private readonly commands = new Set<Promise<void>>();
   private aborting = 0;
   private sequence: number;
+  private viewedCompletionSeq = 0;
   private refresh?: Promise<void>;
   private refreshAgain = false;
   private readonly captures = new Map<string, { worker: PiProcess; revision: number; version: number }>();
@@ -702,6 +703,22 @@ export class OwnedSession {
       }
     }
     return { reservationCurrent: true };
+  }
+
+  /** Viewing is runtime-local, monotonic, and authorized by the current controller. */
+  responseViewed(attachmentId: string, token: string, serviceEpoch: string, runtimeRevision: number, completionSeq: number): void {
+    if (serviceEpoch !== this.catalog.epoch) throw new CommandError("stale_epoch", "Session service changed");
+    if (runtimeRevision !== this.runtimeRevision) throw new CommandError("stale_runtime", "Session runtime changed");
+    const controller = this.control.current();
+    if (!controller || !this.control.matches(attachmentId, controller.grantId, token)) {
+      throw new CommandError("control_revoked", "Viewing acknowledgement requires current session control");
+    }
+    if (!Number.isSafeInteger(completionSeq) || completionSeq < 1 || completionSeq > this.conversation.completedTurns) {
+      throw new CommandError("invalid_command", "Invalid viewed completion");
+    }
+    if (completionSeq <= this.viewedCompletionSeq) return;
+    this.viewedCompletionSeq = completionSeq;
+    this.changed();
   }
 
   commandStatus(serviceEpoch: string, id: string): CommandReceipt | { status: "unknown" } {
@@ -1358,7 +1375,8 @@ export class OwnedSession {
       : this.conversation.compacting ? "Compacting"
       : this.conversation.retrying ? "Retrying"
       : this.queueRunPending || this.conversation.continuationPending || !this.conversation.executionSettled ? "Working"
-      : this.conversation.turnOutcome === "error" ? "Error" : "Idle";
+      : this.conversation.turnOutcome === "error" ? "Error"
+      : this.conversation.turnOutcome === "completed" && this.conversation.completedTurns > this.viewedCompletionSeq ? "Done" : "Idle";
     const subagentRuns: SessionActivity["subagentRuns"] = [];
     const raw = this.conversation.status("pi-spawn-runs");
     if (raw) {

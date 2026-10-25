@@ -24,29 +24,13 @@ const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
 let hosts = [], conversations = new Map(), activeKey = null, activeScreen = "overview", connecting = false, generation = 0;
 let controllerLabel = "webui";
-const completionStates = new Map(), expandedSubagents = new Set();
+const expandedSubagents = new Set();
 // Disconnecting a session keeps unsent text available in this page.
 const stoppedPromptDrafts = new Map();
-function sessionStatus(host, row, activity = row.live, resetSeen = false, viewed = false) {
+function sessionStatus(host, row, activity = row.live) {
   if (!host.connected) return "Unknown";
-  const key = sessionKey(host.hello.hostId, row.id);
-  if (!row.live) { completionStates.delete(key); return "Stopped"; }
-  if (!activity) return "Unknown";
-  const epoch = host.hello.serviceEpoch;
-  const viewedCompletion = viewed ? activity.completionSeq || 0 : 0;
-  let previous = completionStates.get(key);
-  if (previous?.epoch === epoch && (activity.runtimeRevision < previous.activity.runtimeRevision
-    || activity.runtimeRevision === previous.activity.runtimeRevision && activity.sequence < previous.activity.sequence)) {
-    activity = previous.activity;
-  }
-  const completion = activity.completionSeq || 0;
-  if (resetSeen || !previous || previous.epoch !== epoch || previous.activity.runtimeRevision !== activity.runtimeRevision) {
-    previous = { epoch, activity, seen: completion };
-    completionStates.set(key, previous);
-  }
-  previous.activity = activity;
-  if (key === activeKey && !document.hidden && document.hasFocus()) previous.seen = Math.max(previous.seen, viewedCompletion);
-  return activity.status === "Idle" && activity.turnOutcome === "completed" && completion > previous.seen ? "Done" : activity.status;
+  if (!row.live) return "Stopped";
+  return activity?.status || "Unknown";
 }
 function setStatus(node, status) {
   node.textContent = status === "Done" ? "✓ Done" : status;
@@ -92,7 +76,6 @@ function setSummaries(host, value) {
     host.client.close("Host identity changed. Reconnect explicitly."); return;
   }
   host.sessions = value.sessions;
-  for (const row of host.sessions) sessionStatus(host, row);
   for (const conversation of conversations.values()) {
     if (conversation.identity === host.hello.hostId && (!conversation.host.connected || !hosts.includes(conversation.host))) conversation.rebind(host);
   }
@@ -573,6 +556,7 @@ function createConversation(host, row) {
   let refreshTimer, refreshing = false, dirty = false;
   let transcriptKey = "", interactionKey = "";
   let following = true, savedScrollTop = 0;
+  let viewedResponse, viewFrame;
   const transcriptEntries = new Map(), assistantGroups = new Map();
   const answerDrafts = new Map(), submittedAnswers = new Set();
   const settingFields = new Map();
@@ -703,7 +687,7 @@ function createConversation(host, row) {
     } catch (error) { if (sameContext(captured)) notice(error.message); }
     finally { refreshing = false; if (dirty) scheduleRefresh(); }
   }
-  function applySnapshot(value, resetSeen = false) {
+  function applySnapshot(value) {
     if (value.sessionId !== selectedId || value.serviceEpoch !== hello.serviceEpoch) return;
     if (snapshot && value.serviceEpoch === snapshot.serviceEpoch && value.sequence < snapshot.sequence) return;
     value = mergeSnapshot(snapshot, value);
@@ -715,7 +699,6 @@ function createConversation(host, row) {
       owner = value;
     }
     if (grant && !controlsCurrent()) grant = null;
-    sessionStatus(host, row, value, resetSeen);
     renderSession();
     renderOverview();
   }
@@ -818,11 +801,33 @@ function createConversation(host, row) {
     $("session-directory").textContent = `${host.alias} / ${owner?.interactions.runtime?.cwd || currentRow.cwd || ""}`;
     if (host.connected && row.live && connected && owner?.error) notice(owner.error);
     renderTranscript();
-    if (connected) sessionStatus(host, row, snapshot, false, true);
+    scheduleViewedResponse();
     const state = displayStatus();
     setStatus($("session-status"), state);
     renderQueue();
     renderControls();
+  }
+  function scheduleViewedResponse() {
+    if (viewFrame) return;
+    viewFrame = requestAnimationFrame(() => {
+      viewFrame = null;
+      if (disposed || !controlsCurrent() || document.hidden || !document.hasFocus() || element.hidden || $("chat-screen").hidden
+        || activeKey !== key || snapshot?.status !== "Done" || snapshot.runtimeRevision !== runtimeRevision
+        || !snapshot.conversation.hydrated) return;
+      const target = $("transcript");
+      if (!target.clientHeight || target.scrollHeight - target.scrollTop - target.clientHeight > 1) return;
+      const captured = context();
+      const payload = { serviceEpoch: snapshot.serviceEpoch, runtimeRevision: snapshot.runtimeRevision,
+        completionSeq: snapshot.completionSeq, controlToken: grant.token };
+      const acknowledgement = JSON.stringify([attachment, payload]);
+      if (viewedResponse === acknowledgement) return;
+      viewedResponse = acknowledgement;
+      captured.client.request("response.viewed", payload).then(() => {
+        if (sameContext(captured)) scheduleRefresh();
+      }).catch(() => {
+        if (viewedResponse === acknowledgement) viewedResponse = null;
+      });
+    });
   }
   function blockDetails(label, value, key, markdown = false) {
     const details = document.createElement("details");
@@ -1131,7 +1136,11 @@ function createConversation(host, row) {
     if (takeover && !confirm(`Take control from ${owner.controller.label}?`)) return;
     await command(takeover ? "control.takeover" : "control.acquire", takeover ? { confirmed: true } : {});
     const value = await client.request("grant");
-    if (sameContext(captured)) { grant = value; if (!controlsCurrent()) scheduleRefresh(); }
+    if (sameContext(captured)) {
+      grant = value;
+      if (!controlsCurrent()) scheduleRefresh();
+      else scheduleViewedResponse();
+    }
   }));
   $("layout-diagnostics").addEventListener("click", toggleViewportDiagnostics);
   $("refresh-settings").addEventListener("click", () => { void loadSettings(); });
@@ -1178,6 +1187,7 @@ function createConversation(host, row) {
     following = true;
     $("transcript").scrollTop = $("transcript").scrollHeight;
     $("latest").hidden = true;
+    scheduleViewedResponse();
   });
   $("transcript").addEventListener("scroll", () => {
     if (element.hidden || $("chat-screen").hidden) return;
@@ -1185,6 +1195,7 @@ function createConversation(host, row) {
     savedScrollTop = target.scrollTop;
     following = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
     $("latest").hidden = following;
+    scheduleViewedResponse();
   });
   let promptWidth = 0;
   const transcriptResize = new ResizeObserver(() => {
@@ -1195,9 +1206,11 @@ function createConversation(host, row) {
     }
     if (following) $("transcript").scrollTop = $("transcript").scrollHeight;
     $("latest").hidden = following;
+    scheduleViewedResponse();
   });
   transcriptResize.observe($("transcript"));
   const heartbeat = setInterval(() => {
+    scheduleViewedResponse();
     if (!controlsCurrent()) return;
     const captured = context();
     const token = grant.token;
@@ -1228,7 +1241,8 @@ function createConversation(host, row) {
         authoritySequence = 0;
         runtimeRevision = value.snapshot.runtimeRevision;
         transcriptKey = interactionKey = "";
-        applySnapshot(value.snapshot, true);
+        viewedResponse = null;
+        applySnapshot(value.snapshot);
       } catch (error) { next.close(error.message); throw error; }
     });
   }
@@ -1275,6 +1289,7 @@ function createConversation(host, row) {
     dispose() {
       disposed = true;
       clearInterval(heartbeat); clearTimeout(refreshTimer);
+      cancelAnimationFrame(viewFrame);
       transcriptResize.disconnect();
       client?.close();
     },

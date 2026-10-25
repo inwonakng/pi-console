@@ -3,7 +3,6 @@ local transport = require("pi-integration.service-connection")
 local M = {}
 local hosts, started, timer = {}, false, nil
 local forgotten_explicit = {}
-local completion_states = {}
 local reminder_checked = {}
 local saved_request
 local initial = { version = 1, hosts = {} }
@@ -261,7 +260,7 @@ function M.find(identity)
 end
 function M.list()
 	M.start()
-	local owners, entries, next_completions = {}, {}, {}
+	local owners, entries = {}, {}
 	local ordered = vim.tbl_keys(hosts); table.sort(ordered)
 	for _, key in ipairs(ordered) do
 		local host = hosts[key]
@@ -276,29 +275,15 @@ function M.list()
 			if row.live then
 				local id = vim.json.encode({ identity, row.id })
 				local live = row.live or {}
-				local epoch = host.hello and host.hello.serviceEpoch
-				local completion = live.completionSeq or 0
-				local focused, pane_baseline, pane_viewed
+				local focused
 				local frontend_keys = {}
 				for _, pane in ipairs(attachments or {}) do
 					if pane.host_id == identity and pane.session_id == row.id then
 						table.insert(frontend_keys, "frontend:" .. vim.json.encode({ pane.id, pane.pid }))
 						focused = math.max(focused or 0, pane.last_focused_at or 0)
-						if pane.status ~= "Unresponsive" and pane.service_epoch == epoch
-							and pane.runtime_revision == live.runtimeRevision and type(pane.seen_seq) == "number" then
-							-- An unfocused attachment's initial history baseline is not a read acknowledgement.
-							pane_baseline = math.min(pane_baseline or pane.seen_seq, pane.seen_seq)
-							if type(pane.viewed_seq) == "number" then pane_viewed = math.max(pane_viewed or 0, pane.viewed_seq) end
-						end
 					end
 				end
-				local previous = completion_states[id]
-				local seen = previous and previous.epoch == epoch and previous.revision == live.runtimeRevision
-					and previous.seen or pane_baseline or completion
-				seen = math.max(seen, pane_viewed or 0)
-				next_completions[id] = { epoch = epoch, revision = live.runtimeRevision, seen = seen }
 				local status = live.status or "Idle"
-				if status == "Idle" and live.turnOutcome == "completed" and completion > seen then status = "Done" end
 				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host_label(host),
 					connected = host.connected == true, status = host.connected and status or "Unknown", frontend_keys = frontend_keys,
 					title = session_title(row), cwd = row.cwd, directory = row.cwd,
@@ -327,7 +312,6 @@ function M.list()
 			table.insert(entries, entry)
 		end
 	end
-	completion_states = next_completions
 	return entries
 end
 function M.expected_identity(target)

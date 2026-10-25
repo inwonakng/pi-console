@@ -326,6 +326,15 @@ export async function runService(options: HostOwnerOptions & { root: string; por
                 exact(p, ["controlToken", "reservationId"]);
                 if (typeof p.controlToken !== "string" || p.reservationId !== undefined && !identifier(p.reservationId)) throw new CommandError("invalid_command", "Invalid heartbeat");
                 result = target.heartbeat(view.attachmentId, p.controlToken, p.reservationId as string | undefined); break;
+              case "response.viewed":
+                exact(p, ["serviceEpoch", "runtimeRevision", "completionSeq", "controlToken"]);
+                if (!identifier(p.serviceEpoch) || !Number.isSafeInteger(p.runtimeRevision) || Number(p.runtimeRevision) < 0
+                  || !Number.isSafeInteger(p.completionSeq) || Number(p.completionSeq) < 1
+                  || typeof p.controlToken !== "string" || !p.controlToken.length || p.controlToken.length > 128) {
+                  throw new CommandError("invalid_command", "Invalid viewing acknowledgement");
+                }
+                target.responseViewed(view.attachmentId, p.controlToken, p.serviceEpoch, Number(p.runtimeRevision), Number(p.completionSeq));
+                result = {}; break;
               case "command.status":
                 exact(p, ["serviceEpoch", "commandId"]);
                 if (!identifier(p.serviceEpoch) || !identifier(p.commandId)) throw new CommandError("invalid_command", "Invalid command lookup");

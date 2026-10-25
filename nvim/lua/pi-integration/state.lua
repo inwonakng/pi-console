@@ -37,8 +37,6 @@ function M.new()
 		is_agent_running = false,
 		refresh_transcript_after_settled = false,
 		completion_pending = false,
-		completion_seq = 0,
-		seen_seq = 0,
 		session_replacement_pending = false,
 		is_retrying = false,
 		is_compacting = false,
