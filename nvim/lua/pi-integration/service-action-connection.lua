@@ -30,7 +30,7 @@ function M.new(ctx)
 	end
 	function gate.run(fn)
 		if executing then return fn() end
-		if action then ctx.notify("Waiting for the connection; no duplicate action queued."); return end
+		if action then ctx.notify("Waiting for Pi connection. This action was ignored; try again once connected."); return end
 		local waiting = {}
 		action = waiting
 		local function finish(ok)
