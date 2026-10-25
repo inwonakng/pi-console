@@ -1710,6 +1710,7 @@ function M.detach_frontend()
 	vim.cmd("qall!")
 end
 function M.quit()
+	if not session_id then return M.detach_frontend() end
 	local captured = stamp()
 	vim.ui.select({ "Stop", "Detach", "Cancel" }, { prompt = "Close frontend:" }, function(choice)
 		if choice == "Stop" then
