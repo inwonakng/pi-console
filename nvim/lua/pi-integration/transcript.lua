@@ -355,6 +355,14 @@ function M.render(ctx)
 		-- Coalesced requests may target a buffer recreated before this callback.
 		local buf = state.transcript_buf
 		if state.frontend_visible ~= false and ctx.buffer.valid(buf) and M.win_valid(ctx) then
+			local pending = state.pending_transcript_scroll
+			-- Check navigation before folds can change the saved viewport.
+			if pending and (pending.buf ~= buf or not buffer.window_matches(pending.win, buf)
+				or M.is_focused(ctx) or not vim.deep_equal(pending.view,
+					vim.api.nvim_win_call(pending.win, vim.fn.winsaveview))) then
+				state.pending_transcript_scroll = nil
+				pending = nil
+			end
 			M.preserve_view(ctx, function()
 				for _, win in ipairs(vim.api.nvim_list_wins()) do
 					if buffer.window_matches(win, buf) then
@@ -364,6 +372,11 @@ function M.render(ctx)
 				markdown_render.render(buf, state.transcript_win, { latex = true, event = "PiNvim" })
 				M.apply_quote_highlights(ctx)
 			end)
+			if pending and state.pending_transcript_scroll == pending then
+				-- Folding is layout work, not user navigation. Keep the correction
+				-- valid until the scheduled Markdown render finishes.
+				pending.view = vim.api.nvim_win_call(pending.win, vim.fn.winsaveview)
+			end
 		end
 	end)
 end
