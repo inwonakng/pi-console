@@ -363,12 +363,14 @@ function detachConversation(key) {
 
 // Safari keeps the layout viewport tall while the software keyboard is open.
 // Follow keyboard panning, but keep the shell inside the layout viewport when
-// rotation leaves a stale visual-viewport offset.
+// rotation leaves a stale visual-viewport offset. innerHeight can shrink with the
+// keyboard, so use the root clientHeight for the layout viewport bounds.
 function fitViewport() {
   const viewport = window.visualViewport;
   if (!viewport || viewport.scale !== 1) return;
-  const height = Math.min(viewport.height, window.innerHeight);
-  const top = Math.max(0, Math.min(viewport.offsetTop, window.innerHeight - height));
+  const layoutHeight = document.documentElement.clientHeight;
+  const height = Math.min(viewport.height, layoutHeight);
+  const top = Math.max(0, Math.min(viewport.offsetTop, layoutHeight - height));
   document.documentElement.style.setProperty("--viewport-height", `${height}px`);
   document.documentElement.style.setProperty("--viewport-top", `${top}px`);
 }
@@ -383,6 +385,54 @@ window.addEventListener("resize", scheduleViewportFit);
 window.addEventListener("pageshow", scheduleViewportFit);
 window.screen.orientation?.addEventListener("change", scheduleViewportFit);
 fitViewport();
+
+let viewportDiagnosticsTimer;
+function toggleViewportDiagnostics() {
+  const existing = $("viewport-diagnostics");
+  if (existing) {
+    clearInterval(viewportDiagnosticsTimer);
+    existing.remove();
+    return;
+  }
+  const panel = text("pre");
+  panel.id = "viewport-diagnostics";
+  panel.setAttribute("aria-label", "Layout diagnostics");
+  document.body.append(panel);
+  const update = () => {
+    const viewport = window.visualViewport;
+    const prompt = document.querySelector('.conversation:not([hidden]) .chat-screen:not([hidden]) [data-id="prompt"]');
+    const bounds = node => {
+      if (!node) return "-";
+      const rect = node.getBoundingClientRect();
+      return `${Math.round(rect.top)}..${Math.round(rect.bottom)}`;
+    };
+    const scrolls = [];
+    for (let node = prompt; node; node = node.parentElement) {
+      if (node.scrollTop) scrolls.push(`${node.dataset.id || node.id || node.tagName}=${Math.round(node.scrollTop)}`);
+    }
+    const mode = navigator.standalone || matchMedia("(display-mode: standalone)").matches ? "home-screen" : "browser";
+    const shell = getComputedStyle(document.body);
+    // Read geometry only: never include prompt text, session data or host details.
+    panel.textContent = [
+      `Layout diagnostics v1 (${mode})`,
+      `visual top/height: ${viewport ? `${Math.round(viewport.offsetTop)} / ${Math.round(viewport.height)}` : "unavailable"}`,
+      `scale: ${viewport?.scale ?? "-"} | inner/doc height: ${innerHeight}/${document.documentElement.clientHeight}`,
+      `window scrollY: ${Math.round(scrollY)} | visual pageTop: ${viewport ? Math.round(viewport.pageTop) : "-"}`,
+      `shell CSS top/height: ${shell.top} / ${shell.height}`,
+      `body bounds: ${bounds(document.body)}`,
+      `chat bounds: ${bounds(prompt?.closest(".chat-screen"))}`,
+      `composer bounds: ${bounds(prompt?.closest(".composer"))}`,
+      `input bounds: ${bounds(prompt)}`,
+      `focus: ${document.activeElement?.dataset.id || document.activeElement?.tagName}`,
+      `ancestor scrollTop: ${scrolls.join(", ") || "all zero"}`,
+      "Toggle in Options. Screenshot with keyboard open.",
+    ].join("\n");
+    // Keep the readout visible even if the app shell has been panned offscreen.
+    panel.style.top = `${Math.max(0, viewport?.offsetTop ?? 0) + 6}px`;
+  };
+  update();
+  viewportDiagnosticsTimer = setInterval(update, 100);
+}
 
 $("connection-form").addEventListener("submit", event => { event.preventDefault(); perform(connectAll); });
 $("new-session").addEventListener("click", () => showCreate());
@@ -992,6 +1042,7 @@ function createConversation(host, row) {
       if (sameContext(captured)) { grant = value; if (!controlsCurrent()) scheduleRefresh(); }
     }
   }));
+  $("layout-diagnostics").addEventListener("click", toggleViewportDiagnostics);
   $("refresh-settings").addEventListener("click", () => { void loadSettings(); });
   $("abort").addEventListener("click", () => run(() => command("turn.abort")));
   $("rename").addEventListener("click", () => {
