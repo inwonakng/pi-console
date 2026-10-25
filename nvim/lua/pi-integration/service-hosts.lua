@@ -739,7 +739,7 @@ function M.manage(entry, action, argument)
 		end)
 	end
 	if action == "kill" then
-		vim.ui.select({ "Stop session", "Cancel" }, { prompt = "Stop " .. entry.title .. " on " .. host.alias .. " and close its controller?" }, function(choice)
+		vim.ui.select({ "Stop session", "Cancel" }, { prompt = "Stop session and close its controller?" }, function(choice)
 			if choice == "Stop session" then send() end
 		end)
 	else send() end
