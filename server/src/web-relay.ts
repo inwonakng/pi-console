@@ -66,8 +66,9 @@ export async function webRelay(stream: Duplex, target: RegisteredHost, channel: 
       if (pending.size >= 32 || pending.has(record.id)) {
         await reject(record.id, "request_not_sent", "Relay request limit/conflict"); continue;
       }
-      const request = client!.request(record.method, record.payload, record.id).then(
-        (result) => send({ type: "response", id: record.id, success: true, result }),
+      const metadata: Record<string, unknown> | undefined = record.method === "attach" && record.payload.timings === true ? {} : undefined;
+      const request = client!.request(record.method, record.payload, record.id, metadata).then(
+        (result) => send({ type: "response", id: record.id, success: true, result, ...metadata }),
         (error: unknown) => {
           const detail = object(error) ? error : {};
           return send({ type: "response", id: record.id, success: false, error: { ...detail,

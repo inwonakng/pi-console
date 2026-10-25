@@ -40,12 +40,22 @@ function renderLoadTiming() {
     `Session list request: ${timing.kind === "cached" ? "not needed" : ms(timing.summaries?.elapsedMs)}`,
     `WebSocket open: ${timing.kind === "cached" ? "not needed" : ms(timing.connection?.socketMs)} | Hello: ${timing.kind === "cached" ? "not needed" : ms(timing.connection?.hello?.elapsedMs)}`,
     `Attach (server + transfer + parse): ${timing.kind === "cached" ? "not needed" : ms(timing.attach?.elapsedMs)}`,
-    ...(timing.attach?.bytes != null ? [`Response: ${(timing.attach.bytes / 1024).toFixed(1)} KiB | JSON parse: ${ms(timing.attach.parseMs)}`] : []),
-    `Transcript render: ${ms(timing.renderMs)}${timing.messages != null ? ` | ${timing.messages} messages` : ""}`,
+    ...(timing.attach?.bytes != null ? [
+      `First response message: ${ms(timing.attach.firstResponseMs)} | Complete: ${ms(timing.attach.responseCompleteMs)}`,
+      `Response delivery span: ${ms(timing.attach.receiveSpanMs)}`,
+      `Response: ${(timing.attach.bytes / 1024).toFixed(1)} KiB | JSON parse: ${ms(timing.attach.parseMs)}`,
+      ...(timing.attach.server ? [
+        `Server handling: ${ms(timing.attach.server.handlingMs)} (includes snapshot/subscribe: ${ms(timing.attach.server.snapshotMs)})`,
+        `Server serialization: ${ms(timing.attach.server.serializeMs)}`,
+      ] : ["Server timings unavailable; update/restart the session's host."]),
+    ] : []),
+    `Initial transcript render: ${ms(timing.renderMs)}${timing.messages != null ? ` | ${timing.messages} messages | hydrated: ${timing.hydrated ? "yes" : "no"}` : ""}`,
     `Start -> DOM ready: ${ms(timing.domMs)}`,
     `Start -> paint opportunity (~): ${ms(timing.paintMs)}`,
     ...(timing.kind === "reconnect" ? ["Reconnect totals include time spent in Options."] : []),
-    "Paint is an estimate. No server/transfer split. No content recorded.",
+    "Server excludes inbound/event-loop waits, output queue and relay work.",
+    "Delivery uses WebSocket dispatch, not packet arrivals; a single message has zero span.",
+    "Paint is an estimate. No content recorded.",
   ].join("\n");
 }
 function setLoadTimings(enabled) {
@@ -72,10 +82,11 @@ function currentLoadTiming(key) {
   return loadTimingsEnabled && loadTiming?.key === key && loadTiming.paintMs == null && !loadTiming.interrupted && !loadTiming.failed ? loadTiming : null;
 }
 function timeTranscript(timing, started, conversation) {
-  if (!timing || timing.domMs != null || !conversation.hydrated || timing.kind !== "cached" && !timing.attached) return;
+  if (!timing || timing.domMs != null || timing.kind !== "cached" && !timing.attached) return;
   timing.renderMs = performance.now() - started;
   timing.domMs = performance.now() - timing.started;
   timing.messages = conversation.messages.length;
+  timing.hydrated = conversation.hydrated;
   timing.stage = "Waiting for paint opportunity";
   // Two frames allow a paint between callbacks; this is not a measured screen presentation.
   loadPaintFrame = requestAnimationFrame(() => {
@@ -1318,7 +1329,9 @@ function createConversation(host, row) {
       if (disposed) { next.close(); return; }
       connected = true;
       try {
-        const value = await next.request("attach", { sessionId: selectedId, label: controllerLabel }, timing ? (timing.attach = {}) : undefined);
+        const value = await next.request("attach", { sessionId: selectedId, label: controllerLabel,
+          ...(timing && hello.capabilities.includes("attach.timings") ? { timings: true } : {}),
+        }, timing ? (timing.attach = {}) : undefined);
         if (timing) timing.attached = true;
         attachment = value.attachmentId;
         streamSequence = value.snapshot.sequence;
@@ -1331,7 +1344,7 @@ function createConversation(host, row) {
     });
     if (timing && timing === loadTiming && timing.domMs == null) {
       timing.failed = !connected;
-      if (!timing.interrupted) timing.stage = connected ? "Waiting for hydrated transcript" : "Not connected; see session notice";
+      if (!timing.interrupted) timing.stage = connected ? "Waiting for visible transcript" : "Not connected; see session notice";
       renderLoadTiming();
     }
   }

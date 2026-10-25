@@ -11,7 +11,7 @@ import type { Channel } from "./session-catalog.js";
 import { object } from "./pi-records.js";
 
 export class LocalClient {
-  private readonly pending = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
+  private readonly pending = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void; responseMetadata?: Record<string, unknown> }>();
   private readonly writer: RecordWriter;
   private disconnected = false;
   private constructor(private readonly socket: Duplex, private readonly event: (record: Record<string, unknown>) => void) {
@@ -90,18 +90,18 @@ export class LocalClient {
     } catch (error) { client.close(); throw error; }
     finally { clearTimeout(deadline); }
   }
-  request(method: string, payload: unknown = {}, id: string = randomUUID()): Promise<unknown> {
-    return this.send(method, payload, id, 30);
+  request(method: string, payload: unknown = {}, id: string = randomUUID(), responseMetadata?: Record<string, unknown>): Promise<unknown> {
+    return this.send(method, payload, id, 30, responseMetadata);
   }
   /** Keep two of the service's 32 request slots available for lease maintenance. */
   requestControl(method: "grant" | "heartbeat", payload: unknown = {}): Promise<unknown> {
     return this.send(method, payload, randomUUID(), 32);
   }
-  private send(method: string, payload: unknown, id: string, limit: number): Promise<unknown> {
+  private send(method: string, payload: unknown, id: string, limit: number, responseMetadata?: Record<string, unknown>): Promise<unknown> {
     if (this.socket.destroyed || this.pending.size >= limit || this.pending.has(id)) return Promise.reject(Object.assign(
       new Error("Connection closed or request limit/conflict"), { code: "request_not_sent", delivery: "not_sent" }));
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve, reject, responseMetadata });
       void this.writer.send({ id, method, payload }).catch((error) => this.failed(error));
     });
   }
@@ -119,6 +119,7 @@ export class LocalClient {
       const request = typeof record.id === "string" && this.pending.get(record.id);
       if (!request) throw new Error("Uncorrelated service response");
       this.pending.delete(record.id as string);
+      if (request.responseMetadata && object(record.timings)) request.responseMetadata.timings = record.timings;
       if (record.success === true) request.resolve(record.result);
       else request.reject(Object.assign(new Error(object(record.error) ? String(record.error.message) : "Service request failed"),
         object(record.error) ? record.error : { code: "service_error" }));

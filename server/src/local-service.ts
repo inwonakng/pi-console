@@ -11,7 +11,7 @@ import type { SessionSubscription } from "./session-subscription.js";
 import { CommandError } from "./session-commands.js";
 import { identifier } from "./host-commands.js";
 import { object } from "./pi-records.js";
-import { CAPABILITIES, MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWriter } from "./local-protocol.js";
+import { CAPABILITIES, MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWriter, type AttachTimings } from "./local-protocol.js";
 import { serviceBuild } from "./service-paths.js";
 import { ServiceRestart } from "./service-restart.js";
 import { readExtensionSettings } from "../../pi/extensions/shared/read-extension-settings.mjs";
@@ -124,7 +124,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
     socket.once("close", () => { clearTimeout(handshakeDeadline); clearTimeout(closeDeadline); });
     socket.on("error", (error: Error) => disconnect(error, "transport_error"));
     socket.once("close", closeViews);
-    const send = (value: unknown) => writer.send(value).catch((error: Error) => { disconnect(error, "output_error"); throw error; });
+    const send = (value: unknown, timings?: Omit<AttachTimings, "serializeMs">) => writer.send(value, timings).catch((error: Error) => { disconnect(error, "output_error"); throw error; });
     async function pumpSummaries(feed: NonNullable<typeof summaryFeed>, initial?: HostSummaries): Promise<void> {
       if (summaryFeed !== feed) return;
       if (socket.destroyed || owner.shutdownStarted) { stopSummaries(); return; }
@@ -152,6 +152,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       }
     }
     async function request(record: Record<string, unknown>): Promise<void> {
+      const started = record.method === "attach" && object(record.payload) && record.payload.timings === true ? performance.now() : 0;
       let stopAfterReply = false;
       if (closing) return;
       try {
@@ -264,17 +265,21 @@ export async function runService(options: HostOwnerOptions & { root: string; por
             if (!identifier(p.serviceEpoch) || !identifier(p.commandId)) throw new CommandError("invalid_command", "Invalid command lookup");
             result = owner.hostStatus(p.serviceEpoch, p.commandId); break;
           case "attach": {
-            exact(p, ["sessionId", "label"]);
+            exact(p, ["sessionId", "label", "timings"]);
+            if (p.timings !== undefined && typeof p.timings !== "boolean") throw new CommandError("invalid_command", "Invalid attach timings flag");
             if (!identifier(p.sessionId) || typeof p.label !== "string") throw new CommandError("invalid_command", "Invalid attachment");
             const target = owner.lookup(p.sessionId);
             if (!target) throw new CommandError("session_unavailable", "Session is not live; reconnect to restore a suspended session, or explicitly reopen it");
             detach();
             session = target;
+            const snapshotStarted = p.timings ? performance.now() : 0;
             const view = target.subscribe(p.label);
+            const snapshotMs = p.timings ? performance.now() - snapshotStarted : 0;
             subscription = view;
             void view.closed.then((reason) => { if (subscription === view) disconnect(reason, "subscription_closed"); });
             await send({ type: "response", id: record.id, success: true,
-              result: { attachmentId: view.attachmentId, snapshot: view.snapshot } });
+              result: { attachmentId: view.attachmentId, snapshot: view.snapshot } },
+              p.timings ? { handlingMs: performance.now() - started, snapshotMs } : undefined);
             void pump(view);
             return;
           }

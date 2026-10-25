@@ -23,10 +23,13 @@ export class ServiceClient {
     const started = timing ? performance.now() : 0;
     const socket = this.socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
-    let buffer = "";
+    let buffer = "", lineStarted;
     const decoder = new TextDecoder("utf-8", { fatal: true });
     socket.addEventListener("message", event => {
       try {
+        // WebSocket messages are delivered whole; these are dispatch times, not raw packet arrivals.
+        const received = this.measuring ? performance.now() : undefined;
+        if (!buffer.length) lineStarted = received;
         buffer += typeof event.data === "string" ? event.data : decoder.decode(event.data, { stream: true });
         if (buffer.length > 80 * 1024 * 1024) throw new Error("Service response is too large");
         let newline;
@@ -35,7 +38,9 @@ export class ServiceClient {
           const line = buffer.slice(0, newline);
           const record = JSON.parse(line);
           const parsed = this.measuring ? performance.now() : 0;
+          const firstReceived = lineStarted;
           buffer = buffer.slice(newline + 1);
+          lineStarted = buffer.length ? received : undefined;
           if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("Invalid service record");
           if (record.type === "response") {
             const pending = this.pending.get(record.id);
@@ -45,7 +50,14 @@ export class ServiceClient {
             if (pending.timing) {
               this.measuring--;
               Object.assign(pending.timing, { elapsedMs: parsed - pending.started, parseMs: parsed - parseStarted,
+                firstResponseMs: firstReceived == null ? undefined : firstReceived - pending.started,
+                responseCompleteMs: received - pending.started,
+                receiveSpanMs: firstReceived == null ? undefined : received - firstReceived,
                 bytes: new TextEncoder().encode(line).length + 1 });
+              const server = record.timings;
+              if (server && ["handlingMs", "snapshotMs", "serializeMs"].every(key => Number.isFinite(server[key]) && server[key] >= 0)) {
+                pending.timing.server = { handlingMs: server.handlingMs, snapshotMs: server.snapshotMs, serializeMs: server.serializeMs };
+              }
             }
             if (record.success === true) pending.resolve(record.result);
             else pending.reject(Object.assign(new Error(record.error?.message || "Service request failed"), {

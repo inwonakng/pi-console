@@ -4,7 +4,7 @@ import { NATIVE_OPERATIONS } from "./session-operations.js";
 import { BUNDLED_SOURCES } from "./session-bundled.js";
 
 export const PROTOCOL = 1;
-export const CAPABILITIES = ["snapshot", "snapshot.sections", "updates", "sessions.subscribe", "notifications.subscribe", "host.create", "host.resume", "host.recover", "host.saved", "host.history", "host.archive", "host.delete", "control.acquire", "control.takeover", "control.release",
+export const CAPABILITIES = ["snapshot", "snapshot.sections", "attach.timings", "updates", "sessions.subscribe", "notifications.subscribe", "host.create", "host.resume", "host.recover", "host.saved", "host.history", "host.archive", "host.delete", "control.acquire", "control.takeover", "control.release",
   "interaction.respond", "interaction.cancel", "prompt.submit", "turn.abort", "queue.edit", "queue.remove", "queue.reserve", "queue.release",
   "session.manage", "session.manage.status", "session.rename", "workspace.review.save", "workspace.review.stage", "workspace.review.unstage", "workspace.review.restore", "session.read", "resource.read", "resource.complete", "host.directories", "host.options", "host.complete", "session.restart", "session.kill", ...Object.keys(BUNDLED_SOURCES), ...NATIVE_OPERATIONS, "response.viewed", "command.status", "effect.inspect", "service.stop", "service.restart", "service.restart.status"] as const;
 // Shared by the public listener and registered local-profile relays.
@@ -38,13 +38,22 @@ export async function* records(input: Readable, limit: number): AsyncGenerator<R
   if (bytes) throw new Error("IPC stream ended inside a frame");
 }
 
+export type AttachTimings = { handlingMs: number; snapshotMs: number; serializeMs: number };
+
 /** Serial writes with a byte budget. Slow peers cannot hold owner reduction. */
 export class RecordWriter {
   private lane: Promise<void> = Promise.resolve();
   private pending = 0;
   constructor(private readonly output: Writable, private readonly limit = MAX_RESPONSE + MAX_REQUEST) {}
-  send(value: unknown): Promise<void> {
-    const line = JSON.stringify(value) + "\n";
+  send(value: unknown, timings?: Omit<AttachTimings, "serializeMs">): Promise<void> {
+    const started = timings ? performance.now() : 0;
+    let line = JSON.stringify(value);
+    if (timings) {
+      // Append envelope metadata after serializing the response once. No snapshot re-encoding.
+      const measured: AttachTimings = { ...timings, serializeMs: performance.now() - started };
+      line = line.slice(0, -1) + ',"timings":' + JSON.stringify(measured) + "}";
+    }
+    line += "\n";
     const bytes = Buffer.byteLength(line);
     if (bytes > MAX_RESPONSE || this.pending + bytes > this.limit) return Promise.reject(new Error("IPC output budget exceeded; reconnect for a fresh snapshot"));
     this.pending += bytes;
