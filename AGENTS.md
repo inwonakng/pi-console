@@ -17,3 +17,8 @@ The `TODO.md` is written by me and should not be editted. You can make suggestio
 
 - No alt-bound hotkeys. alt is reserved for OS related apps
 - No tests. Write tests only for your sake if you absolutely need it. Do not include them in the final code.
+
+## Rules
+
+- No superfluous items in the transcript. things like compaction, emtpy session and error messages are fine. but statuses or other things should not be injected into the transcript. if you are not sure, ask.
+- Do not overengineer. think about 
