@@ -120,7 +120,7 @@ end
 function M.render_statusline()
 	local win = vim.g.statusline_winid or vim.api.nvim_get_current_win()
 	return build_info.statusline(vim.api.nvim_win_get_width(win), {
-		" 󰕮", "Enter open", "Tab expand", "J/K move", "g group", "p pin", "dd stop/delete group", "/ filter", "<leader>? keys",
+		" 󰕮", "Enter open", "Tab expand", "j/k move", "<leader>pg group", "p pin", "dd stop/delete group", "/ filter", "<leader>? keys",
 	})
 end
 
@@ -287,7 +287,7 @@ function M.open(config)
 	local help_state = {}
 	local function map(key, callback, description)
 		table.insert(mapping_specs, { lhs = key, desc = description })
-		vim.keymap.set("n", key, callback, { buffer = list_buf, desc = description, silent = true, nowait = key == "g" })
+		vim.keymap.set("n", key, callback, { buffer = list_buf, desc = description, silent = true })
 		if key == "<CR>" then
 			require("pi-integration.backends.tmux-input").register(list_buf, callback)
 		end

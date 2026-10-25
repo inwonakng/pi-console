@@ -195,7 +195,7 @@ function M.open(config)
 	local mapping_specs, help_state = {}, {}
 	local function map(key, action, description)
 		table.insert(mapping_specs, { key, buffer = buf, desc = description })
-		vim.keymap.set("n", key, action, { buffer = buf, silent = true, desc = description, nowait = key == "g" })
+		vim.keymap.set("n", key, action, { buffer = buf, silent = true, desc = description })
 		if key == "<CR>" then
 			require("pi-integration.backends.tmux-input").register(buf, action)
 		end

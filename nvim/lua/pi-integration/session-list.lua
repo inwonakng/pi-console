@@ -174,7 +174,7 @@ function M.new()
 				if node then report(organization.move(node, delta * vim.v.count1)) end
 			end, delta == 1 and "Move group/session down" or "Move group/session up")
 		end
-		map("g", function()
+		map("<leader>pg", function()
 			local entry = session()
 			local function create()
 				vim.ui.input({ prompt = "New group: " }, function(name)

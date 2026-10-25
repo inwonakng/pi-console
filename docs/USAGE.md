@@ -135,7 +135,7 @@ Both lists use the same controls:
 | `Tab` | Expand/collapse a group or a session's running subagents |
 | `Enter` | Focus/reopen a session, or expand/collapse a group |
 | `J` / `K` | Move a session within its group, or reorder a selected group |
-| `g` | Assign a session to an existing/new group; on a header, create an empty group |
+| `<leader>pg` | Assign a session to an existing/new group; on a header, create an empty group |
 | `p` | Toggle a session's pin |
 | `dd` | Kill/close a session, or delete a group without killing its sessions |
 | `<leader>?` | Show the list's keys |
