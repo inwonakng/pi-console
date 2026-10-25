@@ -13,6 +13,8 @@ export function parseAccessMode(input: string | undefined): AccessMode | undefin
 type AccessState = {
   accessMode: AccessMode;
   scratchDirectory?: string;
+  revision?: number;
+  invalidators?: Set<() => void>;
 };
 
 const ACCESS_STATE_KEY = Symbol.for("pi.agent.extensions.access-mode-state");
@@ -33,7 +35,26 @@ export function setAccessMode(mode: AccessMode): void {
   if (process.env.PI_SIDE_AGENT === "1" && mode !== "ask") {
     throw new Error("Side conversations have fixed ask access mode.");
   }
+  const childMode = parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE);
+  if (process.env.PI_SPAWN_WORKER_ID && childMode === "readonly" && mode !== "readonly") {
+    throw new Error("Readonly workers have fixed readonly access mode.");
+  }
+  if (state.accessMode === mode) return;
   state.accessMode = mode;
+  invalidateAccessAuthority();
+}
+
+/** In-memory only: history and summaries never recreate live authority. */
+export function accessRevision(): number { return state.revision ?? 0; }
+
+export function invalidateAccessAuthority(): void {
+  state.revision = accessRevision() + 1;
+  for (const invalidate of state.invalidators ?? []) invalidate();
+}
+
+export function onAccessInvalidated(invalidate: () => void): () => void {
+  (state.invalidators ??= new Set()).add(invalidate);
+  return () => state.invalidators?.delete(invalidate);
 }
 
 export function getScratchDirectory(): string | undefined {

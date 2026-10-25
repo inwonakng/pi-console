@@ -5,9 +5,9 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { managedBash } from "./managed-bash";
-import { getAccessMode, getScratchDirectory, setScratchDirectory } from "./access-state";
+import { accessRevision, getAccessMode, getScratchDirectory, setScratchDirectory } from "./access-state";
 import { loadExtensionSettings } from "./extension-settings";
-import { baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, hasPermission, pathInside, requestPermission, resolveToolPath } from "./permissions";
+import { baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, hasPermission, pathInside, requestPermission, resolveToolPath, type PermissionAuthorization } from "./permissions";
 
 export type BashAccessRequest = {
   readPaths?: string[];
@@ -111,9 +111,13 @@ async function runUnsandboxed(
   options: Parameters<BashOperations["exec"]>[2],
   ctx: ExtensionContext,
   onSessionGrant: () => void,
+  assertAuthority: () => void,
 ): Promise<{ exitCode: number | null }> {
-  await requestPermission(ctx, { kind: "unsandboxed", scope: command, cwd }, "bash",
+  assertAuthority();
+  const authorization = await requestPermission(ctx, { kind: "unsandboxed", scope: command, cwd }, "bash",
     { text: command, filetype: "sh" }, onSessionGrant);
+  await authorization.validate();
+  assertAuthority();
   if (options.signal?.aborted) throw new Error("aborted");
   return localBash.exec(command, cwd, options);
 }
@@ -126,6 +130,8 @@ async function runSandboxed(
   filesystem: SandboxRuntimeConfig["filesystem"],
   networkAccess: boolean,
   unixSocketPaths: string[],
+  authorizations: PermissionAuthorization[],
+  assertAuthority: () => void,
   onSessionGrant: () => void,
   onBlocked: () => void,
 ): Promise<{ exitCode: number | null }> {
@@ -150,7 +156,7 @@ async function runSandboxed(
       commandUnixSocketPaths = [];
       updateNetworkConfig();
       options.onData(Buffer.from(`Sandbox could not prepare this command: ${error instanceof Error ? error.message : String(error)}. No command was started.\n`));
-      return await runUnsandboxed(command, cwd, options, ctx, onSessionGrant);
+      return await runUnsandboxed(command, cwd, options, ctx, onSessionGrant, assertAuthority);
     } finally {
       if (previousTempDir === undefined) delete process.env.CLAUDE_CODE_TMPDIR;
       else process.env.CLAUDE_CODE_TMPDIR = previousTempDir;
@@ -167,6 +173,12 @@ async function runSandboxed(
       }
     };
     try {
+      // Preparation may await proxy/sandbox setup. Consume delegated one-use
+      // authority only at the actual process boundary, never while prompting.
+      assertAuthority();
+      for (const authorization of authorizations) await authorization.validate();
+      assertAuthority();
+      if (options.signal?.aborted) throw new Error("aborted");
       const result = await localBash.exec(wrapped, cwd, { ...options, env });
       await report();
       return result;
@@ -197,6 +209,14 @@ async function executeRestricted(
 ): Promise<{ exitCode: number | null }> {
   if (getAccessMode() === "full") return localBash.exec(command, cwd, options);
   const root = canonicalPath(cwd);
+  const revision = accessRevision();
+  const baseline = () => JSON.stringify([baselineReadPaths(root).map(canonicalPath), baselineWritePaths(root).map(canonicalPath)]);
+  const initialBaseline = baseline();
+  const assertAuthority = () => {
+    if (accessRevision() !== revision || baseline() !== initialBaseline || canonicalPath(cwd) !== root) {
+      throw new Error("Command permission authority changed before execution. No command was started.");
+    }
+  };
   const context = { ...ctx, cwd: root, signal: options.signal ?? ctx.signal };
   const paths = (values: string[] = []) => [...new Set(values.map((path) => canonicalPath(resolveToolPath(path, root))))];
   const reads = paths(request.readPaths);
@@ -213,19 +233,20 @@ async function executeRestricted(
   }
   if (request.unsandboxed || !sandboxConfig || !SandboxManager.isSandboxingEnabled()
     || [...baselinePaths, ...reads, ...writes].some(globShaped)) {
-    return runUnsandboxed(command, root, options, context, onSessionGrant);
+    return runUnsandboxed(command, root, options, context, onSessionGrant, assertAuthority);
   }
   const preview = { text: command, filetype: "sh" };
+  const authorizations: PermissionAuthorization[] = [];
   for (const scope of writes) {
-    await requestPermission(context, { kind: "write", scope }, "bash", preview, onSessionGrant);
+    authorizations.push(await requestPermission(context, { kind: "write", scope }, "bash", preview, onSessionGrant));
   }
   for (const scope of reads) {
     if (!writes.some((path) => pathInside(path, scope))) {
-      await requestPermission(context, { kind: "read", scope }, "bash", preview, onSessionGrant);
+      authorizations.push(await requestPermission(context, { kind: "read", scope }, "bash", preview, onSessionGrant));
     }
   }
   if (request.broadReadAccess) {
-    await requestPermission(context, { kind: "read", scope: "/" }, "bash", preview, onSessionGrant, false);
+    authorizations.push(await requestPermission(context, { kind: "read", scope: "/" }, "bash", preview, onSessionGrant, false));
     reads.push("/");
   }
   reads.push(...getGrantedScopes("read").filter((path) => !globShaped(path)));
@@ -236,19 +257,19 @@ async function executeRestricted(
   // without a parent deny overriding that child. Offer the explicit fallback
   // before execution rather than silently widening or blocking the grant.
   if (filesystem.allowWrite.some((write) => filesystem.denyWrite.some((denied) => pathInside(denied, write)))) {
-    return runUnsandboxed(command, root, options, context, onSessionGrant);
+    return runUnsandboxed(command, root, options, context, onSessionGrant, assertAuthority);
   }
   for (const scope of sockets) {
-    await requestPermission(context, { kind: "unix-socket", scope }, "bash", preview, onSessionGrant);
+    authorizations.push(await requestPermission(context, { kind: "unix-socket", scope }, "bash", preview, onSessionGrant));
   }
   sockets.push(...getGrantedScopes("unix-socket"));
   if (request.networkAccess) {
-    await requestPermission(context, { kind: "network", scope: "*" }, "bash", preview, onSessionGrant);
+    authorizations.push(await requestPermission(context, { kind: "network", scope: "*" }, "bash", preview, onSessionGrant));
   }
   if (options.signal?.aborted) throw new Error("aborted");
   const networkAccess = request.networkAccess === true || hasPermission({ kind: "network", scope: "*" }, root);
   return runSandboxed(command, root, options, context, filesystem, networkAccess,
-    [...new Set(sockets)], onSessionGrant, onBlocked);
+    [...new Set(sockets)], authorizations, assertAuthority, onSessionGrant, onBlocked);
 }
 
 export function createAccessControlledBashOperations(

@@ -1,14 +1,17 @@
 import {
   createBashToolDefinition,
+  createEditToolDefinition,
+  createWriteToolDefinition,
   generateUnifiedPatch,
   type ExtensionAPI,
   type ExtensionContext,
   type ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 import assert from "node:assert";
-import { existsSync, readFileSync } from "node:fs";
+import { constants, existsSync, readFileSync } from "node:fs";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { Type } from "typebox";
-import { getAccessMode, parseAccessMode, setAccessMode } from "./shared/access-state";
+import { accessRevision, getAccessMode, parseAccessMode, setAccessMode } from "./shared/access-state";
 import { registerServiceOperation } from "./shared/service-operation";
 import {
   createAccessControlledBashOperations,
@@ -43,7 +46,7 @@ const KNOWN_TOOLS = new Set([
   "spawn_control",
 ]);
 const READONLY_WORKSPACE_ACTIONS = new Set(["status", "list"]);
-const READONLY_SPAWN_CONTROL_ACTIONS = new Set(["list", "status", "join", "join_all", "report", "diff", "reply", "followup", "close", "stop"]);
+const READONLY_SPAWN_CONTROL_ACTIONS = new Set(["list", "status", "join", "join_all", "report", "diff", "reply", "followup", "close", "stop", "approve", "deny"]);
 const ACCESS_SETTING = "access";
 
 type PersistedAccessState = {
@@ -186,6 +189,46 @@ function restoreAccessState(ctx: ExtensionContext, restoreGrants = true): void {
 
 export default function accessModeExtension(pi: ExtensionAPI) {
   registerPermissionHistory(pi);
+  // File mutations queue inside Pi. Authorize at their first filesystem
+  // operation, after that queue, rather than releasing a stale hook approval.
+  const mutationGuard = (ctx: ExtensionContext, name: "edit" | "write", input: Record<string, unknown>, signal?: AbortSignal) => {
+    let started = false;
+    return async (target: string) => {
+      if (signal?.aborted) throw new Error("aborted");
+      if (canonicalPath(target) !== target || target !== input.path) throw new Error("File target changed before execution");
+      const blocked = workspaceToolBlock(name, input, ctx);
+      if (blocked) throw new Error(blocked.reason);
+      if (started) return;
+      const revision = accessRevision();
+      const scope = pathInside(canonicalPath(ctx.cwd), target) && !hasPermission({ kind: "write", scope: target }, ctx.cwd)
+        ? canonicalPath(ctx.cwd) : target;
+      const authorization = await requestPermission({ ...ctx, signal: signal ?? ctx.signal }, { kind: "write", scope }, name,
+        () => name === "edit" ? { text: exactEditPreview(ctx.cwd, input), filetype: "diff" } : writePreview(ctx.cwd, input),
+        () => saveAccessState(pi));
+      await authorization.validate();
+      if (signal?.aborted || accessRevision() !== revision || canonicalPath(target) !== target) throw new Error("File operation cancelled or target changed");
+      started = true;
+    };
+  };
+  const defaultEdit = createEditToolDefinition(process.cwd());
+  pi.registerTool({ ...defaultEdit, async execute(id, params, signal, update, ctx) {
+    params.path = canonicalPath(resolveToolPath(params.path, ctx.cwd));
+    const guard = mutationGuard(ctx, "edit", params, signal);
+    return createEditToolDefinition(ctx.cwd, { operations: {
+      access: async (path) => { await guard(path); await access(path, constants.R_OK | constants.W_OK); },
+      readFile: async (path) => { await guard(path); return readFile(path); },
+      writeFile: async (path, contents) => { await guard(path); await writeFile(path, contents); },
+    } }).execute(id, params, signal, update, ctx);
+  } });
+  const defaultWrite = createWriteToolDefinition(process.cwd());
+  pi.registerTool({ ...defaultWrite, async execute(id, params, signal, update, ctx) {
+    params.path = canonicalPath(resolveToolPath(params.path, ctx.cwd));
+    const guard = mutationGuard(ctx, "write", params, signal);
+    return createWriteToolDefinition(ctx.cwd, { operations: {
+      mkdir: async (directory) => { await guard(params.path); await mkdir(directory, { recursive: true }); },
+      writeFile: async (path, contents) => { await guard(path); await writeFile(path, contents); },
+    } }).execute(id, params, signal, update, ctx);
+  } });
   const defaultBash = createBashToolDefinition(process.cwd());
   pi.registerTool({
     ...defaultBash,
@@ -292,11 +335,10 @@ export default function accessModeExtension(pi: ExtensionAPI) {
         input.path = path;
         const canonicalBlock = workspaceToolBlock(event.toolName, input, ctx);
         if (canonicalBlock) return canonicalBlock;
-        const writing = MUTATION_TOOLS.has(event.toolName);
-        const scope = writing && pathInside(canonicalPath(ctx.cwd), path)
-          && !hasPermission({ kind: "write", scope: path }, ctx.cwd) ? canonicalPath(ctx.cwd) : path;
-        await requestPermission(ctx, { kind: writing ? "write" : "read", scope }, event.toolName,
+        if (MUTATION_TOOLS.has(event.toolName)) return undefined; // Execution operations own approval after the mutation queue.
+        const authorization = await requestPermission(ctx, { kind: "read", scope: path }, event.toolName,
           () => previewForTool(event, ctx), () => saveAccessState(pi));
+        await authorization.validate();
         return workspaceToolBlock(event.toolName, input, ctx);
       } catch (error) {
         return { block: true, reason: error instanceof Error ? error.message : String(error) };
@@ -328,8 +370,9 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     if (!readonlyToolBlockReason(event.toolName, input)) return undefined;
     try {
       const action = typeof input.action === "string" ? `:${input.action}` : "";
-      await requestPermission(ctx, { kind: "tool", scope: `${event.toolName}${action}` }, event.toolName,
+      const authorization = await requestPermission(ctx, { kind: "tool", scope: `${event.toolName}${action}` }, event.toolName,
         () => previewForTool(event, ctx), () => saveAccessState(pi));
+      await authorization.validate();
       return undefined;
     } catch (error) {
       return { block: true, reason: error instanceof Error ? error.message : String(error) };

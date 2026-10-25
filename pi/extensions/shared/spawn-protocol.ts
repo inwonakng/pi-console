@@ -1,9 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
+import { registerPermissionRouter, type PermissionAttempt } from "./permissions";
 
 export const SPAWN_PROTOCOL_VERSION = 1;
 export const SPAWN_PROTOCOL_TITLE = "pi-spawn-protocol:";
+export const SPAWN_PERMISSION_CANCEL = "pi-spawn-permission-cancel";
 export const WORKER_TOOLS = ["spawn_report", "spawn_question"];
 export type WorkerLifetime = "bounded" | "conversational";
 export type WorkerExecution = "working" | "waiting_parent" | "idle" | "closing" | "closed" | "failed" | "cancelled";
@@ -39,6 +41,33 @@ export type WorkerOperation = {
   workerId: string;
   assignmentId: string;
 } & ({ operation: "question"; question: string } | { operation: "report"; report: AssignmentReport });
+
+export type WorkerPermissionRequest = PermissionAttempt & {
+  id: string;
+  workerId: string;
+  assignmentId: string;
+  runtimeId: string;
+  parentRuntimeId: string;
+  attemptId: string;
+  workspaceId?: string;
+  authorityRevision: number;
+  consumedAt?: string;
+  state: "pending" | "approved" | "denied" | "cancelled" | "consumed";
+  createdAt: string;
+  resolvedAt?: string;
+  decision?: { actor: "parent" | "user" | "worker"; outcome: "approved" | "denied" | "cancelled"; reason?: string };
+};
+export type WorkerPermissionOperation = {
+  version: 1;
+  operation: "permission" | "permission_execute";
+  workerId: string;
+  assignmentId: string;
+  runtimeId: string;
+  parentRuntimeId: string;
+  attemptId: string;
+  attempt: PermissionAttempt;
+  requestId?: string;
+};
 
 /** Agent-authored context always carries its runtime-assigned provenance. */
 export function agentContext(sender: { kind: "parent" | "worker"; id: string }, payload: unknown): string {
@@ -80,6 +109,38 @@ export function registerWorkerProtocol(pi: ExtensionAPI): void {
     if (!reply) throw new Error("Parent request cancelled or transport closed");
     return JSON.parse(reply) as { version: number; sender: { kind: string; id: string }; workerId: string; assignmentId: string; requestId?: string; text?: string };
   };
+  const runtimeId = process.env.PI_SPAWN_RUNTIME_ID;
+  const parentRuntimeId = process.env.PI_SPAWN_PARENT_RUNTIME_ID;
+  if (runtimeId && parentRuntimeId) registerPermissionRouter(async (ctx, attempt) => {
+    if (!assignmentId || reported) throw new Error("No active assignment for permission routing");
+    const address = { version: 1 as const, workerId, assignmentId, runtimeId, parentRuntimeId, attemptId: randomUUID(), attempt };
+    // A dialog can abort before its parent-assigned request ID comes back.
+    // The private attempt address cancels only that wait, never grants access.
+    const cancel = () => ctx.ui.setStatus(SPAWN_PERMISSION_CANCEL, JSON.stringify(address));
+    ctx.signal?.addEventListener("abort", cancel, { once: true });
+    const exchangePermission = async (operation: "permission" | "permission_execute", requestId?: string) => {
+      if (ctx.mode !== "rpc" || !ctx.hasUI) throw new Error("Permission routing requires the managed RPC runtime");
+      const raw = await ctx.ui.input(SPAWN_PROTOCOL_TITLE + JSON.stringify({ ...address, operation, requestId }), undefined, { signal: ctx.signal });
+      if (!raw) throw new Error("Permission request denied, cancelled, or transport closed");
+      const reply = JSON.parse(raw);
+      if (reply.version !== 1 || reply.workerId !== workerId || reply.assignmentId !== address.assignmentId
+        || reply.runtimeId !== runtimeId || reply.parentRuntimeId !== parentRuntimeId || reply.sender?.kind !== "parent"
+        || reply.sender.id !== parentId || typeof reply.requestId !== "string"
+        || (requestId !== undefined && reply.requestId !== requestId)) throw new Error("Invalid permission decision");
+      if (reply.allowed !== true) throw new Error(`Permission attempt ${reply.decision ?? "cancelled"}; no action was authorized.`);
+      return reply.requestId as string;
+    };
+    let requestId: string;
+    try { requestId = await exchangePermission("permission"); }
+    catch (error) { ctx.signal?.removeEventListener("abort", cancel); throw error; }
+    let consumed = false;
+    return { validate: async () => {
+      if (consumed || reported || assignmentId !== address.assignmentId) throw new Error("Permission authorization already consumed or assignment changed");
+      consumed = true;
+      try { await exchangePermission("permission_execute", requestId); }
+      finally { ctx.signal?.removeEventListener("abort", cancel); }
+    } };
+  });
   pi.registerTool({
     name: "spawn_report", label: "Report assignment", executionMode: "sequential",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
