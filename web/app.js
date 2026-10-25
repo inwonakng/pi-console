@@ -162,6 +162,68 @@ async function connectAll() {
     }));
   } finally { connecting = false; $("connect").disabled = false; renderOverview(); }
 }
+function restartMessage(receipt) {
+  if (!receipt) return "No saved server restart outcome.";
+  return `Server restart ${receipt.status} (${receipt.id}).${receipt.error ? " " + receipt.error.message : ""}${receipt.result ? " Build: " + receipt.result.buildId : ""}`;
+}
+async function lastRestart(host) {
+  host.restartMessage = restartMessage(await host.client.request("service.restart.status"));
+  renderOverview();
+}
+async function restartHost(host, force = false) {
+  if (host.restarting || !host.connected) return;
+  const connection = host.client, hello = host.hello;
+  if (!confirm(`${force ? "Force restart" : "Restart"} server on ${host.alias} [${channel}]?\n${force ? "Interrupts owned work." : "Active work refuses."} Saved sessions stay stopped. Installation and frontend restart are separate.`)) return;
+  if (!host.connected || host.client !== connection || host.hello.serviceEpoch !== hello.serviceEpoch) throw new Error("Host connection changed; select restart again.");
+  const query = { id: requestId(), serviceEpoch: hello.serviceEpoch };
+  host.restarting = true;
+  host.restartMessage = `Restart requested (${query.id}). Waiting for its outcome.`;
+  renderOverview();
+  let forceOffered = false;
+  try {
+    try {
+      await connection.request("service.restart", { ...query, hostId: hello.hostId, force, confirmed: true });
+    } catch (error) {
+      if (error.delivery === "rejected" || error.delivery === "not_sent") throw error;
+      // Lost acknowledgement: query the original ID only. Never replay restart.
+      host.restartMessage = `Acknowledgement lost. Checking restart ${query.id}; it was not replayed.`;
+    }
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      await sleep(1000);
+      if (!hosts.includes(host) || host.enabled === false) throw new Error("Host registration changed. Inspect its restart outcome before retrying.");
+      if (!host.connected) await connectHost(host);
+      if (!host.connected) continue;
+      let receipt;
+      try { receipt = await host.client.request("service.restart.status", query); }
+      catch { continue; }
+      if (!receipt || receipt.status === "accepted") continue;
+      host.restartMessage = restartMessage(receipt);
+      if (receipt.status === "failed") {
+        forceOffered = !force && receipt.error?.code === "session_busy" && host.hello.serviceEpoch === hello.serviceEpoch;
+        return;
+      }
+      if (receipt.status === "completed" && receipt.result?.serviceEpoch === host.hello.serviceEpoch
+        && receipt.result.buildId === host.hello.buildId) {
+        host.restartMessage += " Reconnect saved conversations explicitly.";
+        await connectAll();
+        notice(`${host.alias}: ${host.restartMessage}`);
+        return;
+      }
+      host.client.close("Refreshing the replacement server identity.");
+    }
+    throw new Error(`Restart ${query.id} is unconfirmed. Check Last restart or service.log before retrying. Restart was not replayed.`);
+  } catch (error) {
+    host.restartMessage = error.message;
+    throw error;
+  } finally {
+    host.restarting = false;
+    renderOverview();
+    if (forceOffered && confirm(`${host.alias}: ${host.restartMessage}\nForce restart and interrupt owned work? History/workspaces are kept; sessions stay stopped.`)) {
+      await restartHost(host, true);
+    }
+  }
+}
 function hostIdentity(host) { return host.hello?.hostId || host.key; }
 function uniqueHosts() {
   const result = new Map();
@@ -212,6 +274,11 @@ function renderOverview() {
     const state = host.connected ? "Connected" : host.connecting ? "Connecting" : host.enabled === false ? "Disabled" : "Disconnected";
     node.append(text("span", `${host.alias} / ${state}`));
     if (!host.connected && !host.connecting && host.enabled !== false) node.append(button("Reconnect", () => perform(() => connectHost(host))));
+    if (host.hello?.capabilities.includes("service.restart")) {
+      node.append(button(host.restarting ? "Restarting..." : "Restart server", () => perform(() => restartHost(host)), !host.connected || host.restarting));
+      node.append(button("Last restart", () => perform(() => lastRestart(host)), !host.connected));
+    }
+    if (host.restartMessage) node.append(text("p", host.restartMessage, "host-message"));
     if (host.error) node.append(text("p", host.error, "host-error"));
     return node;
   }));

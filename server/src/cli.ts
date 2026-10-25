@@ -1,11 +1,7 @@
-import { spawn } from "node:child_process";
-import { checkPi } from "../../pi/scripts/check-pi.mjs";
-import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
+import { manageService, type ManagementAction } from "./service-management.js";
 import { resolve, join, isAbsolute, basename, dirname } from "node:path";
 import { listenerPort } from "./remote-transport.js";
-import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { HostOwner } from "./host-owner.js";
 import { privateJson } from "./catalog-storage.js";
@@ -13,7 +9,7 @@ import { object } from "./pi-records.js";
 import { LocalClient } from "./local-client.js";
 import { runService } from "./local-service.js";
 import { applicationRoot, defaultRoot, managementIdentity, requireNode, serviceBuild } from "./service-paths.js";
-import { managementLock, ServiceSupervisor } from "./service-supervisor.js";
+import { ServiceSupervisor } from "./service-supervisor.js";
 import type { Channel } from "./session-catalog.js";
 
 process.umask(0o077);
@@ -138,24 +134,7 @@ async function main(): Promise<void> {
       throw error;
     }
   };
-  const requireNoClaim = async (): Promise<void> => {
-    try { await lstat(join(root, "owner.lock")); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-    throw new Error("Service lock remains without a reachable service. Inspect startup/cleanup and explicitly reconcile if appropriate; no supervisor teardown or automatic recovery occurred.");
-  };
-  const privateLog = async () => {
-    const file = await open(join(root, "service.log"), constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || stat.mode & 0o077) {
-      await file.close(); throw new Error("service.log must be a private same-user regular file (0600)");
-    }
-    return file;
-  };
   const port = listenerPort(flags.get("--port"));
-  const extraArgs: string[] = [];
-  if (flags.has("--port")) extraArgs.push("--port", String(port));
-  if (options.provider) extraArgs.push("--provider", options.provider);
-  if (options.model) extraArgs.push("--model", options.model);
   if (action === "reconcile") {
     const claim = await privateJson(join(root, "owner.lock"), 16384);
     if (!object(claim)) throw new Error("Invalid recovery claim");
@@ -169,103 +148,11 @@ async function main(): Promise<void> {
     await runService({ ...options, port }); return;
   }
   if (["start", "stop", "restart", "enable", "disable"].includes(action ?? "")) {
-    await managementIdentity(options.appRoot, channel);
-    const unlock = await managementLock(root);
-    try {
-      let supervisor = await ServiceSupervisor.load(root, channel, options.appRoot, flags.get("--supervisor-dir"));
-      if (supervisor) await supervisor.loaded();
-      const existing = await connect();
-      let startupExit: string | undefined;
-      if (existing) {
-        try {
-          await assertManagementOwner(existing.hello);
-          if (existing.hello.stopping) throw new Error("Service is stopping; wait for closure and retry explicitly");
-          if (action === "restart" && !supervisor && !flags.has("--port") && object(existing.hello.network)
-            && typeof existing.hello.network.port === "number") extraArgs.push("--port", String(listenerPort(existing.hello.network.port)));
-        }
-        catch (error) { existing.client.close(); throw error; }
-      }
-      // Check start configuration before stopping a healthy owner.
-      if ((action === "enable" || action === "restart" || action === "start" && !existing) && !supervisor) {
-        try {
-          if (!binary || !isAbsolute(binary)) throw new Error("Pi >=1.3.0 is required to start a local server. Install Pi and make sure pi is available on PATH.");
-          checkPi(binary);
-        } catch (error) { existing?.client.close(); throw error; }
-      }
-      // A retained claim is ownership even when no endpoint is reachable. Fence
-      // registration as well as launch; never let another checkout claim startup.
-      if (action === "enable" && !existing) await requireNoClaim();
-      if (action === "enable" && !supervisor) {
-        existing?.client.close();
-        await (await privateLog()).close();
-        supervisor = await ServiceSupervisor.create({ ...options, binary: binary!, directory: flags.get("--supervisor-dir"), path: flags.get("--path"), extraArgs });
-        await supervisor.enable(!existing);
-      } else if (action === "enable") {
-        existing?.client.close();
-        if (!existing) await supervisor!.configurePort(flags.has("--port") ? port : undefined);
-        await supervisor!.enable(!existing);
-      } else if (action === "stop" || action === "restart" || action === "disable") {
-        if (existing) {
-          try { await existing.client.request("service.stop", { serviceEpoch: existing.hello.serviceEpoch, force }); }
-          finally { existing.client.close(); }
-          // Do not mistake the old listener for the replacement during restart.
-          let closed = false;
-          for (let n = 0; n < 600; n++) {
-            let view: Awaited<ReturnType<typeof connect>>;
-            try { view = await connect(); }
-            catch (error) {
-              if (!["service_disconnected", "ECONNRESET", "EPIPE"].includes(String((error as NodeJS.ErrnoException).code))) throw error;
-              await delay(100); continue;
-            }
-            if (!view) { closed = true; break; }
-            view.client.close();
-            if (view.hello.serviceEpoch !== existing.hello.serviceEpoch) throw new Error("Service instance changed during shutdown; refusing further management");
-            await delay(100);
-          }
-          if (!closed) throw new Error("Old service endpoint remains; refusing supervisor teardown/replacement");
-          await supervisor?.waitStopped();
-        } else await supervisor?.assertStopped();
-        await requireNoClaim();
-        if (action === "disable") await supervisor?.disable();
-        if (action !== "restart") {
-          const message = action === "disable" ? "Server shut down successfully; startup disabled."
-            : existing ? "Server shut down successfully." : "Server is already stopped.";
-          console.log(terminalText(message, "22;32", process.stdout)); return;
-        }
-      } else if (existing) {
-        existing.client.close();
-        await reportStarted(existing.hello, true); return;
-      }
-      if (action !== "enable") {
-        await requireNoClaim();
-        if (supervisor) {
-          await (await privateLog()).close();
-          await supervisor.configurePort(flags.has("--port") ? port : undefined);
-          await supervisor.start();
-        }
-        else {
-          const log = await privateLog();
-          try {
-            const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "run", "--channel", channel, "--root", root, "--app-root", options.appRoot, ...extraArgs],
-              { detached: true, cwd: options.appRoot, stdio: ["ignore", log.fd, log.fd], env: { ...process.env, PI_BINARY: binary! } });
-            child.once("exit", (code, signal) => { startupExit = `code ${code}, signal ${signal}`; });
-            await new Promise<void>((done, fail) => { child.once("spawn", done); child.once("error", fail); });
-            child.unref();
-          } finally { await log.close(); }
-        }
-      }
-      for (let n = 0; n < 600; n++) {
-        if (startupExit) throw new Error(`Service exited during startup (${startupExit}); inspect ${join(root, "service.log")}`);
-        const view = await connect(true);
-        if (view) {
-          view.client.close(); await assertManagementOwner(view.hello);
-          if (view.hello.stopping) throw new Error("Discovered service is stopping; no replacement started");
-          await reportStarted(view.hello, action === "enable" && !!existing, action === "enable" ? await supervisor!.status() : undefined); return;
-        }
-        await delay(100);
-      }
-      throw new Error(`Service did not become ready; inspect ${join(root, "service.log")}. Existing claims require explicit reconcile, never automatic removal.`);
-    } finally { await unlock(); }
+    const result = await manageService(action as ManagementAction, options, { force,
+      port: flags.has("--port") ? port : undefined, supervisorDirectory: flags.get("--supervisor-dir"), path: flags.get("--path") });
+    if (result.hello) await reportStarted(result.hello, result.alreadyRunning, result.startup);
+    else if (result.message) console.log(terminalText(result.message, "22;32", process.stdout));
+    return;
   }
   if (action === "status") {
     const supervisor = await ServiceSupervisor.load(root, channel, options.appRoot, flags.get("--supervisor-dir"));

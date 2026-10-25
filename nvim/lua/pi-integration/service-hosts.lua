@@ -801,9 +801,79 @@ end
 function M.select_host(callback)
 	pick_host(function(host) with_connected_host(host, callback) end)
 end
+local function restart_supported(host)
+	return host.connected and vim.tbl_contains(host.hello.capabilities or {}, "service.restart")
+end
+local function restart_message(host, receipt)
+	if not receipt or receipt == vim.NIL then return host.alias .. ": no saved restart outcome" end
+	local message = host.alias .. ": server restart " .. receipt.status .. " (" .. receipt.id .. ")"
+	if receipt.error then message = message .. "\n" .. receipt.error.message end
+	if receipt.result then message = message .. "\nBuild: " .. receipt.result.buildId end
+	return message
+end
+local restart_server
+local function poll_restart(host, pending)
+	if host.restart ~= pending then return end
+	if hosts[host.key] ~= host or host.target.enabled == false then host.restart = nil; return end
+	if vim.uv.hrtime() / 1e6 > pending.deadline then
+		host.restart = nil
+		notify(host.alias .. ": restart outcome unconfirmed. Use Last server restart or inspect service.log. Request " .. pending.id .. ". Restart was not replayed.")
+		return
+	end
+	if host.connected and host.connection and pending.connection ~= host.connection then pending.reading = false end
+	if host.connected and host.connection and not pending.reading then
+		pending.reading, pending.connection = true, host.connection
+		host.connection.request("service.restart.status", { serviceEpoch = pending.epoch, id = pending.id }, function(ok, receipt)
+			pending.reading = false
+			if host.restart ~= pending or not ok or not receipt or receipt == vim.NIL then return end
+			if receipt.status == "failed" then
+				host.restart = nil
+				notify(restart_message(host, receipt))
+				if receipt.error and receipt.error.code == "session_busy" and not pending.force then
+					vim.ui.select({ "Cancel", "Force restart server" }, { prompt = host.alias .. ": interrupt owned work? History/workspaces kept; sessions stay stopped." }, function(choice)
+						if choice == "Force restart server" then restart_server(host, true) end
+					end)
+				end
+			elseif receipt.status == "completed" then
+				if host.hello.serviceEpoch == receipt.result.serviceEpoch and host.hello.buildId == receipt.result.buildId then
+					host.restart = nil
+					notify(restart_message(host, receipt) .. "\nReconnect saved conversations explicitly; frontend restart remains separate.")
+				else stop(host); host.retry_at = nil; M.refresh() end
+			end
+		end)
+	elseif not host.connected then host.retry_at = nil; M.refresh() end
+	vim.defer_fn(function() poll_restart(host, pending) end, 1000)
+end
+restart_server = function(host, force)
+	if not restart_supported(host) then notify("Connect to a server supporting frontend restart first"); return end
+	if host.restart then notify("A restart is pending. Use Last server restart; it will not be replayed."); return end
+	local identity, epoch, connection = host.host_id, host.hello.serviceEpoch, host.connection
+	local label = force and "Force restart server" or "Restart server"
+	vim.ui.select({ "Cancel", label }, { prompt = label .. " on " .. host_label(host) .. " [" .. channel .. "]? "
+		.. (force and "Interrupts owned work. " or "Active work refuses. ") .. "Saved sessions stay stopped." }, function(choice)
+		if choice ~= label then return end
+		if host.host_id ~= identity or host.connection ~= connection or host.hello.serviceEpoch ~= epoch then notify("Host connection changed; select restart again"); return end
+		local pending = { id = uid(), epoch = epoch, force = force == true, deadline = vim.uv.hrtime() / 1e6 + 120000 }
+		host.restart = pending
+		connection.request("service.restart", { id = pending.id, serviceEpoch = epoch, hostId = identity, confirmed = true, force = pending.force }, function(ok, result)
+			if not ok then
+				if result.code and result.code ~= "disconnected" and result.code ~= "service_disconnected" then host.restart = nil end
+				notify(result.message .. "\nRequest " .. pending.id .. ". Restart was not replayed.")
+			end
+		end)
+		poll_restart(host, pending)
+	end)
+end
+local function last_restart(host)
+	if not restart_supported(host) then notify("Connect to a server supporting restart status first"); return end
+	host.connection.request("service.restart.status", {}, function(ok, receipt)
+		if not ok then notify(receipt.message); return end
+		notify(restart_message(host, receipt))
+	end)
+end
 function M.picker(on_attach)
 	pick_host(function(host)
-		local actions = { "Connect/retry", "Disconnect", "Edit alias", "Edit / confirm identity", "Forget" }
+		local actions = { "Connect/retry", "Disconnect", "Restart server", "Last server restart", "Edit alias", "Edit / confirm identity", "Forget" }
 		if on_attach then table.insert(actions, 1, "Attach current frontend") end
 		vim.ui.select(actions, { prompt = host.alias }, function(action)
 			if action == "Attach current frontend" then
@@ -829,6 +899,8 @@ function M.picker(on_attach)
 					for _, source in pairs(hosts) do if source == host or host.host_id and source.host_id == host.host_id then stop(source, true) end end
 					M.refresh()
 				end
+			elseif action == "Restart server" then restart_server(host, false)
+			elseif action == "Last server restart" then last_restart(host)
 			elseif action == "Edit alias" then
 				vim.ui.input({ prompt = "Host alias: ", default = host.alias }, function(alias)
 					if not alias or vim.trim(alias) == "" or alias:find("%c") then return end

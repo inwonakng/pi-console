@@ -39,6 +39,7 @@ export class ServiceClient {
             this.pending.delete(record.id);
             if (record.success === true) pending.resolve(record.result);
             else pending.reject(Object.assign(new Error(record.error?.message || "Service request failed"), {
+              code: record.error?.code,
               delivery: record.error?.delivery || (record.error?.code === "service_disconnected" ? "uncertain" : "rejected"),
             }));
           } else {

@@ -112,6 +112,27 @@ previous status snapshot. `--force` is intentional authorization to interrupt
 owned work; an in-flight host lifecycle admission can still refuse and require
 an explicit retry. Idle sessions are stopped and saved, not resumed on restart.
 
+Neovim Hosts (`<leader>ph`) and the web Hosts panel offer a confirmed Restart
+server action for local or connected hosts. `service.restart` accepts only the
+current host ID/epoch, a request ID, explicit confirmation and a force boolean.
+A detached coordinator uses the same guarded management path as the CLI, selects
+the target installation's current build and records its outcome in private
+`service-restart.json`. `service.restart.status` reads the original request
+(`serviceEpoch`/`id`), or the latest durable outcome with an empty payload.
+Frontends reconnect and verify the replacement epoch/build without replaying the
+mutation or automatically resuming saved sessions. Last server restart / Last
+restart inspects the latest outcome. A failed replacement can require shell-based
+inspection of the service log, outcome and retained claims. Installation and
+frontend restart remain separate.
+
+Restart/status are exposed on unauthenticated direct and registered-host streams,
+under the same trusted-network restrictions as session control. `service.stop`
+remains local-only. In-epoch request IDs are deduplicated (128 attempts per owner);
+only the latest durable restart outcome is retained across owners. An unresolved
+accepted outcome blocks another frontend restart; it is never treated
+as permission to replay or reconcile. The coordinator detaches its IPC before
+shutdown and requires the existing systemd `KillMode=process` policy.
+
 ```sh
 pi-console server enable
 pi-console server status
@@ -475,7 +496,7 @@ selected service build; it never silently restarts a different running build.
 
 Methods: `health`, `sessions`, `host.command`, `host.status`, `attach`, `detach`,
 `snapshot`, typed `session.read`, `resource.read`, `resource.complete`, `host.directories`, `command`, `grant`, `heartbeat`, `command.status`, `effect.inspect`,
-`service.stop` (local-only). All have typed allowlisted fields; raw RPC is rejected. A connection
+`service.restart`, `service.restart.status`, and `service.stop` (local-only). All have typed allowlisted fields; raw RPC is rejected. A connection
 owns at most one subscription. `command` accepts the existing version-1 session
 command **without** `attachmentId`; the service stamps its own transport attachment
 and rejects caller-supplied attachment IDs or other targets. Tokens are returned only

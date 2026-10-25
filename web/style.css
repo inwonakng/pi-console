@@ -79,7 +79,8 @@ label { font-size: 12px; color: var(--muted); }
 #hosts { display: grid; padding: 0 12px; color: var(--muted); font-size: 12px; }
 .host-state { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 0; border-top: 1px solid var(--border); }
 .host-state span { overflow-wrap: anywhere; min-width: 0; }
-.host-error { flex-basis: 100%; color: var(--danger); overflow-wrap: anywhere; }
+.host-message, .host-error { flex-basis: 100%; overflow-wrap: anywhere; }
+.host-error { color: var(--danger); }
 #session-list { border-top: 1px solid var(--border); }
 .empty { padding: 24px; font-size: 12px; }
 .session-row { display: grid; gap: 6px; padding: 18px 24px; border-bottom: 1px solid var(--border); border-left: 3px solid transparent; text-decoration: none; color: inherit; }

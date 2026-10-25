@@ -54,7 +54,10 @@ dev), including local root profiles. Saved host identity pins and the selected
 channel are validated before attachment. The browser cannot supply another endpoint
 or modify registrations; manage registrations through pi-console's Hosts picker.
 Existing non-browser clients remain available regardless of the web frontend
-setting. Service administration stays on local IPC, including for relayed profiles.
+setting. Confirmed server restart and read-only restart status are available on
+direct and registered-host streams. Stop and other service administration remain
+local-IPC-only. Anyone with access to these unauthenticated streams can also
+request a restart; use the same trusted-network restrictions as session control.
 
 `client.js` uses the existing protocol-1 LF-delimited JSON records, including
 binary WebSocket frames. The listener embeds its channel in the served HTML; the
@@ -63,6 +66,18 @@ Session operations use the existing service protocol. Session links use
 `/#sessions/<host-id>/<session-id>` so asset serving needs no deep-route fallback.
 
 ## Behavior
+
+The Hosts panel offers Restart server and Last restart for capable servers.
+Restart applies the build already installed on the selected host/channel; it does
+not install updates or reload this browser page. Active work refuses normally. A
+separate force confirmation authorizes interrupting owned work, preserving history
+and workspaces. Saved conversations remain stopped until explicitly resumed.
+The page reconnects to inspect the original request and reports completion only
+when the replacement host, server instance and build match. A lost connection
+never resends restart. Drafts remain in the current page; do not reload it to
+reconnect. Last restart reads the latest durable outcome, including after a page
+reload. If the server cannot return, inspect its private service.log and
+service-restart.json on that host before retrying.
 
 The permanent Overview tab shows open sessions across the serving host and its
 registered hosts, with search and host filtering. Stopped sessions are available

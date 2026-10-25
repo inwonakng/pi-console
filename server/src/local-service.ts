@@ -10,6 +10,7 @@ import { identifier } from "./host-commands.js";
 import { object } from "./pi-records.js";
 import { CAPABILITIES, MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWriter } from "./local-protocol.js";
 import { serviceBuild } from "./service-paths.js";
+import { ServiceRestart } from "./service-restart.js";
 import { readExtensionSettings } from "../../pi/extensions/shared/read-extension-settings.mjs";
 
 export const endpoint = (root: string): string => join(root, "service.sock");
@@ -27,6 +28,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
   const webRoot = webSettings?.enabled ? join(options.appRoot, "web") : undefined;
   const buildId = await serviceBuild();
   const owner = await HostOwner.open(options);
+  const restarts = new ServiceRestart(options, owner.hostId, owner.serviceEpoch);
   const clients = new Set<Socket>();
   const summaryStops = new Set<() => void>();
   let remote: RemoteListener | undefined;
@@ -223,6 +225,20 @@ export async function runService(options: HostOwnerOptions & { root: string; por
             return;
           }
           case "detach": exact(p, []); detach(); result = {}; break;
+          case "service.restart": {
+            exact(p, ["id", "serviceEpoch", "hostId", "force", "confirmed"]);
+            if (stopping) throw new CommandError("session_busy", "Service is stopping");
+            result = await restarts.request(p);
+            break;
+          }
+          case "service.restart.status":
+            exact(p, ["serviceEpoch", "id"]);
+            if (p.serviceEpoch === undefined && p.id === undefined) result = await restarts.latest();
+            else {
+              if (!identifier(p.serviceEpoch) || !identifier(p.id)) throw new CommandError("invalid_command", "Invalid restart lookup");
+              result = await restarts.status(p.serviceEpoch, p.id);
+            }
+            break;
           case "service.stop":
             exact(p, ["serviceEpoch", "force"]);
             if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Service epoch changed");
