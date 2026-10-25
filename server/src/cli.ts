@@ -45,20 +45,26 @@ async function main(): Promise<void> {
   const action = args.shift();
   const flags = new Map<string, string>();
   let force = false;
+  let startupBinary: string | undefined;
   while (args.length) {
     const key = args.shift()!;
     if (key === "--force") { force = true; continue; }
+    // Existing startup definitions pinned Pi in argv. New definitions use the
+    // captured environment; retain run-only decoding so updates still boot.
+    if (action === "run" && key === "--binary" && args.length && startupBinary === undefined) {
+      startupBinary = args.shift(); continue;
+    }
     // Old OS startup definitions can still contain this flag until re-registration.
     if (action === "run" && key === "--tls-config" && args.length) {
       args.shift(); console.error("Ignoring obsolete --tls-config; serving HTTP without credentials on the default port unless --port is set."); continue;
     }
-    if (!["--channel", "--root", "--binary", "--app-root", "--cwd", "--session", "--id", "--provider", "--model", "--port", "--supervisor-dir", "--path"].includes(key) || !args.length || flags.has(key)) throw new Error(`Invalid service argument: ${key}`);
+    if (!["--channel", "--root", "--app-root", "--cwd", "--session", "--id", "--provider", "--model", "--port", "--supervisor-dir", "--path"].includes(key) || !args.length || flags.has(key)) throw new Error(`Invalid service argument: ${key}`);
     flags.set(key, args.shift()!);
   }
   const channel = flags.get("--channel") ?? process.env.PI_CONSOLE_CHANNEL ?? "stable";
   if (channel !== "stable" && channel !== "dev") throw new Error("Channel must be stable or dev");
   const root = resolve(flags.get("--root") ?? defaultRoot(channel));
-  const binary = flags.get("--binary") ?? process.env.PI_BINARY;
+  const binary = startupBinary ?? process.env.PI_BINARY;
   const options = { root, channel: channel as Channel, binary: binary ?? "", appRoot: await realpath(flags.get("--app-root") ?? applicationRoot()),
     provider: flags.get("--provider") ?? process.env.PI_PROVIDER, model: flags.get("--model") ?? process.env.PI_MODEL };
   const assertManagementOwner = async (hello: Record<string, unknown>): Promise<void> => {
@@ -101,7 +107,7 @@ async function main(): Promise<void> {
   }
   if (action === "run") {
     await managementIdentity(options.appRoot, channel);
-    if (!binary || !isAbsolute(binary)) throw new Error("Pi >=1.3.0 is required to run a local server. Install Pi and provide an absolute --binary path (or PI_BINARY).");
+    if (!binary || !isAbsolute(binary)) throw new Error("Pi >=1.3.0 is required to run a local server. Install Pi and make sure pi is available on PATH.");
     await runService({ ...options, port }); return;
   }
   if (["start", "stop", "restart", "enable", "disable"].includes(action ?? "")) {
@@ -124,7 +130,7 @@ async function main(): Promise<void> {
       // Check start configuration before stopping a healthy owner.
       if ((action === "enable" || action === "restart" || action === "start" && !existing) && !supervisor) {
         try {
-          if (!binary || !isAbsolute(binary)) throw new Error("Pi >=1.3.0 is required to start a local server. Install Pi and provide an absolute --binary path (or PI_BINARY).");
+          if (!binary || !isAbsolute(binary)) throw new Error("Pi >=1.3.0 is required to start a local server. Install Pi and make sure pi is available on PATH.");
           checkPi(binary);
         } catch (error) { existing?.client.close(); throw error; }
       }
@@ -182,8 +188,8 @@ async function main(): Promise<void> {
         else {
           const log = await privateLog();
           try {
-            const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "run", "--channel", channel, "--root", root, "--binary", binary!, "--app-root", options.appRoot, ...extraArgs],
-              { detached: true, cwd: options.appRoot, stdio: ["ignore", log.fd, log.fd], env: process.env });
+            const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "run", "--channel", channel, "--root", root, "--app-root", options.appRoot, ...extraArgs],
+              { detached: true, cwd: options.appRoot, stdio: ["ignore", log.fd, log.fd], env: { ...process.env, PI_BINARY: binary! } });
             child.once("exit", (code, signal) => { startupExit = `code ${code}, signal ${signal}`; });
             await new Promise<void>((done, fail) => { child.once("spawn", done); child.once("error", fail); });
             child.unref();
@@ -218,7 +224,7 @@ async function main(): Promise<void> {
     finally { view.client.close(); }
     return;
   }
-  if (!["create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|enable|disable|reconcile|list|create|resume} [--channel stable|dev] [--root PATH] [--binary ABSOLUTE_PI] [--port PORT] [--force] [--cwd PATH|--session ID] [--id COMMAND_ID]");
+  if (!["create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|enable|disable|reconcile|list|create|resume} [--channel stable|dev] [--root PATH] [--port PORT] [--force] [--cwd PATH|--session ID] [--id COMMAND_ID]");
   const { client, hello } = await LocalClient.open(root, channel);
   try {
     let result: unknown;

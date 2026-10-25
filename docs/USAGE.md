@@ -39,7 +39,8 @@ only disconnects and removes its saved entry. See [service usage](../server/READ
 stop|restart|disable` saves/stops idle conversations but refuses active work,
 accepted queues, approvals and transitions. `--force` intentionally interrupts
 owned work while retaining data. Installation never enables startup; use `server
-enable --binary /absolute/path/to/pi` explicitly. Startup PATH is captured without
+enable` explicitly. Local startup discovers `pi` on PATH and requires Pi >=1.3.0;
+installation itself does not require Pi. Startup PATH is captured without
 shell rc files; login/logout and sleep constrain execution. See
 [environment and startup](../server/README.md#service-environment-and-startup).
 

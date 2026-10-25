@@ -8,7 +8,7 @@ export function checkPi(binary, environment = process.env) {
       env: environment, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
     }).trim();
   } catch {
-    throw new Error("Pi >=1.3.0 is required to run locally. Install Pi and select its executable with PI_BINARY or server --binary. Could not run: " + binary);
+    throw new Error("Pi >=1.3.0 is required to run locally. Install Pi and make sure pi is available on PATH. Could not run: " + binary);
   }
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
   if (!match || Number(match[1]) < 1 || Number(match[1]) === 1 && Number(match[2]) < 3) {

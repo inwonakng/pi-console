@@ -88,12 +88,12 @@ export class ServiceSupervisor {
       if (/[\0\r\n]/.test(value)) throw new Error("Supervisor paths/options must not contain NUL/newline characters");
     }
     const label = `dev.pi-console.${options.channel}.${createHash("sha256").update(options.root).digest("hex").slice(0, 16)}`;
-    const environment: Record<string, string> = { HOME: homedir(), PATH: options.path ?? process.env.PATH ?? "/usr/bin:/bin" };
+    const environment: Record<string, string> = { HOME: homedir(), PATH: options.path ?? process.env.PATH ?? "/usr/bin:/bin", PI_BINARY: await realpath(options.binary) };
     for (const key of ["USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "XDG_CONFIG_HOME", "PI_CODING_AGENT_DIR"]) if (process.env[key]) environment[key] = process.env[key]!;
     if (Object.values(environment).some((v) => /[\0\r\n]/.test(v))) throw new Error("Service environment must not contain NUL/newline characters");
     const supervisor = new ServiceSupervisor({ version: 1, platform: process.platform, root: options.root, channel: options.channel,
       owner: await managementIdentity(options.appRoot, options.channel), directory, label, node: await realpath(process.execPath), application,
-      args: ["--channel", options.channel, "--root", options.root, "--binary", await realpath(options.binary), ...options.extraArgs], environment });
+      args: ["--channel", options.channel, "--root", options.root, ...options.extraArgs], environment });
     await mkdir(directory, { recursive: true });
     const stat = await lstat(directory);
     if (!stat.isDirectory() || stat.uid !== process.getuid?.() || stat.mode & 0o022) throw new Error("Supervisor directory must be owned by this user and not writable by others");

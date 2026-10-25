@@ -27,14 +27,14 @@ npm run build
 
 Dependencies are locked. Pi is a development dependency for its exported RPC
 **types**, not an embedded SDK execution engine. Built JavaScript uses Node
-built-ins, the locked `ws` transport dependency and the repository's shared `pi/scripts/managed-process.mjs`; actual execution uses the explicitly selected installed Pi CLI.
+built-ins, the locked `ws` transport dependency and the repository's shared `pi/scripts/managed-process.mjs`; actual execution uses the installed Pi CLI discovered on PATH.
 Both installers build this package in a staged runtime, then prune build-only
 dependencies. `scripts/install.sh [--full|--server-only]` selects stable;
 `scripts/install-dev.sh [--full|--server-only]` selects an immutable dev snapshot.
 Mode is preserved when omitted. Old runtime trees remain unchanged across updates,
 including same-commit mode changes. Installation never starts/restarts services.
-Starting a local server requires an external Pi CLI >=1.3.0; startup checks it.
-Installers do not require Pi. Installing Pi later requires no pi-console reinstall,
+Installers do not require Pi. Local startup discovers an external `pi` CLI on PATH
+and fails if it is missing or older than 1.3.0. Installing Pi later requires no pi-console reinstall,
 and remote clients need no local Pi. Installers require Node >=22.19.0 and never
 modify those executables. Both installation modes require Git >=2.45.0 and verify
 `merge-tree --write-tree --merge-base` with raw tree operands, as used by workspace
@@ -58,9 +58,9 @@ profile; no state migration is performed. Frontend organization/drafts have sepa
 XDG-aware paths.
 
 ```sh
-# Independent execution host: no Neovim/tmux required. Use an absolute Pi binary.
-bin/pi-console server run --binary /absolute/path/to/pi
-bin/pi-console server start --binary /absolute/path/to/pi
+# Independent execution host: no Neovim/tmux required. Discovers pi on PATH.
+bin/pi-console server run
+bin/pi-console server start
 bin/pi-console server status
 bin/pi-console server list
 bin/pi-console server create --cwd /absolute/project --id explicit-request-id
@@ -83,7 +83,7 @@ attachment remains allowed. Legacy `--session PATH` files remain untouched; open
 those explicitly through `pi-stable`/`pi-dev --session PATH`, not a service identity.
 Missing service/build/version/channel errors do not start local Pi as a fallback.
 
-Normal `server stop` / `restart --binary ...` saves/stops idle sessions but refuses active
+Normal `server stop` / `restart` saves/stops idle sessions but refuses active
 work, accepted queues, approvals, startup/transitions or known managed nested work.
 An intentional `--force` interrupts owned work, retains history/workspaces and waits
 for managed cleanup. Cleanup failure exits the owner with its claim retained; it does
@@ -113,7 +113,7 @@ owned work; an in-flight host lifecycle admission can still refuse and require
 an explicit retry. Idle sessions are stopped and saved, not resumed on restart.
 
 ```sh
-pi-console server enable --binary /absolute/path/to/pi --path /opt/homebrew/bin:/usr/bin:/bin
+pi-console server enable
 pi-console server status
 pi-console server stop
 pi-console server start
@@ -156,13 +156,14 @@ selected code. Old runtime trees must remain while their processes run.
 Supervised processes run without a shell under `env -i`: HOME, PATH and available
 USER/LOGNAME/LANG/LC_ALL/TMPDIR/PI_CODING_AGENT_DIR are captured at enable time.
 `--path` overrides PATH and must include Node (for Pi's shebang) and required tool
-executables; Pi and Node use explicit resolved absolute paths. Provider,
-model and TLS configuration paths supplied at enable are retained. Shell rc files,
+executables. Pi is discovered from the invoking PATH, and Pi/Node paths are resolved
+and saved internally for startup. Provider, model and TLS configuration paths
+supplied at enable are retained. Shell rc files,
 frontend tmux variables, shell-exported API keys, SSH agent sockets and unrelated
 environment variables are not inherited. Store provider credentials/settings on
-the execution host through Pi's normal private agent directory. To change startup
-environment/binary/options, disable then enable again; repeating enable retains the
-registered configuration. Detached startup instead uses its invoking host shell
+the execution host through Pi's normal private agent directory. To change the
+captured startup environment, Pi installation or options, disable then enable
+again; repeating enable retains the registered configuration. Detached startup instead uses its invoking host shell
 environment, with worker frontend/tmux markers filtered by the owner. A frontend
 connecting to an existing service never changes its environment. Keep external Pi
 and Node resources unchanged during live work; installation does not upgrade them.
@@ -198,7 +199,7 @@ hostname and IPv4 addresses. Use a hostname or VPN IP reachable from the client;
 hostname resolution and firewall access are external.
 
 ```sh
-bin/pi-console server start --binary /absolute/path/to/pi
+bin/pi-console server start
 # On another machine, using the matching launcher channel:
 bin/pi-console --remote http://host.example:8443 --attach SESSION_ID
 ```

@@ -133,7 +133,7 @@ Old stable/dev runtime directories remain so running sessions are not disrupted.
 Neither installer starts/stops services or installs supervisor definitions. Ordinary
 full-client launches ensure an independent local service; overview/sidebar launches
 create no conversation. Startup is separately enabled with
-`pi-console[-dev] server enable --binary /absolute/path/to/pi`. Service status
+`pi-console[-dev] server enable` (discovers `pi` on PATH). Service status
 compares running `buildId` and `selectedBuildId`, reports `restartRequired`, and
 shows sessions/registration. Restart is explicit and guarded; it saves/stops idle
 sessions and never replays work or automatically resumes them. A selected update

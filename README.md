@@ -43,6 +43,7 @@ Install these before starting (both installers check versions and required capab
 Pi >=1.3.0 is required only to start a local server or run `pi-stable`/`pi-dev`.
 Both install modes include the server components without requiring Pi. Install Pi
 later without reinstalling pi-console, or connect to a remote server without local Pi.
+Local server startup discovers `pi` on PATH and fails if it is missing or too old.
 
 Initial setup downloads packages, plugins, and parsers, so it needs network
 access. A Nerd Font and true-color terminal are recommended.
@@ -92,7 +93,7 @@ For a specific release or a development checkout, see
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/inwonakng/pi-console/main/scripts/install.sh | bash -s -- --server-only
-pi-console server start --binary /absolute/path/to/pi
+pi-console server start
 ```
 
 Server-only mode needs no Neovim, tmux, fzf, Cargo or Tree-sitter tooling. It includes
@@ -107,7 +108,7 @@ Installation never enables startup. Enable it explicitly with macOS launchd or
 Linux user-systemd:
 
 ```sh
-pi-console server enable --binary /absolute/path/to/pi
+pi-console server enable
 pi-console server status
 pi-console server restart
 pi-console server disable
@@ -117,7 +118,7 @@ Normal stop/restart/disable refuses active work, queued prompts and approvals;
 `--force` intentionally interrupts owned work. Idle conversations are stopped and
 saved. Disable preserves histories, workspaces and credentials. Updates leave the
 running release pinned; status reports running/selected builds and restart needs.
-Startup captures an explicit PATH and Pi/Node paths, without shell initialization.
+Startup captures PATH and the discovered Pi/Node paths, without shell initialization.
 LaunchAgents require login; Linux execution after logout requires user lingering.
 Sleep suspends execution. See [service environment and startup](server/README.md#service-environment-and-startup).
 
