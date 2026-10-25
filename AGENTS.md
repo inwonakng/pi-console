@@ -21,4 +21,4 @@ The `TODO.md` is written by me and should not be editted. You can make suggestio
 ## Rules
 
 - No superfluous items in the transcript. things like compaction, emtpy session and error messages are fine. but statuses or other things should not be injected into the transcript. if you are not sure, ask.
-- Do not overengineer. think about 
+- Do not overengineer. if you think something will really be an issue in the future, bring it up to the user and explain what you are trying to solve. sometimes doing that itself can also help you realize you are overdoing it. 
