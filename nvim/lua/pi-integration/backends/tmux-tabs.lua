@@ -109,17 +109,19 @@ local function restore_formats(window, tab, current, changes)
 end
 
 function M.refresh(window, run, attempt)
-	local info, err = run({ "display-message", "-p", "-t", window,
-		"#{version}\t#{window_name}\t#{automatic-rename}\t#{" .. option .. "}" }, true)
-	if not info then return nil, err end
-	info = info:gsub("\n$", "")
+	local boundary = "pi-console-panes-" .. vim.uv.hrtime()
+	local output, err = run({ "display-message", "-p", "-t", window,
+		"#{version}\t#{window_name}\t#{automatic-rename}\t#{" .. option .. "}",
+		";", "display-message", "-p", boundary,
+		";", "list-panes", "-t", window, "-F", "#{pane_id}\t#{pane_dead}\t#{@pi_sidebar}\t#{@pi_console}" }, true)
+	if not output then return nil, err end
+	local sections = vim.split(output, boundary .. "\n", { plain = true })
+	if #sections ~= 2 then return nil, "Unexpected tmux pane metadata" end
+	local info, pane_output = sections[1]:gsub("\n$", ""), sections[2]
 	local version, name, automatic, payload = info:match("^(.-)\t(.-)\t(.-)\t(.*)$")
 	if not name then return nil, "Unexpected tmux window metadata" end
 	local previous = json.decode_object(payload)
 	local tab = previous and previous.version == 2 and vim.deepcopy(previous) or { version = 2, formats = {} }
-	local pane_output, pane_err = run({ "list-panes", "-t", window, "-F",
-		"#{pane_id}\t#{pane_dead}\t#{@pi_sidebar}\t#{@pi_console}" }, true)
-	if not pane_output then return nil, pane_err end
 	local entries, pane_count = {}, 0
 	for line in pane_output:gmatch("[^\n]+") do
 		local pane, dead, sidebar, value = line:match("^(%%%d+)\t(%d)\t(.-)\t(.*)$")

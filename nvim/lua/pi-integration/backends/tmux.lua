@@ -5,6 +5,7 @@ local option = "@pi_console"
 local tab_option = "@pi_console_tab"
 local owner_pane
 local owner_window
+local pending_launches = {}
 local publication, pending_snapshot, pending_heartbeat, last_published
 local last_publication, last_tab_refresh = -math.huge, -math.huge
 
@@ -26,6 +27,14 @@ local function command(args, raw)
 	local argv = { "tmux" }
 	vim.list_extend(argv, args)
 	return command_result(vim.system(argv, { text = true }):wait(2000), raw)
+end
+
+local function command_async(args, callback)
+	local argv = vim.list_extend({ "tmux" }, args)
+	local ok, process = pcall(vim.system, argv, { text = true, timeout = 2000 }, vim.schedule_wrap(function(result)
+		callback(command_result(result))
+	end))
+	if not ok then vim.schedule(function() callback(nil, tostring(process)) end) end
 end
 
 local list_args = { "list-panes", "-a", "-F", "#{pane_id}\t#{session_id}\t#{window_id}\t#{pane_dead}\t#{" .. option .. "}" }
@@ -73,14 +82,9 @@ function M.list()
 end
 
 function M.list_async(callback)
-	local argv = vim.list_extend({ "tmux" }, list_args)
-	local ok, process = pcall(vim.system, argv, { text = true, timeout = 2000 }, vim.schedule_wrap(function(result)
-		local output, err = command_result(result)
+	command_async(list_args, function(output, err)
 		callback(output and parse_instances(output) or nil, err)
-	end))
-	if not ok then
-		vim.schedule(function() callback(nil, tostring(process)) end)
-	end
+	end)
 end
 
 function M.is_focused()
@@ -199,43 +203,28 @@ function M.close_sidebar()
 	for _, pane in ipairs(sidebars) do command({ "kill-pane", "-t", pane }) end
 end
 
-local function launch_window(shell_command, cwd, entry)
-	local session, session_err = command({ "display-message", "-p", "-t", vim.env.TMUX_PANE, "#{session_id}" })
-	if not session then return nil, session_err end
-	local name = "New Session"
-	local target, err = command({ "new-window", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}", "-t", session .. ":", "-n", name, "-c", cwd, shell_command })
-	if not target then
-		return nil, err
-	end
-	local pane, pid = target:match("^(%%%d+)\t(%d+)$")
-	if not pane then
-		return nil, "Could not identify the new conversation pane"
-	end
-	local marked, mark_err = command({ "set-option", "-wo", "-t", pane, tab_option, json.encode({ pane = pane, name = name }) })
-	if not marked then
-		return nil, mark_err
-	end
-	-- Reserve the session while Neovim starts, so a second selection focuses
-	-- this window instead of opening the same history again. -o never replaces
-	-- a snapshot already published by the new instance.
-	command({
-		"set-option",
-		"-po",
-		"-t",
-		pane,
-		option,
-		json.encode(vim.tbl_extend("force", {
-			version = 1,
-			build = build_info.snapshot(),
-			pid = tonumber(pid),
-			updated = os.time(),
-			cwd = cwd,
-			status = "Starting",
-			is_starting = true,
-			activity = "Starting pi-console",
-		}, entry)),
-	})
-	return M.focus(pane)
+local function launch_window(shell_command, cwd, entry, callback)
+	command_async({ "display-message", "-p", "-t", vim.env.TMUX_PANE, "#{session_id}" }, function(session, session_err)
+		if not session then callback(nil, session_err); return end
+		local name = "New Session"
+		command_async({ "new-window", "-d", "-P", "-F", "#{pane_id}\t#{pane_pid}", "-t", session .. ":", "-n", name, "-c", cwd, shell_command }, function(target, err)
+			if not target then callback(nil, err); return end
+			local pane, pid = target:match("^(%%%d+)\t(%d+)$")
+			if not pane then callback(nil, "Could not identify the new conversation pane"); return end
+			-- Reserve before focusing. -o preserves any metadata the new editor
+			-- has already published. The pane is in the launching session, so no
+			-- cross-session client discovery is needed here.
+			command_async({
+				"set-option", "-wo", "-t", pane, tab_option, json.encode({ pane = pane, name = name }),
+				";", "set-option", "-po", "-t", pane, option,
+				json.encode(vim.tbl_extend("force", {
+					version = 1, build = build_info.snapshot(), pid = tonumber(pid), updated = os.time(),
+					cwd = cwd, status = "Starting", is_starting = true, activity = "Starting pi-console",
+				}, entry)),
+				";", "select-window", "-t", pane, ";", "select-pane", "-t", pane,
+			}, callback)
+		end)
+	end)
 end
 
 function M.launch_service(launcher, target, session_id, cwd, resume)
@@ -251,9 +240,18 @@ function M.launch_service(launcher, target, session_id, cwd, resume)
 		vim.list_extend(args, { "--remote", target.service_remote })
 	elseif target.service_root then vim.list_extend(args, { "--root", target.service_root }) end
 	local shell_command = table.concat(vim.tbl_map(vim.fn.shellescape, args), " ")
+	-- Keep repeated selections from racing the asynchronous pane reservation.
+	local key = session_id and json.encode({ target.service_remote or "", target.service_root or "", session_id })
+	if key and pending_launches[key] then return true end
+	if key then pending_launches[key] = true end
 	-- This is a local frontend window; an owner's cwd is never a local tmux path.
-	return launch_window(shell_command, vim.fn.getcwd(), { frontend_attachment = true,
-		host_id = target.expected_host, session_id = session_id, title = "Conversation" })
+	launch_window(shell_command, vim.fn.getcwd(), { frontend_attachment = true,
+		host_id = target.expected_host, session_id = session_id, title = "Conversation" }, function(opened, err)
+		if key then pending_launches[key] = nil end
+		if not opened then require("pi-integration.logs").notify(err, vim.log.levels.ERROR) end
+	end)
+	-- Success means launch accepted; asynchronous failures are reported above.
+	return true
 end
 
 function M.start_overview()

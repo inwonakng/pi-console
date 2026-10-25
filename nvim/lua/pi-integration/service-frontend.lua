@@ -39,7 +39,7 @@ local approval_win, approval_request, heartbeat
 local approval_context, pending_context
 local pending_seen, pending_replies = {}, {}
 local ctx, sync_pending
-local recovery_id, backup_scheduled, restarting_frontend
+local recovery_id, backup_scheduled, restarting_frontend, frontend_leaving
 local render, refresh, connect, attach, acquire_control, recover_selection, tree_ctx, advance_start, host_options, backup
 local side_buf, side_input_buf, side_context, side_id
 local side_permission_state, side_permission_items = {}, {}
@@ -63,6 +63,7 @@ local function status_data(key)
 	return ok and value or nil
 end
 local function publish_attachment(heartbeat_only)
+	if frontend_leaving then return end
 	local tmux = require("pi-integration.backends.tmux")
 	if M.config.role ~= "conversation" or not tmux.available() then return end
 	local pi_state = snapshot and snapshot.piState or {}
@@ -652,6 +653,7 @@ local function update_status_state()
 end
 ctx.transcript.metadata_lines = function() return transcript.metadata_lines(ctx) end
 render = function(metadata_only)
+	if frontend_leaving then return end
 	-- A pending open may detach this frontend. Finish the current state update first.
 	if pending_new_session then vim.schedule(function() sync_new_session() end) end
 	if not valid(state.transcript_buf) then return end
@@ -1177,7 +1179,6 @@ connect = function(automatic)
 			local close = value.update.closeFrontend
 			if close and close.attachmentId == attachment and hello and value.update.serviceEpoch == hello.serviceEpoch then
 				if backup() and can_close_frontend() then
-					M.detach()
 					vim.cmd("qall!")
 				end
 				return
@@ -1813,24 +1814,14 @@ function M.close_unstarted(expected_pid)
 	end)
 	return true
 end
-function M.quit()
-	if not session_id then return M.detach_frontend() end
-	local captured = stamp()
-	vim.ui.select({ "Detach", "Stop", "Cancel" }, { prompt = "Close frontend:" }, function(choice)
-		if choice == "Stop" then
-			if not same_selection(captured) then notify("Session changed; choose the action again."); return end
-			M.kill_session()
-		elseif choice == "Detach" then M.detach_frontend() end
-	end)
-end
-function M.kill_session()
+local function kill_session(confirmed)
 	if kill_pending then notify("Stop already pending; no duplicate request sent."); return end
 	if not can_kill_session() then notify("Stop requires control of a live session (:PiControl)."); return end
 	if not can_close_frontend() then return end
 	local captured, label = stamp(), "Stop session"
 	kill_pending = captured
 	captured.status = "confirming"
-	vim.ui.select({ label, "Cancel" }, { prompt = "Stop session and close its controller?" }, function(choice)
+	local function stop(choice)
 		if kill_pending ~= captured then return end
 		if choice ~= label or not current(captured) or not can_kill_session() or not can_close_frontend() then
 			kill_pending = nil
@@ -1851,12 +1842,29 @@ function M.kill_session()
 			if receipt.status == "uncertain" then captured.status = "unknown" else kill_pending = nil end
 			if receipt.status == "completed" then
 				local preserved = backup()
-				M.detach()
-				if preserved and can_close_frontend() then vim.cmd("qall!") end
+				if preserved and can_close_frontend() then vim.cmd("qall!")
+				else M.detach() end
 			else render() end
 		end)
 		if sent then notify("Stopping session...")
 		else kill_pending = nil; render() end
+	end
+	if confirmed then stop(label)
+	else vim.ui.select({ label, "Cancel" }, { prompt = "Stop session and close its controller?" }, stop) end
+end
+function M.kill_session()
+	kill_session(false)
+end
+function M.quit()
+	if not session_id then return M.detach_frontend() end
+	local captured = stamp()
+	vim.ui.select({ "Detach", "Stop", "Cancel" }, { prompt = "Close frontend (Stop ends the session):" }, function(choice)
+		if choice == "Stop" then
+			action_connection.run(function()
+				if not same_selection(captured) then notify("Session changed; choose the action again."); return end
+				kill_session(true)
+			end)
+		elseif choice == "Detach" then M.detach_frontend() end
 	end)
 end
 function M.new_session_window()
@@ -2586,6 +2594,9 @@ function M.open(restore)
 	publish_attachment()
 end
 vim.api.nvim_create_autocmd("VimLeavePre", { callback = function()
+	-- Detach still resolves local state, but must not publish a new tmux status
+	-- just before clear() drains and removes the existing publication.
+	frontend_leaving = true
 	if visibility_timer then visibility_timer:stop(); visibility_timer:close(); visibility_timer = nil end
 	if refresh_timer then refresh_timer:stop(); refresh_timer:close(); refresh_timer = nil end
 	if stats_timer then stats_timer:stop(); stats_timer:close(); stats_timer = nil end
