@@ -37,9 +37,12 @@ function setStatus(node, status) {
   node.dataset.state = status;
 }
 
+function renderNotice(node, message) {
+  node.replaceChildren(text("span", message, "notice-message"), button("Reload", () => location.reload()));
+  node.hidden = !message;
+}
 function notice(message = "") {
-  $("notice").textContent = message;
-  $("notice").hidden = !message;
+  renderNotice($("notice"), message);
 }
 async function perform(action) {
   notice();
@@ -588,8 +591,7 @@ function createConversation(host, row) {
     });
   }
   function notice(message = "") {
-    $("notice").textContent = message;
-    $("notice").hidden = !message;
+    renderNotice($("notice"), message);
   }
   function controlsCurrent() {
     return host.connected && row.live && connected && grant && owner?.controller?.attachmentId === attachment
