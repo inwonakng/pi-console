@@ -98,6 +98,7 @@ function M.timeline_messages(entries, session, snapshot)
 		local messages = {}
 		if not observed or ambiguous[observed_key] then
 			table.insert(messages, { role = "user", content = { { type = "text", text = text } } })
+			if status then table.insert(messages, { role = "custom", content = "> Submission: " .. status }) end
 		end
 		if error and error ~= "" then
 			table.insert(messages, { role = "error", content = { { type = "text", text = error } } })

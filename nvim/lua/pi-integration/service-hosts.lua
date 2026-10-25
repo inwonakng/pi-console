@@ -143,7 +143,7 @@ local function stop(host, force)
 	for _, callback in ipairs(waiters) do callback(false) end
 	-- Fence an attachment immediately, including local controller callbacks.
 	local frontend = package.loaded["pi-integration.service-frontend"]
-	if (was_connected or force) and frontend and frontend.host_disconnected then frontend.host_disconnected(host.host_id, M.target(host)) end
+	if (was_connected or force) and frontend and frontend.host_disconnected then frontend.host_disconnected(host.host_id, M.target(host), force == true) end
 end
 local function connect(host)
 	if host.connection or host.connecting or host.retry_at and vim.uv.now() < host.retry_at then return end

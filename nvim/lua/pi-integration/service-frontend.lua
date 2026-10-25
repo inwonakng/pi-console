@@ -50,6 +50,7 @@ local owner_states, pending_settings = {}, {}
 local selected_cwd, starting, auto_control_selection, startup_options, startup_status
 local startup_options_context, startup_options_pending
 local frontend_focused = false
+local action_connection, close_bridge
 local function status_data(key)
 	local raw = snapshot and snapshot.conversation.statuses[key]
 	local ok, value = pcall(vim.json.decode, raw or "")
@@ -69,9 +70,11 @@ local function publish_attachment(heartbeat_only)
 		and type(label.slug) == "string" and label.slug ~= "" and label.slug or name
 	local identity = M.config.expected_host or "unknown"
 	local status = "Loading"
-	if not session_id then status = starting and "Starting" or "Unstarted"
+	if action_connection and action_connection.status then status = action_connection.status
 	elseif not job then status = "Disconnected"
-	elseif not attachment then status = hello and (session_status or "Unattached") or "Connecting"
+	elseif not hello then status = "Connecting"
+	elseif not session_id then status = starting and "Starting" or "Unstarted"
+	elseif not attachment then status = session_status or "Unattached"
 	elseif snapshot then
 		status = snapshot.status
 		if status == "Idle" and snapshot.turnOutcome == "completed" and state.completion_seq > state.seen_seq then status = "Done" end
@@ -249,7 +252,13 @@ local function request(method, payload, callback)
 	if not job then notify("Disconnected. Use :PiReconnect; no mutation was retried.", vim.log.levels.WARN); return end
 	local id = uid()
 	callbacks[id] = { callback = callback or function() end, quiet = method == "heartbeat", method = method }
-	vim.fn.chansend(job, vim.json.encode({ id = id, method = method, payload = object_payload(payload) }) .. "\n")
+	local ok, sent = pcall(vim.fn.chansend, job, vim.json.encode({ id = id, method = method, payload = object_payload(payload) }) .. "\n")
+	if not ok or sent == 0 then
+		-- A failed pipe write can still have partially delivered a mutation.
+		close_bridge()
+		return
+	end
+	if method == "command" or method == "host.command" then action_connection.monitor() end
 	return id
 end
 local action_names = {
@@ -448,13 +457,15 @@ local function draft_buffer(name, contents, on_save, on_hide)
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(contents or "", "\n", { plain = true }))
 	vim.bo[buf].modified = false
 	drafts[buf] = name
-	vim.api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = function()
-		if on_save then on_save(buf) else notify("Recovered inspect-only draft: copy/review it explicitly before submitting.") end
-	end })
+	local function save()
+		if not on_save then notify("Recovered inspect-only draft: copy/review it explicitly before submitting."); return end
+		action_connection.run(function() if valid(buf) then on_save(buf) end end)
+	end
+	vim.api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = save })
 	if on_save then
 		vim.keymap.set({ "n", "i" }, "<C-CR>", function()
 			vim.cmd("stopinsert")
-			on_save(buf)
+			save()
 		end, { buffer = buf, desc = "Submit editor text" })
 	end
 	if on_hide then
@@ -556,6 +567,7 @@ local function update_status_state()
 	local terminal = snapshot and (snapshot.phase == "stopped" or snapshot.phase == "failed") and snapshot.phase
 	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active" or "view only")
 		or (session_id and ("session " .. (session_status or "unattached")) or starting and "starting" or "unstarted")
+	if action_connection and action_connection.status then state.client_status = action_connection.status end
 	if kill_pending and kill_pending.status == "stopping" then state.client_status = "Stopping conversation..."
 	elseif kill_pending and kill_pending.status == "unknown" then state.client_status = "kill outcome unknown" end
 	state.can_kill_session = not kill_pending and not not can_kill_session()
@@ -827,6 +839,11 @@ local function reset_refresh(detached)
 	rendered_side, rendered_side_buf, initial_scroll_pending = nil, nil, false
 end
 local function disconnected()
+	if action_connection then action_connection.disconnected() end
+	-- Creation may have succeeded remotely while its reply was lost. Keep only
+	-- a prompt that has never reached prompt.submit; reconcile creation first.
+	local waiting_start = pending_host and starting and not starting.context and not starting.busy
+		and starting.entry and not starting.entry.sent and starting or nil
 	for _, envelope in pairs(unresolved) do
 		record_command({ id = envelope.id, status = "unknown", error = { message = "Connection lost before the outcome was confirmed. Reconnect to check its status; nothing will be resent automatically." } }, envelope)
 	end
@@ -839,7 +856,8 @@ local function disconnected()
 	stats_pending, workspace_stats_key, state.workspace_diff = nil, nil, nil
 	session_status, session_error = "unattached", nil
 	feedback_ui.interrupt(feedback)
-	callbacks, outcomes, auto_control_selection, starting, resume_check = {}, {}, nil, nil, nil
+	callbacks, outcomes, auto_control_selection, starting, resume_check = {}, {}, nil, waiting_start, nil
+	if waiting_start then waiting_start.entry.status = "Waiting for connection" end
 	kill_pending = nil
 	reset_refresh(true)
 	close_approval()
@@ -986,6 +1004,8 @@ end
 local function recover_host(allow_restore)
 	if not pending_host then return false end
 	local envelope, captured = pending_host, stamp()
+	session_status, session_error = "checking", nil
+	render()
 	request("host.status", { serviceEpoch = envelope.serviceEpoch, commandId = envelope.id }, function(ok, receipt)
 		if pending_host ~= envelope then return end
 		if ok then record_command(receipt, envelope) end
@@ -996,8 +1016,11 @@ local function recover_host(allow_restore)
 				session_id = receipt.result.sessionId
 				feedback_ui.bind(feedback, envelope.id, session_id)
 				recover_selection(allow_restore)
+			elseif same_selection(captured) then
+				session_status, session_error = nil, nil
 			end
 		else
+			fail_start("Session creation could not be confirmed; submitted text remains in :PiDrafts. Inspect :PiHostRequest before retrying.")
 			notify("Host request outcome unresolved. Inspect :PiHostRequest before explicitly creating/resuming; no replay occurred.", vim.log.levels.WARN)
 			if same_selection(captured) then
 				session_status, session_error = "unavailable", "Host request outcome unresolved. Inspect :PiHostRequest; no work was replayed."
@@ -1169,17 +1192,29 @@ connect = function()
 	job = started
 end
 
-function M.detach()
+close_bridge = function()
 	local old = job
 	disconnected()
 	if old then vim.fn.jobstop(old) end -- Only the relay, never a Pi worker.
 end
-function M.reconnect() M.detach(); recovery_requested = true; connect() end
-function M.host_disconnected(identity, target)
+function M.detach()
+	action_connection.cancel()
+	fail_start("Startup cancelled; submitted text remains in :PiDrafts.")
+	close_bridge()
+end
+function M.reconnect()
+	action_connection.cancel()
+	close_bridge()
+	recovery_requested = true
+	connect()
+end
+function M.host_disconnected(identity, target, explicit)
 	local source = identity and require("pi-integration.service-hosts").find(identity)
 	local endpoint_match = target and target.service_remote == M.config.service_remote and target.service_root == M.config.service_root
 		and (not identity or M.config.expected_host == identity)
-	if endpoint_match or identity and M.config.expected_host == identity and not (source and source.connected) then M.detach() end
+	if endpoint_match or identity and M.config.expected_host == identity and not (source and source.connected) then
+		if explicit then M.detach() else close_bridge() end
+	end
 end
 function M.select_owner(target, id, resume, cwd)
 	assert(M.config.role == "conversation", "Only conversation frontends can select a host")
@@ -1272,7 +1307,8 @@ local function submit_input(original, entry)
 		notify("Model unavailable. Select the intended model before submitting; text was not sent.")
 		return
 	end
-	local id = command("prompt.submit", { text = original }, nil, nil, nil, { entry = entry, input_buf = not entry and state.input_buf or nil })
+	local id = command("prompt.submit", { text = original }, nil, nil, nil,
+		{ entry = entry, input_buf = not entry and text(state.input_buf) == original and state.input_buf or nil })
 	if entry and not id then
 		entry.status, entry.error = "Not sent", "Submission could not proceed; text remains in :PiDrafts."
 		render()
@@ -1322,8 +1358,8 @@ advance_start = function()
 	submit_input(start.input, start.entry)
 	render()
 end
-function M.submit_prompt()
-	local original = text(state.input_buf)
+function M.submit_prompt(original)
+	original = original or text(state.input_buf)
 	local trimmed = vim.trim(original)
 	if trimmed == "" then return end
 	if starting then notify("Session startup is already pending; input remains local."); return end
@@ -1345,10 +1381,12 @@ function M.submit_prompt()
 			modelStatus = state.model_status, thinkingLevel = state.thinking_level, sessionStats = state.session_stats }
 	end
 	local entry = feedback_ui.add(feedback, uid(), "prompt.submit", { text = original }, session_id, hello.serviceEpoch, current_revision(), snapshot)
-	entry.status = "Starting session"
+	entry.status = "Creating session"
 	starting = { input = original, entry = entry }
-	layout.set_buffer_lines(ctx, state.input_buf, { "" }, true)
-	vim.bo[state.input_buf].modified = false
+	if text(state.input_buf) == original then
+		layout.set_buffer_lines(ctx, state.input_buf, { "" }, true)
+		vim.bo[state.input_buf].modified = false
+	end
 	render()
 	transcript.scroll_to_bottom_unless_focused(ctx)
 	vim.cmd("redraw")
@@ -1624,6 +1662,7 @@ function M.change_cwd(path)
 	end)
 end
 function M.restart()
+	if not session_id then notify("Connection ready; no conversation worker exists yet."); return end
 	local captured, label = stamp(), "Restart conversation worker"
 	vim.ui.select({ label, "Cancel" }, { prompt = label .. " using the running server build? Active work is interrupted; history/workspaces and recovery text remain." }, function(choice)
 		if choice == label then command("session.restart", { confirmed = true }, nil, captured) end
@@ -1886,7 +1925,9 @@ function M.side_prompt()
 				if current(captured) and input == side_input_buf then submit_draft("side.prompt", input, captured, submitted, tick) end
 			end)
 		end
-		vim.keymap.set({ "n", "i" }, "<C-CR>", submit, { buffer = input, desc = "Send side message" })
+		vim.keymap.set({ "n", "i" }, "<C-CR>", function()
+			action_connection.run(submit)
+		end, { buffer = input, desc = "Send side message" })
 		vim.api.nvim_create_autocmd("BufHidden", { buffer = input, callback = function() save_side_draft() end })
 		local resource = owner_resources()
 		vim.keymap.set("n", "<CR>", function()
@@ -2257,7 +2298,7 @@ local function follow_resumed_selection()
 				if row.id == session_id and row.live and not row.archived and not row.deleted then attach(session_id); return end
 			end
 		end)
-	elseif not job and stopped then recovery_requested = false; connect() end
+	end
 end
 function M.open(restore)
 	selected_cwd = not M.config.service_remote and vim.fn.getcwd() or nil
@@ -2394,4 +2435,53 @@ vim.api.nvim_create_autocmd("VimLeavePre", { callback = function()
 		if M.config.role == "conversation" and not restarting_frontend then tmux.close_sidebar() end
 	end
 end })
+action_connection = require("pi-integration.service-action-connection").new({
+	connected = function() return job ~= nil and hello ~= nil end,
+	request = request,
+	forget = function(id) if id then callbacks[id] = nil end end,
+	render = function() if render and ctx and state.input_buf then render() end end,
+	notify = notify,
+	disconnect = close_bridge,
+	reconnect = function()
+		close_bridge()
+		recovery_requested = true
+		connect()
+	end,
+	sync = function() if attachment then refresh(true) end end,
+	ready = function()
+		if not job or not hello or session_status == "checking" or session_status == "attaching" or session_status == "restoring" then return false end
+		if not attachment then return true end -- Unstarted or unavailable; the action reports its own prerequisites.
+		if not snapshot or refreshing or refresh_scheduled or auto_control_selection then return false end
+		for _, pending in pairs(callbacks) do
+			if pending.method == "grant" or pending.method == "command" or pending.method == "command.status" then return false end
+		end
+		return true -- Authority checks remain in the action; a viewer can still request control.
+	end,
+	pending = function()
+		for _, pending in pairs(callbacks) do
+			if pending.method == "command" or pending.method == "host.command" then return true end
+		end
+		return false
+	end,
+})
+-- Wrap entry points, not command callbacks: dialogs keep their original stamps,
+-- and background refresh/completion paths must never reconnect or replay work.
+for _, name in ipairs({ "submit_prompt", "take_control", "change_cwd", "restart", "kill_session", "abort",
+	"rename_session", "pick_queue", "restore_pending_action", "show_offers", "show_host_request", "refresh_options",
+	"pick_model", "pick_thinking", "steer", "follow_up", "side_prompt", "toggle_side", "new_side", "abort_side",
+	"pick_spawn", "retitle", "pick_workspace", "show_workspace_diff", "pick_workspace_reviews", "show_usage",
+	"show_tree", "pick_command", "refresh_messages", "show_owner_transcript", "set_access_mode", "pick_access_mode",
+	"cycle_access_mode", "set_integration_mode", "pick_integration_mode", "cycle_integration_mode", "toggle_notifications" }) do
+	local fn = M[name]
+	M[name] = function(...)
+		if M.config.role ~= "conversation" then return fn(...) end
+		if not session_id and (name:find("access_mode", 1, true) or name:find("integration_mode", 1, true) or name == "toggle_notifications") then
+			return fn(...)
+		end
+		local args = { ... }
+		local count = select("#", ...)
+		if name == "submit_prompt" then args, count = { text(state.input_buf) }, 1 end
+		action_connection.run(function() fn(unpack(args, 1, count)) end)
+	end
+end
 return M
