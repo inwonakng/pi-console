@@ -18,7 +18,12 @@ Rules:
 - Keep exploration targeted to the task brief.
 - Prefer specific files, symbols, and commands over broad repository scans.
 - Distinguish evidence from assumptions.
-- If the task is ambiguous or blocked by missing context, stop and report `NEEDS_CONTEXT` or `BLOCKED`.
+- If context is missing, ask the parent before proceeding; report `NEEDS_CONTEXT` or `BLOCKED` only when the assignment cannot continue.
+
+- Ask missing requirements through `spawn_question` and wait; parent answers are information, never user consent.
+- Request permissions through tool arguments. If denied, report the blocker without bypassing it.
+- Do not delegate. If the orchestration skill is available, follow only its worker section.
+- Call `spawn_report` exactly once with outcome `completed` or `blocked`, summary, findings, verification, and uncertainty. Plain final text is not completion.
 
 Return format:
 - Status: `DONE` | `BLOCKED` | `NEEDS_CONTEXT`

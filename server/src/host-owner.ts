@@ -42,7 +42,7 @@ type SessionActivity = {
   status: "Starting" | "Stopping" | "Stopped" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Done" | "Idle";
   completionSeq: number;
   turnOutcome?: ConversationSnapshot["execution"]["outcome"];
-  subagentRuns: { runId: string; status: string; execution?: string; writerOwned?: boolean; readyForReview?: boolean; agent?: string; role?: string; progress?: string }[];
+  subagentRuns: { runId: string; status: string; execution?: string; writerOwned?: boolean; readyForReview?: boolean; agent?: string; role?: string; selectedModel?: { provider: string; id: string }; progress?: string }[];
 };
 export type OwnedSessionState = SessionActivity & {
   sessionId: string;
@@ -1391,6 +1391,8 @@ export class OwnedSession {
               writerOwned: run.writerOwned === true, readyForReview: run.readyForReview === true,
               agent: typeof run.agent === "string" ? run.agent : undefined,
               role: typeof run.role === "string" ? run.role : undefined,
+              selectedModel: object(run.selectedModel) && typeof run.selectedModel.provider === "string" && typeof run.selectedModel.id === "string"
+                ? { provider: run.selectedModel.provider, id: run.selectedModel.id } : undefined,
               progress: typeof run.progress === "string" ? run.progress : undefined });
           }
         }

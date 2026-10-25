@@ -58,6 +58,8 @@ function M.subagent_label(node)
 	local name = M.text(run.agent)
 	if name == "" then name = M.text(run.role) end
 	if name == "" then name = "Subagent" end
+	local model = type(run.selectedModel) == "table" and (M.text(run.selectedModel.provider) .. "/" .. M.text(run.selectedModel.id)) or ""
+	if model ~= "" then name = name .. " / " .. model end
 	local progress = M.text(run.progress)
 	local state = run.readyForReview and "ready for review" or M.text(run.execution or run.status)
 	return "       " .. icons.subagent_icon .. " " .. name .. " · " .. state .. (progress ~= "" and (" — " .. progress) or "")

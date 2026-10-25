@@ -1,4 +1,12 @@
+export interface SubagentModelSetting {
+	provider: string;
+	model: string;
+}
+
 export interface ExtensionSettings {
+	subagents?: {
+		models?: Record<string, SubagentModelSetting>;
+	};
 	server?: {
 		port?: number;
 		webui?: { enabled?: boolean; "allowed-origins"?: string[] };

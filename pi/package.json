@@ -12,7 +12,8 @@
   "pi": {
     "extensions": [
       "./extensions/*.ts"
-    ]
+    ],
+    "skills": ["./skills"]
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.77",

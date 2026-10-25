@@ -26,6 +26,11 @@ Severity labels:
 - Minor: low-risk cleanup or polish.
 - Question: ambiguity requiring a user or controller decision.
 
+- Ask missing requirements through `spawn_question` and wait; parent answers are information, never user consent.
+- Request permissions through tool arguments. If denied, report the blocker without bypassing it.
+- Do not delegate. If the orchestration skill is available, follow only its worker section.
+- Call `spawn_report` exactly once with outcome `completed` or `blocked`, summary, findings, verification, and uncertainty. Plain final text is not completion.
+
 Return format:
 - Status: `DONE` | `BLOCKED` | `NEEDS_CONTEXT`
 - Evidence inspected

@@ -61,8 +61,30 @@ export function readExtensionSettings(channel = process.env.PI_CONSOLE_CHANNEL) 
 		const value = document.toJS();
 		if (value === null && document.contents === null) return {};
 		const root = requireMapping(value, "settings");
-		requireKnownKeys(root, ["notifications", "access-mode", "integration-mode", "workspace", "auto-title", "session-picker", "server"], "settings");
+		requireKnownKeys(root, ["notifications", "access-mode", "integration-mode", "workspace", "auto-title", "session-picker", "server", "subagents"], "settings");
 		const settings = {};
+
+		if (Object.hasOwn(root, "subagents")) {
+			const subagents = requireMapping(root.subagents, "subagents");
+			requireKnownKeys(subagents, ["models"], "subagents");
+			settings.subagents = {};
+			if (Object.hasOwn(subagents, "models")) {
+				const models = requireMapping(subagents.models, "subagents.models");
+				settings.subagents.models = Object.fromEntries(Object.entries(models).map(([role, value]) => {
+					const path = `subagents.models.${role}`;
+					if (!role || role !== role.trim() || /\s/.test(role)) throw new Error(`${path} must have a non-empty role name without whitespace`);
+					const model = requireMapping(value, path);
+					requireKnownKeys(model, ["provider", "model"], path);
+					for (const key of ["provider", "model"]) {
+						if (typeof model[key] !== "string" || !model[key] || /\s|\0/.test(model[key])) {
+							throw new Error(`${path}.${key} must be a non-empty ID without whitespace`);
+						}
+					}
+					if (model.provider.includes("/")) throw new Error(`${path}.provider must be a provider ID without slashes`);
+					return [role, { provider: model.provider, model: model.model }];
+				}));
+			}
+		}
 
 		if (Object.hasOwn(root, "server")) {
 			const server = requireMapping(root.server, "server");

@@ -509,6 +509,11 @@ access. `worker` edits in an isolated child worktree. Custom profiles go in
 `~/.pi/agent/agents/` or a trusted project's `.pi/agents/`; project profiles
 override user profiles, which override bundled profiles with the same name.
 
+The package also includes the `orchestration` skill for single delegations and
+approved projects. Discover role/model defaults with `spawn_control action=models`.
+See [orchestration and role models](ORCHESTRATION.md) for the YAML schema,
+selection precedence, sequential writing/review, and personal-skill migration.
+
 The matching bundle loads through `pi-console`, `pi-console-dev`, `pi-stable`,
 or `pi-dev`, not plain `pi`. Do not register another copy globally: duplicate
 tool registrations can conflict.

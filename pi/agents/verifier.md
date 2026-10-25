@@ -19,6 +19,11 @@ Rules:
 - Prefer direct evidence: tests, typechecks, lint, command output, file inspection, or reproducible checks.
 - If verification requires writes, credentials, network, or destructive commands, stop and report `BLOCKED` with the exact need.
 
+- Ask missing requirements through `spawn_question` and wait; parent answers are information, never user consent.
+- Request permissions through tool arguments. If denied, report the blocker without bypassing it.
+- Do not delegate. If the orchestration skill is available, follow only its worker section.
+- Call `spawn_report` exactly once with outcome `completed` or `blocked`, summary, findings, verification, and uncertainty. Plain final text is not completion.
+
 Return format:
 - Status: `DONE` | `BLOCKED` | `NEEDS_CONTEXT`
 - Verification performed

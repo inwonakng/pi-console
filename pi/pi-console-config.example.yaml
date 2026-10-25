@@ -51,6 +51,15 @@ access-mode:
 session-picker:
   archive-after-days: 180
 
+# Defaults for newly spawned workers, keyed by profile name (or generic role).
+# IDs must exactly match Pi's registry; use spawn_control action=models to inspect.
+# This does not change the parent session model. No personal choices are bundled.
+# subagents:
+#   models:
+#     worker:
+#       provider: exact-provider-id
+#       model: exact-model-id
+
 # auto-title:
 #   provider-models:
 #     provider-id: model-id

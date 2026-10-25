@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { accessRevision, getAccessMode, onAccessInvalidated } from "./shared/access-state";
 import { canonicalPath, getSessionGrants, hasPermission, requestPermission, validPermissionAttempt, permissionWasDenied, type PermissionAuthorization, type PermissionPreview } from "./shared/permissions";
+import { loadExtensionSettings, type SubagentModelSetting } from "./shared/extension-settings";
 import { saveSessionSetting } from "./shared/session-settings";
 import { assertRepositoryIdle, registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
 import { spawnRunIds } from "./shared/session-deletion";
@@ -97,6 +98,9 @@ type WorktreeInfo = {
   retained: boolean;
 };
 
+type ModelIdentity = { provider: string; id: string };
+type ModelSelection = ModelIdentity & { source: "override" | "settings" | "profile" | "parent" };
+
 type SpawnRun = {
   id: string;
   parentId: string;
@@ -142,7 +146,9 @@ type SpawnRun = {
   cleanupError?: string;
   protectedRoots?: string[];
   childSessionFile?: string;
-  launch?: { model: string; provider?: string; timeoutSeconds?: number };
+  modelSelection?: ModelSelection;
+  selectedModel?: ModelIdentity;
+  launch?: { model: string; provider: string; timeoutSeconds?: number };
   accepting?: boolean;
   timeout?: NodeJS.Timeout;
   abortListener?: () => void;
@@ -581,6 +587,43 @@ function resolveSubagentProfile(input: {
   return profile;
 }
 
+// Resolve against the live registry, never the CLI's fuzzy/custom-ID fallback.
+function resolveWorkerModel(ctx: ExtensionContext, input: {
+  override?: string;
+  role?: string;
+  profile?: SubagentProfile;
+  defaults: Record<string, SubagentModelSetting>;
+}): ModelSelection {
+  if (ctx.modelRegistry.getError()) throw new Error("Subagent model registry is unavailable; correct provider configuration before spawning.");
+  let identity: ModelIdentity;
+  let source: ModelSelection["source"];
+  const configured = input.role && Object.hasOwn(input.defaults, input.role) ? input.defaults[input.role] : undefined;
+  const reference = input.override ?? (configured ? undefined : input.profile?.model);
+  if (input.override !== undefined || (reference && reference !== "inherit")) {
+    source = input.override !== undefined ? "override" : "profile";
+    const models = ctx.modelRegistry.getAll();
+    const qualified = models.filter(model => `${model.provider}/${model.id}` === reference);
+    const prefix = reference?.split("/", 1)[0];
+    const providerQualified = reference?.includes("/") && models.some(model => model.provider === prefix);
+    const matches = providerQualified || qualified.length ? qualified : models.filter(model => model.id === reference);
+    if (matches.length !== 1) throw new Error(matches.length
+      ? `Ambiguous subagent model ${reference}; use an exact provider/model-id reference.`
+      : `Unknown subagent model ${reference}; use an exact registered provider/model-id reference.`);
+    identity = { provider: matches[0].provider, id: matches[0].id };
+  } else if (configured) {
+    source = "settings";
+    identity = { provider: configured.provider, id: configured.model };
+  } else {
+    source = "parent";
+    if (!ctx.model) throw new Error("Cannot inherit a subagent model: the parent has no selected model.");
+    identity = { provider: ctx.model.provider, id: ctx.model.id };
+  }
+  const model = ctx.modelRegistry.find(identity.provider, identity.id);
+  if (!model || model.api === "unknown") throw new Error(`Unknown subagent model ${identity.provider}/${identity.id} (${source}).`);
+  if (!ctx.modelRegistry.hasConfiguredAuth(model)) throw new Error(`Unavailable subagent model ${identity.provider}/${identity.id} (${source}); configure its provider before spawning. No alternative was selected.`);
+  return { ...identity, source };
+}
+
 function subagentSystemPrompt(profile: SubagentProfile): string {
   return `You are the ${profile.name} subagent in a pi parent session.
 
@@ -722,6 +765,8 @@ function artifactDetails(run: SpawnRun): Record<string, unknown> {
     agent: run.profile?.name ?? run.requestedAgent ?? null,
     agentSource: run.profile?.source ?? null,
     agentProfilePath: run.profile?.filePath ?? null,
+    modelSelection: run.modelSelection ?? null,
+    selectedModel: run.selectedModel ?? null,
     status: run.status,
     progress: run.progress ?? null,
     joined: run.joined,
@@ -763,6 +808,8 @@ function statusJson(run: SpawnRun): Record<string, unknown> {
     agent: run.profile?.name ?? run.requestedAgent ?? null,
     agentSource: run.profile?.source ?? null,
     agentProfilePath: run.profile?.filePath ?? null,
+    modelSelection: run.modelSelection ?? null,
+    selectedModel: run.selectedModel ?? null,
     startedAt: run.startedAt,
     completedAt: run.completedAt ?? null,
     error: run.error ?? null,
@@ -882,7 +929,7 @@ async function applyWorktreeChanges(run: SpawnRun, signal?: AbortSignal): Promis
 function formatSpawnStarted(run: SpawnRun): string {
   const worktree = worktreeInfo(run);
   const worktreeLine = worktree?.retained && worktree.path ? `\n- Worktree: ${worktree.path}` : "";
-  return `Spawned subagent.\n- id: ${run.id}\n- status: ${run.status}\n- agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n- accessMode: ${run.accessMode}\n- isolation: ${run.isolation}\n- brief: ${run.briefPath}\n- result: ${run.resultPath}\n- transcript: ${run.transcriptPath}\n- status file: ${run.statusPath}${worktreeLine}\n\nUse spawn_control join/status/report/diff to inspect without integration. join and foreground spawn yield questions and permissions. Use reply for clarification, or approve/deny with exact request and runtime IDs for permissions, then join again. accept explicitly integrates completed, quiescent workers. Conversational workers support followup corrections before acceptance and close. Only one unresolved writer is allowed; discard explicitly disposes an unwanted contribution.`;
+  return `Spawned subagent.\n- id: ${run.id}\n- status: ${run.status}\n- model: ${run.selectedModel ? `${run.selectedModel.provider}/${run.selectedModel.id}` : `awaiting confirmation of ${run.modelSelection?.provider}/${run.modelSelection?.id}`}\n- agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n- accessMode: ${run.accessMode}\n- isolation: ${run.isolation}\n- brief: ${run.briefPath}\n- result: ${run.resultPath}\n- transcript: ${run.transcriptPath}\n- status file: ${run.statusPath}${worktreeLine}\n\nUse spawn_control join/status/report/diff to inspect without integration. join and foreground spawn yield questions and permissions. Use reply for clarification, or approve/deny with exact request and runtime IDs for permissions, then join again. accept explicitly integrates completed, quiescent workers. Conversational workers support followup corrections before acceptance and close. Only one unresolved writer is allowed; discard explicitly disposes an unwanted contribution.`;
 }
 
 function runHasError(run: SpawnRun): boolean {
@@ -895,7 +942,7 @@ function formatRunStatus(run: SpawnRun): string {
   const changed = worktree?.changedFiles.length ? `\n- changed files: ${worktree.changedFiles.join(", ")}` : "";
   const integration = worktree ? `\n- integration: ${worktree.integration}${worktree.integrationReason ? ` (${worktree.integrationReason})` : ""}` : "";
   const permissions = run.permissionRequests.filter((request) => request.state === "pending");
-  return `- id: ${run.id}\n  permissions: ${permissions.length ? JSON.stringify(permissions) : "none"}\n  execution: ${run.execution}\n  lifetime: ${run.lifetime}\n  assignment: ${run.assignments.at(-1)?.id} (${run.assignments.at(-1)?.outcome})\n  pending requests: ${run.requests.filter((request) => request.state === "pending").map((request) => `${request.id}: ${request.question}`).join("; ") || "none"}\n  status: ${run.status}\n  agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n  accessMode: ${run.accessMode}\n  isolation: ${run.isolation}\n  startedAt: ${run.startedAt}${run.completedAt ? `\n  completedAt: ${run.completedAt}` : ""}${run.error ? `\n  error: ${run.error}` : ""}${changed}${integration}`;
+  return `- id: ${run.id}\n  model: ${run.selectedModel ? `${run.selectedModel.provider}/${run.selectedModel.id}` : "not confirmed"}\n  requested model: ${run.modelSelection ? `${run.modelSelection.provider}/${run.modelSelection.id} (${run.modelSelection.source})` : "unknown"}\n  permissions: ${permissions.length ? JSON.stringify(permissions) : "none"}\n  execution: ${run.execution}\n  lifetime: ${run.lifetime}\n  assignment: ${run.assignments.at(-1)?.id} (${run.assignments.at(-1)?.outcome})\n  pending requests: ${run.requests.filter((request) => request.state === "pending").map((request) => `${request.id}: ${request.question}`).join("; ") || "none"}\n  status: ${run.status}\n  agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n  accessMode: ${run.accessMode}\n  isolation: ${run.isolation}\n  startedAt: ${run.startedAt}${run.completedAt ? `\n  completedAt: ${run.completedAt}` : ""}${run.error ? `\n  error: ${run.error}` : ""}${changed}${integration}`;
 }
 
 function restoredRun(statusPath: string, parentSessionFile: string | undefined): SpawnRun | undefined {
@@ -980,6 +1027,17 @@ function restoredRun(statusPath: string, parentSessionFile: string | undefined):
   }
   const storedStatus: RunStatus = data.status === "completed" && assignments.at(-1)?.outcome === "completed" ? "completed"
     : data.status === "error" ? "error" : "aborted";
+  const storedModel = (value: unknown): ModelIdentity | undefined => {
+    if (!value || typeof value !== "object") return undefined;
+    const model = value as Record<string, unknown>;
+    return typeof model.provider === "string" && !!model.provider && typeof model.id === "string" && !!model.id
+      ? { provider: model.provider, id: model.id } : undefined;
+  };
+  const requestedModel = storedModel(data.modelSelection);
+  const source = data.modelSelection && typeof data.modelSelection === "object"
+    ? (data.modelSelection as Record<string, unknown>).source : undefined;
+  const modelSelection = requestedModel && ["override", "settings", "profile", "parent"].includes(String(source))
+    ? { ...requestedModel, source: source as ModelSelection["source"] } : undefined;
   const briefPath = join(runDir, "brief.md");
   let resolveFinished: (run: SpawnRun) => void = () => undefined;
   const finished = new Promise<SpawnRun>((resolvePromise) => { resolveFinished = resolvePromise; });
@@ -1001,6 +1059,8 @@ function restoredRun(statusPath: string, parentSessionFile: string | undefined):
     accessMode: parseAccessMode(typeof data.accessMode === "string" ? data.accessMode : undefined) ?? "readonly",
     isolation: data.isolation === "worktree" ? "worktree" : "none",
     status: storedStatus,
+    modelSelection,
+    selectedModel: storedModel(data.selectedModel),
     startedAt: typeof data.startedAt === "string" ? data.startedAt : new Date().toISOString(),
     completedAt: typeof data.completedAt === "string" ? data.completedAt : new Date().toISOString(),
     error: storedStatus === "aborted" && data.status === "running"
@@ -1518,6 +1578,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     role?: string;
     requestedAgent?: string;
     profile?: SubagentProfile;
+    modelSelection: ModelSelection;
     accessMode: AccessMode;
     isolation: IsolationMode;
     mode: SpawnMode;
@@ -1558,6 +1619,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       role: input.role,
       requestedAgent: input.requestedAgent,
       profile: input.profile,
+      modelSelection: input.modelSelection,
       accessMode: input.accessMode,
       isolation: input.isolation,
       status: "running",
@@ -1778,7 +1840,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     return reject();
   };
 
-  const startRun = async (run: SpawnRun, params: { model: string; provider?: string; timeoutSeconds?: number }) => {
+  const startRun = async (run: SpawnRun, params: { model: string; provider: string; timeoutSeconds?: number }) => {
     if (retired) throw new Error("Cannot launch subagent from a retired runtime");
     run.launch = params;
     const binary = process.env.PI_BINARY || "pi";
@@ -1983,6 +2045,16 @@ export default function spawnExtension(pi: ExtensionAPI) {
       try {
         while (!run.closing) {
           const assignment = run.assignments.at(-1)!;
+          const state = await child.send({ type: "get_state" });
+          assertSuccess(state, "get selected subagent model");
+          const selected = (state.data as { model?: ModelIdentity } | undefined)?.model;
+          run.selectedModel = selected && typeof selected.provider === "string" && typeof selected.id === "string"
+            ? { provider: selected.provider, id: selected.id } : undefined;
+          if (!run.selectedModel || run.selectedModel.provider !== params.provider || run.selectedModel.id !== params.model) {
+            throw new Error(`Subagent model selection mismatch: requested ${params.provider}/${params.model}, selected ${run.selectedModel ? `${run.selectedModel.provider}/${run.selectedModel.id}` : "none"}. No assignment was sent.`);
+          }
+          writeStatus(run);
+          publishSpawnStatus();
           const agentEnd = child.waitForAgentEnd();
           const [, terminalEnd] = await Promise.all([
             child.send({ type: "prompt", message: `/spawn-assignment ${JSON.stringify({ workerId: run.id, parentId: run.parentId, assignmentId: assignment.id,
@@ -2197,10 +2269,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
     defaultActive: false,
     label: "Spawn Subagent",
     description: "Spawn a worker, bounded by default; conversational lifetime supports readonly workers and isolated edit workers. Workers explicitly report outcomes and may ask questions or request permissions. Foreground/join yield actionable requests without accepting changes. Named profiles and artifacts use existing Pi locations.",
-    promptSnippet: "Spawn background or foreground pi subagents, primarily for read-heavy research, investigation, summarization, review, and verification; worker handles self-contained tasks requiring file changes.",
+    promptSnippet: "Delegate approved implementation, research, review, or verification to a worker; inspect and explicitly accept its result.",
     promptGuidelines: [
-      "Use spawn when the user asks for subagents or when bounded read-heavy work would help: research, investigation, summarization, review, or verification.",
-      "The main agent normally implements changes. Delegate writing only when the user approved implementation, requirements are settled, ownership is non-overlapping, the result can be verified independently, and the benefit outweighs briefing and integration overhead. Keep tightly coupled changes and evolving design decisions in the main session.",
+      "Use the packaged orchestration skill when delegating a task or coordinating an approved project. Keep trivial tasks and discussion in the parent; delegation is not mandatory for every change.",
+      "Delegate approved implementation with sufficient context, settled behavior, explicit file ownership, acceptance criteria, and evidence requirements. Keep user decisions and overall scope in the parent.",
+      "Discover profiles and resolved model identities with spawn_control action=models. Use defaults without asking; obtain user authorization before selecting alternatives unless already authorized for this scope. Never inspect credentials or guess provider IDs. Unknown/unavailable selections fail without substitution; model configuration changes apply only to new workers.",
       "spawn defaults to background. If your response depends on the subagent result, call spawn_control with action=join or join_all before answering.",
       "Prefer researcher for investigation and summarization, reviewer for review, verifier for verification, and worker for self-contained tasks requiring file changes.",
       "Use accessMode=readonly for research, planning, review, and verification. Delegate file changes with accessMode=edit and worktree isolation. One writer owns the slot through input waits, completion and review until acceptance/cleanup or explicit discard resolves it. Parent repository writes and unsandboxed Bash are blocked during ownership; sandboxed read commands remain available. There is no concurrent-writer override.",
@@ -2209,7 +2282,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       prompt: Type.String({ description: "The complete bounded prompt/task for the subagent." }),
-      agent: Type.Optional(Type.String({ description: "Named subagent profile to load from ~/.pi/agent/agents/*.md or trusted .pi/agents/*.md, e.g. researcher, reviewer, verifier, worker." })),
+      agent: Type.Optional(Type.String({ description: "Named bundled, user, or trusted project profile. Discover roles and exact model identities with spawn_control action=models." })),
       role: Type.Optional(Type.String({ description: "Backward-compatible role/instructions label. If it matches a subagent profile and agent is omitted, that profile is loaded." })),
       lifetime: Type.Optional(Type.Union([Type.Literal("bounded"), Type.Literal("conversational")], { description: "Bounded by default. Conversational keeps the same conversation for follow-up. Isolated edit workers stop all tracked processes for review and resume that conversation only for corrections before acceptance." })),
       mode: Type.Optional(Type.Union([
@@ -2226,7 +2299,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         Type.Literal("none"),
         Type.Literal("worktree"),
       ], { description: "Isolation mode. Defaults to worktree for writing access and none for readonly." })),
-      model: Type.Optional(Type.String({ description: "Optional pi --model value for the subagent. Defaults to the profile model; an omitted or inherit profile model uses the parent's current provider and model." })),
+      model: Type.Optional(Type.String({ description: "User-authorized exact provider/model-id override (or unique exact bare ID). Otherwise: YAML subagents.models role default, profile model, then parent. No fuzzy matching or silent substitution. Existing workers retain their model for corrections." })),
       timeoutSeconds: Type.Optional(Type.Number({ description: "Assignment timeout in seconds, including question waits. Defaults to 1800. Conversational review/idle time does not consume the timeout; each follow-up starts a new deadline." })),
     }),
     executionMode: "sequential",
@@ -2292,18 +2365,17 @@ export default function spawnExtension(pi: ExtensionAPI) {
         }
       }
 
-      const modelOverride = params.model ?? (subagent?.model && subagent.model !== "inherit" ? subagent.model : undefined);
-      const model = modelOverride ?? ctx.model?.id;
-      const provider = modelOverride ? undefined : ctx.model?.provider;
-      if (!model) {
-        throw new Error("Cannot inherit a subagent model: the parent has no selected model.");
-      }
+      const modelSelection = resolveWorkerModel(ctx, {
+        override: params.model, role: subagent?.name ?? params.role?.trim(), profile: subagent,
+        defaults: loadExtensionSettings().subagents?.models ?? {},
+      });
 
       const run = createRun({
         prompt: params.prompt,
         role: params.role,
         requestedAgent: params.agent,
         profile: subagent,
+        modelSelection,
         accessMode,
         isolation,
         mode,
@@ -2313,7 +2385,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         signal,
       });
 
-      await startRun(run, { model, provider, timeoutSeconds: params.timeoutSeconds });
+      await startRun(run, { model: modelSelection.id, provider: modelSelection.provider, timeoutSeconds: params.timeoutSeconds });
 
       if (mode === "background") {
         onUpdate?.({ content: [{ type: "text", text: `${runLabel(run)} ${run.id} started (${accessMode}).` }], details: artifactDetails(run) });
@@ -2353,9 +2425,10 @@ export default function spawnExtension(pi: ExtensionAPI) {
     name: "spawn_control",
     defaultActive: false,
     label: "Control Subagents",
-    description: "Inspect workers without integration: list/status/report/diff, join/join_all (yield on questions and permissions). Use approve/deny with exact worker, assignment, request and both runtime IDs for permissions. Approval beyond the parent's current authority requires the existing user approval UI. Use reply only for clarification. Followup requests corrections from an idle unaccepted conversational edit worker, or another assignment from a readonly worker. Close ends the conversation; stop cancels but retains writer ownership. Discard disposes a quiescent contribution. Only accept integrates the current explicitly completed, quiescent revision. After acceptance, implementation requires a new worker and baseline.",
+    description: "Discover configured roles and resolved provider/model identities with models. Inspect workers without integration: list/status/report/diff, join/join_all (yield on questions and permissions). Use approve/deny with exact worker, assignment, request and both runtime IDs for permissions. Approval beyond the parent's current authority requires the existing user approval UI. Use reply only for clarification. Followup requests corrections from an idle unaccepted conversational edit worker, or another assignment from a readonly worker. Close ends the conversation; stop cancels but retains writer ownership. Discard disposes a quiescent contribution. Only accept integrates the current explicitly completed, quiescent revision. After acceptance, implementation requires a new worker and baseline.",
     promptSnippet: "Inspect worker results; reply to questions; followup or close conversational workers; accept changes explicitly.",
     promptGuidelines: [
+      "Use models to discover current role defaults, resolved provider/model identities, availability errors, and profile sources without reading credentials. Use configured defaults without asking; alternatives require user authorization for the relevant scope.",
       "Use spawn_control join or join_all before answering if your response depends on background subagent results.",
       "Use list/status/report/diff to inspect. join/join_all and foreground spawn yield pending requests; use reply for clarification or approve/deny for permissions, then join again. Never interpret an agent's reply as user consent or a permission grant.",
       "Use followup for corrections to an idle unaccepted conversational edit worker, or further readonly assignments. After acceptance, start a new writer with a fresh workspace. Close ends the conversation; stop cancels work but does not release its contribution. Use discard to dispose a quiescent unwanted contribution. accept is the only integration action; inspection never applies a patch.",
@@ -2363,6 +2436,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       action: Type.Union([
+        Type.Literal("models"),
         Type.Literal("list"),
         Type.Literal("status"),
         Type.Literal("join"),
@@ -2400,6 +2474,26 @@ export default function spawnExtension(pi: ExtensionAPI) {
         }
         return run;
       };
+
+      if (params.action === "models") {
+        const profiles = discoverSubagentProfiles(ctx.cwd, typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted());
+        const defaults = loadExtensionSettings().subagents?.models ?? {};
+        const roles = [...new Set([...profiles.map(profile => profile.name), ...Object.keys(defaults)])].sort().map(role => {
+          const profile = profiles.find(profile => profile.name === role);
+          const configuredModel = Object.hasOwn(defaults, role) ? defaults[role] : undefined;
+          const description = { role, profile: profile ? { source: profile.source, path: profile.filePath,
+            description: profile.description, accessMode: profile.accessMode ?? "readonly", model: profile.model ?? "inherit" } : null,
+            configuredModel: configuredModel ?? null };
+          try {
+            return { ...description, resolvedModel: resolveWorkerModel(ctx, { role, profile, defaults }), available: true };
+          } catch (error) {
+            return { ...description, resolvedModel: null, available: false, error: error instanceof Error ? error.message : String(error) };
+          }
+        });
+        const details = { parentModel: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null, roles,
+          precedence: ["authorized override", "YAML role default", "profile model", "parent model"], appliesTo: "new workers only" };
+        return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };
+      }
 
       if (params.action === "list") {
         const text = allRuns.length === 0 ? "No spawned subagents in this session." : allRuns.map(formatRunStatus).join("\n\n");

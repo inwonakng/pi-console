@@ -181,9 +181,13 @@ local function queue_summary(item)
 	fields(lines, item.error, { { "message", "Error" } })
 	return table.concat(lines, "\n")
 end
+local function run_model(run)
+	return type(run.selectedModel) == "table" and (tostring(run.selectedModel.provider) .. "/" .. tostring(run.selectedModel.id)) or "not confirmed"
+end
 local function run_label(run)
-	return type(run.agent) == "string" and run.agent ~= "" and run.agent
+	local name = type(run.agent) == "string" and run.agent ~= "" and run.agent
 		or type(run.role) == "string" and run.role ~= "" and run.role or "Subagent"
+	return name .. " / " .. run_model(run)
 end
 local function unavailable(name)
 	notify(name .. " is unavailable on this service path. No local/RPC fallback was executed.", vim.log.levels.WARN)
@@ -2125,7 +2129,7 @@ function M.pick_spawn()
 	local data, captured = status_data("pi-spawn-runs"), stamp()
 	vim.ui.select(data and data.runs or {}, { prompt = "Subagents", format_item = run_label }, function(run)
 		if not run or not same_context(captured) then return end
-		local details = {}
+		local details = { "Model: " .. run_model(run) }
 		fields(details, run, { { "status", "Status" }, { "progress", "Latest activity" }, { "prompt", "Task" },
 			{ "error", "Error" }, { "cleanupError", "Cleanup error" },
 			{ "startedAt", "Started" }, { "completedAt", "Completed" },
@@ -2139,7 +2143,7 @@ function M.pick_spawn()
 			if not same_context(captured) then return end
 			if action == "Artifacts" then require("pi-integration.spawn-artifacts").pick_run({ state = state, ui = { notify = notify }, resources = owner_resources() }, run, function() end)
 			elseif action == "Inspect" then
-				local lines = { "# Subagent", "" }
+				local lines = { "# Subagent", "", "Model: " .. run_model(run) }
 				fields(lines, run, { { "agent", "Agent" }, { "role", "Role" }, { "status", "Status" },
 					{ "prompt", "Task" }, { "startedAt", "Started" }, { "completedAt", "Completed" },
 					{ "accessMode", "Access mode" }, { "isolation", "Isolation" }, { "mode", "Interaction mode" },
