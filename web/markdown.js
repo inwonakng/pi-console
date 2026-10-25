@@ -18,6 +18,36 @@ function linkTarget(href) {
     return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.href : null;
   } catch { return null; }
 }
+function codeBlock(value) {
+  const button = element("button", "Copy");
+  button.type = "button";
+  button.setAttribute("aria-label", "Copy code");
+  button.setAttribute("aria-live", "polite");
+  let resetTimer;
+  button.addEventListener("click", async () => {
+    clearTimeout(resetTimer);
+    button.disabled = true;
+    try {
+      await navigator.clipboard.writeText(value);
+      button.textContent = "Copied";
+    } catch {
+      button.textContent = "Copy failed";
+    } finally {
+      button.disabled = false;
+      button.setAttribute("aria-label", button.textContent);
+      resetTimer = setTimeout(() => {
+        button.textContent = "Copy";
+        button.setAttribute("aria-label", "Copy code");
+      }, 2000);
+    }
+  });
+  const toolbar = element("div", button);
+  toolbar.className = "code-block-toolbar";
+  const wrapper = element("div", toolbar);
+  wrapper.className = "code-block";
+  wrapper.append(element("pre", element("code", document.createTextNode(value))));
+  return wrapper;
+}
 function renderTokens(tokens) {
   const fragment = document.createDocumentFragment();
   for (const token of tokens) {
@@ -34,11 +64,12 @@ function renderTokens(tokens) {
         fragment.append(element(tag, renderTokens(token.tokens)));
         break;
       }
-      case "code": case "codespan": {
-        const code = element("code", document.createTextNode(token.text));
-        fragment.append(token.type === "code" ? element("pre", code) : code);
+      case "code":
+        fragment.append(codeBlock(token.text));
         break;
-      }
+      case "codespan":
+        fragment.append(element("code", document.createTextNode(token.text)));
+        break;
       case "br": case "hr":
         fragment.append(element(token.type));
         break;

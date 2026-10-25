@@ -127,7 +127,9 @@ label { font-size: 12px; color: var(--muted); }
 .markdown li > p { margin-bottom: 8px; }
 .markdown a { color: var(--accent); text-underline-offset: 3px; }
 .markdown code { font: inherit; font-size: .9em; background: var(--surface); border-radius: 3px; padding: 2px 5px; }
-.markdown pre { background: var(--bg); border-radius: 5px; padding: 12px; overflow-x: auto; white-space: pre; overflow-wrap: normal; }
+.markdown .code-block { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.code-block-toolbar { display: flex; justify-content: flex-end; padding: 6px 8px 0; }
+.markdown pre { margin: 0; padding: 12px; overflow-x: auto; white-space: pre; overflow-wrap: normal; }
 .markdown pre code { font-size: inherit; background: none; border-radius: 0; padding: 0; }
 .markdown blockquote { margin-left: 0; margin-right: 0; padding: 10px 14px; background: var(--surface); color: var(--muted); }
 .markdown blockquote > :last-child { margin-bottom: 0; }
