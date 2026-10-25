@@ -1,7 +1,12 @@
 local map = vim.keymap.set
 
 -- window manipulation
-map("n", "<leader>qq", "<cmd>qa<cr>", { desc = "Close frontend" })
+map("n", "<leader>qq", function()
+	require("pi-integration").quit()
+end, { desc = "Stop or detach" })
+map("n", "<leader>pd", function()
+	require("pi-integration").detach_frontend()
+end, { desc = "Detach frontend" })
 map("n", "<leader>wd", "<cmd>q<cr>", { desc = "Close Window" })
 map("n", "<leader>\\", "<cmd>vsplit<cr>", { desc = "Vertical split" })
 map("n", "<leader>-", "<cmd>split<cr>", { desc = "Horizontal split" })
