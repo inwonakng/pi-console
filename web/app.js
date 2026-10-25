@@ -654,8 +654,9 @@ function createConversation(host, row) {
     $("reconnect").hidden = connected;
     $("reconnect").disabled = busy || !host.connected || !row.live;
     $("stop").disabled = !controlled || busy;
-    $("control").disabled = !host.connected || !row.live || !connected || !snapshot || busy;
-    $("control").textContent = controlled ? "Release control" : owner?.controller ? "Take over" : "Take control";
+    $("control").hidden = controlled;
+    $("control").disabled = controlled || !host.connected || !row.live || !connected || !snapshot || busy;
+    $("control").textContent = owner?.controller ? "Take over" : "Take control";
     $("controller").textContent = !host.connected ? "Unknown / read only" : !row.live ? "Inactive / read only"
       : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
@@ -1034,15 +1035,13 @@ function createConversation(host, row) {
   }
 
   $("control").addEventListener("click", () => run(async () => {
+    if (controlsCurrent()) return;
     const captured = context();
-    if (controlsCurrent()) { await command("control.release"); if (sameContext(captured)) grant = null; }
-    else {
-      const takeover = Boolean(owner?.controller);
-      if (takeover && !confirm(`Take control from ${owner.controller.label}?`)) return;
-      await command(takeover ? "control.takeover" : "control.acquire", takeover ? { confirmed: true } : {});
-      const value = await client.request("grant");
-      if (sameContext(captured)) { grant = value; if (!controlsCurrent()) scheduleRefresh(); }
-    }
+    const takeover = Boolean(owner?.controller);
+    if (takeover && !confirm(`Take control from ${owner.controller.label}?`)) return;
+    await command(takeover ? "control.takeover" : "control.acquire", takeover ? { confirmed: true } : {});
+    const value = await client.request("grant");
+    if (sameContext(captured)) { grant = value; if (!controlsCurrent()) scheduleRefresh(); }
   }));
   $("layout-diagnostics").addEventListener("click", toggleViewportDiagnostics);
   $("refresh-settings").addEventListener("click", () => { void loadSettings(); });
