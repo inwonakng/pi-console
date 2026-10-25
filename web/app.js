@@ -362,15 +362,26 @@ function detachConversation(key) {
 }
 
 // Safari keeps the layout viewport tall while the software keyboard is open.
-// Fit the app shell to the visible viewport rather than letting the page pan.
+// Follow keyboard panning, but keep the shell inside the layout viewport when
+// rotation leaves a stale visual-viewport offset.
 function fitViewport() {
   const viewport = window.visualViewport;
   if (!viewport || viewport.scale !== 1) return;
-  document.documentElement.style.setProperty("--viewport-height", `${viewport.height}px`);
-  document.documentElement.style.setProperty("--viewport-top", `${viewport.offsetTop}px`);
+  const height = Math.min(viewport.height, window.innerHeight);
+  const top = Math.max(0, Math.min(viewport.offsetTop, window.innerHeight - height));
+  document.documentElement.style.setProperty("--viewport-height", `${height}px`);
+  document.documentElement.style.setProperty("--viewport-top", `${top}px`);
 }
-window.visualViewport?.addEventListener("resize", fitViewport);
-window.visualViewport?.addEventListener("scroll", fitViewport);
+let viewportFrame;
+function scheduleViewportFit() {
+  cancelAnimationFrame(viewportFrame);
+  viewportFrame = requestAnimationFrame(fitViewport);
+}
+window.visualViewport?.addEventListener("resize", scheduleViewportFit);
+window.visualViewport?.addEventListener("scroll", scheduleViewportFit);
+window.addEventListener("resize", scheduleViewportFit);
+window.addEventListener("pageshow", scheduleViewportFit);
+window.screen.orientation?.addEventListener("change", scheduleViewportFit);
 fitViewport();
 
 $("connection-form").addEventListener("submit", event => { event.preventDefault(); perform(connectAll); });
