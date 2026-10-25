@@ -1351,43 +1351,36 @@ function M.pick_hosts()
 			or target.service_remote ~= M.config.service_remote then M.select_owner(target) end
 	end)
 end
-local function recover_control(captured)
-	local function failed(message)
-		if starting then fail_start(message .. " Submitted text remains in :PiDrafts.")
-		else notify(message, vim.log.levels.WARN) end
-	end
-	-- A command response can overtake its ownership update. The bridge must
-	-- observe our controller in a fresh snapshot before it can return the grant.
-	refresh(true, function(synced)
-		if not synced or not same_context(captured) then
-			failed("Control synchronization failed. Use :PiReconnect to retry."); return
-		end
-		local controller = current_controller()
-		if not controller or controller.attachmentId ~= attachment then
-			failed("Session control changed; use :PiControl to request it again."); return
-		end
-		local loss_generation = control_loss_generation
-		request("grant", {}, function(found, value)
-			local owner = current_controller()
-			if not found or not same_context(captured) or type(value) ~= "table" or value == vim.NIL
-				or value.attachmentId ~= attachment or value.grantId ~= controller.grantId
-				or not owner or owner.grantId ~= value.grantId or owner.attachmentId ~= attachment
-				or loss_generation ~= control_loss_generation then
-				failed("Control was not recovered. Use :PiReconnect to retry."); return
-			end
-			grant, state.control_loss_reason = value, nil
-			render()
-			advance_start()
-		end)
-	end)
-end
 acquire_control = function(takeover, captured)
 	if not same_context(captured) or captured.controller ~= (current_controller() and current_controller().grantId) then
 		notify("Attachment/controller changed; request control again for this session."); return
 	end
+	local function failed(message)
+		if starting then fail_start(message .. " Submitted text remains in :PiDrafts.")
+		else notify(message, vim.log.levels.WARN) end
+	end
 	command(takeover and "control.takeover" or "control.acquire", takeover and { confirmed = true } or {}, function(ok)
-		if not ok or not same_context(captured) then fail_start("Startup control was not acquired; submitted text remains in :PiDrafts."); return end
-		recover_control(captured)
+		if not ok or not same_context(captured) then failed("Control was not acquired."); return end
+		-- A command response can overtake its ownership update. The bridge must
+		-- observe our controller in a fresh snapshot before it can return the grant.
+		refresh(true, function(synced)
+			if not synced or not same_context(captured) then failed("Control synchronization failed."); return end
+			local controller = current_controller()
+			if not controller or controller.attachmentId ~= attachment then failed("Session control changed during acquisition."); return end
+			local loss_generation = control_loss_generation
+			request("grant", {}, function(found, value)
+				local owner = current_controller()
+				if not found or not same_context(captured) or type(value) ~= "table" or value == vim.NIL
+					or value.attachmentId ~= attachment or value.grantId ~= controller.grantId
+					or not owner or owner.grantId ~= value.grantId or owner.attachmentId ~= attachment
+					or loss_generation ~= control_loss_generation then
+					failed("Control was not acquired."); return
+				end
+				grant, state.control_loss_reason = value, nil
+				render()
+				advance_start()
+			end)
+		end)
 	end)
 end
 function M.take_control()
@@ -1395,8 +1388,7 @@ function M.take_control()
 	if control_current() then return end
 	local captured = stamp()
 	local controller = current_controller()
-	if controller and controller.attachmentId == attachment then recover_control(captured)
-	elseif controller then
+	if controller then
 		vim.ui.select({ "Take over", "Cancel" }, { prompt = "Take control from " .. controller.label .. "? Accepted work continues." }, function(choice)
 			if choice == "Take over" then acquire_control(true, captured) end
 		end)
