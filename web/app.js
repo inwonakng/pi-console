@@ -436,6 +436,7 @@ function toggleViewportDiagnostics() {
   viewportDiagnosticsTimer = setInterval(update, 100);
 }
 
+$("refresh-app").addEventListener("click", () => location.reload());
 $("connection-form").addEventListener("submit", event => { event.preventDefault(); perform(connectAll); });
 $("new-session").addEventListener("click", () => showCreate());
 $("cancel-create").addEventListener("click", () => $("create-dialog").close());

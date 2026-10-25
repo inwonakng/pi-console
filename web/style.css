@@ -50,6 +50,9 @@ label { font-size: 12px; color: var(--muted); }
 #overview { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; padding-bottom: env(safe-area-inset-bottom); }
 #overview > * { flex-shrink: 0; }
 .overview-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; }
+.overview-heading h1 { display: flex; align-items: center; }
+.overview-heading .brand { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 0; background: transparent; font: inherit; letter-spacing: inherit; white-space: nowrap; }
+.brand img { flex-shrink: 0; }
 .actions { display: flex; gap: 8px; }
 #new-session, [data-id="send"], #create-form button[type="submit"] { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 #session-count { color: var(--muted); font-size: 12px; padding-left: 4px; }
@@ -59,6 +62,7 @@ label { font-size: 12px; color: var(--muted); }
 .filters input, .filters select { display: block; margin-top: 6px; }
 .hosts-panel { margin: 0 24px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .hosts-panel > summary { padding: 10px 12px; color: var(--muted); }
+.hosts-panel:not([open]) > summary { min-height: 32px; padding: 6px 12px; }
 #connection-state { float: right; margin-left: 8px; color: var(--muted); }
 #connection-state.connected { color: var(--accent); }
 .connection-form { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 0 12px 12px; font-size: 12px; }
