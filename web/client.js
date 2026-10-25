@@ -9,16 +9,18 @@ export class ServiceClient {
   constructor(onEvent) {
     this.onEvent = onEvent;
     this.pending = new Map();
+    this.measuring = 0;
     this.socket = null;
     this.closed = false;
   }
 
-  async connect(channel, path = "/v1/stream", expectedHostId) {
+  async connect(channel, path = "/v1/stream", expectedHostId, timing) {
     const url = new URL(path, location.href);
     if (url.origin !== location.origin || !/^\/v1\/(?:stream|hosts\/[\w-]+\/stream)$/.test(url.pathname) || url.search || url.hash) {
       throw new Error("Invalid same-origin host stream");
     }
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const started = timing ? performance.now() : 0;
     const socket = this.socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
     let buffer = "";
@@ -29,7 +31,10 @@ export class ServiceClient {
         if (buffer.length > 80 * 1024 * 1024) throw new Error("Service response is too large");
         let newline;
         while ((newline = buffer.indexOf("\n")) >= 0) {
-          const record = JSON.parse(buffer.slice(0, newline));
+          const parseStarted = this.measuring ? performance.now() : 0;
+          const line = buffer.slice(0, newline);
+          const record = JSON.parse(line);
+          const parsed = this.measuring ? performance.now() : 0;
           buffer = buffer.slice(newline + 1);
           if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("Invalid service record");
           if (record.type === "response") {
@@ -37,6 +42,11 @@ export class ServiceClient {
             if (!pending) throw new Error("Uncorrelated service response");
             clearTimeout(pending.timer);
             this.pending.delete(record.id);
+            if (pending.timing) {
+              this.measuring--;
+              Object.assign(pending.timing, { elapsedMs: parsed - pending.started, parseMs: parsed - parseStarted,
+                bytes: new TextEncoder().encode(line).length + 1 });
+            }
             if (record.success === true) pending.resolve(record.result);
             else pending.reject(Object.assign(new Error(record.error?.message || "Service request failed"), {
               code: record.error?.code,
@@ -57,7 +67,8 @@ export class ServiceClient {
         socket.addEventListener("open", resolve, { once: true });
         socket.addEventListener("close", () => reject(new Error("Could not connect to the host")), { once: true });
       });
-      const hello = await this.request("hello", { version: 1, channel });
+      if (timing) timing.socketMs = performance.now() - started;
+      const hello = await this.request("hello", { version: 1, channel }, timing ? (timing.hello = {}) : undefined);
       if (hello.version !== 1 || hello.channel !== channel || !Array.isArray(hello.capabilities)
         || !["snapshot", "updates", "sessions.subscribe", "control.acquire"].every(value => hello.capabilities.includes(value))) {
         throw new Error("Incompatible host protocol or channel");
@@ -68,7 +79,8 @@ export class ServiceClient {
     finally { clearTimeout(deadline); }
   }
 
-  request(method, payload = {}) {
+  // The optional timing target stays in the browser; it is never sent to the service.
+  request(method, payload = {}, timing) {
     if (this.closed || this.socket?.readyState !== WebSocket.OPEN || this.pending.size >= 32) {
       return Promise.reject(Object.assign(new Error("Not connected or too many pending requests"), { delivery: "not_sent" }));
     }
@@ -77,7 +89,8 @@ export class ServiceClient {
     if (new TextEncoder().encode(record).length > 2 * 1024 * 1024) return Promise.reject(Object.assign(new Error("Request is too large"), { delivery: "not_sent" }));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.close("Lost connection to the server. Your last action may still have gone through. Reconnect and check before trying again."), 30000);
-      this.pending.set(id, { resolve, reject, timer });
+      if (timing) this.measuring++;
+      this.pending.set(id, { resolve, reject, timer, timing, started: timing ? performance.now() : 0 });
       try { this.socket.send(record); }
       catch (error) { this.close(error.message); }
     });
@@ -92,6 +105,7 @@ export class ServiceClient {
       pending.reject(new Error(message));
     }
     this.pending.clear();
+    this.measuring = 0;
     this.onEvent({ type: "disconnected", message });
   }
 }

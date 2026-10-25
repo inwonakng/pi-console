@@ -27,6 +27,72 @@ let controllerLabel = "webui";
 const expandedSubagents = new Set();
 // Disconnecting a session keeps unsent text available in this page.
 const stoppedPromptDrafts = new Map();
+let loadTimingsEnabled = false, loadTiming, loadPaintFrame;
+try { loadTimingsEnabled = localStorage.getItem("pi-console.load-timings") === "true"; } catch { /* Storage may be disabled. */ }
+function renderLoadTiming() {
+  $("load-timings").checked = loadTimingsEnabled;
+  $("load-diagnostics").hidden = !loadTimingsEnabled;
+  if (!loadTimingsEnabled) return;
+  const timing = loadTiming;
+  const ms = value => value == null ? "pending" : `${value.toFixed(1)} ms`;
+  $("load-diagnostics-output").textContent = !timing ? "Open a session to measure. Preference saved when storage is available." : [
+    `${timing.kind} | ${timing.stage}`,
+    `Session list request: ${timing.kind === "cached" ? "not needed" : ms(timing.summaries?.elapsedMs)}`,
+    `WebSocket open: ${timing.kind === "cached" ? "not needed" : ms(timing.connection?.socketMs)} | Hello: ${timing.kind === "cached" ? "not needed" : ms(timing.connection?.hello?.elapsedMs)}`,
+    `Attach (server + transfer + parse): ${timing.kind === "cached" ? "not needed" : ms(timing.attach?.elapsedMs)}`,
+    ...(timing.attach?.bytes != null ? [`Response: ${(timing.attach.bytes / 1024).toFixed(1)} KiB | JSON parse: ${ms(timing.attach.parseMs)}`] : []),
+    `Transcript render: ${ms(timing.renderMs)}${timing.messages != null ? ` | ${timing.messages} messages` : ""}`,
+    `Start -> DOM ready: ${ms(timing.domMs)}`,
+    `Start -> paint opportunity (~): ${ms(timing.paintMs)}`,
+    ...(timing.kind === "reconnect" ? ["Reconnect totals include time spent in Options."] : []),
+    "Paint is an estimate. No server/transfer split. No content recorded.",
+  ].join("\n");
+}
+function setLoadTimings(enabled) {
+  loadTimingsEnabled = enabled;
+  loadTiming = null;
+  cancelAnimationFrame(loadPaintFrame);
+  try { localStorage.setItem("pi-console.load-timings", String(enabled)); } catch { /* In-memory toggle still works. */ }
+  renderLoadTiming();
+}
+function beginLoadTiming(key, kind) {
+  cancelAnimationFrame(loadPaintFrame);
+  loadTiming = loadTimingsEnabled ? { key, kind, started: performance.now(), stage: "Opening session" } : null;
+  if (document.hidden) interruptLoadTiming("Backgrounded; reopen the session in the foreground to measure");
+  renderLoadTiming();
+}
+function interruptLoadTiming(stage) {
+  if (!loadTiming || loadTiming.paintMs != null) return;
+  loadTiming.interrupted = true;
+  loadTiming.stage = stage;
+  cancelAnimationFrame(loadPaintFrame);
+  renderLoadTiming();
+}
+function currentLoadTiming(key) {
+  return loadTimingsEnabled && loadTiming?.key === key && loadTiming.paintMs == null && !loadTiming.interrupted && !loadTiming.failed ? loadTiming : null;
+}
+function timeTranscript(timing, started, conversation) {
+  if (!timing || timing.domMs != null || !conversation.hydrated || timing.kind !== "cached" && !timing.attached) return;
+  timing.renderMs = performance.now() - started;
+  timing.domMs = performance.now() - timing.started;
+  timing.messages = conversation.messages.length;
+  timing.stage = "Waiting for paint opportunity";
+  // Two frames allow a paint between callbacks; this is not a measured screen presentation.
+  loadPaintFrame = requestAnimationFrame(() => {
+    loadPaintFrame = requestAnimationFrame(() => {
+      if (loadTiming !== timing || timing.interrupted || activeKey !== timing.key || activeScreen !== "conversation" || document.hidden) return;
+      timing.paintMs = performance.now() - timing.started;
+      timing.stage = "Complete";
+      renderLoadTiming();
+    });
+  });
+}
+$("load-timings").addEventListener("change", event => setLoadTimings(event.target.checked));
+$("hide-load-timings").addEventListener("click", () => setLoadTimings(false));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) interruptLoadTiming("Backgrounded; reopen the session in the foreground to measure");
+});
+renderLoadTiming();
 function sessionStatus(host, row, activity = row.live) {
   if (!host.connected) return "Unknown";
   if (!row.live) return "Stopped";
@@ -371,6 +437,7 @@ function route() {
   const match = /^#sessions\/([\w-]{1,128})\/([\w-]{1,128})(\/options)?$/.exec(location.hash);
   const previousKey = activeKey, previousScreen = activeScreen;
   if (!match) {
+    interruptLoadTiming("Left session before measurement completed");
     // Keep old single-host bookmarks usable, without implicitly resuming history.
     const legacy = /^#sessions\/([\w-]{1,128})$/.exec(location.hash);
     const local = hosts.find(host => host.key === "local" && host.connected);
@@ -384,11 +451,17 @@ function route() {
   }
   const key = sessionKey(match[1], match[2]);
   let conversation = conversations.get(key);
+  if (!match[3] && (previousKey !== key || previousScreen !== "conversation") && !currentLoadTiming(key)) {
+    beginLoadTiming(key, conversation?.hasSnapshot() ? "cached" : "initial attachment");
+  } else if (match[3] && previousScreen === "conversation") {
+    interruptLoadTiming("Opened Options before measurement completed");
+  }
   if (!conversation) {
     const host = hosts.find(host => host.connected && host.hello.hostId === match[1]);
     const row = host?.sessions.find(row => row.id === match[2]);
     if (!host || !row?.live) {
       activeKey = null; activeScreen = "overview"; renderScreens();
+      interruptLoadTiming("Session unavailable; no transcript loaded");
       if (!connecting) notice(!host ? "This host is unavailable. Reconnect it from Overview."
         : "This session is stopped or unavailable. Open History to resume it explicitly.");
       return;
@@ -802,7 +875,10 @@ function createConversation(host, row) {
     $("options-title").textContent = $("session-title").textContent;
     $("session-directory").textContent = `${host.alias} / ${owner?.interactions.runtime?.cwd || currentRow.cwd || ""}`;
     if (host.connected && row.live && connected && owner?.error) notice(owner.error);
+    const timing = !element.hidden && !$("chat-screen").hidden ? currentLoadTiming(key) : null;
+    const renderStarted = timing ? performance.now() : 0;
     renderTranscript();
+    timeTranscript(timing, renderStarted, snapshot.conversation);
     scheduleViewedResponse();
     const state = displayStatus();
     setStatus($("session-status"), state);
@@ -1145,6 +1221,7 @@ function createConversation(host, row) {
     }
   }));
   $("layout-diagnostics").addEventListener("click", toggleViewportDiagnostics);
+  $("load-timings").addEventListener("click", () => setLoadTimings(!loadTimingsEnabled));
   $("refresh-settings").addEventListener("click", () => { void loadSettings(); });
   $("abort").addEventListener("click", () => run(() => command("turn.abort")));
   $("rename").addEventListener("click", () => {
@@ -1222,9 +1299,12 @@ function createConversation(host, row) {
   }, 5000);
   async function reconnect() {
     if (disposed || connected || busy) return;
+    if (!currentLoadTiming(key)) beginLoadTiming(key, "reconnect");
+    const timing = currentLoadTiming(key);
     await run(async () => {
       if (!host.connected) throw new Error("Reconnect the execution host from Overview first.");
-      const summaries = await host.client.request("sessions.subscribe");
+      const summaries = await host.client.request("sessions.subscribe", {}, timing ? (timing.summaries = {}) : undefined);
+      if (timing) { timing.stage = "Connecting to session"; renderLoadTiming(); }
       setSummaries(host, summaries);
       if (disposed) return;
       const currentRow = host.sessions.find(item => item.id === selectedId);
@@ -1233,11 +1313,13 @@ function createConversation(host, row) {
       const next = new ServiceClient(record => { if (!disposed && client === next) receive(record); });
       client = next;
       grant = null;
-      hello = await next.connect(channel, host.stream, host.hello.hostId);
+      hello = await next.connect(channel, host.stream, host.hello.hostId, timing ? (timing.connection = {}) : undefined);
+      if (timing) { timing.stage = "Waiting for snapshot"; renderLoadTiming(); }
       if (disposed) { next.close(); return; }
       connected = true;
       try {
-        const value = await next.request("attach", { sessionId: selectedId, label: controllerLabel });
+        const value = await next.request("attach", { sessionId: selectedId, label: controllerLabel }, timing ? (timing.attach = {}) : undefined);
+        if (timing) timing.attached = true;
         attachment = value.attachmentId;
         streamSequence = value.snapshot.sequence;
         authoritySequence = 0;
@@ -1247,6 +1329,11 @@ function createConversation(host, row) {
         applySnapshot(value.snapshot);
       } catch (error) { next.close(error.message); throw error; }
     });
+    if (timing && timing === loadTiming && timing.domMs == null) {
+      timing.failed = !connected;
+      if (!timing.interrupted) timing.stage = connected ? "Waiting for hydrated transcript" : "Not connected; see session notice";
+      renderLoadTiming();
+    }
   }
   return {
     get host() { return host; },
@@ -1254,6 +1341,7 @@ function createConversation(host, row) {
     draft: () => $("prompt").value,
     viewed() { if (snapshot) renderSession(); },
     connected: () => connected,
+    hasSnapshot: () => Boolean(snapshot),
     rebind(current) { host = current; if (snapshot) renderSession(); },
     disconnect(message = "Host registration removed, disabled or changed.") { client?.close(message); },
     syncRow(value) {
