@@ -166,7 +166,7 @@ async function main(): Promise<void> {
         if (action !== "restart") {
           const message = action === "disable" ? "Server shut down successfully; startup disabled."
             : existing ? "Server shut down successfully." : "Server is already stopped.";
-          console.log(terminalText(message, "32", process.stdout)); return;
+          console.log(terminalText(message, "22;32", process.stdout)); return;
         }
       } else if (existing) {
         existing.client.close();
