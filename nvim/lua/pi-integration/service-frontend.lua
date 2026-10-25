@@ -82,7 +82,8 @@ local function publish_attachment(heartbeat_only)
 	end
 	if status == "Stopped" then name, slug = "Stopped session", "Stopped session" end
 	tmux.publish({ version = 1, frontend_attachment = true, host_id = identity, session_id = session_id,
-		pid = vim.uv.os_getpid(), updated = os.time(), cwd = not session_id and selected_cwd or state.session_cwd or selected_cwd,
+		pid = vim.uv.os_getpid(), server = vim.v.servername ~= "" and vim.v.servername or vim.fn.serverstart(),
+		updated = os.time(), cwd = not session_id and selected_cwd or state.session_cwd or selected_cwd,
 		title = name, slug = slug,
 		status = status, last_focused_at = state.last_focused_at,
 		service_epoch = snapshot and snapshot.serviceEpoch, runtime_revision = snapshot and snapshot.runtimeRevision,
@@ -1710,6 +1711,18 @@ end
 function M.detach_frontend()
 	if not can_close_frontend() or not backup() then return end
 	vim.cmd("qall!")
+end
+function M.close_unstarted(expected_pid)
+	if expected_pid ~= vim.uv.os_getpid() or M.config.role ~= "conversation" then return false, "Frontend changed; select the action again" end
+	if session_id then return false, "Frontend now has a session; select the action again" end
+	if not can_close_frontend() then return false, "Save unrelated modified buffers before closing the frontend" end
+	if not backup() then return false, "Could not preserve local drafts; frontend left open" end
+	-- Reply to the overview before exiting, and recheck after yielding to input.
+	vim.schedule(function()
+		if session_id then notify("Frontend now has a session; select the action again."); return end
+		M.detach_frontend()
+	end)
+	return true
 end
 function M.quit()
 	if not session_id then return M.detach_frontend() end

@@ -702,7 +702,15 @@ function M.management_operations()
 	end)
 end
 function M.manage(entry, action, argument)
-	if not entry.session_id then return nil, "Frontend has no session yet" end
+	if not entry.session_id then
+		if action ~= "kill" or not entry.frontend_pane then return nil, "Frontend has no session yet" end
+		vim.ui.select({ "Close frontend", "Cancel" }, { prompt = "Close this unstarted frontend? Local drafts are preserved." }, function(choice)
+			if choice ~= "Close frontend" then return end
+			local closed, err = require("pi-integration.backends.tmux").close_frontend(entry)
+			if not closed then notify(err) end
+		end)
+		return true
+	end
 	if entry.status == "Stopped" then return nil, "Session is stopped" end
 	local host = M.find(entry.host_id)
 	if not host or not host.connected then return nil, "Host disconnected; mutations disabled" end

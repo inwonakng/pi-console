@@ -165,6 +165,25 @@ function M.focus(id)
 	return command({ "select-window", "-t", session .. ":" .. window, ";", "select-pane", "-t", id })
 end
 
+function M.close_frontend(entry)
+	local instances, err = M.list()
+	if not instances then return nil, err end
+	local target
+	for _, instance in ipairs(instances) do
+		if instance.id == entry.frontend_pane and instance.pid == entry.pid then target = instance; break end
+	end
+	if not target then return nil, "That frontend is no longer open" end
+	if not target.frontend_attachment or target.session_id then return nil, "Frontend changed; select the action again" end
+	if type(target.server) ~= "string" or target.server == "" then return nil, "Frontend is still starting or does not support closing; try again after restarting it" end
+	local connected, channel = pcall(vim.fn.sockconnect, "pipe", target.server, { rpc = true })
+	if not connected or channel == 0 then return nil, "Could not connect to the frontend" end
+	local ok, result = pcall(vim.fn.rpcrequest, channel, "nvim_exec_lua",
+		"return { require('pi-integration.service-frontend').close_unstarted(...) }", { target.pid })
+	vim.fn.chanclose(channel)
+	if not ok then return nil, tostring(result) end
+	return result[1], result[2]
+end
+
 -- Remove only sidebar companions when this is the window's sole content pane.
 function M.close_sidebar()
 	local panes = command({ "list-panes", "-t", vim.env.TMUX_PANE, "-F", "#{pane_id}\t#{@pi_sidebar}" })
