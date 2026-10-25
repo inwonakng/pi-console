@@ -13,6 +13,7 @@ export type BundledOperation =
   | { operation: "workspace.enter"; payload: { id?: string; ignoredFiles?: string[] } }
   | { operation: "workspace.integrate"; payload: { id?: string; commitMessage?: string } }
   | { operation: "workspace.revert"; payload: { id: string; reason: string } }
+  | { operation: "workspace.undo"; payload: { id: string; reason: string } }
   | { operation: "workspace.discard"; payload: { id?: string } }
   | { operation: "side.open"; payload: Record<string, never> }
   | { operation: "side.prompt"; payload: { text: string } }
@@ -28,7 +29,7 @@ export const BUNDLED_SOURCES = {
   "access.set": "access-mode.ts", "access.cycle": "access-mode.ts",
   "integration.set": "workspace.ts", "integration.cycle": "workspace.ts",
   "history.navigate": "tree.ts", "history.clone": "tree.ts", "history.fork": "tree.ts", "history.delete": "tree.ts",
-  "workspace.enter": "workspace.ts", "workspace.integrate": "workspace.ts", "workspace.discard": "workspace.ts", "workspace.revert": "workspace.ts",
+  "workspace.enter": "workspace.ts", "workspace.integrate": "workspace.ts", "workspace.discard": "workspace.ts", "workspace.revert": "workspace.ts", "workspace.undo": "workspace.ts",
   "side.open": "side.ts", "side.prompt": "side.ts", "side.draft": "side.ts", "side.reset": "side.ts", "side.abort": "side.ts",
   "spawn.join": "spawn.ts", "spawn.stop": "spawn.ts", "title.generate": "auto-title.ts",
   "notifications.set": "notifications.ts", "usage.refresh": "codex-usage.ts",
@@ -53,7 +54,7 @@ export function validBundled(operation: unknown, p: Record<string, unknown>): bo
         && (p.commitMessage === undefined || typeof p.commitMessage === "string" && !!p.commitMessage.trim() && !p.commitMessage.includes("\0") && Buffer.byteLength(p.commitMessage) <= 16384)
         && (p.id === undefined || typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id))
         && (p.ignoredFiles === undefined || Array.isArray(p.ignoredFiles) && p.ignoredFiles.length <= 128 && p.ignoredFiles.every((v) => typeof v === "string" && v.length <= 4096));
-    case "workspace.revert": return exact(p, ["id", "reason"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
+    case "workspace.undo": case "workspace.revert": return exact(p, ["id", "reason"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
       && typeof p.reason === "string" && !!p.reason.trim() && !p.reason.includes("\0") && Buffer.byteLength(p.reason) <= 8192;
     case "usage.refresh": case "title.generate": case "side.open": case "side.reset": case "side.abort": return exact(p, []);
     case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";

@@ -28,6 +28,8 @@ import { activeLocation, moveToLocation, publishWorkspaceState } from "./shared/
 import {
   createWorkspace,
   createRevertWorkspace,
+  previewWorkspaceUndo,
+  undoWorkspaceIntegration,
   beginWorkspaceContinuation,
   clearWorkspaceContinuation,
   getWorkspaceContinuation,
@@ -56,9 +58,9 @@ import {
   type WorkspaceRecord,
 } from "./shared/workspace";
 
-const WORKSPACE_ACTIONS = ["enter", "status", "list", "integrate", "discard", "revert"] as const;
+const WORKSPACE_ACTIONS = ["enter", "status", "list", "integrate", "discard", "revert", "undo"] as const;
 type WorkspaceAction = (typeof WORKSPACE_ACTIONS)[number];
-const TRANSITION_ACTIONS = new Set<WorkspaceAction>(["enter", "integrate", "discard", "revert"]);
+const TRANSITION_ACTIONS = new Set<WorkspaceAction>(["enter", "integrate", "discard", "revert", "undo"]);
 
 const REVIEW_ACTION = "Review / modify";
 const INTEGRATE_ACTION = "Integrate and return";
@@ -258,8 +260,9 @@ async function confirmDestructive(
   title: string,
   message: string,
   approved: boolean | undefined,
+  alwaysConfirm = false,
 ): Promise<boolean> {
-  if (getIntegrationMode() === "allowed") return true;
+  if (!alwaysConfirm && getIntegrationMode() === "allowed") return true;
   if (getInteractionMode(ctx) === "interactive") {
     const dialogTitle = ctx.mode === "rpc"
       ? JSON.stringify({ kind: "pi_confirmation", prompt: title, resumable: true })
@@ -564,7 +567,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     defaultActive: false,
     label: "Workspace",
     exposure: available ? "direct" : "hidden",
-    description: "Create/reuse a task worktree, inspect, integrate or discard. Revert prepares a recorded integration's reversal in a new workspace for review; it never resets history. List returns workspace/session IDs, newest first (default 20, max 50); status shows commit metadata and paths.",
+    description: "Create/reuse a task worktree, inspect, integrate or discard. Undo removes a confirmed local integration at its branch tip, preserving working files and unrelated staging. Revert prepares a reversal commit when retaining history is explicitly requested. List returns workspace/session IDs, newest first (default 20, max 50); status shows commit metadata and paths.",
     promptSnippet: "Manage the current task's isolated Git worktree and integration lifecycle.",
     promptGuidelines: [
       "Before making implementation changes with edit or write inside the git repository containing the current session cwd, call workspace with action=enter as the only tool call in that assistant response, unless the current session is already in an associated workspace. To edit existing ignored files, provide their paths relative to the original cwd in ignoredFiles on the first enter call; only those files are copied and later integrated. Wait for the cwd switch before using more tools.",
@@ -573,20 +576,20 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       "Join running subagents, or stop them and wait for cleanup, before switching workspaces.",
       "When integration commits are enabled, supply commitMessage describing what changed and why. Never push automatically.",
       "If committing could expose sensitive files, secrets, or has another safety concern, use question to ask the user before integration, even when integration is pre-authorized. Describe the concern without exposing secret values. If question is unavailable, cancelled, or the user declines, retain the workspace without integrating or committing. Integration permission does not approve a questionable commit.",
-      "To undo a managed integration, use action=revert with its workspace id and a reason from the origin checkout. Review and verify the prepared reversal, then integrate it to create a new revert commit. Do not use reset/amend/history rewriting for undo; fix requests normally use a new corrective workspace and commit instead.",
-      "Revert reverses committed changes only; included ignored-file updates are outside Git and require separate explicit handling.",
+      "To remove an accidental local integration commit, use action=undo with its workspace id and a reason from the origin checkout. Undo requires explicit user confirmation even in allowed mode; approved=true is only for user-confirmed undo when no interactive UI is available, after disclosing the commit, branch and publication uncertainty. It removes only the recorded branch-tip commit, leaves working files unchanged and preserves unrelated staging. Known-pushed commits are refused; local remote-tracking refs cannot prove a commit was never pushed. Do not run reset/amend or other history rewriting directly.",
+      "Use action=revert only when the user explicitly wants a reversal commit retaining the original history. Review and verify the prepared reversal, then integrate it. Undo and revert do not restore included ignored-file updates; undo does not purge reflogs, saved refs or artifacts. Fix requests normally use a new corrective workspace and commit.",
       ...guidance,
       "Call workspace with action=integrate, action=discard, or action=revert as the only tool call in that assistant response when the action changes the active workspace. Wait for the cwd switch before using more tools.",
     ],
     parameters: Type.Object({
       action: StringEnum(WORKSPACE_ACTIONS, { description: "Workspace lifecycle action." }),
-      id: Type.Optional(Type.String({ description: "Workspace id for enter, status, integration, or discard; revert requires the original integration's workspace id. Enter creates a new task workspace unless an id is specified." })),
+      id: Type.Optional(Type.String({ description: "Workspace id for enter, status, integration, or discard; undo and revert require the original integration's workspace id. Enter creates a new task workspace unless an id is specified." })),
       offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "List only: zero-based offset (default 0). Use nextOffset from the previous page." })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "List only: number of entries per page (default 20, maximum 50)." })),
       ignoredFiles: Type.Optional(Type.Array(Type.String(), { description: "Existing ignored file paths relative to the original cwd, copied into a new task worktree on enter and copied back on integration." })),
-      approved: Type.Optional(Type.Boolean({ description: "Required for integration or discard in ask mode when no interactive UI is available; does not bypass interactive confirmation." })),
+      approved: Type.Optional(Type.Boolean({ description: "User approval when no interactive UI is available: required for undo in every mode, and for integration/discard in ask mode. Does not bypass interactive confirmation." })),
       commitMessage: Type.Optional(Type.String({ minLength: 1, maxLength: 16384, description: "Integration commit message: describe the changes and why. Required when automatic commits are enabled; reverts get a default message." })),
-      reason: Type.Optional(Type.String({ minLength: 1, maxLength: 8192, description: "Revert only: why the recorded integration should be undone. id identifies that integration's workspace." })),
+      reason: Type.Optional(Type.String({ minLength: 1, maxLength: 8192, description: "Undo/revert only: why the recorded integration should be undone. id identifies that integration's workspace." })),
     }),
     executionMode: "sequential",
     execute: executeWorkspace = async (_toolCallId, params, signal, _onUpdate, ctx, move: Move | undefined = undefined): ReturnType<typeof executeWorkspace> => {
@@ -603,12 +606,25 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         return { content: [{ type: "text", text }], details };
       }
       if (params.commitMessage !== undefined && action !== "integrate") throw new Error("commitMessage only applies to action=integrate.");
-      if (params.reason !== undefined && action !== "revert") throw new Error("reason only applies to action=revert.");
+      if (params.reason !== undefined && action !== "revert" && action !== "undo") throw new Error("reason only applies to action=undo or action=revert.");
       if (params.ignoredFiles !== undefined && action !== "enter") {
         throw new Error("ignoredFiles only applies to action=enter.");
       }
       if (TRANSITION_ACTIONS.has(action) && hasRunningSubagents()) {
         throw new Error("Cannot change workspaces while subagents or their cleanup are active. Use spawn_control join/join_all, or stop them and wait for cleanup, then retry this workspace action.");
+      }
+      if (action === "undo") {
+        if (!params.id || !params.reason?.trim() || params.reason.includes("\0") || Buffer.byteLength(params.reason) > 8192) {
+          throw new Error("Undo requires the recorded integration's workspace id and a reason (maximum 8 KiB, no NUL bytes).");
+        }
+        const preview = await previewWorkspaceUndo(params.id, ctx.cwd, signal);
+        const target = loadWorkspace(params.id)!;
+        const prompt = `Remove ${target.integrationCommit!.oid} from ${preview.branch}?${target.integrationCommit!.undo ? "\nResume the interrupted undo." : ""}\n\nAffected paths:\n${preview.files.map(path => JSON.stringify(path)).join("\n")}\n\nReason: ${params.reason}\n\nWorking files stay unchanged; the commit's changes become unstaged (new files become untracked). Unrelated staging is preserved. Ignored-file updates are not restored. Reflogs, saved refs and artifacts may retain the commit.\n\nRemote-tracking refs may be stale. Confirm that this commit has not been pushed or shared.`;
+        const confirmed = await confirmDestructive(ctx, "Remove local integration commit?", prompt, params.approved, true);
+        if (!confirmed) return { content: [{ type: "text", text: `Commit undo was not approved; no branch or index changes were made.${getInteractionMode(ctx) === "noninteractive" ? `\n\n${prompt}` : ""}` }], details: undefined };
+        const record = await undoWorkspaceIntegration({ id: params.id, cwd: ctx.cwd, reason: params.reason, expected: preview }, signal);
+        publishWorkspaceState(ctx);
+        return { content: [{ type: "text", text: `Removed ${record.integrationCommit!.oid} from ${preview.branch}. Working files were left unchanged and unrelated staging preserved. The removed commit may remain in reflogs, saved refs and artifacts.\n\n${formatWorkspaceRecord(record)}` }], details: record };
       }
       if (action === "revert") {
         if (!params.id || !params.reason) throw new Error("Revert requires the recorded integration's workspace id and a reason.");
@@ -847,13 +863,13 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   // Let native defaultTools select it at startup. session_start resolves whether
   // the directory supports workspaces before any model request is made.
   registerWorkspaceTool(true, []);
-  for (const operation of ["workspace.enter", "workspace.integrate", "workspace.discard", "workspace.revert"] as const) {
+  for (const operation of ["workspace.enter", "workspace.integrate", "workspace.discard", "workspace.revert", "workspace.undo"] as const) {
     registerServiceOperation(pi, operation, async (payload, ctx) => {
       if (!ctx.isIdle() || hasRunningSubagents()) return;
-      const action = operation.slice("workspace.".length) as "enter" | "integrate" | "discard" | "revert";
+      const action = operation.slice("workspace.".length) as "enter" | "integrate" | "discard" | "revert" | "undo";
       const selected = payload.id ? loadWorkspace(payload.id) : workspaceForContext(ctx.cwd, sessionFile(ctx));
       if (payload.id && !selected) return;
-      if (selected && (selected.kind !== "task" || action !== "revert" && !sameSessionFile(selected.sourceSessionFile, sessionFile(ctx)))) return;
+      if (selected && (selected.kind !== "task" || action !== "revert" && action !== "undo" && !sameSessionFile(selected.sourceSessionFile, sessionFile(ctx)))) return;
       let moved = false;
       const result = await executeWorkspace("service", { ...payload, action }, ctx.signal, undefined, ctx, async (transition, id) => {
         if (transition === "enter") await enterWorkspace(id, ctx);
@@ -862,6 +878,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       });
       const record = result.details as WorkspaceRecord;
       const current = record?.id ? loadWorkspace(record.id) : undefined;
+      if (action === "undo") return current?.integrationCommit?.status === "undone"
+        ? { changed: true, workspaceId: current.id, commit: current.integrationCommit.oid, status: "undone" } : undefined;
       const cleanupIncomplete = current?.lifecycle === "cleanup_failed" && (moved || result.cleanupAttempted === true);
       const changed = moved || current?.lifecycle === "discarded" || cleanupIncomplete && !current.retained;
       const commitData = { commit: current?.integrationCommit?.oid, reverts: current?.reverts?.commit };

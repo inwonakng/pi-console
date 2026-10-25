@@ -3,20 +3,31 @@ import { createHash } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
-/** Persisted before any destination mutation; also identifies an interrupted publication. */
-export type WorkspaceCommit = {
+type BranchIndexUpdate = {
   oid: string;
   parent: string;
   branch: string;
-  beforeTree: string;
-  afterTree: string;
-  sourceTree: string;
   indexBefore: string;
   indexAfter: string;
   preparedIndex: string;
-  message: string;
-  status: "prepared" | "published";
   publicationLock?: { pid: number; device: number; inode: number };
+};
+
+export type WorkspaceUndo = BranchIndexUpdate & {
+  reason: string;
+  files: string[];
+  status: "prepared" | "completed";
+};
+export type WorkspaceUndoPreview = { head: string; branch: string; index: string; files: string[] };
+
+/** Persisted before any destination mutation; also identifies an interrupted publication. */
+export type WorkspaceCommit = BranchIndexUpdate & {
+  beforeTree: string;
+  afterTree: string;
+  sourceTree: string;
+  message: string;
+  status: "prepared" | "published" | "undone";
+  undo?: WorkspaceUndo;
 };
 
 function git(root: string, args: string[], index?: string, input?: Buffer): Buffer {
@@ -108,10 +119,58 @@ export function prepareWorkspaceCommit(input: {
   } finally { rmSync(commitIndex, { force: true }); }
 }
 
+/** Inspect an undo without changing files, refs or the index. Remote refs are
+ * only local evidence; confirmation must disclose that they may be stale. */
+export function previewCommitUndo(root: string, commit: WorkspaceCommit): WorkspaceUndoPreview {
+  const destination = commitDestination(root), undo = commit.undo;
+  if (commit.status !== "published" || undo?.status === "completed") throw new Error("Undo requires a committed integration that has not already been undone.");
+  if (destination.branch !== commit.branch || (destination.head !== commit.oid && !(undo && destination.head === commit.parent))) {
+    throw new Error("Undo requires the recorded integration at the tip of its checked-out branch; later commits will not be removed.");
+  }
+  const parents = text(root, ["rev-list", "--parents", "-n", "1", commit.oid]).split(" ");
+  if (parents.length !== 2 || parents[1] !== commit.parent) throw new Error("Integration commit does not match its recorded parent.");
+  const remotes = text(root, ["for-each-ref", `--contains=${commit.oid}`, "--format=%(refname)", "refs/remotes/"]);
+  if (remotes) throw new Error(`Undo refused: the commit is reachable from known remote-tracking refs:\n${remotes}`);
+  const index = indexFingerprint(indexPath(root));
+  const files = undo?.files ?? git(root, ["diff", "--no-renames", "--name-only", "-z", commit.parent, commit.oid]).toString("utf8").split("\0").filter(Boolean);
+  if (undo) {
+    if (![undo.indexBefore, undo.indexAfter].includes(index)) throw new Error("Interrupted undo cannot resume: the index changed. Preserve the newer staging before recovery.");
+  } else {
+    if (git(root, ["ls-files", "--unmerged", "-z"]).length) throw new Error("Resolve index conflicts before undoing a commit.");
+    const staged = new Set(git(root, ["diff", "--cached", "--no-renames", "--name-only", "-z", commit.oid]).toString("utf8").split("\0"));
+    const overlaps = files.filter(path => staged.has(path));
+    if (overlaps.length) throw new Error(`Undo would overlap staged changes; separate those edits first:\n${overlaps.join("\n")}`);
+  }
+  return { head: destination.head, branch: destination.branch, index, files };
+}
+
+/** Build a replacement index by reversing only the commit's entries. Working
+ * files are never touched; unrelated staging is copied from the reviewed index. */
+export function prepareCommitUndo(root: string, commit: WorkspaceCommit, artifactDir: string, reason: string,
+  expected: WorkspaceUndoPreview): WorkspaceUndo {
+  const check = () => {
+    const current = previewCommitUndo(root, commit);
+    if (current.head !== expected.head || current.branch !== expected.branch || current.index !== expected.index) {
+      throw new Error("Branch, HEAD or index changed after undo confirmation; review and confirm again.");
+    }
+  };
+  check();
+  if (commit.undo) return commit.undo;
+  const preparedIndex = join(artifactDir, "undo.index");
+  copyFileSync(indexPath(root), preparedIndex);
+  if (indexFingerprint(preparedIndex) !== expected.index) throw new Error("Index changed while preparing undo.");
+  const patch = git(root, ["diff", "--binary", "--full-index", commit.oid, commit.parent]);
+  if (patch.length) git(root, ["apply", "--cached", "--binary", "--whitespace=nowarn", "-"], preparedIndex, patch);
+  check();
+  return { oid: commit.parent, parent: commit.oid, branch: commit.branch,
+    indexBefore: expected.index, indexAfter: indexFingerprint(preparedIndex), preparedIndex,
+    reason: reason.trim(), files: expected.files, status: "prepared" };
+}
+
 /** The caller holds the workspace destination lock. Git's index lock excludes
  * cooperative Git writers while files, branch and index are published. A crash
  * can split these steps; the durable plan permits only exact-state recovery. */
-export function publishWorkspaceCommit(root: string, plan: WorkspaceCommit, persist: () => void, apply: () => void): void {
+export function publishWorkspaceCommit(root: string, plan: BranchIndexUpdate, persist: () => void, apply: () => void): void {
   const index = indexPath(root), lock = index + ".lock";
   const validate = () => {
     const { head, branch } = commitDestination(root);

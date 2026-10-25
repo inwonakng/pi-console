@@ -20,7 +20,8 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathInside as lexicalPathInside } from "./paths";
-import { commitDestination, prepareWorkspaceCommit, publishWorkspaceCommit, type WorkspaceCommit } from "./workspace-commits";
+import { commitDestination, prepareWorkspaceCommit, publishWorkspaceCommit, previewCommitUndo, prepareCommitUndo,
+  type WorkspaceCommit, type WorkspaceUndoPreview } from "./workspace-commits";
 
 export type WorkspaceKind = "task" | "child";
 export type WorkspaceLifecycle =
@@ -370,6 +371,7 @@ export function formatIntegrationSummary(record: WorkspaceRecord): string {
     lines.push(`Commit (${record.integrationCommit.status}): ${record.integrationCommit.oid}`,
       record.integrationCommit.message.split("\n")[0]!);
   }
+  if (record.integrationCommit?.undo) lines.push(`Undo (${record.integrationCommit.undo.status}): ${record.integrationCommit.undo.reason}`);
   if (record.reverts) lines.push(`Reverts: ${record.reverts.commit}\nReason: ${record.reverts.reason}`);
   if (record.integrationReview?.ignoredFiles.length) lines.push("Ignored-file updates are outside the commit and cannot be undone by Git revert.");
   return lines.filter(Boolean).join("\n\n");
@@ -896,6 +898,9 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal, optio
     let applicationStarted = false;
     let destinationRef: string | undefined;
     try {
+      if (record.integrationCommit?.undo || record.integrationCommit?.status === "undone") {
+        throw new Error("This integration has an undo record; it cannot be published again. Resume a pending undo with action=undo.");
+      }
       // Finalized contributions are idempotent, including after cleanup.
       if (isWorkspaceFinalized(record)) return record;
       assertWorkspaceAvailable(record);
@@ -1044,6 +1049,9 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal, optio
 }
 
 function assertCommitSettled(record: WorkspaceRecord): void {
+  if (record.integrationCommit?.undo?.status === "prepared") {
+    throw new Error("Resume the recorded undo with action=undo before discarding its workspace or deleting its session.");
+  }
   if (record.integrationCommit?.status === "prepared") {
     throw new Error("Recover the recorded integration commit before discarding its workspace or deleting its session. Destination files or the branch may already have changed; discard is not commit undo.");
   }
@@ -1112,10 +1120,52 @@ async function resumeWorkspaceCommit(record: WorkspaceRecord, signal?: AbortSign
   return record;
 }
 
+function assertUndoContext(record: WorkspaceRecord, cwd: string): void {
+  const root = findGitRoot(cwd);
+  if (!root || workspaceForContext(cwd) || canonicalPath(root) !== canonicalPath(record.destinationRoot)) {
+    throw new Error("Undo must run from the integration's origin checkout, outside an active workspace.");
+  }
+  if (record.kind !== "task" || !isWorkspaceFinalized(record) || !record.integrationCommit) {
+    throw new Error("Undo requires a finalized, committed task integration.");
+  }
+}
+
+export async function previewWorkspaceUndo(id: string, cwd: string, signal?: AbortSignal): Promise<WorkspaceUndoPreview> {
+  return withWorkspaceLock(id, async record => {
+    assertUndoContext(record, cwd);
+    return previewCommitUndo(record.destinationRoot, record.integrationCommit!);
+  }, signal);
+}
+
+export async function undoWorkspaceIntegration(input: {
+  id: string; cwd: string; reason: string; expected: WorkspaceUndoPreview;
+}, signal?: AbortSignal): Promise<WorkspaceRecord> {
+  if (!input.reason.trim() || input.reason.includes("\0") || Buffer.byteLength(input.reason) > 8192) throw new Error("An undo reason is required (maximum 8 KiB, no NUL bytes).");
+  return withWorkspaceLock(input.id, async record => {
+    assertUndoContext(record, input.cwd);
+    const commit = record.integrationCommit!;
+    const paths = input.expected.files.map(path => join(record.destinationRoot, path));
+    return withMutationQueues(paths, async () => {
+      checkCancellation(signal);
+      commit.undo = prepareCommitUndo(record.destinationRoot, commit, workspaceArtifactDir(record.id), input.reason, input.expected);
+      saveWorkspace(record);
+      // Same durable branch/index publication protocol as integration, with the
+      // direction reversed. Never replay a task patch or change working files.
+      publishWorkspaceCommit(record.destinationRoot, commit.undo, () => saveWorkspace(record), () => {
+        previewCommitUndo(record.destinationRoot, commit);
+      });
+      commit.undo.status = "completed";
+      commit.status = "undone";
+      saveWorkspace(record);
+      return record;
+    });
+  }, signal);
+}
+
 function assertRevertTarget(root: string, workspaceId: string, exceptId?: string): WorkspaceRecord {
   const target = loadWorkspace(workspaceId), commit = target?.integrationCommit;
   if (!target || target.kind !== "task" || canonicalPath(target.destinationRoot) !== canonicalPath(root)
-    || commit?.status !== "published" || !isWorkspaceFinalized(target)) {
+    || commit?.status !== "published" || commit.undo || !isWorkspaceFinalized(target)) {
     throw new Error("Revert requires a successfully committed task integration in this destination repository.");
   }
   commitDestination(root);
@@ -1313,6 +1363,7 @@ export function formatWorkspaceRecord(record: WorkspaceRecord): string {
     `- baseline: ${record.baselineCommit}`,
     `- integration: ${record.integration}${record.integrationReason ? ` (${record.integrationReason})` : ""}`,
     ...(record.integrationCommit ? [`- commit (${record.integrationCommit.status}): ${record.integrationCommit.oid}`] : []),
+    ...(record.integrationCommit?.undo ? [`- undo (${record.integrationCommit.undo.status}): ${record.integrationCommit.undo.reason}`] : []),
     ...(record.reverts ? [`- reverts: ${record.reverts.commit} (${record.reverts.reason})`] : []),
     `- result patch: ${record.resultPatchPath}`,
     `- application patch: ${record.applicationPatchPath}`,

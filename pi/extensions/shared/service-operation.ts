@@ -13,6 +13,7 @@ export type BundledOperation =
   | { operation: "workspace.enter"; payload: { id?: string; ignoredFiles?: string[] } }
   | { operation: "workspace.integrate"; payload: { id?: string; commitMessage?: string } }
   | { operation: "workspace.revert"; payload: { id: string; reason: string } }
+  | { operation: "workspace.undo"; payload: { id: string; reason: string } }
   | { operation: "workspace.discard"; payload: { id?: string } }
   | { operation: "side.open"; payload: Record<string, never> }
   | { operation: "side.prompt"; payload: { text: string } }
@@ -45,7 +46,7 @@ export function validBundled(operation: unknown, p: Record<string, unknown>): bo
         && (p.commitMessage === undefined || typeof p.commitMessage === "string" && !!p.commitMessage.trim() && !p.commitMessage.includes("\0") && Buffer.byteLength(p.commitMessage) <= 16384)
         && (p.id === undefined || typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id))
         && (p.ignoredFiles === undefined || Array.isArray(p.ignoredFiles) && p.ignoredFiles.length <= 128 && p.ignoredFiles.every((v) => typeof v === "string" && v.length <= 4096));
-    case "workspace.revert": return exact(p, ["id", "reason"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
+    case "workspace.undo": case "workspace.revert": return exact(p, ["id", "reason"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
       && typeof p.reason === "string" && !!p.reason.trim() && !p.reason.includes("\0") && Buffer.byteLength(p.reason) <= 8192;
     case "usage.refresh": case "title.generate": case "side.open": case "side.reset": case "side.abort": case "spawn.cancel": return exact(p, []);
     case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";
