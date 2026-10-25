@@ -142,7 +142,7 @@ end
 function M.help_key_lines()
 	local lines = {
 		"- `<C-CR>` submit the input buffer.",
-		"- `<leader>qq` choose Stop, Detach or Cancel.",
+		"- `<leader>qq` choose Detach, Stop or Cancel.",
 		"- `<leader>pd` detach the frontend; conversation keeps running.",
 		"- `" .. kill_spec.lhs .. "` " .. kill_spec.desc .. " (requires control of a live session).",
 	}
