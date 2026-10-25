@@ -275,10 +275,7 @@ function renderHistory() {
 }
 function showHistory() {
   renderHostOptions(); renderHistory();
-  logViewport("history-before-open");
   $("history-dialog").showModal();
-  logViewport("history-open");
-  logSettledViewport("history-open");
   void perform(async () => {
     await Promise.all(uniqueHosts().filter(host => host.connected).map(async host => {
       const connection = host.client;
@@ -363,49 +360,6 @@ function detachConversation(key) {
   renderScreens(); renderOverview();
 }
 
-// Temporary, page-local diagnostics for the top-edge blur after reload.
-// Capture geometry only, never conversation text, session IDs or host details.
-const viewportLog = [];
-function logViewport(event) {
-  const viewport = window.visualViewport;
-  const root = document.documentElement;
-  const shell = getComputedStyle(document.body);
-  const bounds = node => {
-    const rect = node.getBoundingClientRect();
-    return { top: rect.top, left: rect.left, width: rect.width, height: rect.height, scrollTop: node.scrollTop };
-  };
-  const entry = {
-    event, ms: Math.round(performance.now()),
-    mode: navigator.standalone || matchMedia("(display-mode: standalone)").matches ? "home-screen" : "browser",
-    viewport: viewport ? { top: viewport.offsetTop, left: viewport.offsetLeft, height: viewport.height, width: viewport.width, pageTop: viewport.pageTop, scale: viewport.scale } : null,
-    window: { width: innerWidth, height: innerHeight, scrollX, scrollY, devicePixelRatio },
-    document: { width: root.clientWidth, height: root.clientHeight },
-    shell: { top: shell.top, height: shell.height, paddingTop: shell.paddingTop, background: shell.backgroundColor, rootBackground: getComputedStyle(root).backgroundColor },
-    body: bounds(document.body), panels: bounds($("panels")), overview: bounds($("overview")),
-    focus: { tag: document.activeElement?.tagName, control: document.activeElement?.dataset.id },
-    historyOpen: $("history-dialog").open,
-  };
-  viewportLog.push(entry);
-  if (viewportLog.length > 100) viewportLog.shift();
-  console.debug("[pi-console layout]", JSON.stringify(entry));
-}
-function logSettledViewport(event) {
-  requestAnimationFrame(() => requestAnimationFrame(() => logViewport(`${event}:frames`)));
-  setTimeout(() => logViewport(`${event}:500ms`), 500);
-}
-function downloadViewportLog() {
-  logViewport("export");
-  const blob = new Blob([JSON.stringify({ version: 1, navigation: performance.getEntriesByType("navigation")[0]?.type, snapshots: viewportLog }, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "pi-console-layout.json";
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
 // Safari keeps the layout viewport tall while the software keyboard is open.
 // Follow keyboard panning, but keep the shell inside the layout viewport when
 // rotation leaves a stale visual-viewport offset. innerHeight can shrink with the
@@ -420,7 +374,6 @@ function fitViewport() {
   document.documentElement.style.setProperty("--viewport-top", `${top}px`);
   // Treat a large viewport reduction as a keyboard, rather than browser chrome.
   document.documentElement.classList.toggle("keyboard-open", layoutHeight - height > 150);
-  logViewport("viewport-fit");
 }
 let viewportFrame;
 function scheduleViewportFit() {
@@ -431,14 +384,8 @@ window.visualViewport?.addEventListener("resize", scheduleViewportFit);
 window.visualViewport?.addEventListener("scroll", scheduleViewportFit);
 window.addEventListener("resize", scheduleViewportFit);
 window.addEventListener("pageshow", scheduleViewportFit);
-window.addEventListener("pageshow", () => {
-  logViewport("pageshow");
-  logSettledViewport("pageshow");
-});
 window.screen.orientation?.addEventListener("change", scheduleViewportFit);
-logViewport("startup-before-fit");
 fitViewport();
-logSettledViewport("startup");
 
 let viewportDiagnosticsTimer;
 function toggleViewportDiagnostics() {
@@ -515,11 +462,6 @@ $("search").addEventListener("input", renderOverview);
 $("host-filter").addEventListener("change", renderOverview);
 $("history").addEventListener("click", showHistory);
 $("close-history").addEventListener("click", () => $("history-dialog").close());
-$("history-dialog").addEventListener("close", () => {
-  logViewport("history-close");
-  logSettledViewport("history-close");
-});
-$("download-layout-log").addEventListener("click", downloadViewportLog);
 $("history-search").addEventListener("input", renderHistory);
 $("history-host").addEventListener("change", renderHistory);
 function refreshViewedStatus() {
