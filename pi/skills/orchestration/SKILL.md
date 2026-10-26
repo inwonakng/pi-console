@@ -1,6 +1,6 @@
 ---
 name: orchestration
-description: Use when the user asks to "use subagents", "orchestrate", or approves a suggestion to orchestrate. The parent coordinates; subagents execute. Also consult for individual subagent assignments without activating task-wide orchestration. Workers follow only the worker section and must not delegate.
+description: Use when the user asks to "use subagents", "orchestrate", or approves a suggestion to orchestrate. Before substantial work with separable assignments, you may offer orchestration; wait for approval before switching. The parent coordinates; subagents execute. Also consult for individual subagent assignments without activating task-wide orchestration. Workers follow only the worker section and must not delegate.
 ---
 
 # Orchestration
