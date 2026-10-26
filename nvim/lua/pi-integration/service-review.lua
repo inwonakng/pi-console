@@ -2,6 +2,7 @@
 local M = {}
 local resources = require("pi-integration.service-resources")
 local sequence = 0
+local selected_ns = vim.api.nvim_create_namespace("PiReviewSelected")
 local function scratch_name(title)
 	sequence = sequence + 1
 	return "pi://owner-review/" .. sequence .. "/" .. title
@@ -30,8 +31,32 @@ end
 
 function M.open(options, workspace_id, pinned)
 	local captured, resource = options.stamp(), options.resource
-	local review_tab, list_win, before_win, after_win
-	local files, selection = {}, 0
+	local review_tab, list_win, before_win, after_win, list_buf
+	local files, selection, rows = {}, 0, {}
+	local help_state, help_lines, displayed = {}, {}, nil
+	local help_name = scratch_name("help")
+	local function bind_help(buf)
+		vim.keymap.set("n", "?", function()
+			local output = vim.list_extend({}, help_lines)
+			if displayed then
+				vim.list_extend(output, { "", "## Displayed file", displayed.path,
+					displayed.historical and "Historical file (read-only)" or "Current file" })
+				for _, message in ipairs(displayed.messages) do table.insert(output, message) end
+			end
+			require("pi-integration.help").toggle_window(help_state, {
+				name = help_name, title = "Workspace review help", lines = output,
+				parent = vim.api.nvim_get_current_win(),
+			})
+		end, { buffer = buf, desc = "Workspace review help" })
+	end
+	local function style_window(win, role, path)
+		local group = "PiReview" .. role .. "Status"
+		vim.wo[win].statusline = "%#" .. group .. "# " .. role
+			.. (path and " | " .. path:gsub("%%", "%%%%") or "") .. " %="
+		vim.wo[win].fillchars = "stl: ,stlnc: "
+		vim.wo[win].winhighlight = "StatusLine:" .. group .. ",StatusLineNC:" .. group
+			.. ",DiffChange:PiReviewDiffChange,DiffText:PiReviewDiffText"
+	end
 	local function anchor_list()
 		if not review_tab or not vim.api.nvim_tabpage_is_valid(review_tab)
 			or not list_win or not vim.api.nvim_win_is_valid(list_win)
@@ -50,13 +75,18 @@ function M.open(options, workspace_id, pinned)
 			vim.bo[blank].bufhidden = "wipe"
 			before_win = vim.api.nvim_open_win(blank, true, { split = "right", win = list_win })
 			vim.wo[before_win].winfixwidth = false
+			bind_help(blank)
 		end
 		if not after_win or not vim.api.nvim_win_is_valid(after_win) then
 			local blank = vim.api.nvim_create_buf(false, true)
 			vim.bo[blank].bufhidden = "wipe"
 			after_win = vim.api.nvim_open_win(blank, true, { split = "below", win = before_win })
 			vim.wo[after_win].winfixwidth = false
+			bind_help(blank)
 		end
+		style_window(list_win, "Files")
+		style_window(before_win, "Before", displayed and displayed.path)
+		style_window(after_win, "After", displayed and displayed.path)
 		anchor_list()
 		return true
 	end
@@ -69,6 +99,15 @@ function M.open(options, workspace_id, pinned)
 		end
 		vim.api.nvim_set_current_win(after_win)
 		vim.cmd("diffupdate")
+		displayed = pair
+		style_window(before_win, "Before", pair.path)
+		style_window(after_win, "After", pair.path)
+		vim.api.nvim_buf_clear_namespace(list_buf, selected_ns, 0, -1)
+		if rows[pair.path] then
+			vim.api.nvim_buf_set_extmark(list_buf, selected_ns, rows[pair.path] - 1, 0, {
+				line_hl_group = "PiReviewSelected", hl_eol = true,
+			})
+		end
 	end
 	local function alive() return options.current(captured) end
 	local function query(payload, callback)
@@ -191,7 +230,12 @@ function M.open(options, workspace_id, pinned)
 			if not editable then vim.bo[buf].buftype, vim.bo[buf].modifiable, vim.bo[buf].readonly = "nofile", false, true end
 			vim.b[buf].pi_review_path = path -- display metadata only
 			vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel
-			files[path] = { before = before_buf, after = buf }
+			local messages = {}
+			if present(page.unsupported) then table.insert(messages, page.unsupported) end
+			if present(page.actionUnsupported) then table.insert(messages, page.actionUnsupported) end
+			files[path] = { before = before_buf, after = buf, path = path, historical = page.historical, messages = messages }
+			bind_help(before_buf)
+			bind_help(buf)
 			display_file(files[path])
 			vim.keymap.set("n", "gO", function()
 				-- Always open a separate view. Never refresh/replace an unsaved buffer.
@@ -214,31 +258,50 @@ function M.open(options, workspace_id, pinned)
 		end)
 	end
 	query({ kind = "workspaceReview", workspaceId = workspace_id, before = pinned and pinned.before, after = pinned and pinned.after }, function(review)
-		local output = { "# Workspace review", resource.label,
-			review.historical and "Historical (read-only)" or "Current (text :write requires control)", "", review.notice,
-			review.partial and "Partial integration: comparison is the intended Git merge, not a captured post-failure tree." or "", "" }
-		local entries = {}
+		help_lines = { "# Workspace review", resource.label,
+			review.historical and "Historical (read-only)" or "Current (text :write requires control)", "" }
+		if present(review.notice) then table.insert(help_lines, review.notice) end
+		if review.partial then table.insert(help_lines, "Partial integration: comparison is the intended Git merge, not a captured post-failure tree.") end
+		vim.list_extend(help_lines, {
+			"", "## Files", "Enter opens a file diff. The highlighted file is the displayed comparison.",
+			"S stages reviewed working files; U resets the entire workspace index to HEAD.",
+			"r opens a fresh review without replacing drafts; gS looks up the original review action.",
+			"= denotes an index-only difference against HEAD.",
+			"Ignored files are outside the Git diff; historical bytes are unavailable.",
+			"Unpreserved ignored files are not preserved by workspace cleanup.",
+			"", "## After pane", "s stages, u unstages, X confirms baseline restore.",
+			":write saves only text. gO inspects saved file content without replacing drafts.",
+			"gS looks up the original command; gD shows the patch.",
+			"Historical reviews cannot save, stage, unstage, or restore.",
+			"", "? opens help from any review pane; q or Esc closes help.",
+		})
+		if present(review.stageUnsupported) then table.insert(help_lines, "Stage all: " .. review.stageUnsupported) end
+		if present(review.unstageUnsupported) then table.insert(help_lines, "Unstage all: " .. review.unstageUnsupported) end
+		local output, entries = {}, {}
 		for _, file in ipairs(review.files or {}) do
 			table.insert(output, string.format("%s %s (+%s -%s)%s", file.status, file.path, present(file.additions) and file.additions or "?", present(file.deletions) and file.deletions or "?", file.staged and " [staged]" or ""))
-			entries[#output] = file.path
+			entries[#output], rows[file.path] = file.path, #output
 		end
-		table.insert(output, ""); table.insert(output, "Ignored files (outside Git diff; historical bytes unavailable):")
-		for _, path in ipairs(review.ignoredFiles or {}) do table.insert(output, path); if not review.historical then entries[#output] = path end end
-		table.insert(output, ""); table.insert(output, "Other ignored files not preserved by workspace cleanup:")
+		table.insert(output, ""); table.insert(output, "Ignored files:")
+		for _, path in ipairs(review.ignoredFiles or {}) do
+			table.insert(output, path)
+			if not review.historical then entries[#output], rows[path] = path, #output end
+		end
+		table.insert(output, ""); table.insert(output, "Unpreserved ignored files:")
 		for _, path in ipairs(review.unpreservedFiles or {}) do table.insert(output, path) end
 		if (review.unpreservedFilesOmitted or 0) > 0 then
 			table.insert(output, string.format("... %d more ignored files omitted", review.unpreservedFilesOmitted))
 		end
-		table.insert(output, ""); table.insert(output, "Enter opens a file diff: s stages, u unstages, X confirms baseline restore. S stages reviewed working files; U resets the entire workspace index to HEAD. r opens a fresh review without replacing drafts.")
-		table.insert(output, ":write saves only text. gO inspects saved file content; gS looks up the original command; gD shows the patch. = denotes an index-only difference against HEAD.")
-		if present(review.stageUnsupported) then table.insert(output, "Stage all: " .. review.stageUnsupported) end
-		if present(review.unstageUnsupported) then table.insert(output, "Unstage all: " .. review.unstageUnsupported) end
 		local buf = readonly(options, scratch_name("summary"), table.concat(output, "\n"), "markdown", true)
+		list_buf = buf
+		bind_help(buf)
 		review_tab, list_win = vim.api.nvim_get_current_tabpage(), vim.api.nvim_get_current_win()
 		vim.wo[list_win].winfixwidth = true
 		local anchoring = false
-		vim.api.nvim_create_autocmd({ "WinNew", "WinClosed", "WinResized", "WinEnter", "TabEnter" }, { callback = function()
+		vim.api.nvim_create_autocmd({ "WinNew", "WinClosed", "WinResized", "WinEnter", "TabEnter", "SafeState" }, { callback = function(event)
 			if not vim.api.nvim_tabpage_is_valid(review_tab) or not vim.api.nvim_win_is_valid(list_win) then return true end
+			-- Equal-sized pane moves can change topology without resize or focus events.
+			if event.event == "SafeState" then anchor_list(); return end
 			if anchoring then return end
 			anchoring = true
 			vim.schedule(function() anchor_list(); anchoring = false end)
