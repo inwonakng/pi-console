@@ -116,13 +116,10 @@ function moveSession(key, target, after) {
   next.splice(index + Number(after), 0, key);
   sessionOrder = next;
 }
-function reorderHandle(key, name) {
-  const handle = button("::", () => {});
-  handle.className = "reorder-handle";
-  handle.setAttribute("aria-label", `Reorder ${name}`);
-  handle.setAttribute("aria-describedby", "reorder-help");
-  handle.title = "Drag the session row (press and hold on touch), or use up and down arrow keys";
-  handle.addEventListener("keydown", event => {
+function bindSessionReorder(link, key, name) {
+  link.setAttribute("aria-describedby", "reorder-help");
+  link.title = "Drag the session row (press and hold on touch), or use up and down arrow keys";
+  link.addEventListener("keydown", event => {
     if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
     const keys = [...$("session-list").children].map(node => node.dataset.key);
@@ -130,10 +127,9 @@ function reorderHandle(key, name) {
     if (!adjacent) return;
     moveSession(key, adjacent, event.key === "ArrowDown");
     saveSessionOrder(); renderOverview();
-    [...$("session-list").children].find(node => node.dataset.key === key)?.querySelector(".reorder-handle").focus();
+    [...$("session-list").children].find(node => node.dataset.key === key)?.querySelector(".session-row").focus();
     $("reorder-status").textContent = `${name} moved ${event.key === "ArrowUp" ? "up" : "down"}.`;
   });
-  return handle;
 }
 function bindSessionDrag(heading, key) {
   const list = $("session-list");
@@ -187,7 +183,7 @@ function bindSessionDrag(heading, key) {
     list.addEventListener("click", suppressClick, true);
     setTimeout(() => list.removeEventListener("click", suppressClick, true), 0);
     renderOverview();
-    [...list.children].find(node => node.dataset.key === key)?.querySelector(".reorder-handle").focus({ preventScroll: true });
+    [...list.children].find(node => node.dataset.key === key)?.querySelector(".session-row").focus({ preventScroll: true });
   };
   const cancel = () => finish(true);
   const pointerMove = event => { if (event.pointerId === sessionDrag?.pointerId) move(event); };
@@ -511,7 +507,6 @@ function renderOverview() {
   if (sessionDrag) return;
   const ranks = new Map(sessionOrder.map((key, index) => [key, index]));
   const rows = filteredRows().sort((a, b) => ranks.get(sessionKey(a.host.hello.hostId, a.row.id)) - ranks.get(sessionKey(b.host.hello.hostId, b.row.id)));
-  const focusedHandle = document.activeElement.matches(".reorder-handle") ? document.activeElement.closest(".session-entry")?.dataset.key : null;
   $("session-list").replaceChildren(...rows.map(({ host, row }) => {
     const key = sessionKey(host.hello.hostId, row.id);
     const link = text("a", "", "session-row");
@@ -532,7 +527,8 @@ function renderOverview() {
     const group = text("div", "", "session-entry");
     group.dataset.key = key;
     const headingRow = text("div", "", "session-entry-heading");
-    headingRow.append(reorderHandle(key, sessionName(row)), link);
+    bindSessionReorder(link, key, sessionName(row));
+    headingRow.append(link);
     group.append(headingRow);
     bindSessionDrag(headingRow, key);
     const runs = host.connected ? (row.live?.subagentRuns || []).filter(run => run.status === "running") : [];
@@ -553,7 +549,6 @@ function renderOverview() {
   }));
   if (!rows.length) $("session-list").append(text("p", "No open sessions match. Start a new session or open History to resume a stopped one.", "empty"));
   if (focusedRow) [...$("session-list").querySelectorAll("a")].find(link => link.dataset.key === focusedRow)?.focus({ preventScroll: true });
-  else if (focusedHandle) [...$("session-list").children].find(node => node.dataset.key === focusedHandle)?.querySelector(".reorder-handle").focus({ preventScroll: true });
 }
 function renderHistory() {
   $("history-list").replaceChildren(...filteredRows(true).map(({ host, row }) => {
