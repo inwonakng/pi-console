@@ -661,7 +661,7 @@ function M.new_conversation()
 		local connection = host.connection
 		local epoch = host.hello.serviceEpoch
 		local function current() return host.connected and host.connection == connection and host.hello.serviceEpoch == epoch end
-		require("pi-integration.directory-history").owner_input({ label = host_label(host), key = channel .. "/" .. host.host_id,
+		require("pi-integration.directory-history").owner_input({ label = host.alias, key = channel .. "/" .. host.host_id,
 			current = current, request = function(query, callback)
 				connection.request("host.directories", vim.tbl_extend("force", query, { serviceEpoch = epoch }), callback)
 			end }, function(cwd)
