@@ -791,10 +791,19 @@ deltas are retained until authoritative block/message ends replace them. Tool pa
 results replace previous results; nested parent IDs survive. Correlated direct-bash
 responses finish retained output even though Pi emits no final bash message event.
 
-Initial history and idle reconciliation use `get_state`/`get_messages`. History is
-applied synchronously at its response's stdout position, fenced by worker/runtime
-and intervening event version. Settlement, compaction, history invalidation and
-bash completion request a coalesced refresh. Active-run history replacement is
+Initial history and idle reconciliation use `get_state`, session stats and the
+bundled private `pi-console-history-read` command. Its source is discovered before
+dispatch; correlated, ordered JSON-text status chunks stay below the existing
+16-MiB RPC record limit. The command captures Pi's session projection synchronously
+and returns the newest 512 messages / 16 MiB with the exact omitted count. History is
+applied synchronously after its terminal result and handled acknowledgment, fenced
+at dispatch and stdout reduction by worker/runtime, idle state and event version.
+History replacement publishes a lightweight sequence checkpoint; attachments fetch
+the changed snapshot sections rather than receiving a large subscription update.
+Typed entries (including `since`) and tree reads use the same private channel,
+retaining their existing shapes and leaf IDs. Results beyond the 80-MiB public
+frame budget (less envelope allowance) explicitly refuse without stopping Pi.
+Settlement, compaction, history invalidation and bash completion request a coalesced refresh. Active-run history replacement is
 avoided: Pi has no atomic active snapshot and omits partial assistants. Runtime
 replacement invalidates hydration; ended activity is marked interrupted/uncertain,
 not silently continued. Runtime-scoped statuses/widgets/title and native pending

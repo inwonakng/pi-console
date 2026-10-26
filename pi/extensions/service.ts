@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerServiceHistory } from "./shared/service-history";
 import { managedBash } from "./shared/managed-bash";
 import { assertManagedResources } from "../scripts/managed-process.mjs";
 import { startServiceRuntime, stopServiceRuntime } from "./shared/service-ui";
@@ -7,6 +8,7 @@ import { initializeModelReadiness, modelReady, recordModelSelection } from "./sh
 /** Extra lifecycle status for service-owned RPC workers; ordinary Pi is unchanged. */
 export default function serviceExtension(pi: ExtensionAPI): void {
   if (process.env.PI_CONSOLE_SERVICE !== "1") return;
+  registerServiceHistory(pi);
   // User-entered/RPC Bash keeps its existing unrestricted-shell semantics;
   // only ownership changes. Model-facing sandbox permissions remain separate.
   pi.on("user_bash", () => ({ operations: managedBash }));

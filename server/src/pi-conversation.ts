@@ -87,7 +87,7 @@ export type FrontendEffect =
 // Internal owner updates, NOT a client protocol or a raw RPC dispatch API.
 export type ConversationChange =
   | { type: "event"; event: JsonAgentSessionEvent }
-  | { type: "history"; messages: PiMessage[] }
+  | { type: "history"; messages: PiMessage[]; omittedMessages?: number }
   | { type: "permission_history"; permissions: PermissionHistoryItem[]; omitted: number }
   | { type: "diagnostic"; message: string }
   | { type: "pi_state"; state: RpcSessionState }
@@ -257,7 +257,7 @@ export class PiConversation {
         this.state.messageKeys = [];
         this.messageBytes.length = 0;
         this.historyBytes = 0;
-        this.state.omittedMessages = 0;
+        this.state.omittedMessages = change.omittedMessages ?? 0;
         for (const message of change.messages) this.append(message);
         this.state.historyRevision++;
         this.state.hydrated = true;

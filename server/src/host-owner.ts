@@ -1,3 +1,4 @@
+import { HISTORY_COMMAND, HISTORY_STATUS, HistoryRead, type HistoryKind, type HistoryData, type ProjectedTail } from "./session-history.js";
 import { open } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { DESKTOP_NOTIFICATION_STATUS, validDesktopNotification, type DesktopNotification } from "../../pi/extensions/shared/desktop-notification.mjs";
@@ -32,6 +33,10 @@ type WorkspaceStatus = { cwd: string; sessionFile: string; transitionPending: bo
 type BundledFlight = {
   worker: PiProcess; revision: number; runtimeId: string; invocationId: string; operation: BundledOperation["operation"];
   message: string; dispatched: boolean; requestId?: string; result?: OperationResult; resultRevision?: number; recipient?: Controller;
+};
+type HistoryFlight = {
+  worker: PiProcess; revision: number; read: HistoryRead; message: string; requestId?: string;
+  version?: number; terminalCurrent?: boolean; data?: HistoryData; error?: CommandError;
 };
 type SubagentCancellation = { runtimeId: string; message: string; requestId?: string; result?: OperationResult };
 type RenameFlight = {
@@ -548,6 +553,7 @@ export class OwnedSession {
   private viewedCompletionSeq = 0;
   private refresh?: Promise<void>;
   private refreshAgain = false;
+  private readonly historyReads = new Map<string, HistoryFlight>();
   private readonly captures = new Map<string, { worker: PiProcess; revision: number; version: number }>();
   private runtimeRevision: number;
   private workerRevision = 0;
@@ -1242,6 +1248,11 @@ export class OwnedSession {
     const worker = this.commandRuntime(input.runtimeRevision);
     const check = () => { admission?.(); this.commandRuntime(input.runtimeRevision, worker); };
     check();
+    if (input.kind === "entries" || input.kind === "tree") {
+      const data = await this.readHistory(worker, input.kind, check, input.since);
+      check();
+      return { runtimeRevision: this.runtimeRevision, data };
+    }
     const response = await worker.request(readCommand(input.kind, input.since)!, check);
     check();
     return { runtimeRevision: this.runtimeRevision, data: "data" in response ? response.data : null };
@@ -1823,6 +1834,14 @@ export class OwnedSession {
     }
     const previousRevision = this.runtimeRevision;
     this.syncRevision();
+    if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === HISTORY_STATUS) {
+      if (Buffer.byteLength(event.statusText ?? "") > 1024 * 1024) throw new Error("History record limit exceeded");
+      const value: unknown = JSON.parse(event.statusText ?? "null");
+      const flight = object(value) && typeof value.invocationId === "string" ? this.historyReads.get(value.invocationId) : undefined;
+      if (!flight?.requestId || !object(value)) throw new Error("Unmatched history result");
+      if (flight.read.consume(value)) flight.terminalCurrent = this.currentHistory(flight);
+      return; // Private data never enters statuses, work, effects or refresh routing.
+    }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-workspace-continuation"
       && event.statusText !== undefined && event.statusText !== "pending" && event.statusText !== "starting") {
       throw new Error("Invalid Pi workspace continuation status");
@@ -1951,6 +1970,8 @@ export class OwnedSession {
   }
 
   private dispatch(command: RpcCommand & { id: string }): void {
+    const history = [...this.historyReads.values()].find(flight => command.type === "prompt" && command.message === flight.message);
+    if (history) { history.requestId = command.id; return; }
     const cancellation = [...this.subagentCancellations.values()].find((flight) => command.type === "prompt" && command.message === flight.message);
     if (cancellation) {
       cancellation.requestId = command.id;
@@ -1979,12 +2000,27 @@ export class OwnedSession {
     }
     const work = this.conversation.dispatch(command);
     if (work) this.retain({ type: "work", work });
-    if ((command.type === "get_messages" || command.type === "get_session_stats") && this.worker && this.conversation.idle) {
+    if (command.type === "get_session_stats" && this.worker && this.conversation.idle) {
       this.captures.set(command.id, { worker: this.worker, revision: this.runtimeRevision, version: this.conversation.historyVersion });
     }
   }
 
   private response(response: RpcResponse, command: RpcCommand & { id: string }): void {
+    const history = [...this.historyReads.values()].find(flight => response.id === flight.requestId);
+    if (history) {
+      try { history.data = history.read.finish(response); }
+      catch (error) {
+        if (!(error instanceof CommandError)) throw error;
+        history.error = error; // Resource/cursor refusals must not stop the worker.
+      }
+      if (history.read.identity.kind === "projected-tail" && !history.error) {
+        if (history.terminalCurrent && this.currentHistory(history)) {
+          const tail = history.data as ProjectedTail;
+          this.retain({ type: "history", ...tail });
+        } else this.refreshAgain = true;
+      }
+      return;
+    }
     if ([...this.subagentCancellations.values()].some((flight) => response.id === flight.requestId)) return;
     if (response.id === this.rename?.requestId || response.id === this.bundled?.requestId || response.id === this.bundledInterrupt?.requestId) return;
     // Prompt acceptance precedes its user events in Pi's stdout stream. Record
@@ -2001,12 +2037,11 @@ export class OwnedSession {
       this.retain({ type: "pi_state", state: response.data });
       this.changed();
     }
-    if (command.type === "get_messages" || command.type === "get_session_stats") {
+    if (command.type === "get_session_stats") {
       const capture = this.captures.get(command.id);
       this.captures.delete(command.id);
       if (response.success && capture && capture.worker === this.worker
         && capture.revision === this.runtimeRevision && capture.version === this.conversation.historyVersion && this.conversation.idle) {
-        if (response.command === "get_messages") this.retain({ type: "history", messages: response.data.messages });
         if (response.command === "get_session_stats") this.retain({ type: "session_stats", stats: response.data });
       } else this.refreshAgain = true;
     }
@@ -2021,13 +2056,67 @@ export class OwnedSession {
     }
   }
 
-  /** Reconcile only at idle boundaries: get_messages has no atomic active-run
-   * snapshot contract. The version fence rejects interleaving live events.
+  private historyIdle(): boolean {
+    return this.conversation.idle && !this.conversation.compacting && !this.conversation.sessionState?.isStreaming;
+  }
+
+  private currentHistory(flight: HistoryFlight): boolean {
+    const runtime = this.worker?.interactionRuntime();
+    return flight.worker === this.worker && flight.revision === this.runtimeRevision && runtime?.active === true
+      && runtime.id === flight.read.identity.runtimeId && runtime.sessionId === flight.read.identity.sessionId
+      && runtime.sessionFile === flight.read.identity.sessionFile && flight.version === this.conversation.historyVersion
+      && this.historyIdle() && !this.stopRequested && !this.exit;
+  }
+
+  private async readHistory(worker: PiProcess, kind: HistoryKind, check: () => void, since?: string): Promise<HistoryData> {
+    // Reserve a slot for internal hydration; observational read pressure must
+    // not turn a scheduled refresh into a worker failure.
+    if (this.historyReads.size >= (kind === "projected-tail" ? 4 : 3)) throw new CommandError("resource_limit", "Too many session history readers");
+    const runtime = worker.interactionRuntime();
+    if (!runtime?.active) throw new CommandError("session_unavailable", "History runtime is unavailable");
+    const identity = { version: 1 as const, invocationId: randomUUID(), runtimeId: runtime.id,
+      sessionId: this.record.piSessionId, sessionFile: this.catalog.sessionFile(this.id), kind };
+    const flight: HistoryFlight = { worker, revision: this.runtimeRevision, read: new HistoryRead(identity),
+      message: `/${HISTORY_COMMAND} ${JSON.stringify({ ...identity, ...(since === undefined ? {} : { since }) })}` };
+    const guard = () => {
+      this.catalog.assertExecutionAllowed(); check();
+      const current = worker.interactionRuntime();
+      if (worker !== this.worker || this.runtimeRevision !== flight.revision || !current?.active || current.id !== identity.runtimeId
+        || current.sessionId !== identity.sessionId || current.sessionFile !== identity.sessionFile || this.stopRequested || this.exit) {
+        throw new CommandError("stale_runtime", "History context changed");
+      }
+    };
+    this.historyReads.set(identity.invocationId, flight);
+    try {
+      // Never let an absent/overridden slash capability fall through to a model.
+      const discovery = await worker.request({ type: "get_commands" }, guard);
+      guard();
+      const capabilities = discovery.command === "get_commands" ? discovery.data.commands.filter(command => command.name === HISTORY_COMMAND) : [];
+      if (capabilities.length !== 1 || capabilities[0]!.source !== "extension"
+        || capabilities[0]!.sourceInfo?.path !== join(this.options.appRoot, "pi", "extensions", "service.ts")) {
+        throw new CommandError("unsupported_command", "Bundled history capability is missing or ambiguous");
+      }
+      await worker.request({ type: "prompt", message: flight.message }, () => {
+        guard();
+        if (kind === "projected-tail" && !this.historyIdle()) {
+          throw new CommandError("session_busy", "History capture requires an idle session");
+        }
+        flight.version = this.conversation.historyVersion;
+      });
+      guard();
+      if (flight.error) throw flight.error;
+      if (!flight.data) throw new Error("Missing history result");
+      return flight.data;
+    } finally { this.historyReads.delete(identity.invocationId); }
+  }
+
+  /** Reconcile only at idle boundaries. Capture fences apply at dispatch and
+   * terminal stdout positions, not in the later awaiting continuation.
    */
   private refreshConversation(checkRuntime?: () => void): Promise<void> {
     if (this.refresh) { this.refreshAgain = true; return this.refresh; }
     const worker = this.worker;
-    if (!worker || !this.conversation.idle || this.stopRequested || this.exit) return Promise.resolve();
+    if (!worker || !this.historyIdle() || this.stopRequested || this.exit) return Promise.resolve();
     this.refresh = (async () => {
       do {
         this.refreshAgain = false;
@@ -2038,18 +2127,32 @@ export class OwnedSession {
           checkRuntime();
           this.checkIdentity();
         }
-        if (this.conversation.sessionState?.isStreaming || !this.conversation.idle) return;
+        if (!this.historyIdle()) return;
         await worker.request({ type: "get_session_stats" });
         if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
-        if (!this.conversation.idle) return;
-        await worker.request({ type: "get_messages" });
-      } while (this.refreshAgain && worker === this.worker && this.conversation.idle && !this.stopRequested && !this.exit
+        if (!this.historyIdle()) return;
+        try {
+          await this.readHistory(worker, "projected-tail", () => {
+            checkRuntime?.();
+            if (worker !== this.worker || revision !== this.runtimeRevision || !this.historyIdle()) {
+              throw new CommandError("stale_runtime", "History capture context changed");
+            }
+          });
+        } catch (error) {
+          if (!(error instanceof CommandError) || !["stale_runtime", "session_busy"].includes(error.code)) throw error;
+          // Pi may become busy after dispatch but before its synchronous capture.
+          // Wait for settlement/compaction_end, preserving any already-coalesced
+          // completion signal instead of immediately retrying a known-busy read.
+          if (error.code !== "session_busy") this.refreshAgain = true;
+          return;
+        }
+      } while (this.refreshAgain && worker === this.worker && this.historyIdle() && !this.stopRequested && !this.exit
         && (checkRuntime || !this.navigationRefreshPending()));
     })().catch((error: unknown) => { this.refreshAgain = false; throw error; }).finally(() => {
       this.refresh = undefined;
       // A settlement/runtime signal can arrive while get_state is pending or in
       // the same stdout batch as its response. Do not lose that coalesced read.
-      if (this.refreshAgain && this.conversation.idle && !this.stopRequested && !this.exit) this.scheduleRefresh();
+      if (this.refreshAgain && this.historyIdle() && !this.stopRequested && !this.exit) this.scheduleRefresh();
     });
     return this.refresh;
   }
@@ -2075,7 +2178,9 @@ export class OwnedSession {
 
   private retain(change: ConversationChange): void {
     this.conversation.apply(structuredClone(change));
-    this.publish({ conversation: change });
+    // History baselines can exceed the subscription's 8-MiB backlog budget.
+    // Both frontends refresh revisioned snapshot sections on every checkpoint.
+    this.publish(change.type === "history" ? {} : { conversation: change });
   }
 
   private publish(change: Pick<OwnedSessionUpdate, "owner" | "conversation" | "effect" | "command" | "acceptedQueue" | "closeFrontend">): void {

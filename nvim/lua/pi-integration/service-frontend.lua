@@ -2235,7 +2235,9 @@ function M.pick_spawn()
 					{ "agentPromptPath", "Agent prompt" }, { "worktreePath", "Worktree" }, { "patchPath", "Recovery patch" } })
 				fields(lines, run.integrationBlock, { { "integration", "Integration blocked" }, { "reason", "Reason" } })
 				for _, path in ipairs(run.changedFiles or {}) do table.insert(lines, "Changed: " .. path) end
+				if (tonumber(run.changedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Changed: %d more files (full list in status artifact)", run.changedFilesOmitted)) end
 				for _, path in ipairs(run.unpreservedFiles or {}) do table.insert(lines, "Not preserved: " .. path) end
+				if (tonumber(run.unpreservedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Not preserved: %d more files (full list in status artifact)", run.unpreservedFilesOmitted)) end
 				local buf = draft_buffer(scratch_name("owner-spawn"), table.concat(lines, "\n"))
 				local markdown = require("pi-integration.markdown-render")
 				markdown.prepare_buffer(buf)

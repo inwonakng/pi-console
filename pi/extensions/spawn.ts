@@ -725,18 +725,38 @@ function worktreeInfo(run: SpawnRun): WorktreeInfo | undefined {
   };
 }
 
-function workspaceDetails(worktree: WorktreeInfo | undefined) {
-  // Lua merges run updates and accepts both forms. Publish them together so
-  // clearing a flat artifact cannot fall back to stale nested metadata (or vice versa).
+const FILE_SAMPLE_COUNT = 32;
+const FILE_SAMPLE_BYTES = 8 * 1024;
+function fileSample(files: string[]): { files: string[]; total: number; omitted: number } {
+  const sample: string[] = [];
+  let bytes = 2;
+  for (const file of files) {
+    const next = Buffer.byteLength(JSON.stringify(file)) + (sample.length ? 1 : 0);
+    if (sample.length >= FILE_SAMPLE_COUNT || bytes + next > FILE_SAMPLE_BYTES) break;
+    sample.push(file);
+    bytes += next;
+  }
+  return { files: sample, total: files.length, omitted: files.length - sample.length };
+}
+
+function workspaceDetails(worktree: WorktreeInfo | undefined, durable = false) {
+  const changed = fileSample(worktree?.changedFiles ?? []);
+  const unpreserved = fileSample(worktree?.unpreservedFiles ?? []);
+  // Keep nested scalars (including null clearing) without repeating file lists.
+  const { changedFiles: _changed, unpreservedFiles: _unpreserved, ...scalars } = worktree ?? {};
   return {
     workspaceId: worktree?.workspaceId,
     worktreePath: worktree?.path,
     patchPath: worktree?.patchPath,
     integration: worktree?.integration ?? "not_applicable",
     integrationReason: worktree?.integrationReason ?? null,
-    changedFiles: worktree?.changedFiles,
-    unpreservedFiles: worktree?.unpreservedFiles,
-    worktree: worktree ? { ...worktree, integrationReason: worktree.integrationReason ?? null } : null,
+    changedFiles: durable ? worktree?.changedFiles : changed.files,
+    changedFilesTotal: changed.total,
+    changedFilesOmitted: durable ? 0 : changed.omitted,
+    unpreservedFiles: durable ? worktree?.unpreservedFiles : unpreserved.files,
+    unpreservedFilesTotal: unpreserved.total,
+    unpreservedFilesOmitted: durable ? 0 : unpreserved.omitted,
+    worktree: worktree ? { ...(durable ? worktree : scalars), integrationReason: worktree.integrationReason ?? null } : null,
   };
 }
 
@@ -790,7 +810,7 @@ function artifactDetails(run: SpawnRun): Record<string, unknown> {
   };
 }
 
-function statusJson(run: SpawnRun): Record<string, unknown> {
+function statusJson(run: SpawnRun, durable = false): Record<string, unknown> {
   return {
     version: 1,
     status: run.status,
@@ -837,13 +857,14 @@ function statusJson(run: SpawnRun): Record<string, unknown> {
     resultPath: run.resultPath,
     transcriptPath: run.transcriptPath,
     agentPromptPath: run.agentPromptPath,
-    ...workspaceDetails(worktreeInfo(run)),
+    statusPath: run.statusPath,
+    ...workspaceDetails(worktreeInfo(run), durable),
   };
 }
 
 function writeStatus(run: SpawnRun): void {
   const temporary = `${run.statusPath}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, JSON.stringify(statusJson(run), null, 2), "utf8");
+  writeFileSync(temporary, JSON.stringify(statusJson(run, true), null, 2), "utf8");
   renameSync(temporary, run.statusPath);
 }
 
@@ -866,7 +887,8 @@ function formatIntegrationLine(worktree: WorktreeInfo | undefined): string {
     return "";
   }
   if (worktree.integration === "applied") {
-    const files = worktree.changedFiles.length > 0 ? `\n\nApplied isolated worktree changes to parent worktree:\n${worktree.changedFiles.map((file) => `- ${file}`).join("\n")}` : "\n\nApplied isolated worktree changes to parent worktree.";
+    const sample = fileSample(worktree.changedFiles);
+    const files = sample.total > 0 ? `\n\nApplied isolated worktree changes to parent worktree:\n${sample.files.map((file) => `- ${file}`).join("\n")}${sample.omitted ? `\n(${sample.omitted} more files; full list in the status artifact.)` : ""}` : "\n\nApplied isolated worktree changes to parent worktree.";
     return `${files}${worktree.integrationReason ? `\n\nCleanup warning: ${worktree.integrationReason}` : ""}`;
   }
   if (worktree.integration === "needs_parent" || worktree.integration === "failed") {
@@ -953,7 +975,8 @@ function runHasError(run: SpawnRun): boolean {
 
 function formatRunStatus(run: SpawnRun): string {
   const worktree = worktreeInfo(run);
-  const changed = worktree?.changedFiles.length ? `\n- changed files: ${worktree.changedFiles.join(", ")}` : "";
+  const sample = fileSample(worktree?.changedFiles ?? []);
+  const changed = sample.total ? `\n- changed files: ${sample.files.join(", ")}${sample.omitted ? ` (${sample.omitted} more; full list: ${run.statusPath})` : ""}` : "";
   const integration = worktree ? `\n- integration: ${worktree.integration}${worktree.integrationReason ? ` (${worktree.integrationReason})` : ""}` : "";
   const permissions = run.permissionRequests.filter((request) => request.state === "pending");
   return `- id: ${run.id}\n  model: ${run.selectedModel ? `${run.selectedModel.provider}/${run.selectedModel.id}` : "not confirmed"}\n  requested model: ${run.modelSelection ? `${run.modelSelection.provider}/${run.modelSelection.id} (${run.modelSelection.source})` : "unknown"}\n  permissions: ${permissions.length ? JSON.stringify(permissions) : "none"}\n  execution: ${run.execution}\n  lifetime: ${run.lifetime}\n  assignment: ${run.assignments.at(-1)?.id} (${run.assignments.at(-1)?.outcome})\n  pending requests: ${run.requests.filter((request) => request.state === "pending").map((request) => `${request.id}: ${request.question}`).join("; ") || "none"}\n  status: ${run.status}\n  agent: ${run.profile?.name ?? run.requestedAgent ?? "generic"}\n  accessMode: ${run.accessMode}\n  isolation: ${run.isolation}\n  startedAt: ${run.startedAt}${run.completedAt ? `\n  completedAt: ${run.completedAt}` : ""}${run.error ? `\n  error: ${run.error}` : ""}${changed}${integration}`;
@@ -1189,7 +1212,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
   let ui: Pick<ExtensionUIContext, "notify" | "setStatus"> | undefined;
 
   const spawnStatusPayload = () => {
-    const allRuns = Array.from(runs.values()).map(statusJson);
+    const allRuns = Array.from(runs.values()).map(run => statusJson(run));
     return {
       sessionFile: sessionManager?.getSessionFile() ?? null,
       running: allRuns.filter((run) => run.status === "running").length,
@@ -1232,7 +1255,8 @@ export default function spawnExtension(pi: ExtensionAPI) {
     const failed = run.execution === "failed";
     const key = failed ? `${run.id}:execution:failed` : `${run.id}:${run.assignments.at(-1)?.id}:result`;
     queueEvent(run, key, agentContext({ kind: "worker", id: run.id }, {
-      event: failed ? "execution_failure" : "assignment_result", ...artifactDetails(run), report: resultSummary(run),
+      event: failed ? "execution_failure" : "assignment_result", runId: run.id,
+      assignmentId: run.assignments.at(-1)?.id, execution: run.execution, report: resultSummary(run),
       next: "Inspect with join/report/diff. Acceptance is explicit. Request corrections with followup before acceptance, or close the conversation. Discard explicitly disposes an unwanted contribution. Incomplete turns are not success.",
     }));
   };
@@ -2553,7 +2577,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
 
       if (params.action === "list") {
         const text = allRuns.length === 0 ? "No spawned subagents in this session." : allRuns.map(formatRunStatus).join("\n\n");
-        return { content: [{ type: "text", text }], details: { runs: allRuns.map(statusJson) } };
+        return { content: [{ type: "text", text }], details: { runs: allRuns.map(run => statusJson(run)) } };
       }
 
       if (params.action === "status") {
@@ -2739,7 +2763,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         }
         await waitForRuns(selected, undefined, false);
         const text = selected.map((run) => `Stopped ${run.id}: ${run.status}${run.error ? ` (${run.error})` : ""}`).join("\n");
-        return { content: [{ type: "text", text }], details: { runs: selected.map(statusJson) } };
+        return { content: [{ type: "text", text }], details: { runs: selected.map(run => statusJson(run)) } };
       }
 
       if (params.action === "join") {
@@ -2765,8 +2789,8 @@ export default function spawnExtension(pi: ExtensionAPI) {
         return finalizeJoin(selected, signal, "tool", () => ({
           content: [{ type: "text" as const, text: selected.map((run) => `## ${run.id}\n\n${resultSummary(run)}`).join("\n\n---\n\n") }],
           isError: selected.some(runHasError),
-          details: { runs: selected.map(statusJson) },
-        }), () => onUpdate?.({ content: [{ type: "text", text: `Waiting for ${selected.length} subagent(s)…` }], details: { runs: selected.map(statusJson) } }));
+          details: { runs: selected.map(run => statusJson(run)) },
+        }), () => onUpdate?.({ content: [{ type: "text", text: `Waiting for ${selected.length} subagent(s)…` }], details: { runs: selected.map(run => statusJson(run)) } }));
       }
 
       return { content: [{ type: "text", text: `Unknown action: ${String(params.action)}` }], isError: true, details: undefined };
