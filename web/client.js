@@ -14,21 +14,29 @@ export class ServiceClient {
     this.pending = new Map();
     this.socket = null;
     this.closed = false;
+    this.recoveryBlocked = false;
   }
 
-  async connect(channel, path = "/v1/stream", expectedHostId) {
+  connect(channel, path = "/v1/stream", expectedHostId) {
+    if (this.closed) return Promise.reject(new Error("Connection closed"));
+    if (this.connecting) return this.connecting;
+    return this.connecting = this.open(channel, path, expectedHostId);
+  }
+
+  async open(channel, path, expectedHostId) {
     const url = new URL(path, location.href);
     if (url.origin !== location.origin || !/^\/v1\/(?:stream|hosts\/[\w-]+\/stream)$/.test(url.pathname) || url.search || url.hash) {
+      this.recoveryBlocked = true;
       throw new Error("Invalid same-origin host stream");
     }
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     recordDiagnostic("connect_start", this.diagnostics);
     const socket = this.socket = new WebSocket(url);
-    socket.addEventListener("open", () => recordDiagnostic("socket_open", this.diagnostics));
     socket.binaryType = "arraybuffer";
     let buffer = "";
     const decoder = new TextDecoder("utf-8", { fatal: true });
     socket.addEventListener("message", event => {
+      if (this.closed || this.socket !== socket) return;
       try {
         buffer += typeof event.data === "string" ? event.data : decoder.decode(event.data, { stream: true });
         if (buffer.length > 80 * 1024 * 1024) throw new Error("Service response is too large");
@@ -50,10 +58,17 @@ export class ServiceClient {
           } else {
             if (record.type === "disconnected") recordDiagnostic("service_disconnected", { ...this.diagnostics, code: diagnosticServiceCode(record.code) });
             // Preserve response/event ordering when several records share a frame.
-            queueMicrotask(() => { if (!this.closed) this.onEvent(record); });
+            queueMicrotask(() => {
+              if (this.closed || this.socket !== socket) return;
+              if (record.type === "disconnected") this.close(record.message, "socket_closed");
+              else this.onEvent(record);
+            });
           }
         }
-      } catch (error) { this.close(error.message, "invalid_record"); }
+      } catch (error) {
+        this.recoveryBlocked = true;
+        this.close(error.message, "invalid_record");
+      }
     });
     socket.addEventListener("close", event => {
       recordDiagnostic("socket_close", { ...this.diagnostics, code: event.code, wasClean: event.wasClean, reason: event.reason ? "omitted" : "empty" });
@@ -61,28 +76,42 @@ export class ServiceClient {
     });
     socket.addEventListener("error", () => {
       recordDiagnostic("socket_error", this.diagnostics);
-      this.close("Connection failed. Check the host's browser connection setup, then reconnect.", "socket_error");
+      this.close("Connection failed. Recovery will retry while online and visible.", "socket_error");
     });
     const deadline = setTimeout(() => this.close("Connection timed out", "connect_timeout"), 10000);
     try {
       await new Promise((resolve, reject) => {
-        socket.addEventListener("open", resolve, { once: true });
-        socket.addEventListener("close", () => reject(new Error("Could not connect to the host")), { once: true });
+        // close() must settle this even when a browser delays CONNECTING's close event.
+        this.rejectOpening = reject;
+        socket.addEventListener("open", () => {
+          if (this.closed) return;
+          recordDiagnostic("socket_open", this.diagnostics);
+          this.rejectOpening = null;
+          resolve();
+        }, { once: true });
       });
       const hello = await this.request("hello", { version: 1, channel });
-      if (hello.version !== 1 || hello.channel !== channel || !Array.isArray(hello.capabilities)
+      if (!hello || hello.version !== 1 || hello.channel !== channel || !Array.isArray(hello.capabilities)
         || !["snapshot", "updates", "sessions.subscribe", "control.acquire"].every(value => hello.capabilities.includes(value))) {
-        throw new Error("Incompatible host protocol or channel");
+        this.recoveryBlocked = true;
+        throw new Error("Incompatible host protocol or channel. Refresh its registration explicitly.");
       }
-      if (expectedHostId && hello.hostId !== expectedHostId) throw new Error("Host identity changed. Review its registration in pi-console Hosts before reconnecting.");
+      if (expectedHostId && hello.hostId !== expectedHostId) {
+        this.recoveryBlocked = true;
+        throw new Error("Host identity changed. Review its registration in pi-console Hosts before reconnecting.");
+      }
+      this.hello = hello;
       recordDiagnostic("server_connection", { ...this.diagnostics, serverConnectionId: hello.connectionId });
       recordDiagnostic("handshake_complete", this.diagnostics);
       return hello;
-    } catch (error) { this.close(error.message, "handshake_failed"); throw error; }
-    finally { clearTimeout(deadline); }
+    } catch (error) {
+      if (error.code === "unsupported_command") this.recoveryBlocked = true;
+      this.close(error.message, "handshake_failed");
+      throw error;
+    } finally { clearTimeout(deadline); this.rejectOpening = null; }
   }
 
-  request(method, payload = {}) {
+  request(method, payload = {}, timeout = 30000) {
     if (this.closed || this.socket?.readyState !== WebSocket.OPEN || this.pending.size >= 32) {
       return Promise.reject(Object.assign(new Error("Not connected or too many pending requests"), { delivery: "not_sent" }));
     }
@@ -92,22 +121,46 @@ export class ServiceClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         recordDiagnostic("request_timeout", { ...this.diagnostics, method: diagnosticMethod(method), pending: this.pending.size });
-        this.close("Lost connection to the server. Your last action may still have gone through. Reconnect and check before trying again.", "request_timeout");
-      }, 30000);
+        this.close("Lost connection to the server. Your last action may still have gone through. Commands were not replayed; inspect before trying again.", method === "health" ? "probe_timeout" : "request_timeout");
+      }, timeout);
       this.pending.set(id, { resolve, reject, timer });
       try { this.socket.send(record); }
       catch (error) { this.close(error.message, "send_failed"); }
     });
   }
 
+  probe() {
+    if (this.probing) return this.probing;
+    this.probing = (async () => {
+      try {
+        const value = await this.request("health", {}, 4000);
+        if (value.channel !== this.hello.channel) {
+          this.recoveryBlocked = true;
+          throw new Error("Host channel changed. Refresh its registration explicitly.");
+        }
+        if (value.serviceEpoch !== this.hello.serviceEpoch || value.buildId !== this.hello.buildId || !Array.isArray(value.sessions)) {
+          throw new Error("Host service changed. Refreshing its connection.");
+        }
+        return value;
+      } catch (error) {
+        recordDiagnostic("probe_failed", { ...this.diagnostics, outcome: this.recoveryBlocked ? "blocked" : this.closed ? "closed" : "changed" });
+        this.close(error.message, "probe_failed");
+        throw error;
+      } finally { this.probing = null; }
+    })();
+    return this.probing;
+  }
+
   close(message = "Disconnected", cause = "unspecified") {
     if (this.closed) return;
     recordDiagnostic("local_close", { ...this.diagnostics, cause: diagnosticCause(cause), pending: this.pending.size });
     this.closed = true;
-    this.socket?.close();
+    this.rejectOpening?.(new Error(message));
+    this.rejectOpening = null;
+    try { this.socket?.close(); } catch { /* A CONNECTING socket may reject close(). Still settle all work. */ }
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error(message));
+      pending.reject(Object.assign(new Error(message), { delivery: "uncertain" }));
     }
     this.pending.clear();
     this.onEvent({ type: "disconnected", message });

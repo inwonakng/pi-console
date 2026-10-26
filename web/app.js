@@ -1,7 +1,7 @@
 import { ServiceClient, requestId } from "./client.js";
 import { renderMarkdown } from "./markdown.js";
 import { snapshotQuery, mergeSnapshot } from "./snapshot.js";
-import { exportDiagnostics, clearDiagnostics } from "./diagnostics.js";
+import { exportDiagnostics, clearDiagnostics, recordDiagnostic } from "./diagnostics.js";
 
 const $ = id => document.getElementById(id);
 const channel = document.documentElement.dataset.piChannel;
@@ -41,6 +41,58 @@ const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
 let hosts = [], conversations = new Map(), activeKey = null, activeScreen = "overview", connecting = false, generation = 0;
 let controllerLabel = "webui";
+let pageLeaving = false, recoveryTimer, recoveryRunning = false, recoveryCheck = false;
+const recoveryState = () => ({ attempt: 0, due: 0, blocked: false });
+const canRecover = () => !pageLeaving && !document.hidden && navigator.onLine !== false;
+const registered = host => hosts.includes(host) && host.enabled !== false;
+function recoveryFailed(state, client) {
+  state.blocked = client?.recoveryBlocked === true;
+  state.attempt = Math.min(10, state.attempt + 1);
+  const delay = state.blocked ? 0 : Math.min(30000, 1000 * 2 ** Math.min(5, state.attempt - 1));
+  state.due = Date.now() + delay;
+  if (client) recordDiagnostic("recovery", { ...client.diagnostics, outcome: state.blocked ? "blocked" : "retry", attempt: state.attempt, delay });
+}
+function recoverySucceeded(state, client) {
+  if (state.attempt) recordDiagnostic("recovery", { ...client.diagnostics, outcome: "recovered", attempt: state.attempt, delay: 0 });
+  state.attempt = 0; state.due = 0; state.blocked = false;
+}
+function scheduleRecovery(check = false) {
+  recoveryCheck ||= check;
+  clearTimeout(recoveryTimer);
+  recoveryTimer = null;
+  if (!canRecover() || recoveryRunning) return;
+  recoveryTimer = setTimeout(recoverConnections, check ? 100 : 1000);
+}
+async function recoverConnections() {
+  recoveryTimer = null;
+  if (!canRecover() || recoveryRunning) return;
+  recoveryRunning = true;
+  const check = recoveryCheck;
+  recoveryCheck = false;
+  try {
+    await Promise.allSettled(hosts.filter(registered).map(async host => {
+      const state = host.recovery;
+      if (state.blocked || !canRecover()) return;
+      if (!host.connected) {
+        if (Date.now() >= state.due) await connectHost(host, true);
+      } else if (check && !host.connecting) {
+        const connection = host.client;
+        try {
+          await connection.probe();
+          if (!canRecover() || !registered(host) || host.client !== connection || connection.closed) return;
+          const summaries = await connection.request("sessions.subscribe");
+          if (host.client === connection && registered(host) && !connection.closed) setSummaries(host, summaries);
+        } catch {
+          if (host.client === connection && connection.recoveryBlocked) state.blocked = true;
+        }
+      }
+    }));
+    if (canRecover()) await Promise.allSettled([...conversations.values()].map(conversation => conversation.recover(check)));
+  } finally {
+    recoveryRunning = false;
+    scheduleRecovery(recoveryCheck);
+  }
+}
 const expandedSubagents = new Set();
 const sessionOrderStorage = `pi-console:${channel}:session-order`;
 let sessionOrder = [];
@@ -174,7 +226,7 @@ function bindSessionDrag(heading, key) {
 // Disconnecting a session keeps unsent text available in this page.
 const stoppedPromptDrafts = new Map();
 function sessionStatus(host, row, activity = row.live) {
-  if (!host.connected) return "Unknown";
+  if (!host.connected || navigator.onLine === false) return "Unknown";
   if (!row.live) return "Stopped";
   return activity?.status || "Unknown";
 }
@@ -210,7 +262,7 @@ async function terminalReceipt(connection, method, payload, receipt) {
   return receipt;
 }
 async function hostCommand(host, operation, payload) {
-  if (!host.connected) throw new Error("Connect to this host first.");
+  if (!host.connected || navigator.onLine === false) throw new Error("Connect to this host while online first.");
   const envelope = { id: requestId(), serviceEpoch: host.hello.serviceEpoch, operation, payload };
   const connection = host.client;
   let receipt = receiptResult(await connection.request("host.command", envelope));
@@ -218,11 +270,14 @@ async function hostCommand(host, operation, payload) {
   return receipt.result.sessionId;
 }
 function sameOwner(host, value) {
-  return value.hostId === host.hello.hostId && value.serviceEpoch === host.hello.serviceEpoch && value.channel === channel;
+  return value?.hostId === host.hello.hostId && value?.serviceEpoch === host.hello.serviceEpoch && value?.channel === channel;
 }
 function setSummaries(host, value) {
   if (!sameOwner(host, value) || !Array.isArray(value.sessions)) {
-    host.client.close("Host identity changed. Reconnect explicitly.", "host_identity_changed"); return;
+    host.recovery.blocked = true;
+    host.client.recoveryBlocked = true;
+    host.client.close("Host identity changed. Review its registration and refresh hosts explicitly.", "host_identity_changed");
+    return false;
   }
   host.sessions = value.sessions;
   rememberSessions(host);
@@ -233,32 +288,60 @@ function setSummaries(host, value) {
   renderOverview();
   if ($("history-dialog").open) renderHistory();
   renderScreens();
+  return true;
 }
-async function connectHost(host) {
-  if (host.connecting || host.enabled === false) return;
+function connectHost(host, automatic = false) {
+  if (host.connectPromise) return host.connectPromise;
+  if (!registered(host) || pageLeaving || (automatic && (!canRecover() || host.recovery.blocked || Date.now() < host.recovery.due))) return Promise.resolve();
+  if (!automatic) host.recovery = recoveryState();
+  const attempt = host.attempt = (host.attempt || 0) + 1;
   host.connecting = true;
-  host.error = "";
+  host.client?.close(undefined, "host_setup_failed");
+  host.connected = false;
   const next = new ServiceClient(record => {
-    if (host.client !== next) return;
+    if (host.client !== next || host.attempt !== attempt) return;
     if (record.type === "disconnected") {
+      const wasConnected = host.connected;
       host.connected = false;
       host.error = record.message;
+      if (wasConnected && registered(host) && !pageLeaving) recoveryFailed(host.recovery, next);
       renderOverview();
       renderScreens();
       if ($("history-dialog").open) renderHistory();
+      scheduleRecovery();
     } else if (record.type === "summaries" && host.hello) setSummaries(host, record.result);
   }, connectionDiagnostics(host, "host"));
   host.client = next;
+  const current = () => registered(host) && !pageLeaving && (!automatic || canRecover())
+    && host.client === next && host.attempt === attempt && !next.closed;
   renderOverview();
-  try {
-    host.hello = await next.connect(channel, host.stream, host.hostId);
-    // Remember identity for this page even when the registry has no saved pin.
-    host.hostId = host.hello.hostId;
-    host.connected = true;
-    setSummaries(host, await next.request("sessions.subscribe"));
-    route();
-  } catch (error) { host.connected = false; host.error = error.message; next.close(error.message, "host_setup_failed"); }
-  finally { host.connecting = false; renderOverview(); }
+  host.connectPromise = (async () => {
+    try {
+      const hello = await next.connect(channel, host.stream, host.hostId);
+      if (!current()) { next.close(undefined, "host_setup_failed"); return; }
+      // Remember identity for this page even when the registry has no saved pin.
+      host.hostId = hello.hostId;
+      host.hello = hello;
+      const summaries = await next.request("sessions.subscribe");
+      if (!current()) { next.close(undefined, "host_setup_failed"); return; }
+      host.connected = true;
+      if (!setSummaries(host, summaries)) return;
+      host.error = "";
+      recoverySucceeded(host.recovery, next);
+      route();
+    } catch (error) {
+      if (host.client !== next || host.attempt !== attempt) return;
+      host.connected = false; host.error = error.message;
+      next.close(error.message, "host_setup_failed");
+      if (registered(host) && !pageLeaving) recoveryFailed(host.recovery, next);
+    } finally {
+      if (host.attempt === attempt) host.connecting = false;
+      host.connectPromise = null;
+      renderOverview();
+      scheduleRecovery();
+    }
+  })();
+  return host.connectPromise;
 }
 async function connectAll() {
   if (connecting) return;
@@ -281,18 +364,26 @@ async function connectAll() {
         existing.enabled = target.enabled;
         return existing;
       }
-      return { ...target, sessions: [], connected: false, connecting: false };
+      return { ...target, sessions: [], connected: false, connecting: false, recovery: recoveryState() };
     });
     for (const host of previous) {
       if (!hosts.includes(host) || host.enabled === false) {
+        host.attempt = (host.attempt || 0) + 1;
+        host.connecting = false;
+        host.connected = false;
+        host.recovery.blocked = true;
         host.client?.close("Host registration removed, disabled or changed.", "host_registration_changed");
         for (const conversation of conversations.values()) if (conversation.host === host) conversation.disconnect();
       }
     }
     renderHostOptions();
     await Promise.allSettled(hosts.map(async host => {
-      if (host.connected) setSummaries(host, await host.client.request("sessions.subscribe"));
-      else await connectHost(host);
+      if (!registered(host)) return;
+      if (host.connected) {
+        const connection = host.client;
+        const value = await connection.request("sessions.subscribe");
+        if (registered(host) && host.client === connection && !connection.closed) setSummaries(host, value);
+      } else await connectHost(host);
     }));
   } finally { connecting = false; $("connect").disabled = false; renderOverview(); }
 }
@@ -326,7 +417,7 @@ async function restartHost(host, force = false) {
     while (Date.now() < deadline) {
       await sleep(1000);
       if (!hosts.includes(host) || host.enabled === false) throw new Error("Host registration changed. Inspect its restart outcome before retrying.");
-      if (!host.connected) await connectHost(host);
+      if (!host.connected) await connectHost(host, true);
       if (!host.connected) continue;
       let receipt;
       try { receipt = await host.client.request("service.restart.status", query); }
@@ -339,7 +430,7 @@ async function restartHost(host, force = false) {
       }
       if (receipt.status === "completed" && receipt.result?.serviceEpoch === host.hello.serviceEpoch
         && receipt.result.buildId === host.hello.buildId) {
-        host.restartMessage += " Reconnect saved conversations explicitly.";
+        host.restartMessage += " Saved sessions stay stopped until explicitly resumed.";
         await connectAll();
         notice(`${host.alias}: ${host.restartMessage}`);
         return;
@@ -376,7 +467,7 @@ function renderHostOptions() {
     const choices = id === "create-host" ? [] : [new Option("All hosts", "")];
     for (const host of visible) {
       const option = new Option(host.alias, host.key);
-      option.disabled = id === "create-host" && !host.connected;
+      option.disabled = id === "create-host" && (!host.connected || navigator.onLine === false);
       choices.push(option);
     }
     if (select.options.length !== choices.length || choices.some((option, index) => {
@@ -396,7 +487,7 @@ function filteredRows(historyView = false) {
 }
 function renderOverview() {
   const visible = uniqueHosts();
-  const connected = visible.filter(host => host.connected).length;
+  const connected = visible.filter(host => host.connected && navigator.onLine !== false).length;
   renderHostOptions();
   $("connection-state").textContent = `${connected}/${visible.length} connected`;
   $("connection-state").className = connected ? "connected" : "";
@@ -405,12 +496,13 @@ function renderOverview() {
   const focusedRow = document.activeElement.closest("#session-list a")?.dataset.key;
   $("hosts").replaceChildren(...visible.map(host => {
     const node = text("div", "", "host-state");
-    const state = host.connected ? "Connected" : host.connecting ? "Connecting" : host.enabled === false ? "Disabled" : "Disconnected";
+    const state = host.enabled === false ? "Disabled" : navigator.onLine === false ? "Offline"
+      : host.connected ? "Connected" : host.connecting ? "Connecting" : host.recovery.blocked ? "Needs review" : "Reconnecting";
     node.append(text("span", `${host.alias} / ${state}`));
-    if (!host.connected && !host.connecting && host.enabled !== false) node.append(button("Reconnect", () => perform(() => connectHost(host))));
+    if (!host.connected && !host.connecting && host.enabled !== false) node.append(button("Reconnect", () => perform(() => connectHost(host)), navigator.onLine === false));
     if (host.hello?.capabilities.includes("service.restart")) {
-      node.append(button(host.restarting ? "Restarting..." : "Restart server", () => perform(() => restartHost(host)), !host.connected || host.restarting));
-      node.append(button("Last restart", () => perform(() => lastRestart(host)), !host.connected));
+      node.append(button(host.restarting ? "Restarting..." : "Restart server", () => perform(() => restartHost(host)), !host.connected || host.restarting || navigator.onLine === false));
+      node.append(button("Last restart", () => perform(() => lastRestart(host)), !host.connected || navigator.onLine === false));
     }
     if (host.restartMessage) node.append(text("p", host.restartMessage, "host-message"));
     if (host.error) node.append(text("p", host.error, "host-error"));
@@ -426,10 +518,10 @@ function renderOverview() {
     link.href = sessionRoute(host, row);
     link.dataset.key = key;
     link.draggable = false;
-    link.setAttribute("aria-disabled", String(!host.connected));
+    link.setAttribute("aria-disabled", String(!host.connected || navigator.onLine === false));
     link.addEventListener("click", event => {
       event.preventDefault();
-      if (host.connected) navigate(link.hash);
+      if (host.connected && navigator.onLine !== false) navigate(link.hash);
     });
     const heading = text("div", "", "row-heading");
     const state = sessionStatus(host, row);
@@ -483,7 +575,7 @@ function renderHistory() {
         if (old && !old.connected()) await old.reconnect();
         navigate(sessionRoute(host, row));
       } finally { host.busy = false; renderHistory(); }
-    }), !host.connected || host.busy || Boolean(row.archived));
+    }), !host.connected || navigator.onLine === false || host.busy || Boolean(row.archived));
     node.append(description, open);
     return node;
   }));
@@ -684,19 +776,33 @@ function refreshViewedStatus() {
   conversations.get(activeKey)?.viewed();
   renderOverview(); renderScreens();
 }
-window.addEventListener("focus", refreshViewedStatus);
-document.addEventListener("visibilitychange", refreshViewedStatus);
+function returnToPage() {
+  refreshViewedStatus();
+  scheduleRecovery(true);
+}
+window.addEventListener("focus", returnToPage);
+document.addEventListener("visibilitychange", returnToPage);
+window.addEventListener("online", returnToPage);
+window.addEventListener("offline", () => { scheduleRecovery(); refreshViewedStatus(); });
 window.addEventListener("hashchange", route);
 window.addEventListener("popstate", route);
 window.addEventListener("pagehide", event => {
-  for (const host of hosts) host.client?.close(undefined, "pagehide");
+  pageLeaving = true;
+  scheduleRecovery();
+  for (const host of hosts) {
+    host.attempt = (host.attempt || 0) + 1;
+    host.connecting = false;
+    host.connected = false;
+    host.client?.close(undefined, "pagehide");
+  }
   for (const conversation of conversations.values()) {
-    if (event.persisted) conversation.disconnect("Page suspended. Reconnect explicitly to continue.", "pagehide");
+    if (event.persisted) conversation.disconnect("Page suspended. Commands were not replayed.", "pagehide");
     else conversation.dispose("pagehide");
   }
 });
-window.addEventListener("pageshow", event => {
-  if (event.persisted) notice("Page restored. Refresh hosts, then reconnect sessions from Options. Commands were not replayed.");
+window.addEventListener("pageshow", () => {
+  pageLeaving = false;
+  returnToPage();
 });
 void perform(connectAll);
 
@@ -717,6 +823,8 @@ function createConversation(host, row) {
   $("options-title").textContent = sessionName(row);
   let client, hello, snapshot, attachment, grant, owner;
   let busy = false, connected = false, disposed = false;
+  let reconnectPromise, reconnectingClient, connectionAttempt = 0, recoveryAllowed = true;
+  const recovery = recoveryState();
   let streamSequence = 0, authoritySequence = 0, runtimeRevision = 0;
   let refreshTimer, refreshing = false, dirty = false;
   let transcriptKey = "", interactionKey = "";
@@ -756,13 +864,15 @@ function createConversation(host, row) {
   function notice(message = "") {
     renderNotice($("notice"), message);
   }
+  function grantCurrent() {
+    return connected && grant && owner?.controller?.attachmentId === attachment && owner.controller.grantId === grant.grantId;
+  }
   function controlsCurrent() {
-    return host.connected && row.live && connected && grant && owner?.controller?.attachmentId === attachment
-      && owner.controller.grantId === grant.grantId;
+    return navigator.onLine !== false && !pageLeaving && registered(host) && host.connected && row.live && grantCurrent();
   }
   function context() { return { client, selectedId, attachment, runtimeRevision }; }
   function sameContext(captured) {
-    return captured.client === client && captured.selectedId === selectedId
+    return !disposed && connected && captured.client === client && !captured.client?.closed && captured.selectedId === selectedId
       && captured.attachment === attachment && captured.runtimeRevision === runtimeRevision;
   }
   async function run(action) {
@@ -784,7 +894,15 @@ function createConversation(host, row) {
     }
     const connection = client;
     $("command-status").textContent = `${operation}: sending (${envelope.id})`;
-    let receipt = receiptResult(await connection.request("command", envelope));
+    let receipt;
+    try { receipt = receiptResult(await connection.request("command", envelope)); }
+    catch (error) {
+      if (error.delivery === "uncertain") {
+        $("command-status").textContent = `${operation}: outcome unknown (${envelope.id}). Not replayed; inspect before retrying.`;
+        error.message += ` Command: ${envelope.id}. Inspect before resubmitting.`;
+      }
+      throw error;
+    }
     if (operation.startsWith("control.")) {
       receipt = await terminalReceipt(connection, "command.status", { serviceEpoch: envelope.serviceEpoch, commandId: envelope.id }, receipt);
     }
@@ -794,11 +912,15 @@ function createConversation(host, row) {
   }
   function receive(record) {
     if (record.type === "disconnected") {
+      const wasConnected = connected;
       connected = false;
       grant = null;
+      attachment = null;
       clearTimeout(refreshTimer);
       refreshTimer = null;
-      notice(record.message);
+      if (wasConnected && recoveryAllowed && registered(host) && !pageLeaving) recoveryFailed(recovery, client);
+      // Mutation callers report uncertain delivery; recovery leaves their warnings intact.
+      scheduleRecovery();
       if (snapshot) renderSession();
       else renderControls();
       renderOverview();
@@ -806,7 +928,7 @@ function createConversation(host, row) {
     } else if (record.type === "update" && record.update.sessionId === selectedId) {
       const update = record.update;
       if (update.serviceEpoch !== hello.serviceEpoch || update.sequence !== streamSequence + 1) {
-        client.close("Session stream changed or skipped an update. Reconnect for a fresh snapshot.", "stream_changed");
+        client.close("Session stream changed or skipped an update. Recovering a fresh read-only attachment.", "stream_changed");
         return;
       }
       streamSequence = update.sequence;
@@ -822,7 +944,7 @@ function createConversation(host, row) {
         if (runtimeRevision !== update.runtimeRevision) grant = null;
         runtimeRevision = update.runtimeRevision;
         if (update.owner) owner = { ...update.owner, sequence: update.sequence };
-        if (grant && !controlsCurrent()) { grant = null; controlsChanged = true; }
+        if (grant && !grantCurrent()) { grant = null; controlsChanged = true; }
       }
       if (update.command) {
         const receipt = update.command;
@@ -854,10 +976,10 @@ function createConversation(host, row) {
     } catch (error) { if (sameContext(captured)) notice(error.message); }
     finally { refreshing = false; if (dirty) scheduleRefresh(); }
   }
-  function applySnapshot(value) {
+  function applySnapshot(value, fresh = false) {
     if (value.sessionId !== selectedId || value.serviceEpoch !== hello.serviceEpoch) return;
-    if (snapshot && value.serviceEpoch === snapshot.serviceEpoch && value.sequence < snapshot.sequence) return;
-    value = mergeSnapshot(snapshot, value);
+    if (!fresh && snapshot && value.serviceEpoch === snapshot.serviceEpoch && value.sequence < snapshot.sequence) return;
+    value = mergeSnapshot(fresh ? null : snapshot, value);
     snapshot = value;
     if (value.sequence >= authoritySequence) {
       authoritySequence = value.sequence;
@@ -865,30 +987,34 @@ function createConversation(host, row) {
       runtimeRevision = value.runtimeRevision;
       owner = value;
     }
-    if (grant && !controlsCurrent()) grant = null;
+    if (grant && !grantCurrent()) grant = null;
     renderSession();
   }
   function renderControls() {
     const controlled = Boolean(controlsCurrent());
     $("reconnect").hidden = connected;
-    $("reconnect").disabled = busy || !host.connected || !row.live;
+    $("reconnect").disabled = busy || Boolean(reconnectPromise) || !host.connected || !row.live || navigator.onLine === false;
     $("stop").disabled = !controlled || busy;
     $("control").textContent = controlled ? "Detach" : "Take control";
-    $("control").disabled = !host.connected || !row.live || !connected || !snapshot || busy;
-    $("controller").textContent = !host.connected ? "Unknown / read only" : !row.live ? "Stopped / read only"
+    $("control").disabled = navigator.onLine === false || !host.connected || !row.live || !connected || !snapshot || busy;
+    $("controller").textContent = !host.connected || navigator.onLine === false ? "Unknown / read only" : !row.live ? "Stopped / read only"
       : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
     const active = snapshot?.conversation.execution.running || owner?.subagentRuns?.some(run => !run.quiescent);
     $("abort").hidden = !active;
     $("abort").disabled = !controlled || busy || !active;
-    $("choose-directory").disabled = !host.connected;
-    $("new-workspace").disabled = !host.connected;
+    $("choose-directory").disabled = !host.connected || navigator.onLine === false;
+    $("new-workspace").disabled = !host.connected || navigator.onLine === false;
     $("rename").disabled = !controlled || busy;
     const ready = owner?.phase === "ready";
     $("prompt").disabled = !controlled || !ready;
     $("send").disabled = !controlled || !ready || busy || !$("prompt").value.trim();
-    $("composer-hint").textContent = !host.connected || !connected ? "Disconnected. Open Options to reconnect."
-      : !row.live ? "Session stopped. Resume it from History." : !controlled ? "Take control in Options to send a prompt."
+    $("composer-hint").textContent = navigator.onLine === false ? "Offline. Recovery resumes when online."
+      : !row.live && host.connected ? "Session stopped. Resume it from History."
+      : !host.connected || !connected ? host.recovery.blocked || recovery.blocked || !recoveryAllowed
+        ? "Disconnected. Review the host registration or reconnect explicitly."
+        : "Disconnected. Recovering while online and visible; commands are not replayed."
+      : !controlled ? "Take control in Options to send a prompt."
       : !ready ? "Waiting for session setup." : snapshot?.conversation.execution.running ? "Prompts sent while working are queued." : "";
     renderSettings();
     renderWorkers();
@@ -1013,14 +1139,15 @@ function createConversation(host, row) {
       field.select.value = value;
       field.select.disabled = !enabled || !choices.length || !hello?.capabilities.includes(field.operation) || Boolean(optionsLoad);
     }
-    $("refresh-settings").disabled = !host.connected || !row.live || !connected || owner?.phase !== "ready" || Boolean(optionsLoad) || !hello?.capabilities.includes("session.read");
-    $("settings-hint").textContent = !host.connected ? "Host unavailable. Current settings are unknown." : !row.live ? "Session stopped. Resume it from History."
+    $("refresh-settings").disabled = navigator.onLine === false || !host.connected || !row.live || !connected || owner?.phase !== "ready" || Boolean(optionsLoad) || !hello?.capabilities.includes("session.read");
+    $("settings-hint").textContent = navigator.onLine === false ? "Offline. Current settings cannot be checked."
+      : !host.connected ? "Host unavailable. Current settings are unknown." : !row.live ? "Session stopped. Resume it from History."
       : optionsLoad ? "Loading model options..." : optionsError ? `${optionsError} Tap Refresh options to retry.`
       : !connected ? "Reconnect to read current settings." : owner?.phase !== "ready" ? "Waiting for session setup."
       : !controlsCurrent() ? "Take control to change settings." : "Changes apply to this session on the execution host.";
   }
   function displayStatus() {
-    if (!host.connected) return "Unknown";
+    if (!host.connected || navigator.onLine === false) return "Unknown";
     if (!row.live) return "Stopped";
     if (!connected) return "Unknown";
     return sessionStatus(host, row, owner || row.live);
@@ -1030,7 +1157,7 @@ function createConversation(host, row) {
     $("session-title").textContent = snapshot.piState?.sessionName || sessionName(currentRow);
     $("options-title").textContent = $("session-title").textContent;
     $("session-directory").textContent = `${host.alias} / ${owner?.interactions.runtime?.cwd || currentRow.cwd || ""}`;
-    if (host.connected && row.live && connected && owner?.error) notice(owner.error);
+    if (host.connected && row.live && connected && owner?.error && $("notice").hidden) notice(owner.error);
     renderTranscript();
     scheduleViewedResponse();
     const state = displayStatus();
@@ -1385,7 +1512,7 @@ function createConversation(host, row) {
     target.replaceChildren(...pending.map(item => {
       const request = item.request;
       const captured = context();
-      const answerKey = `${hello.hostId}/${selectedId}/${runtimeRevision}/${request.id}`;
+      const answerKey = `${hello.hostId}/${selectedId}/${hello.serviceEpoch}/${runtimeRevision}/${request.id}`;
       const form = document.createElement("form");
       const fieldset = document.createElement("fieldset");
       fieldset.disabled = !enabled || item.submitted || submittedAnswers.has(answerKey);
@@ -1458,7 +1585,8 @@ function createConversation(host, row) {
     const takeover = Boolean(owner?.controller);
     if (takeover && !confirm(`Take control from ${owner.controller.label}?`)) return;
     await command(takeover ? "control.takeover" : "control.acquire", takeover ? { confirmed: true } : {});
-    const value = await client.request("grant");
+    if (!sameContext(captured)) return;
+    const value = await captured.client.request("grant");
     if (sameContext(captured)) {
       grant = value;
       if (!controlsCurrent()) scheduleRefresh();
@@ -1558,57 +1686,125 @@ function createConversation(host, row) {
   transcriptResize.observe($("transcript"));
   const heartbeat = setInterval(() => {
     scheduleViewedResponse();
-    if (!controlsCurrent()) return;
+    if (!canRecover() || !controlsCurrent()) return;
     const captured = context();
     const token = grant.token;
     client.request("heartbeat", { controlToken: token }).catch(error => {
       if (sameContext(captured) && grant?.token === token) { grant = null; notice(error.message); renderControls(); }
     });
   }, 5000);
-  async function reconnect() {
-    if (disposed || connected || busy) return;
-    await run(async () => {
-      if (!host.connected) throw new Error("Reconnect the execution host from Overview first.");
-      const summaries = await host.client.request("sessions.subscribe");
-      setSummaries(host, summaries);
-      if (disposed) return;
-      const currentRow = host.sessions.find(item => item.id === selectedId);
-      if (!currentRow?.live) throw new Error("This session is stopped. Open History to resume it explicitly.");
-      client?.close(undefined, "session_reconnect");
-      const next = new ServiceClient(record => { if (!disposed && client === next) receive(record); }, connectionDiagnostics(host, "session"));
-      client = next;
-      grant = null;
-      hello = await next.connect(channel, host.stream, host.hello.hostId);
-      if (disposed) { next.close(undefined, "session_disposed"); return; }
-      connected = true;
+  function reconnect(automatic = false) {
+    if (reconnectPromise) return reconnectPromise;
+    if (disposed || pageLeaving || connected || busy || !registered(host) || !host.connected
+      || (automatic && (!canRecover() || !recoveryAllowed || recovery.blocked || host.recovery.blocked || !row.live))) return Promise.resolve();
+    if (!automatic) { recoveryAllowed = true; recovery.blocked = false; recovery.due = 0; }
+    const attempt = ++connectionAttempt, target = host, hostClient = host.client;
+    const current = () => !disposed && !pageLeaving && connectionAttempt === attempt && host === target
+      && registered(target) && host.connected && host.client === hostClient
+      && (!automatic || (canRecover() && recoveryAllowed && !recovery.blocked && !host.recovery.blocked && row.live));
+    reconnectPromise = (async () => {
+      let next;
       try {
+        const summaries = await hostClient.request("sessions.subscribe");
+        if (!current() || !setSummaries(target, summaries) || !current()) return;
+        const currentRow = target.sessions.find(item => item.id === selectedId);
+        if (!currentRow?.live) {
+          recoveryAllowed = false;
+          if (!automatic) notice("This session is stopped. Open History to resume it explicitly.");
+          return;
+        }
+        client?.close(undefined, "session_reconnect");
+        next = new ServiceClient(record => { if (!disposed && connectionAttempt === attempt && client === next) receive(record); }, connectionDiagnostics(target, "session"));
+        client = reconnectingClient = next;
+        grant = null;
+        attachment = null;
+        const nextHello = await next.connect(channel, target.stream, identity);
+        if (!current() || next.closed || !row.live) { next.close(undefined, "session_disposed"); return; }
+        hello = nextHello;
         const value = await next.request("attach", { sessionId: selectedId, label: controllerLabel });
+        if (!current() || next.closed || !row.live) { next.close(undefined, "session_disposed"); return; }
         attachment = value.attachmentId;
         streamSequence = value.snapshot.sequence;
         authoritySequence = 0;
         runtimeRevision = value.snapshot.runtimeRevision;
-        transcriptKey = interactionKey = "";
+        owner = null;
+        transcriptKey = interactionKey = optionsKey = "";
+        optionsLoad = null;
         viewedResponse = null;
-        applySnapshot(value.snapshot);
-      } catch (error) { next.close(error.message, "session_attach_failed"); throw error; }
-    });
+        connected = true;
+        applySnapshot(value.snapshot, true);
+        recoverySucceeded(recovery, next);
+      } catch (error) {
+        next?.close(error.message, "session_attach_failed");
+        if (!current()) return;
+        // Session disappearance is not permission to resume its saved history.
+        if (["session_unavailable", "session_not_found"].includes(error.code)) recoveryAllowed = false;
+        else recoveryFailed(recovery, next || hostClient);
+        if (!automatic) notice(error.message);
+      } finally {
+        if (reconnectingClient === next) reconnectingClient = null;
+        reconnectPromise = null;
+        if (!disposed) renderControls();
+        scheduleRecovery();
+      }
+    })();
+    renderControls();
+    return reconnectPromise;
+  }
+  async function recover(check) {
+    if (disposed || !recoveryAllowed || !registered(host) || host.recovery.blocked || recovery.blocked || !canRecover() || !row.live) return;
+    if (connected && host.connected && hello.serviceEpoch !== host.hello.serviceEpoch) client.close("Host service restarted. Recovering read only.", "stream_changed");
+    if (!connected) {
+      if (host.connected && Date.now() >= recovery.due) await reconnect(true);
+    } else if (check) {
+      const captured = context();
+      try {
+        await captured.client.probe();
+        if (canRecover() && sameContext(captured)) scheduleRefresh();
+      } catch {
+        if (captured.client === client && captured.client.recoveryBlocked) recovery.blocked = true;
+      }
+    }
   }
   return {
     get host() { return host; },
-    identity, id: selectedId, element, reconnect,
+    identity, id: selectedId, element, reconnect, recover,
     draft: () => $("prompt").value,
     viewed() { if (snapshot) renderSession(); },
     connected: () => connected,
-    rebind(current) { host = current; if (snapshot) renderSession(); },
-    disconnect(message = "Host registration removed, disabled or changed.", cause = "host_registration_changed") { client?.close(message, cause); },
+    rebind(current) {
+      if (disposed || host === current) return;
+      ++connectionAttempt;
+      connected = false; grant = null; attachment = null;
+      clearTimeout(refreshTimer); refreshTimer = null;
+      client?.close(undefined, "host_registration_changed");
+      host = current;
+      if (snapshot) renderSession();
+    },
+    disconnect(message = "Host registration removed, disabled or changed.", cause = "host_registration_changed") {
+      ++connectionAttempt;
+      if (cause !== "pagehide") recoveryAllowed = false;
+      connected = false; grant = null; attachment = null;
+      clearTimeout(refreshTimer); refreshTimer = null;
+      client?.close(message, cause);
+      if (!disposed) {
+        if (cause !== "pagehide" && $("notice").hidden) notice(message);
+        renderControls();
+      }
+    },
     syncRow(value) {
       row = value || { ...row, live: undefined };
       if (!row.live) {
+        recoveryAllowed = false;
+        if (reconnectPromise && !connected) {
+          ++connectionAttempt;
+          reconnectingClient?.close("Session stopped or unavailable. Resume it explicitly from History.", "session_attach_failed");
+        }
         connected = false;
         grant = null;
         clearTimeout(refreshTimer);
         refreshTimer = null;
-        // Keep the attachment subscribed for a targeted closeFrontend update.
+        // Keep established attachments subscribed for a targeted closeFrontend update.
       }
       if (snapshot) renderSession();
       else { setStatus($("session-status"), displayStatus()); renderControls(); }
@@ -1635,6 +1831,9 @@ function createConversation(host, row) {
     },
     dispose(cause = "session_disposed") {
       disposed = true;
+      ++connectionAttempt;
+      recoveryAllowed = false;
+      connected = false; grant = null; attachment = null;
       clearInterval(heartbeat); clearTimeout(refreshTimer);
       cancelAnimationFrame(viewFrame);
       transcriptResize.disconnect();

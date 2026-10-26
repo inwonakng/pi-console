@@ -6,11 +6,11 @@ const integer = (value, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(v
 const bool = value => typeof value === "boolean";
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const choice = values => value => values.includes(value);
-const methods = ["hello", "sessions.subscribe", "sessions", "host.command", "host.status", "service.restart", "service.restart.status",
+const methods = ["hello", "health", "sessions.subscribe", "sessions", "host.command", "host.status", "service.restart", "service.restart.status",
   "snapshot", "command", "command.status", "resource.read", "session.read", "response.viewed", "grant", "heartbeat", "attach", "unknown"];
 const causes = ["unspecified", "socket_closed", "socket_error", "connect_timeout", "handshake_failed", "invalid_record", "request_timeout",
   "send_failed", "host_identity_changed", "host_setup_failed", "host_registration_changed", "server_identity_refresh",
-  "pagehide", "stream_changed", "session_reconnect", "session_disposed", "session_attach_failed"];
+  "pagehide", "stream_changed", "session_reconnect", "session_disposed", "session_attach_failed", "probe_timeout", "probe_failed"];
 const serviceCodes = ["heartbeat_timeout", "handshake_timeout", "service_connection_error", "transport_error", "output_error",
   "discovery_error", "service_disconnected", "websocket_closed", "bridge_error", "attachment_closed", "ECONNRESET", "EPIPE", "unknown"];
 const connection = { connection: integer, hostGroup: integer, role: choice(["host", "session", "unknown"]) };
@@ -25,6 +25,8 @@ const schemas = {
   local_close: { ...connection, cause: choice(causes), pending: value => integer(value, 32) },
   request_timeout: { ...connection, method: choice(methods), pending: value => integer(value, 32) },
   service_disconnected: { ...connection, code: choice(serviceCodes) },
+  probe_failed: { ...connection, outcome: choice(["blocked", "closed", "changed"]) },
+  recovery: { ...connection, outcome: choice(["retry", "recovered", "blocked"]), attempt: value => integer(value, 10), delay: value => integer(value, 30000) },
 };
 const started = performance.now();
 // Random page identity only, unrelated to any host, session or installation.
