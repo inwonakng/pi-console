@@ -230,12 +230,12 @@ export class PiConversation {
   }
 
   apply(change: ConversationChange): void {
-    // Bump before mutation; no snapshot can interleave with this synchronous reducer.
+    // No snapshot can interleave with this synchronous reducer.
     if (["history", "invalidate_history", "runtime_ended"].includes(change.type)
       || change.type === "event" && change.event.type === "message_end") this.revisions.history++;
     if (change.type === "runtime_ended" || change.type === "event" && change.event.type.startsWith("tool_execution_")) this.revisions.tools++;
     if (!["status", "widget", "title", "session_stats"].includes(change.type)) this.revisions.activity++;
-    if (["status", "widget", "title", "pi_state", "session_stats", "runtime_ended", "event"].includes(change.type)) this.revisions.status++;
+    if (["status", "widget", "title", "pi_state", "session_stats", "runtime_ended"].includes(change.type)) this.revisions.status++;
     switch (change.type) {
       case "diagnostic": {
         if (this.state.diagnostics.length >= 128) {
@@ -398,6 +398,9 @@ export class PiConversation {
   }
 
   private reduceEvent(event: JsonAgentSessionEvent): void {
+    const state = this.state.piState;
+    const isStreaming = state?.isStreaming, isCompacting = state?.isCompacting, pendingMessageCount = state?.pendingMessageCount;
+    const sessionName = state?.sessionName, thinkingLevel = state?.thinkingLevel;
     this.version++;
     switch (event.type) {
       case "entry_appended":
@@ -535,6 +538,9 @@ export class PiConversation {
       this.state.piState.isStreaming = this.state.execution.running;
       this.state.piState.isCompacting = this.state.execution.compaction?.type === "compaction_start";
       this.state.piState.pendingMessageCount = this.state.queue.steering.length + this.state.queue.followUp.length;
+      if (isStreaming !== this.state.piState.isStreaming || isCompacting !== this.state.piState.isCompacting
+        || pendingMessageCount !== this.state.piState.pendingMessageCount || sessionName !== this.state.piState.sessionName
+        || thinkingLevel !== this.state.piState.thinkingLevel) this.revisions.status++;
     }
   }
 

@@ -5,7 +5,7 @@ import { WebSocket, createWebSocketStream } from "ws";
 
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import { endpoint } from "./local-service.js";
+import { endpoint } from "./service-paths.js";
 import { MAX_RESPONSE, PROTOCOL, records, RecordWriter } from "./local-protocol.js";
 import type { Channel } from "./session-catalog.js";
 import { object } from "./pi-records.js";

@@ -810,6 +810,7 @@ function createConversation(host, row) {
         return;
       }
       streamSequence = update.sequence;
+      let controlsChanged = false;
       if (update.closeFrontend && update.closeFrontend.attachmentId === attachment) {
         detachConversation(key);
         return;
@@ -817,10 +818,11 @@ function createConversation(host, row) {
       // A snapshot can already include an update still waiting in the stream.
       if (update.sequence > authoritySequence) {
         authoritySequence = update.sequence;
+        controlsChanged = runtimeRevision !== update.runtimeRevision || Boolean(update.owner);
         if (runtimeRevision !== update.runtimeRevision) grant = null;
         runtimeRevision = update.runtimeRevision;
         if (update.owner) owner = { ...update.owner, sequence: update.sequence };
-        if (grant && !controlsCurrent()) grant = null;
+        if (grant && !controlsCurrent()) { grant = null; controlsChanged = true; }
       }
       if (update.command) {
         const receipt = update.command;
@@ -831,7 +833,7 @@ function createConversation(host, row) {
       }
       // Read a coalesced owner snapshot instead of duplicating its conversation reducer.
       // Live frontend effects are deliberately not executed by this first draft.
-      renderControls();
+      if (controlsChanged || update.command) renderControls();
       scheduleRefresh();
     }
   }
@@ -865,7 +867,6 @@ function createConversation(host, row) {
     }
     if (grant && !controlsCurrent()) grant = null;
     renderSession();
-    renderOverview();
   }
   function renderControls() {
     const controlled = Boolean(controlsCurrent());
@@ -996,14 +997,19 @@ function createConversation(host, row) {
       const choices = id === "model" ? models.map(model => [JSON.stringify([model.provider, model.id]), `${model.provider} / ${model.id}`])
         : id === "thinking" ? thinkingLevels.map(level => [level, level]) : field.choices;
       const value = values[id] ?? "";
-      const options = choices.map(([value, label]) => new Option(label, value));
+      const options = choices.map(([value, label]) => [value, label, false]);
       if (!choices.some(([choice]) => choice === value)) {
-        const current = new Option(id === "model" && currentModel ? `${currentModel.provider} / ${currentModel.id}` : value || "Unavailable", value);
-        current.disabled = true;
-        options.unshift(current);
+        options.unshift([value, id === "model" && currentModel ? `${currentModel.provider} / ${currentModel.id}` : value || "Unavailable", true]);
       }
-      const signature = JSON.stringify(options.map(option => [option.value, option.text, option.disabled]));
-      if (field.signature !== signature) { field.select.replaceChildren(...options); field.signature = signature; }
+      const signature = JSON.stringify(options);
+      if (field.signature !== signature) {
+        field.select.replaceChildren(...options.map(([value, label, disabled]) => {
+          const option = new Option(label, value);
+          option.disabled = disabled;
+          return option;
+        }));
+        field.signature = signature;
+      }
       field.select.value = value;
       field.select.disabled = !enabled || !choices.length || !hello?.capabilities.includes(field.operation) || Boolean(optionsLoad);
     }

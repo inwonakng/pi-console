@@ -165,7 +165,7 @@ export class HostOwner {
 
   /** Owner-local display projection only; never subscribes to workers or other hosts. */
   summaries(): HostSummaries {
-    return { sessions: this.catalog.list().map(({ id, cwd, name }) => {
+    return { sessions: this.catalog.listSummaries().map(({ id, cwd, name }) => {
       const session = this.lookup(id);
       return { id, cwd, name: session?.name || name, ...(session ? { live: session.summary() } : {}) };
     }), hostId: this.hostId, channel: this.options.channel, serviceEpoch: this.serviceEpoch };
@@ -603,8 +603,8 @@ export class OwnedSession {
   /** No conversation, queued text, interaction contents or control secrets. */
   summary(): OwnedSessionSummary {
     const state = this.conversation.sessionState;
-    const pendingInteractions = this.worker?.interactionSnapshot().pending.filter((item) => !item.submitted).length ?? 0;
-    return { ...this.activity(), sequence: this.sequence, phase: this.phase, runtimeRevision: this.runtimeRevision, controller: this.control.snapshot(), pendingInteractions,
+    const pendingInteractions = this.worker?.pendingInteractionCount ?? 0;
+    return { ...this.activity(pendingInteractions > 0), sequence: this.sequence, phase: this.phase, runtimeRevision: this.runtimeRevision, controller: this.control.snapshot(), pendingInteractions,
       accessMode: this.conversation.status("pi-access-mode")?.match(/^Mode: (\w+)$/)?.[1],
       integrationMode: this.conversation.status("pi-integration-mode")?.match(/^Integration: (\w+)$/)?.[1],
       notificationsEnabled: this.conversation.status("pi-notifications") === "notify on", cwd: this.workspace?.cwd ?? this.record.cwd,
@@ -648,7 +648,7 @@ export class OwnedSession {
     try {
       this.catalog.assertExecutionAllowed();
       this.checkIdentity();
-      const runtime = this.worker?.interactionSnapshot().runtime;
+      const runtime = this.worker?.interactionRuntime();
       const notification = stored.offer.data.type === "notification" || stored.offer.data.type === "extension_signal"
         && stored.offer.data.key === "pi-spawn-notification";
       return (this.phase === "ready" || notification && this.phase === "initializing") && !this.stopRequested && !this.exit
@@ -678,7 +678,7 @@ export class OwnedSession {
     if (this.mainEffectsAmbiguous && !independent) return;
     if (active && (data.type === "notification" || data.type === "editor_text") && this.turnRecipient !== undefined
       && active.recipient?.grantId !== this.turnRecipient?.grantId && (!this.conversation.executionSettled || this.queueFlight?.dispatched)) return;
-    const runtime = this.worker?.interactionSnapshot().runtime;
+    const runtime = this.worker?.interactionRuntime();
     if (!recipient || !runtime?.active) return;
     const offer: EffectOffer = { id: randomUUID(), policy: "recipient_bound", source: "owned_pi_stream",
       recipient: { attachmentId: recipient.attachmentId, grantId: recipient.grantId }, runtimeId: runtime.id, cwd: runtime.cwd, data };
@@ -1034,7 +1034,7 @@ export class OwnedSession {
   private prepareRename(command: SessionCommand & { operation: "session.rename" }, worker: PiProcess): RenameFlight {
     if (this.rename || this.nativePending || this.bundled || this.bundledInterrupt) throw new CommandError("session_busy", "A session operation is already pending");
     this.assertRenameReady();
-    const runtimeId = worker.interactionSnapshot().runtime!.id;
+    const runtimeId = worker.interactionRuntime()!.id;
     const invocationId = randomUUID();
     const request = { version: 1, invocationId, runtimeId, sessionId: this.record.piSessionId,
       sessionFile: this.catalog.sessionFile(this.id), title: command.payload.title };
@@ -1124,7 +1124,7 @@ export class OwnedSession {
     if (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another session operation is pending");
     if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
     if (command.operation.startsWith("history.") || command.operation.startsWith("workspace.") || command.operation === "title.generate") this.assertRenameReady();
-    const runtimeId = worker.interactionSnapshot().runtime!.id;
+    const runtimeId = worker.interactionRuntime()!.id;
     const invocationId = randomUUID();
     return { worker, revision: command.runtimeRevision, runtimeId, invocationId, operation: command.operation, dispatched: false,
       recipient: this.control.current(), message: `/${operationCommand(command.operation)} ${JSON.stringify({ version: 1, invocationId,
@@ -1198,7 +1198,7 @@ export class OwnedSession {
           // managed file, then validate identity; never accept a fork on this ID.
           const checkRuntime = () => {
             this.catalog.assertExecutionAllowed();
-            const runtime = flight.worker.interactionSnapshot().runtime;
+            const runtime = flight.worker.interactionRuntime();
             if (flight.worker !== this.worker || !runtime?.active || runtime.sessionId !== this.record.piSessionId
               || runtime.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Operation changed managed identity");
           };
@@ -1249,7 +1249,7 @@ export class OwnedSession {
 
   private readonly reviews = new WorkspaceReviews(() => JSON.stringify([this.catalog.epoch, this.id, this.runtimeRevision]));
   private reviewContext(worker: PiProcess, check: () => void): ResourceContext {
-    const runtime = worker.interactionSnapshot().runtime!;
+    const runtime = worker.interactionRuntime()!;
     return { sessionFile: this.catalog.sessionFile(this.id), cwd: runtime.cwd,
       workspaceRoot: typeof this.workspace?.path === "string" ? this.workspace.path : runtime.cwd,
       workspaceId: typeof this.workspace?.id === "string" ? this.workspace.id : undefined,
@@ -1381,8 +1381,7 @@ export class OwnedSession {
     if (changed) { await this.catalog.replaceQueue(this.id, items); this.queueChanged(); }
   }
 
-  private activity(): SessionActivity {
-    const pending = this.worker?.interactionSnapshot().pending.some((item) => !item.submitted);
+  private activity(pending = (this.worker?.pendingInteractionCount ?? 0) > 0): SessionActivity {
     const status = this.done ? "Stopped"
       : this.error || this.phase === "failed" ? "Error"
       : this.phase === "stopping" ? "Stopping"
@@ -1434,12 +1433,12 @@ export class OwnedSession {
   }
 
   private ownerState(): OwnedSessionState {
-    return structuredClone({
-      ...this.activity(), sessionId: this.id, serviceEpoch: this.catalog.epoch, runtimeRevision: this.runtimeRevision,
+    const interactions = this.worker?.interactionSnapshot() ?? { revision: 0, pending: [] };
+    return { ...structuredClone({
+      ...this.activity(interactions.pending.some((item) => !item.submitted)), sessionId: this.id, serviceEpoch: this.catalog.epoch, runtimeRevision: this.runtimeRevision,
       phase: this.phase, trust: this.trust, workspace: this.workspace, piState: this.conversation.sessionState,
-      interactions: this.worker?.interactionSnapshot() ?? { revision: 0, pending: [] }, controller: this.control.snapshot(),
-      error: this.error?.message, exit: this.exit, startupTimings: this.startupTimings,
-    });
+      controller: this.control.snapshot(), error: this.error?.message, exit: this.exit, startupTimings: this.startupTimings,
+    }), interactions };
   }
 
   /** Rechecked at the actual backpressured queue write position. */
@@ -1451,7 +1450,7 @@ export class OwnedSession {
   private commandRuntime(revision: number, worker = this.worker): PiProcess {
     this.catalog.assertExecutionAllowed();
     if (revision !== this.runtimeRevision || worker !== this.worker) throw new CommandError("stale_runtime", "Command targets a replaced runtime");
-    if (this.stopRequested || this.error || this.exit || !worker || !worker.interactionSnapshot().runtime?.active) {
+    if (this.stopRequested || this.error || this.exit || !worker || !worker.interactionRuntime()?.active) {
       throw new CommandError("session_unavailable", "Session runtime is unavailable");
     }
     try { this.checkIdentity(); }
@@ -1531,7 +1530,7 @@ export class OwnedSession {
       const worker = this.commandRuntime(command.runtimeRevision);
       const guard = () => { this.commandRuntime(command.runtimeRevision, worker); };
       if (command.operation === "interaction.respond" || command.operation === "interaction.cancel") {
-        await worker.respond(this.interactionResponse(command), worker.interactionSnapshot().runtime!.id, () => {
+        await worker.respond(this.interactionResponse(command), worker.interactionRuntime()!.id, () => {
           guard(); this.interactionResponse(command);
         });
         receipt.result = { delivery: "flushed" };
@@ -1588,7 +1587,7 @@ export class OwnedSession {
     }
     guard();
     const invocationId = randomUUID();
-    const runtimeId = worker.interactionSnapshot().runtime!.id;
+    const runtimeId = worker.interactionRuntime()!.id;
     const flight: SubagentCancellation = { runtimeId, message: `/${name} ${JSON.stringify({ version: 1, invocationId,
       runtimeId, sessionId: this.record.piSessionId, sessionFile: this.catalog.sessionFile(this.id), payload: {} })}` };
     this.subagentCancellations.set(invocationId, flight);
@@ -1606,11 +1605,11 @@ export class OwnedSession {
       if (pending.submitted || sideInteraction(pending.request.title)) continue;
       this.commandRuntime(revision, worker);
       // A concurrently answered/closed dialog is not an abort failure.
-      if (!worker.interactionSnapshot().pending.some((item) => item.request.id === pending.request.id && !item.submitted)) continue;
+      if (!worker.hasPendingInteraction(pending.request.id)) continue;
       try {
         await worker.respond({ type: "extension_ui_response", id: pending.request.id, cancelled: true }, pending.runtimeId, () => {
           this.commandRuntime(revision, worker);
-          if (!worker.interactionSnapshot().pending.some((item) => item.request.id === pending.request.id && !item.submitted)) {
+          if (!worker.hasPendingInteraction(pending.request.id)) {
             throw new CommandError("interaction_resolved", "Interaction already closed or answered");
           }
         });
@@ -1638,7 +1637,7 @@ export class OwnedSession {
     }
     if (this.phase !== "ready" || this.stopRequested || !this.usableWorkspace() || !this.conversation.settled
       || this.admitting || this.commands.size || this.lifecyclePending || this.bundled || this.nativePending || this.aborting || this.rename || this.queueFlight || this.queueRunPending
-      || this.worker?.interactionSnapshot().pending.length || this.catalog.queue(this.id).some((item) => item.status !== "failed")) {
+      || this.worker?.interactionCount || this.catalog.queue(this.id).some((item) => item.status !== "failed")) {
       return `Session ${this.id} has active work, approval, accepted queue or transition; stop refused`;
     }
   }
@@ -1843,7 +1842,7 @@ export class OwnedSession {
       flight.observedMessage = messageKey(event.message);
     }
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-console-runtime") {
-      const runtime = this.worker?.interactionSnapshot().runtime;
+      const runtime = this.worker?.interactionRuntime();
       if (!runtime?.active) this.retain({ type: "runtime_ended", preserveContinuation: true });
       else if (previousRevision !== this.runtimeRevision) {
         // Preserve statuses already published during extension binding. Pi binds
@@ -1866,7 +1865,7 @@ export class OwnedSession {
         // Bundled trust can publish during binding after old-runtime stop but
         // before service.ts announces the incoming runtime. Attribute only fresh
         // publications in that inactive gap to the next adapter revision.
-        const statusRevision = this.workerRevision + (this.worker?.interactionSnapshot().runtime?.active ? 0 : 1);
+        const statusRevision = this.workerRevision + (this.worker?.interactionRuntime()?.active ? 0 : 1);
         if (event.statusKey === "pi-project-trust") {
           if (!["pending", "ready", "restart", "error"].includes(String(value.state))
             || (value.error !== undefined && typeof value.error !== "string")) throw new Error("Invalid Pi trust status");
@@ -2098,7 +2097,7 @@ export class OwnedSession {
   }
 
   private syncRevision(): void {
-    const revision = this.worker?.interactionSnapshot().revision ?? 0;
+    const revision = this.worker?.interactionRevision ?? 0;
     if (revision !== this.workerRevision) {
       this.queueRunPending = false;
       this.turnRecipient = undefined;
@@ -2111,23 +2110,24 @@ export class OwnedSession {
   }
 
   private checkIdentity(): void {
-    const runtime = this.worker?.interactionSnapshot().runtime;
+    const runtime = this.worker?.interactionRuntime();
     const state = this.conversation.sessionState;
-    if (!runtime?.active || runtime.sessionId !== this.record.piSessionId || runtime.sessionFile !== this.catalog.sessionFile(this.id)
-      || state?.sessionId !== this.record.piSessionId || state.sessionFile !== this.catalog.sessionFile(this.id)) {
+    const sessionFile = runtime?.active && runtime.sessionId === this.record.piSessionId ? this.catalog.sessionFile(this.id) : undefined;
+    if (!runtime?.active || runtime.sessionId !== this.record.piSessionId || runtime.sessionFile !== sessionFile
+      || state?.sessionId !== this.record.piSessionId || state.sessionFile !== sessionFile) {
       throw new Error("Pi runtime changed managed conversation identity or became unavailable");
     }
   }
 
   private checkStatusIdentity(status: { cwd: string; sessionFile: string }): void {
-    const runtime = this.worker?.interactionSnapshot().runtime;
+    const runtime = this.worker?.interactionRuntime();
     if (!runtime?.active || status.cwd !== runtime.cwd || status.sessionFile !== runtime.sessionFile) throw new Error("Pi startup status targets a different runtime");
   }
 
   private workspacePending(): boolean { return this.workspace?.transitionPending === true; }
 
   private usableWorkspace(): boolean {
-    const runtime = this.worker?.interactionSnapshot().runtime;
+    const runtime = this.worker?.interactionRuntime();
     return !!runtime?.active && runtime.sessionId === this.record.piSessionId && runtime.sessionFile === this.catalog.sessionFile(this.id)
       && this.trustWorkerRevision === this.workerRevision && this.workspaceWorkerRevision === this.workerRevision
       && this.trust?.state === "ready" && this.trust.cwd === runtime.cwd && this.trust.sessionFile === runtime.sessionFile

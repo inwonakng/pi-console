@@ -161,9 +161,18 @@ export class SessionCatalog {
     assertManagedLaunchAllowed(this.processRegistry, this.epoch);
   }
 
-  list(): CatalogSession[] {
+  list(): CatalogSession[] { return this.listSessions(true); }
+
+  listSummaries(): Pick<CatalogSession, "id" | "cwd" | "name">[] {
+    return this.listSessions(false).map(({ id, cwd, name }) => ({ id, cwd, name }));
+  }
+
+  private listSessions(loadQueue: boolean): CatalogSession[] {
     return this.read(() => this.db.prepare("SELECT metadata FROM sessions ORDER BY rowid DESC").all()
-      .map((row) => this.withQueue(JSON.parse(String(row.metadata)) as CatalogSession)).filter(session => !session.deleted)
+      .map((row) => {
+        const session = JSON.parse(String(row.metadata)) as CatalogSession;
+        return loadQueue ? this.withQueue(session) : session;
+      }).filter(session => !session.deleted)
       .sort((left, right) => Date.parse(right.lastActivityAt ?? right.createdAt) - Date.parse(left.lastActivityAt ?? left.createdAt)));
   }
 
@@ -181,8 +190,10 @@ export class SessionCatalog {
   }
 
   sessionFile(id: string): string {
-    this.get(id);
-    return join(this.root, "sessions", `${id}.jsonl`);
+    return this.read(() => {
+      if (!this.db.prepare("SELECT 1 FROM sessions WHERE id=?").get(id)) throw new Error("Unknown service session");
+      return join(this.root, "sessions", `${id}.jsonl`);
+    });
   }
 
   hostRecord(epoch: string, id: string): { fingerprint: string; receipt: HostReceipt } | undefined {

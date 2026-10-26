@@ -26,6 +26,7 @@ function M.path(name, kind)
 	local suffix = kind == "config" and (channel == "dev" and "-dev.yaml" or ".yaml") or ".json"
 	return vim.fs.joinpath(M.root(kind), name .. suffix)
 end
+local decoded_yaml = {}
 local function yaml(mode, source)
 	local result = vim.system({ "node", vim.fs.joinpath(vim.g.pi_console_root, "pi/scripts/hosts-yaml.mjs"), mode },
 		{ stdin = source, text = true }):wait()
@@ -39,7 +40,14 @@ function M.load(name, initial, kind)
 	M.prepare(vim.fs.dirname(path), kind)
 	assert(stat.type == "file" and check_permissions(stat, kind), "Frontend file has invalid ownership or permissions: " .. path)
 	local source = table.concat(vim.fn.readfile(path), "\n")
-	return vim.json.decode(kind == "config" and yaml("decode", source) or source)
+	if kind ~= "config" then return vim.json.decode(source) end
+	local cached = decoded_yaml[path]
+	if not cached or cached.source ~= source then
+		local value = vim.json.decode(yaml("decode", source))
+		cached = { source = source, value = value }
+		decoded_yaml[path] = cached
+	end
+	return vim.deepcopy(cached.value)
 end
 function M.update(name, initial, callback, kind)
 	local path = M.path(name, kind)

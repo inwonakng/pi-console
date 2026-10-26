@@ -29,6 +29,16 @@ export class PiInteractions {
 
   constructor(private readonly discard: (request: PiDialogRequest) => void) {}
 
+  get runtimeRevision(): number { return this.revision; }
+  get interactionCount(): number { return this.pending.size; }
+  get pendingCount(): number {
+    let count = 0;
+    for (const item of this.pending.values()) if (!item.submitted) count++;
+    return count;
+  }
+  runtimeSnapshot(): PiRuntime | undefined { return this.runtime && { ...this.runtime }; }
+  hasPending(id: string): boolean { return this.pending.get(id)?.submitted === false; }
+
   snapshot(): InteractionSnapshot {
     return structuredClone({ runtime: this.runtime, revision: this.revision, pending: [...this.pending.values()].map(({ bytes: _bytes, ...item }) => item) });
   }

@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Channel } from "./session-catalog.js";
 
+export const endpoint = (root: string): string => join(root, "service.sock");
 export const applicationRoot = (): string => fileURLToPath(new URL("../../", import.meta.url));
 // Service profiles are HOME-based, independent of XDG_STATE_HOME; --root is explicit.
 export const defaultRoot = (channel: Channel): string => join(homedir(), ".local/state/pi-console/service", channel);

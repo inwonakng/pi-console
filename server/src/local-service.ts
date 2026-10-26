@@ -12,12 +12,11 @@ import { CommandError } from "./session-commands.js";
 import { identifier } from "./host-commands.js";
 import { object } from "./pi-records.js";
 import { CAPABILITIES, MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWriter } from "./local-protocol.js";
-import { serviceBuild } from "./service-paths.js";
+import { endpoint, serviceBuild } from "./service-paths.js";
 import { ServiceRestart } from "./service-restart.js";
 import { readExtensionSettings } from "../../pi/extensions/shared/read-extension-settings.mjs";
 import { ConnectionDiagnostics, diagnosticCode, serviceDiagnostic } from "./connection-diagnostics.js";
 
-export const endpoint = (root: string): string => join(root, "service.sock");
 function exact(value: Record<string, unknown>, keys: string[]): void {
   if (Object.keys(value).some((key) => !keys.includes(key))) throw new CommandError("invalid_command", "Unknown IPC field");
 }
@@ -210,7 +209,7 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
             if (owner.shutdownStarted) throw new CommandError("session_unavailable", "Service is stopping");
             const summaries = owner.summaries();
             const initial = !summaryFeed;
-            const feed = summaryFeed ??= { previous: "" };
+            const feed = summaryFeed ??= { previous: JSON.stringify(summaries) };
             summaryStops.add(stopSummaries);
             await send({ type: "response", id: record.id, success: true, result: summaries });
             if (initial) void pumpSummaries(feed, summaries);

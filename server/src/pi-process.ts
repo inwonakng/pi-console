@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import { realpathSync } from "node:fs";
 import type { RpcCommand, RpcExtensionUIResponse, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
-import { PiInteractions, type InteractionSnapshot } from "./pi-interactions.js";
+import { PiInteractions, type InteractionSnapshot, type PiRuntime } from "./pi-interactions.js";
 import { parsePiRecord, type PiEvent, type PiRecord } from "./pi-records.js";
 
 const MAX_RECORD_BYTES = 16 * 1024 * 1024;
@@ -142,13 +142,19 @@ export class PiProcess {
   async ready(): Promise<RpcSessionState> {
     const response = await this.request({ type: "get_state" });
     if (response.command !== "get_state") throw new Error("Pi returned the wrong startup response");
-    if (!this.interactions.snapshot().runtime?.active) {
+    if (!this.interactions.runtimeSnapshot()?.active) {
       const error = new Error("Pi worker did not load pi-console's managed lifecycle extension");
       this.fail(error);
       throw error;
     }
     return response.data;
   }
+
+  get interactionRevision(): number { return this.interactions.runtimeRevision; }
+  get interactionCount(): number { return this.interactions.interactionCount; }
+  get pendingInteractionCount(): number { return this.interactions.pendingCount; }
+  interactionRuntime(): PiRuntime | undefined { return this.interactions.runtimeSnapshot(); }
+  hasPendingInteraction(id: string): boolean { return this.interactions.hasPending(id); }
 
   interactionSnapshot(): InteractionSnapshot {
     return this.interactions.snapshot();
@@ -248,7 +254,7 @@ export class PiProcess {
     if (this.failure) return;
     if (this.buffer.length) { this.fail(new Error("Pi stdout ended with an incomplete JSONL record")); return; }
     const error = new Error("Pi response channel closed; outstanding command outcomes may be uncertain");
-    if (!this.stopping && !this.exited && (this.pending.size > 0 || this.interactions.snapshot().runtime?.active)) this.fail(error);
+    if (!this.stopping && !this.exited && (this.pending.size > 0 || this.interactions.runtimeSnapshot()?.active)) this.fail(error);
     else {
       this.rejectPending(error);
       void this.stop();
