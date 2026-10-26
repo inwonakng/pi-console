@@ -25,6 +25,90 @@ const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
 let hosts = [], conversations = new Map(), activeKey = null, activeScreen = "overview", connecting = false, generation = 0;
 let controllerLabel = "webui";
 const expandedSubagents = new Set();
+const sessionOrderStorage = `pi-console:${channel}:session-order`;
+let sessionOrder = [];
+try {
+  const saved = JSON.parse(localStorage.getItem(sessionOrderStorage));
+  if (Array.isArray(saved)) sessionOrder = [...new Set(saved.filter(key => typeof key === "string"))];
+} catch { /* Storage may be unavailable; retain order for this page. */ }
+let sessionDrag;
+function saveSessionOrder() {
+  try { localStorage.setItem(sessionOrderStorage, JSON.stringify(sessionOrder)); } catch { /* Keep the in-page order. */ }
+}
+function rememberSessions(host) {
+  const known = new Set(sessionOrder);
+  const added = host.sessions.map(row => sessionKey(host.hello.hostId, row.id)).filter(key => !known.has(key));
+  if (added.length) { sessionOrder.push(...added); saveSessionOrder(); }
+}
+function moveSession(key, target, after) {
+  const next = sessionOrder.filter(item => item !== key);
+  const index = next.indexOf(target);
+  if (index < 0 || key === target) return;
+  next.splice(index + Number(after), 0, key);
+  sessionOrder = next;
+}
+function reorderHandle(key, name) {
+  const handle = button("::", () => {});
+  handle.className = "reorder-handle";
+  handle.setAttribute("aria-label", `Reorder ${name}`);
+  handle.setAttribute("aria-describedby", "reorder-help");
+  handle.title = "Drag to reorder, or use up and down arrow keys";
+  handle.addEventListener("keydown", event => {
+    if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    const keys = [...$("session-list").children].map(node => node.dataset.key);
+    const adjacent = keys[keys.indexOf(key) + (event.key === "ArrowUp" ? -1 : 1)];
+    if (!adjacent) return;
+    moveSession(key, adjacent, event.key === "ArrowDown");
+    saveSessionOrder(); renderOverview();
+    [...$("session-list").children].find(node => node.dataset.key === key)?.querySelector(".reorder-handle").focus();
+    $("reorder-status").textContent = `${name} moved ${event.key === "ArrowUp" ? "up" : "down"}.`;
+  });
+  handle.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || sessionDrag) return;
+    const entry = handle.closest(".session-entry");
+    sessionDrag = { key, entry, handle, pointerId: event.pointerId, startY: event.clientY, initial: [...sessionOrder], moved: false };
+    const list = $("session-list");
+    list.addEventListener("pointermove", move);
+    list.addEventListener("pointerup", finish);
+    list.addEventListener("pointercancel", finish);
+    list.addEventListener("lostpointercapture", finish);
+    list.setPointerCapture(event.pointerId);
+  });
+  const move = event => {
+    const drag = sessionDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.moved && Math.abs(event.clientY - drag.startY) < 5) return;
+    drag.moved = true;
+    drag.entry.classList.add("reordering");
+    const overview = $("overview"), bounds = overview.getBoundingClientRect();
+    if (event.clientY < bounds.top + 60) overview.scrollTop -= 16;
+    else if (event.clientY > bounds.bottom - 60) overview.scrollTop += 16;
+    const over = document.elementFromPoint(event.clientX, event.clientY)?.closest("#session-list > .session-entry");
+    if (!over || over === drag.entry) return;
+    const rect = over.getBoundingClientRect(), after = event.clientY > rect.top + rect.height / 2;
+    moveSession(key, over.dataset.key, after);
+    const before = after ? over.nextSibling : over;
+    if (before !== drag.entry) over.parentElement.insertBefore(drag.entry, before);
+  };
+  const finish = event => {
+    if (!sessionDrag || sessionDrag.pointerId !== event.pointerId) return;
+    const drag = sessionDrag;
+    sessionDrag = null;
+    if (event.type === "pointercancel") sessionOrder = [...drag.initial, ...sessionOrder.filter(key => !drag.initial.includes(key))];
+    if (drag.moved) saveSessionOrder();
+    drag.entry.classList.remove("reordering");
+    const list = $("session-list");
+    list.removeEventListener("pointermove", move);
+    list.removeEventListener("pointerup", finish);
+    list.removeEventListener("pointercancel", finish);
+    list.removeEventListener("lostpointercapture", finish);
+    if (list.hasPointerCapture(event.pointerId)) list.releasePointerCapture(event.pointerId);
+    renderOverview();
+    [...$("session-list").children].find(node => node.dataset.key === key)?.querySelector(".reorder-handle").focus({ preventScroll: true });
+  };
+  return handle;
+}
 // Disconnecting a session keeps unsent text available in this page.
 const stoppedPromptDrafts = new Map();
 function sessionStatus(host, row, activity = row.live) {
@@ -79,6 +163,7 @@ function setSummaries(host, value) {
     host.client.close("Host identity changed. Reconnect explicitly."); return;
   }
   host.sessions = value.sessions;
+  rememberSessions(host);
   for (const conversation of conversations.values()) {
     if (conversation.identity === host.hello.hostId && (!conversation.host.connected || !hosts.includes(conversation.host))) conversation.rebind(host);
   }
@@ -269,12 +354,16 @@ function renderOverview() {
     if (host.error) node.append(text("p", host.error, "host-error"));
     return node;
   }));
-  const rows = filteredRows();
+  if (sessionDrag) return;
+  const ranks = new Map(sessionOrder.map((key, index) => [key, index]));
+  const rows = filteredRows().sort((a, b) => ranks.get(sessionKey(a.host.hello.hostId, a.row.id)) - ranks.get(sessionKey(b.host.hello.hostId, b.row.id)));
+  const focusedHandle = document.activeElement.matches(".reorder-handle") ? document.activeElement.closest(".session-entry")?.dataset.key : null;
   $("session-list").replaceChildren(...rows.map(({ host, row }) => {
     const key = sessionKey(host.hello.hostId, row.id);
     const link = text("a", "", "session-row");
     link.href = sessionRoute(host, row);
     link.dataset.key = key;
+    link.draggable = false;
     link.setAttribute("aria-disabled", String(!host.connected));
     link.addEventListener("click", event => {
       event.preventDefault();
@@ -286,9 +375,14 @@ function renderOverview() {
     setStatus(status, state);
     heading.append(text("span", sessionName(row), "row-title"), status);
     link.append(heading, text("span", `${host.alias} / ${row.live?.cwd || row.cwd}`, "row-directory"));
+    const group = text("div", "", "session-entry");
+    group.dataset.key = key;
+    const headingRow = text("div", "", "session-entry-heading");
+    headingRow.append(reorderHandle(key, sessionName(row)), link);
+    group.append(headingRow);
     const runs = host.connected ? row.live?.subagentRuns || [] : [];
-    if (!runs.length) return link;
-    const group = text("div", "", "session-entry"), details = text("details", "", "subagent-runs");
+    if (!runs.length) return group;
+    const details = text("details", "", "subagent-runs");
     details.open = expandedSubagents.has(key);
     details.addEventListener("toggle", () => {
       if (details.open) expandedSubagents.add(key); else expandedSubagents.delete(key);
@@ -299,11 +393,12 @@ function renderOverview() {
     inspect.href = sessionRoute(host, row);
     inspect.addEventListener("click", event => { event.preventDefault(); navigate(inspect.hash); });
     details.append(inspect);
-    group.append(link, details);
+    group.append(details);
     return group;
   }));
   if (!rows.length) $("session-list").append(text("p", "No open sessions match. Start a new session or open History to resume a stopped one.", "empty"));
   if (focusedRow) [...$("session-list").querySelectorAll("a")].find(link => link.dataset.key === focusedRow)?.focus({ preventScroll: true });
+  else if (focusedHandle) [...$("session-list").children].find(node => node.dataset.key === focusedHandle)?.querySelector(".reorder-handle").focus({ preventScroll: true });
 }
 function renderHistory() {
   $("history-list").replaceChildren(...filteredRows(true).map(({ host, row }) => {
@@ -564,7 +659,8 @@ function createConversation(host, row) {
   let transcriptKey = "", interactionKey = "";
   let following = true, savedScrollTop = 0;
   let viewedResponse, viewFrame;
-  const transcriptEntries = new Map(), assistantGroups = new Map();
+  const transcriptEntries = new Map(), assistantGroups = new Map(), activityGroups = new Map();
+  let currentActivity;
   const answerDrafts = new Map(), submittedAnswers = new Set();
   const settingFields = new Map();
   let models = [], thinkingLevels = [], optionsKey = "", optionsLoad = null, optionsError = "";
@@ -932,6 +1028,7 @@ function createConversation(host, row) {
     const scrollTop = target.scrollTop;
     const top = target.getBoundingClientRect().top;
     const anchor = [...container.children].flatMap(node => node.dataset.role === "assistant" ? [...node.children].slice(1) : [node])
+      .flatMap(node => node.classList.contains("activity-group") && node.open ? [node.firstElementChild, ...node.lastElementChild.children] : [node])
       .find(node => node.getBoundingClientRect().bottom > top);
     const anchorTop = anchor?.getBoundingClientRect().top;
     const diagnostics = conversation.diagnostics || [];
@@ -951,7 +1048,8 @@ function createConversation(host, row) {
       const partialKey = `partial-${message.timestamp}`;
       const toolAnchor = toolAnchors.get(message.toolCallId);
       const entryKey = message.role === "toolResult" && toolAnchor ? `tool-${toolAnchor}-${message.toolCallId}`
-        : message.role === "assistant" && transcriptEntries.has(partialKey) ? partialKey
+        : message.role === "assistant" && Array.isArray(message.content)
+          && message.content.some((_, index) => transcriptEntries.has(`${partialKey}-block-${index}`)) ? partialKey
         : unique ? `message-${anchor}` : `message-index-${conversation.omittedMessages + index}`;
       history.push({ key: entryKey, message, anchor: unique ? anchor : undefined });
       if (unique) {
@@ -975,7 +1073,7 @@ function createConversation(host, row) {
         if (historyKeys.has(key)) return [];
         const message = tool.result ? { ...tool.result, role: "toolResult", toolName: tool.toolName,
           toolCallId: tool.toolCallId, isError: tool.isError || tool.result.isError } : { role: "toolResult" };
-        return [{ key, message, tool: tool.result ? undefined : tool }];
+        return [{ key, message, tool: tool.result ? undefined : tool, execution: tool }];
       })];
     });
     const supersededErrors = new Set();
@@ -1001,33 +1099,80 @@ function createConversation(host, row) {
         } });
       }
     }
-    const entries = visible.map(({ key, message, tool }) => {
+    // Recognize skill reads by their call arguments, including nested live reads.
+    // Keep one skill item and attach its recorded result instead of a second read row.
+    const skillCalls = new Map(), skills = new Map();
+    for (const { key, message, execution } of visible) {
+      if (message.role === "assistant" && Array.isArray(message.content)) {
+        message.content.forEach((block, index) => {
+          if (block.type !== "toolCall") return;
+          // Call IDs may be reused in later turns, including by ordinary reads.
+          skillCalls.delete(block.id);
+          const name = skillName(block.name, block.arguments);
+          if (!name) return;
+          const skill = { name, path: block.arguments.path, hasCall: true };
+          skillCalls.set(block.id, skill);
+          skills.set(`${key}-block-${index}`, skill);
+        });
+      } else if (message.role === "toolResult") {
+        const id = message.toolCallId || execution?.toolCallId;
+        const name = execution && skillName(execution.toolName, execution.args);
+        const skill = skillCalls.get(id) || (name ? { name, path: execution.args.path } : undefined);
+        if (!skill) continue;
+        if (execution) Object.assign(skill, { result: execution.result || execution.partialResult, state: execution.state,
+          isError: execution.isError || execution.result?.isError });
+        else Object.assign(skill, { result: message, state: "completed", isError: message.isError });
+        skills.set(key, skill);
+      }
+    }
+    const entries = visible.flatMap(({ key, message, tool }) => {
       const assistant = ["assistant", "toolResult", "bashExecution"].includes(message.role)
         || message.role === "custom" && ["spawn_completion", "spawn_control_result"].includes(message.customType);
-      return { key, assistant, value: tool || message, render() {
-        const article = text(assistant ? "div" : "article", "", assistant ? "assistant-part" : "message");
-        article.dataset.role = message.role;
-        if (tool) {
-          const details = blockDetails(`${tool.toolName} / ${tool.state}`, tool.partialResult || tool.args, `output-${key}`);
-          details.className = "tool-output";
-          details.dataset.error = String(Boolean(tool.isError));
-          article.append(details);
-        } else if (message.role === "toolResult") {
-          const details = document.createElement("details");
-          details.className = "tool-output";
-          details.dataset.key = `output-${key}`;
-          details.dataset.error = String(Boolean(message.isError));
-          details.append(text("summary", `${message.toolName || "Tool"} / ${message.isError ? "error" : "output"}`));
-          details.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key, false));
-          if (message.errorMessage) details.append(text("p", message.errorMessage));
-          article.append(details);
-        } else {
-          if (!assistant) article.append(text("div", messageLabel(message), "message-label"));
-          article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key));
-          if (message.role !== "assistant" && message.errorMessage) article.append(text("p", message.errorMessage));
-        }
-        return article;
-      } };
+      const resultSkill = message.role === "toolResult" && skills.get(key);
+      if (resultSkill?.hasCall) return [];
+      // Split mixed assistant messages so text stays outside consecutive activity.
+      const parts = message.role === "assistant" && Array.isArray(message.content)
+        ? message.content.map((block, index) => ({ key: `${key}-block-${index}`, message: { ...message, content: [block] },
+          activity: block.type !== "text", skill: skills.get(`${key}-block-${index}`) }))
+        : [{ key, message, activity: assistant && message.role !== "assistant", skill: resultSkill }];
+      return parts.filter(part => part.message.role !== "assistant" || part.message.content?.[0]?.type !== "text" || part.message.content[0].text).map(({ key, message, activity, skill }) => ({
+        key, assistant, activity, isError: Boolean(skill?.isError || tool?.isError || message.isError),
+        value: [tool || message, skill], render() {
+          const article = text(assistant ? "div" : "article", "", assistant ? "assistant-part" : "message");
+          article.dataset.role = message.role;
+          if (skill) {
+            const state = skill.isError ? "Skill read failed" : skill.state === "completed" ? "Using skill"
+              : skill.state === "interrupted" ? "Skill read interrupted" : live ? "Loading skill" : "Skill read";
+            const details = document.createElement("details");
+            details.dataset.key = `skill-${key}`;
+            details.dataset.kind = "skill";
+            details.dataset.error = String(Boolean(skill.isError));
+            details.append(text("summary", `${state}: ${skill.name}`), text("p", skill.path, "muted"));
+            if (skill.result) details.append(...contentNodes(skill.result.content ?? skill.result.output ?? skill.result, key));
+            if (skill.result?.errorMessage) details.append(text("p", skill.result.errorMessage));
+            article.append(details);
+          } else if (tool) {
+            const details = blockDetails(`${tool.toolName} / ${tool.state}`, tool.partialResult || tool.args, `output-${key}`);
+            details.className = "tool-output";
+            details.dataset.error = String(Boolean(tool.isError));
+            article.append(details);
+          } else if (message.role === "toolResult") {
+            const details = document.createElement("details");
+            details.className = "tool-output";
+            details.dataset.key = `output-${key}`;
+            details.dataset.error = String(Boolean(message.isError));
+            details.append(text("summary", `${message.toolName || "Tool"} / ${message.isError ? "error" : "output"}`));
+            details.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key, false));
+            if (message.errorMessage) details.append(text("p", message.errorMessage));
+            article.append(details);
+          } else {
+            if (!assistant) article.append(text("div", messageLabel(message), "message-label"));
+            article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key));
+            if (message.role !== "assistant" && message.errorMessage) article.append(text("p", message.errorMessage));
+          }
+          return article;
+        },
+      }));
     });
     if (conversation.omittedMessages) entries.unshift({ key: "omitted", value: conversation.omittedMessages,
       render: () => text("p", `${conversation.omittedMessages} older messages are outside this snapshot.`, "muted") });
@@ -1039,8 +1184,8 @@ function createConversation(host, row) {
     }
     // Match Neovim's assistant_block_open: tool activity and later assistant
     // messages share one heading until a visible standalone message or error.
-    const roots = [], groups = new Map();
-    let group;
+    const roots = [], groups = new Map(), activities = new Map();
+    let group, activity;
     entries.forEach(entry => {
       const signature = JSON.stringify(entry.value);
       let cached = transcriptEntries.get(entry.key);
@@ -1052,7 +1197,7 @@ function createConversation(host, row) {
         cached.signature = signature;
       }
       if (!entry.assistant) {
-        group = undefined;
+        group = activity = undefined;
         roots.push(cached.node);
         return;
       }
@@ -1068,9 +1213,39 @@ function createConversation(host, row) {
         groups.set(entry.key, group);
         roots.push(node);
       }
-      if (group.node.children[group.count] !== cached.node) group.node.insertBefore(cached.node, group.node.children[group.count] || null);
-      group.count++;
+      if (entry.activity) {
+        if (!activity) {
+          let node = activityGroups.get(entry.key);
+          if (!node) {
+            node = text("details", "", "activity-group");
+            node.dataset.key = `activity-${entry.key}`;
+            node.append(text("summary", "Activity"), text("div", "", "activity-content"));
+            activityGroups.set(entry.key, node);
+          }
+          activity = { node, body: node.lastElementChild, count: 0, errors: 0 };
+          activities.set(entry.key, activity);
+          if (group.node.children[group.count] !== node) group.node.insertBefore(node, group.node.children[group.count] || null);
+          group.count++;
+        }
+        if (activity.body.children[activity.count] !== cached.node) activity.body.insertBefore(cached.node, activity.body.children[activity.count] || null);
+        activity.count++;
+        if (entry.isError) activity.errors++;
+      } else {
+        activity = undefined;
+        if (group.node.children[group.count] !== cached.node) group.node.insertBefore(cached.node, group.node.children[group.count] || null);
+        group.count++;
+      }
     });
+    for (const [key, node] of activityGroups) {
+      const activity = activities.get(key);
+      if (!activity) { node.remove(); activityGroups.delete(key); }
+      else {
+        const label = `Activity / ${activity.count} item${activity.count === 1 ? "" : "s"}${activity.errors ? ` / ${activity.errors} error${activity.errors === 1 ? "" : "s"}` : ""}`;
+        if (node.firstElementChild.textContent !== label) node.firstElementChild.textContent = label;
+        node.dataset.error = String(Boolean(activity.errors));
+        while (activity.body.children.length > activity.count) activity.body.lastChild.remove();
+      }
+    }
     for (const [key, node] of assistantGroups) {
       const group = groups.get(key);
       if (!group) { node.remove(); assistantGroups.delete(key); }
@@ -1084,6 +1259,19 @@ function createConversation(host, row) {
     else target.scrollTop = scrollTop;
     savedScrollTop = target.scrollTop;
     $("latest").hidden = following;
+    updateActivityReturn();
+  }
+  function updateActivityReturn() {
+    const target = $("transcript"), top = target.getBoundingClientRect().top;
+    currentActivity = undefined;
+    if (!element.hidden && !$("chat-screen").hidden) {
+      for (const node of activityGroups.values()) {
+        if (!node.open) continue;
+        const bounds = node.getBoundingClientRect();
+        if (bounds.top < top - 32 && bounds.bottom > top + 50) currentActivity = node;
+      }
+    }
+    $("activity-return").hidden = !currentActivity;
   }
   function dialogDescription(title) {
     // Bundled dialogs put their preview and runtime tag inside a JSON title.
@@ -1255,12 +1443,34 @@ function createConversation(host, row) {
     $("latest").hidden = true;
     scheduleViewedResponse();
   });
+  $("activity-return").addEventListener("click", () => {
+    if (!currentActivity?.isConnected) return;
+    const target = $("transcript"), activity = currentActivity;
+    const start = target.scrollTop + activity.getBoundingClientRect().top - target.getBoundingClientRect().top - 8;
+    following = false;
+    activity.open = false;
+    target.scrollTop = start;
+    savedScrollTop = target.scrollTop;
+    activity.firstElementChild.focus({ preventScroll: true });
+    $("latest").hidden = false;
+    updateActivityReturn();
+  });
+  $("transcript").addEventListener("toggle", () => {
+    updateActivityReturn();
+  }, true);
+  $("transcript").addEventListener("click", event => {
+    if (event.target.closest("summary")) following = false;
+  });
+  $("transcript").addEventListener("keydown", event => {
+    if (["Enter", " "].includes(event.key) && event.target.matches("summary")) following = false;
+  });
   $("transcript").addEventListener("scroll", () => {
     if (element.hidden || $("chat-screen").hidden) return;
     const target = $("transcript");
     savedScrollTop = target.scrollTop;
     following = target.scrollHeight - target.scrollTop - target.clientHeight < 100;
     $("latest").hidden = following;
+    updateActivityReturn();
     scheduleViewedResponse();
   });
   let promptWidth = 0;
@@ -1272,6 +1482,7 @@ function createConversation(host, row) {
     }
     if (following) $("transcript").scrollTop = $("transcript").scrollHeight;
     $("latest").hidden = following;
+    updateActivityReturn();
     scheduleViewedResponse();
   });
   transcriptResize.observe($("transcript"));
@@ -1389,6 +1600,13 @@ function updateContent(current, next) {
   });
   while (current.childNodes.length > children.length) current.lastChild.remove();
   return current;
+}
+
+function skillName(toolName, args) {
+  if (toolName !== "read" || typeof args?.path !== "string") return;
+  const path = args.path.replaceAll("\\", "/");
+  if (!/(^|\/)skills\//.test(path)) return;
+  return /(?:^|\/)([^/]+)\/SKILL\.md$/.exec(path)?.[1] || /(?:^|\/)skills\/([^/]+)\.md$/.exec(path)?.[1];
 }
 
 function workerLabel(run) {
