@@ -1242,7 +1242,7 @@ export class OwnedSession {
     const worker = this.commandRuntime(input.runtimeRevision);
     const check = () => { admission?.(); this.commandRuntime(input.runtimeRevision, worker); };
     check();
-    const response = await worker.request(readCommand(input.kind)!, check);
+    const response = await worker.request(readCommand(input.kind, input.since)!, check);
     check();
     return { runtimeRevision: this.runtimeRevision, data: "data" in response ? response.data : null };
   }

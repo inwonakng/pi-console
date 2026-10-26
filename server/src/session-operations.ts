@@ -47,18 +47,20 @@ export function nativeCommand(command: NativeOperation): RpcCommand {
 export function isNative(value: { operation: string }): value is NativeOperation { return (NATIVE_OPERATIONS as readonly string[]).includes(value.operation); }
 export const SESSION_READS = ["models", "thinking", "entries", "tree", "stats", "forkMessages", "commands"] as const;
 export type SessionRead = typeof SESSION_READS[number];
-export function readCommand(kind: unknown): RpcCommand | undefined {
+export function readCommand(kind: unknown, since?: string): RpcCommand | undefined {
   switch (kind) {
     case "models": return { type: "get_available_models" };
     case "thinking": return { type: "get_available_thinking_levels" };
-    case "entries": return { type: "get_entries" };
+    case "entries": return { type: "get_entries", ...(since === undefined ? {} : { since }) };
     case "tree": return { type: "get_tree" };
     case "stats": return { type: "get_session_stats" };
     case "forkMessages": return { type: "get_fork_messages" };
     case "commands": return { type: "get_commands" };
   }
 }
-export function validRead(value: unknown): value is { kind: SessionRead; runtimeRevision: number } {
-  return object(value) && exact(value, ["kind", "runtimeRevision"]) && (SESSION_READS as readonly unknown[]).includes(value.kind)
+export function validRead(value: unknown): value is { kind: SessionRead; runtimeRevision: number; since?: string } {
+  return object(value) && (SESSION_READS as readonly unknown[]).includes(value.kind)
+    && (exact(value, ["kind", "runtimeRevision"])
+      || value.kind === "entries" && exact(value, ["kind", "runtimeRevision", "since"]) && string(value.since))
     && Number.isSafeInteger(value.runtimeRevision) && Number(value.runtimeRevision) >= 0;
 }

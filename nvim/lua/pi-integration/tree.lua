@@ -326,14 +326,15 @@ local function render_nodes(ctx, nodes, leaf_id, lines, line_nodes, highlights_b
 	end
 end
 
-local function apply_tree_highlights(ctx)
+local function apply_tree_highlights(ctx, row)
 	local state = ctx.state
 	if not ctx.buffer.valid(state.tree_buf) then
 		return
 	end
 
-	vim.api.nvim_buf_clear_namespace(state.tree_buf, tree_highlight_ns, 0, -1)
-	for line, highlights in pairs(state.tree_highlights_by_line or {}) do
+	vim.api.nvim_buf_clear_namespace(state.tree_buf, tree_highlight_ns, row and row - 1 or 0, row or -1)
+	local highlights_by_line = row and { [row] = state.tree_highlights_by_line[row] } or state.tree_highlights_by_line or {}
+	for line, highlights in pairs(highlights_by_line) do
 		for _, highlight in ipairs(highlights) do
 			vim.api.nvim_buf_set_extmark(state.tree_buf, tree_highlight_ns, line - 1, highlight.start_col, {
 				end_col = highlight.end_col,
@@ -344,19 +345,22 @@ local function apply_tree_highlights(ctx)
 	end
 end
 
-local function close_tree_window(ctx, preserve_data)
+local function close_tree_window(ctx, preserve_data, keep_request)
 	local state = ctx.state
-	if ctx.tree and not preserve_data then
+	if not keep_request then
 		state.tree_request = (state.tree_request or 0) + 1
-		state.tree_records, state.tree_context, state.tree_leaf_id = nil, nil, nil
+		state.tree_context = nil
 	end
-	floats.close_descendants(state.tree_win)
-	floats.close_window(state.tree_win)
-	floats.close_window(state.tree_preview_win)
-	state.tree_win = nil
-	state.tree_preview_win = nil
-	if ctx.tree and not preserve_data then
-		for _, buf in ipairs({ state.tree_buf, state.tree_preview_buf }) do
+	if preserve_data == false then
+		state.tree_records, state.tree_cache_context, state.tree_leaf_id = nil, nil, nil
+	end
+	local win, preview_win = state.tree_win, state.tree_preview_win
+	state.tree_win, state.tree_preview_win = nil, nil
+	floats.close_descendants(win)
+	floats.close_window(win)
+	floats.close_window(preview_win)
+	if preserve_data == false then
+		for _, buf in pairs({ state.tree_buf, state.tree_preview_buf }) do
 			if vim.api.nvim_buf_is_valid(buf) then vim.api.nvim_buf_delete(buf, { force = true }) end
 		end
 		state.tree_buf, state.tree_preview_buf = nil, nil
@@ -528,6 +532,35 @@ local function find_tree_line_by_id(ctx, entry_id)
 	return nil
 end
 
+local function hint_line(items)
+	local text, spans = "", {}
+	for _, item in ipairs(items) do
+		if text ~= "" then text = text .. " · " end
+		table.insert(spans, { start_col = #text, end_col = #text + #item[1], hl_group = "PiOverviewKey" })
+		text = text .. item[1] .. " " .. item[2]
+	end
+	table.insert(spans, 1, { start_col = 0, end_col = #text, hl_group = "PiOverviewStatusLine", priority = 200 })
+	return text, spans
+end
+
+local function action_hint(ctx)
+	ctx.state.tree_writable = not not ctx.tree.writable(ctx.state.tree_context)
+	if not ctx.state.tree_writable then
+		return hint_line({ { "r", "Refresh (read-only)" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
+	end
+	return hint_line({ { "Enter", "Jump" }, { "c", "Clone" }, { "d", "Delete" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
+end
+
+local function update_action_hint(ctx)
+	if not ctx.buffer.valid(ctx.state.tree_buf) then return end
+	local line, spans = action_hint(ctx)
+	ctx.state.tree_highlights_by_line[2] = spans
+	vim.api.nvim_set_option_value("modifiable", true, { buf = ctx.state.tree_buf })
+	vim.api.nvim_buf_set_lines(ctx.state.tree_buf, 1, 2, false, { line })
+	vim.api.nvim_set_option_value("modifiable", false, { buf = ctx.state.tree_buf })
+	apply_tree_highlights(ctx, 2)
+end
+
 local function render_tree_buffer(ctx, opts)
 	opts = opts or {}
 	local state = ctx.state
@@ -545,25 +578,10 @@ local function render_tree_buffer(ctx, opts)
 	end
 
 	local lines, highlights = {}, {}
-	local function hint_line(items)
-		local text, spans = "", {}
-		for _, item in ipairs(items) do
-			if text ~= "" then text = text .. " · " end
-			table.insert(spans, { start_col = #text, end_col = #text + #item[1], hl_group = "PiOverviewKey" })
-			text = text .. item[1] .. " " .. item[2]
-		end
-		table.insert(lines, text)
-		table.insert(spans, 1, { start_col = 0, end_col = #text, hl_group = "PiOverviewStatusLine", priority = 200 })
-		highlights[#lines] = spans
-	end
 	local filters = { default = "Default", ["user-only"] = "User only", all = "All entries" }
 	local mode = state.tree_filter_mode or "default"
-	hint_line({ { "b", state.tree_scope == "branch" and "Current branch" or "Full tree" }, { "o", filters[mode] or mode } })
-	if not ctx.tree.writable(state.tree_context) then
-		hint_line({ { "r", "Refresh (read-only)" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
-	else
-		hint_line({ { "Enter", "Jump" }, { "c", "Clone" }, { "d", "Delete" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
-	end
+	lines[1], highlights[1] = hint_line({ { "b", state.tree_scope == "branch" and "Current branch" or "Full tree" }, { "o", filters[mode] or mode } })
+	lines[2], highlights[2] = action_hint(ctx)
 	local query = state.tree_search_query or ""
 	local search_row
 	if query ~= "" then
@@ -598,6 +616,7 @@ local function render_tree_buffer(ctx, opts)
 	end
 	ctx.buffer.set_lines(state.tree_buf, lines, false)
 	apply_tree_highlights(ctx)
+	state.tree_focus_id, state.tree_rendered_query = focus_id, query
 	return true, focus_id
 end
 
@@ -732,26 +751,32 @@ local function delete_node(ctx)
 	if not ctx.tree.can_mutate(captured) then return end
 	local position = selected_tree_position(ctx)
 	position.view = save_tree_view(ctx)
-	close_tree_window(ctx)
+	close_tree_window(ctx, false)
 	ctx.tree.delete(node.start_id, captured, position)
 end
 
-local function show_tree(ctx, position)
+local function show_tree(ctx, position, reuse)
 	local state = ctx.state
+	reuse = reuse and state.tree_rendered_query == (state.tree_search_query or "")
 	if win_valid(state.tree_win) then
 		position = position or selected_tree_position(ctx)
 		position.view = position.view or save_tree_view(ctx)
-		refresh_tree_in_place(ctx, position)
+		if reuse then update_action_hint(ctx) else refresh_tree_in_place(ctx, position) end
 		vim.api.nvim_set_current_win(state.tree_win)
 		return
 	end
 
 	local width = math.min(math.max(72, math.floor(vim.o.columns * 0.82)), vim.o.columns - 4)
+	local same_width = state.tree_width == width
 	state.tree_width = width
-	local rendered, focus_id = render_tree_buffer(ctx)
-	if not rendered then
-		return
+	local rendered, focus_id
+	if reuse and same_width and ctx.buffer.valid(state.tree_buf) and ctx.buffer.valid(state.tree_preview_buf) then
+		update_action_hint(ctx)
+		rendered, focus_id = true, state.tree_focus_id
+	else
+		rendered, focus_id = render_tree_buffer(ctx)
 	end
+	if not rendered then return end
 
 	local outer_height = math.min(math.max(22, math.floor(vim.o.lines * 0.78)), vim.o.lines - 4)
 	local top_height = math.max(8, math.floor((outer_height - 4) * 0.6))
@@ -759,7 +784,7 @@ local function show_tree(ctx, position)
 	local row = math.max(1, math.floor((vim.o.lines - outer_height) / 2))
 	local col = math.max(0, math.floor((vim.o.columns - width) / 2))
 
-	close_tree_window(ctx, true)
+	close_tree_window(ctx, true, true)
 	state.tree_win = vim.api.nvim_open_win(state.tree_buf, true, {
 		relative = "editor",
 		width = width,
@@ -796,6 +821,13 @@ local function show_tree(ctx, position)
 	floats.close_on_win_leave(state.tree_buf, function()
 		close_tree_window(ctx)
 	end, { win = state.tree_win })
+	local opened_win = state.tree_win
+	vim.api.nvim_create_autocmd("WinClosed", {
+		pattern = tostring(opened_win), once = true,
+		callback = function()
+			if state.tree_win == opened_win then close_tree_window(ctx) end
+		end,
+	})
 
 	vim.keymap.set("n", "q", function()
 		close_tree_window(ctx)
@@ -879,30 +911,52 @@ end
 
 function M.show(ctx, position)
 	local state = ctx.state
+	if state.tree_records and not ctx.tree.cache_current(state.tree_cache_context) then
+		close_tree_window(ctx, false)
+	end
 	if win_valid(state.tree_win) then
 		position = position or selected_tree_position(ctx)
 		position.view = position.view or save_tree_view(ctx)
 	end
 	state.tree_request = (state.tree_request or 0) + 1
 	local request = state.tree_request
-	state.tree_context = nil -- Disable mutations until a fresh owner read completes.
-	ctx.tree.read(function(data, captured)
-		if state.tree_request ~= request then return end
-		if not data then close_tree_window(ctx); return end
-		state.tree_records, state.tree_context = data.entries, captured
-		state.tree_leaf_id = type(data.leafId) == "string" and data.leafId or nil
-		show_tree(ctx, position)
-	end)
+	state.tree_context = nil -- Cached views cannot authorize mutations.
+	local cached = state.tree_records
+	if cached then show_tree(ctx, position, true) end
+	local last = cached and cached[#cached]
+	local function read(since)
+		ctx.tree.read(function(data, captured, missing_cursor)
+			if state.tree_request ~= request then return end
+			if missing_cursor and since then read(nil); return end
+			if not data then close_tree_window(ctx, false); return end
+			local leaf = type(data.leafId) == "string" and data.leafId or nil
+			local changed = not since or #data.entries > 0 or state.tree_leaf_id ~= leaf
+			if since then
+				vim.list_extend(state.tree_records, data.entries)
+			else
+				state.tree_records = data.entries
+			end
+			state.tree_context, state.tree_cache_context, state.tree_leaf_id = captured, captured, leaf
+			if win_valid(state.tree_win) then
+				local current_position = selected_tree_position(ctx)
+				current_position.view = save_tree_view(ctx)
+				if changed then refresh_tree_in_place(ctx, current_position) else update_action_hint(ctx) end
+			else
+				show_tree(ctx, position)
+			end
+		end, since)
+	end
+	read(last and last.id)
 end
 
 function M.update(ctx)
-	if win_valid(ctx.state.tree_win) then
-		local position = selected_tree_position(ctx)
-		position.view = save_tree_view(ctx)
-		refresh_tree_in_place(ctx, position)
+	if win_valid(ctx.state.tree_win) and ctx.state.tree_writable ~= not not ctx.tree.writable(ctx.state.tree_context) then
+		update_action_hint(ctx)
 	end
 end
 
-M.close = close_tree_window
+function M.close(ctx)
+	close_tree_window(ctx, false)
+end
 
 return M

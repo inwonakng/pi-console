@@ -222,6 +222,8 @@ local function observe_authority(value, full)
 	if not authority or authority.epoch ~= value.serviceEpoch or authority.revision ~= value.runtimeRevision then
 		resources.invalidate()
 		if authority then tree.close(tree_ctx) end
+	elseif (authority.controller and authority.controller.grantId) ~= (controller and controller.grantId) then
+		tree.close(tree_ctx)
 	end
 	authority = { epoch = value.serviceEpoch, sequence = value.sequence, revision = value.runtimeRevision, controller = controller }
 	return true
@@ -2272,22 +2274,31 @@ tree_ctx = {
 	messages = { extract_text = require("pi-integration.utils.message").extract_text },
 }
 tree_ctx.tree = {
-	read = function(done)
+	cache_current = function(captured)
+		return captured and job and attachment and same_context(captured)
+			and captured.epoch == snapshot.serviceEpoch and authority and captured.epoch == authority.epoch
+			and captured.controller == (current_controller() and current_controller().grantId)
+	end,
+	read = function(done, since)
 		if not job or not attachment or not snapshot then
 			notify("Connect and attach to a live session to view its history.", vim.log.levels.WARN)
 			done(nil); return
 		end
 		local captured = stamp()
-		request("session.read", { kind = "entries", runtimeRevision = captured.revision }, function(ok, result)
-			if not job or not same_context(captured) then done(nil); return end
-			if not ok then notify(result.message or "History unavailable", vim.log.levels.WARN); done(nil); return end
+		request("session.read", { kind = "entries", runtimeRevision = captured.revision, since = since }, function(ok, result)
+			if not tree_ctx.tree.cache_current(captured) then done(nil); return end
+			if not ok then
+				local missing_cursor = since and type(result.message) == "string" and result.message:find("Entry not found:", 1, true) ~= nil
+				if not missing_cursor then notify(result.message or "History unavailable", vim.log.levels.WARN) end
+				done(nil, captured, missing_cursor); return
+			end
 			done(result.data, captured)
 		end)
 	end,
-	writable = function(captured) return captured and current(captured) end,
+	writable = function(captured) return tree_ctx.tree.cache_current(captured) and current(captured) end,
 	can_mutate = function(captured, action)
 		if not control_current() then notify("Viewer: use :PiControl first.", vim.log.levels.WARN); return false end
-		if not captured or not current(captured) then notify("History context changed; refresh the tree before changing history.", vim.log.levels.WARN); return false end
+		if not tree_ctx.tree.cache_current(captured) or not current(captured) then notify("History context changed; refresh the tree before changing history.", vim.log.levels.WARN); return false end
 		if not require("pi-integration.utils.guard").if_history_change_allowed(tree_ctx, "changing history") then return false end
 		if action == "clone" and not require("pi-integration.backends.tmux").available() then
 			notify("Opening a clone in a new window requires tmux.", vim.log.levels.WARN); return false
