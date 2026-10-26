@@ -1,5 +1,41 @@
 local cmp = require("blink.cmp")
 
+local default_label_highlight = require("blink.cmp.config").completion.menu.draw.components.label.highlight
+local label_max_width = 60
+
+local function label_text(ctx)
+	local text = ctx.label .. ctx.label_detail
+	local is_path = ctx.kind == "File" or ctx.kind == "Folder" or ctx.source_id == "path"
+		or (ctx.source_id == "cmdline" and ctx.label:find("/", 1, true) ~= nil)
+	if not is_path or vim.api.nvim_strwidth(text) <= label_max_width then
+		return text, 0
+	end
+
+	local tail = ""
+	for index = vim.fn.strchars(text, true) - 1, 0, -1 do
+		local candidate = vim.fn.strcharpart(text, index, 1, true) .. tail
+		if vim.api.nvim_strwidth("…" .. candidate) > label_max_width then break end
+		tail = candidate
+	end
+	return "…" .. tail, #text - #tail
+end
+
+local function label_highlight(ctx)
+	local highlights = default_label_highlight(ctx)
+	local _, removed = label_text(ctx)
+	if removed == 0 then return highlights end
+
+	local shifted = { { 0, #"…", group = ctx.deprecated and "BlinkCmpLabelDeprecated" or "BlinkCmpLabel" } }
+	for _, highlight in ipairs(highlights) do
+		if highlight[2] > removed then
+			highlight[1] = math.max(0, highlight[1] - removed) + #"…"
+			highlight[2] = highlight[2] - removed + #"…"
+			table.insert(shifted, highlight)
+		end
+	end
+	return shifted
+end
+
 local function is_owner_directory_prompt()
 	return require("pi-integration.directory-history").completion_context() ~= nil
 end
@@ -62,6 +98,17 @@ cmp.setup({
 		nerd_font_variant = "mono",
 	},
 	completion = {
+		menu = {
+			draw = {
+				components = {
+					label = {
+						width = { max = label_max_width },
+						text = label_text,
+						highlight = label_highlight,
+					},
+				},
+			},
+		},
 		list = { selection = {
 			preselect = function() return not is_owner_directory_prompt() end,
 			auto_insert = function() return not is_owner_directory_prompt() end,
