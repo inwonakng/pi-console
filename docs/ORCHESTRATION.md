@@ -1,6 +1,8 @@
 # Orchestration and role models
 
-Load the packaged `orchestration` skill when delegating a task or coordinating an approved project. Simple edits and discussion can stay in the parent. Implementation approval still comes from the user. The parent supplies context, reviews evidence, requests corrections, explicitly accepts contributions, and continues only within the approved goal.
+Say "use subagents" or "orchestrate" to activate the packaged `orchestration` skill for the approved task, including later "go ahead" messages. The parent handles decisions, assignments, and acceptance; subagents perform investigation, implementation, verification, and detailed code review. The parent inspects returned evidence and diffs but does not take over task execution, even for small changes, without an explicit user request. If delegation is blocked, it reports the blocker.
+
+Without an orchestration request, ordinary task handling stays unchanged. For substantial work with separable assignments, the agent may offer orchestration and wait for approval before switching. Individual subagent assignments still follow the skill's delegation procedures. Discussing orchestration does not activate it, and orchestration does not authorize implementation when the user requested only discussion or planning. These are model instructions, not a token budget or a runtime ban on parent tools.
 
 ## Configure models
 
@@ -85,7 +87,7 @@ The old `~/.pi/agent/skills/subagent-delegation/SKILL.md` is external personal s
    ```
    Omit nonexistent paths. Also inspect `~/.agents/skills`, project `.agents/skills`, custom resource paths, and `PI_CODING_AGENT_DIR` when used. Do not print credentials.
 2. With user approval, move the old skill outside all discovered skill roots, or replace its body with a short instruction to load the packaged `orchestration` skill through its advertised path. Do not copy the new skill into personal directories. A redirect retains the old name for instructions still referencing it; remove conflicting old content rather than appending a correction.
-3. Redirect references to the packaged skill and remove the old policy that writing delegation is exceptional. Change only the relevant references; keep unrelated personal instructions/skills untouched. Do not globally register a second console package.
+3. Redirect references to the packaged skill and remove the old policy that writing delegation is exceptional. In always-loaded personal instructions, route "use subagents" and "orchestrate" requests to the packaged skill and allow suggesting orchestration before substantial, separable work. Keep inline-work exceptions out of active orchestration. Change only the relevant instructions; keep unrelated personal instructions/skills untouched. Do not globally register a second console package.
 4. Restart or `/reload` and inspect skill diagnostics. Same-name collisions keep the first discovered skill and warn; differently named old/new skills can both load without a collision warning and still contradict each other.
 
 The old personal skill says join integrates contributions. Current join only inspects/waits; acceptance is explicit. Its brief/evidence and scope-control guidance remains applicable, while packaged guidance adds model discovery, questions, permission routing, correction conversations, strict writer ownership, and automatic continuation within approved scope.

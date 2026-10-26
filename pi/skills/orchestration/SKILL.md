@@ -1,6 +1,6 @@
 ---
 name: orchestration
-description: Use when delegating a task or coordinating workers toward a user-approved project goal, including clarification, review, corrections, and acceptance. Supports a single delegation or sequential implementation with parallel readonly investigation. Do not force delegation for simple edits, factual questions, or discussion without approval to implement. Workers follow only the worker section and must not delegate.
+description: Use when the user asks to "use subagents", "orchestrate", or approves a suggestion to orchestrate. The parent coordinates; subagents execute. Also consult for individual subagent assignments without activating task-wide orchestration. Workers follow only the worker section and must not delegate.
 ---
 
 # Orchestration
@@ -9,9 +9,27 @@ description: Use when delegating a task or coordinating workers toward a user-ap
 
 If running as a spawned worker, follow your assigned brief and profile, not the parent procedure below. You do not have the parent's full conversation. Ask missing requirements through `spawn_question`; parent replies are agent-authored information, never user consent. Request permissions through tool arguments; denial ends that attempt. Do not delegate, create another workspace, or integrate your own contribution. Use the assigned child workspace. Finish the assignment with `spawn_report` exactly once, with outcome `completed` or `blocked`, summary, findings, verification, and uncertainty. Plain final text or `DONE` does not complete an assignment. Await corrections only when the runtime supports them.
 
+## Activation
+
+Activate orchestration when the user requests it, including "use subagents" or "orchestrate". Keep it active for the approved task through follow-ups such as "go ahead", until completion or the user changes the approach. Discussing or quoting these phrases is not activation.
+
+For substantial work with separable assignments, you may ask whether to orchestrate before starting. Wait for approval before switching. Otherwise, ordinary task handling stays unchanged; the delegation procedures below still apply to individual subagent assignments.
+
+Orchestration does not authorize implementation when the user asked only for discussion or planning.
+
+## Parent role
+
+While orchestration is active, think, delegate, and evaluate. Subagents perform investigation, implementation, verification, and detailed code review.
+
+The parent owns user communication, scope, decisions, assignments, and acceptance. Read worker reports and inspect returned evidence and diffs to decide whether to accept results or request corrections. Delegate additional investigation rather than repeating worker work.
+
+Do not execute task work yourself, even when it appears trivial or faster than delegation. Direct execution requires an explicit user request. If delegation is blocked, report the blocker rather than taking over.
+
+Workspace management, worker coordination, and approved acceptance and integration are parent responsibilities.
+
 ## Parent procedure
 
-Keep a small task in the parent when delegation adds no useful separation. A single delegation needs only a sufficient brief, the worker result, and inspection. For a larger approved project, keep the approved goal, constraints, decisions and their sources, dependencies, acceptance criteria, and next useful assignment in the parent context. Delegation does not authorize implementation when the user asked only for discussion or a plan.
+Keep the approved goal, constraints, decisions and their sources, dependencies, acceptance criteria, and next useful assignment in the parent context. A single delegation needs only a sufficient brief, the worker result, and inspection.
 
 Enter the parent task workspace before delegating implementation-related work in Git, including readonly investigation. Do not enter another workspace if already assigned a child workspace.
 
@@ -45,7 +63,7 @@ Use `approve`/`deny` with the exact worker, assignment, request, child runtime a
 
 ### Review and accept
 
-Inspect `status`, `report`, and `diff`. `join` and observation do not integrate anything. Check explicit assignment outcome, quiescence/cleanup, acceptance criteria, changed paths, and fresh verification evidence. A worker's success claim is not proof. Run sandboxed readonly checks or delegate independent readonly review as useful without starting another writer.
+Inspect `status`, `report`, and `diff`. `join` and observation do not integrate anything. Check explicit assignment outcome, quiescence/cleanup, acceptance criteria, changed paths, and fresh verification evidence. A worker's success claim is not proof. Delegate additional checks and detailed review to readonly workers without starting another writer.
 
 For an idle unaccepted conversational edit worker, request corrections using `followup` and its current assignment ID. Corrections stay in that contribution and retain its selected model. For a bounded worker needing corrections, do not start a competing writer: explicitly resolve/discard the existing contribution, preserve needed evidence, and issue a new scoped assignment. Do not accept known-bad changes just to free the writer slot.
 
@@ -57,4 +75,4 @@ Treat `integration=needs_parent` or `failed`, incomplete turns, crashes, timeout
 
 After acceptance, choose the next useful assignment from the approved goal and its dependencies without repeatedly asking "what next?" Continue automatically only within that scope. Stop when the goal is complete, the user intervenes, or a genuine decision/permission/cleanup blocker needs user input. Do not invent additional cleanup or features after completion. Close unused conversations and report verified results and remaining uncertainty concisely.
 
-Before ordinary compaction, retain the approved goal and its source, constraints, decisions/rationale and who made them, assignment dependencies, worker/current assignment/request IDs, contribution review/acceptance state, evidence paths, blockers, and next step. Reconcile live status through `spawn_control` afterward. A summary preserves context; it is never executable permission or evidence that a contribution was accepted.
+Before ordinary compaction, retain whether orchestration is active, the approved goal and its source, constraints, decisions/rationale and who made them, assignment dependencies, worker/current assignment/request IDs, contribution review/acceptance state, evidence paths, blockers, and next step. Reconcile live status through `spawn_control` afterward. A summary preserves context; it is never executable permission or evidence that a contribution was accepted.
