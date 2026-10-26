@@ -15,6 +15,7 @@ import { CAPABILITIES, MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWri
 import { serviceBuild } from "./service-paths.js";
 import { ServiceRestart } from "./service-restart.js";
 import { readExtensionSettings } from "../../pi/extensions/shared/read-extension-settings.mjs";
+import { ConnectionDiagnostics, diagnosticCode, serviceDiagnostic } from "./connection-diagnostics.js";
 
 export const endpoint = (root: string): string => join(root, "service.sock");
 function exact(value: Record<string, unknown>, keys: string[]): void {
@@ -37,6 +38,11 @@ function snapshotCursor(value: unknown): SnapshotCursor | undefined {
 /** Same-user local IPC. Filesystem ownership/modes are the authentication boundary.
  * A transport has at most one attachment; caller-supplied attachment IDs are refused. */
 export async function runService(options: HostOwnerOptions & { root: string; port?: number }): Promise<void> {
+  serviceDiagnostic("start");
+  try { await serve(options); serviceDiagnostic("stopped"); }
+  catch (error) { serviceDiagnostic("failure", { code: diagnosticCode(error) }); throw error; }
+}
+async function serve(options: HostOwnerOptions & { root: string; port?: number }): Promise<void> {
   const path = endpoint(options.root);
   if (Buffer.byteLength(path) > 100) throw new Error("Unix endpoint path is too long; select a shorter private --root");
   const port = listenerPort(options.port);
@@ -46,7 +52,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
   const owner = await HostOwner.open(options);
   const restarts = new ServiceRestart(options, owner.hostId, owner.serviceEpoch);
   const remoteNotifications = new RemoteNotifications(options.channel, owner.hostId);
-  const clients = new Set<Socket>();
+  const clients = new Map<Socket, ConnectionDiagnostics>();
   const summaryStops = new Set<() => void>();
   let remote: RemoteListener | undefined;
   let startReady!: () => void, startFailed!: (error: unknown) => void;
@@ -55,33 +61,42 @@ export async function runService(options: HostOwnerOptions & { root: string; por
   let stopping = false;
   let shutdownFailure: unknown;
   const server = createServer((socket) => {
-    if (stopping || clients.size >= 64) { socket.destroy(); return; }
-    clients.add(socket);
-    void connection(socket).catch(() => socket.destroy()).finally(() => clients.delete(socket));
+    const diagnostics = new ConnectionDiagnostics(randomUUID(), "local");
+    if (stopping || clients.size >= 64) { diagnostics.action("destroy", "admission_rejected"); socket.destroy(); return; }
+    diagnostics.log("open");
+    clients.set(socket, diagnostics);
+    let rejected = false;
+    void connection(socket, false, undefined, diagnostics.connectionId, diagnostics).catch((error) => {
+      rejected = true; diagnostics.action("handler_rejected", "handler_rejected", error);
+      diagnostics.action("destroy", "handler_rejected"); socket.destroy();
+    }).finally(() => { if (!rejected) diagnostics.log("handler_complete"); clients.delete(socket); });
   });
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((resolve) => { resolveStopped = resolve; });
   const shutdown = async (force: boolean): Promise<void> => {
     if (stopping) throw new CommandError("session_unavailable", "Service is already stopping");
+    serviceDiagnostic("shutdown_requested");
     // HostOwner fences admissions in the same turn as the preflight.
     const task = owner.shutdown(force);
     stopping = true;
     if (owner.shutdownStarted) {
+      serviceDiagnostic("shutdown_started");
       remoteNotifications.stop();
       for (const stop of summaryStops) stop();
     }
-    try { await task; }
+    try { await task; serviceDiagnostic("shutdown_complete"); }
     catch (error) {
       // A preflight refusal leaves the owner usable. A cleanup failure retains
       // its fence/claim and terminates this owner after the diagnostic reply;
       // only explicit B2 reconciliation may authorize a later replacement.
       if (owner.shutdownStarted) shutdownFailure = error;
       else stopping = false;
+      serviceDiagnostic(owner.shutdownStarted ? "shutdown_failed" : "shutdown_refused", { code: diagnosticCode(error) });
       throw error;
     }
   };
   async function connection(socket: Duplex, isRemote = false, onDetach?: (detach: (error?: Error) => void) => void,
-    connectionId: string = randomUUID()): Promise<void> {
+    connectionId: string = randomUUID(), diagnostics = new ConnectionDiagnostics(connectionId, isRemote ? "ws" : "local")): Promise<void> {
     const writer = new RecordWriter(socket);
     let handshaken = false;
     let subscription: SessionSubscription | undefined;
@@ -108,13 +123,14 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       if (closing) return;
       closing = true;
       const record = { type: "disconnected", connectionId, code: error.code ?? code, message: error.message.slice(0, 1024) };
-      console.error(JSON.stringify({ ...record, timestamp: new Date().toISOString(), transport: isRemote ? "ws" : "local",
-        hostId: owner.hostId, serviceEpoch: owner.serviceEpoch, sessionId: session?.id, attachmentId: subscription?.attachmentId }));
+      diagnostics.action("disconnect", "service_disconnect", { code: record.code });
       // Revoke authority immediately. A diagnostic must never keep a dead/slow viewer alive.
       closeViews();
       if (socket.destroyed) return;
-      closeDeadline = setTimeout(() => socket.destroy(), 100);
-      void writer.send(record).then(() => socket.end(), () => socket.destroy());
+      closeDeadline = setTimeout(() => { diagnostics.action("destroy", "disconnect_deadline"); socket.destroy(); }, 100);
+      void writer.send(record).then(() => {
+        diagnostics.action("end", "disconnect_sent"); socket.end();
+      }, (error) => { diagnostics.action("destroy", "disconnect_write_failed", error); socket.destroy(); });
     };
     onDetach?.((error) => { if (error) disconnect(error); else closeViews(); });
     const remoteAdmission = () => {
@@ -122,7 +138,16 @@ export async function runService(options: HostOwnerOptions & { root: string; por
     };
     const handshakeDeadline = setTimeout(() => disconnect(new Error("Service handshake timed out after 10 seconds"), "handshake_timeout"), 10000);
     socket.once("close", () => { clearTimeout(handshakeDeadline); clearTimeout(closeDeadline); });
-    socket.on("error", (error: Error) => disconnect(error, "transport_error"));
+    socket.on("error", (error: Error) => {
+      if (!isRemote) {
+        diagnostics.observed("socket_error"); diagnostics.log("error", { cause: "socket_error", code: diagnosticCode(error) });
+      }
+      disconnect(error, "transport_error");
+    });
+    if (!isRemote) {
+      socket.once("end", () => { diagnostics.observed("stream_end"); diagnostics.log("end", { cause: "stream_end" }); });
+      socket.once("close", () => { diagnostics.observed("stream_close"); diagnostics.log("close", { cause: "stream_close" }); });
+    }
     socket.once("close", closeViews);
     const send = (value: unknown) => writer.send(value).catch((error: Error) => { disconnect(error, "output_error"); throw error; });
     async function pumpSummaries(feed: NonNullable<typeof summaryFeed>, initial?: HostSummaries): Promise<void> {
@@ -373,15 +398,18 @@ export async function runService(options: HostOwnerOptions & { root: string; por
         socket.destroyed ? "transport_closed" : "input_error");
     } finally {
       if (closing && !socket.destroyed) await closed;
-      clearTimeout(handshakeDeadline); clearTimeout(closeDeadline); closeViews(); socket.destroy();
+      clearTimeout(handshakeDeadline); clearTimeout(closeDeadline); closeViews();
+      if (socket.destroyed) diagnostics.observed("stream_close");
+      diagnostics.action("destroy", "connection_cleanup"); socket.destroy();
     }
   }
   function finish(): void {
+    serviceDiagnostic("finish");
     remoteNotifications.stop();
     for (const stop of summaryStops) stop();
     remote?.close();
     server.close();
-    for (const socket of clients) socket.destroy();
+    for (const [socket, diagnostics] of clients) { diagnostics.action("destroy", "service_shutdown"); socket.destroy(); }
     resolveStopped();
   }
   // Only the successfully claimed catalog owner may remove a leftover endpoint.
@@ -396,17 +424,27 @@ export async function runService(options: HostOwnerOptions & { root: string; por
       server.listen(path, () => { server.off("error", reject); resolve(); });
     });
     await chmod(path, 0o600);
-    remote = new RemoteListener(port, (stream, onDetach, connectionId) => connection(stream, true, onDetach, connectionId),
+    remote = new RemoteListener(port, (stream, onDetach, connectionId, diagnostics) => connection(stream, true, onDetach, connectionId, diagnostics),
       webRoot ? { root: webRoot, serviceRoot: options.root, channel: options.channel, hostId: owner.hostId,
         allowedOrigins: webSettings?.["allowed-origins"] } : undefined);
     await remote.listen();
     remoteNotifications.start();
     console.log(JSON.stringify({ network: listenerAddresses(port) }));
+    serviceDiagnostic("ready");
     startReady();
-  } catch (error) { startFailed(error); remoteNotifications.stop(); remote?.close(); server.close(); for (const socket of clients) socket.destroy(); await owner.close(); throw error; }
-  const signal = () => { void shutdown(true).then(finish, (error) => { shutdownFailure = error; console.error(error); finish(); }); };
-  process.once("SIGTERM", signal); process.once("SIGINT", signal);
+  } catch (error) {
+    serviceDiagnostic("startup_failed", { code: diagnosticCode(error) });
+    startFailed(error); remoteNotifications.stop(); remote?.close(); server.close();
+    for (const [socket, diagnostics] of clients) { diagnostics.action("destroy", "service_shutdown"); socket.destroy(); }
+    await owner.close(); throw error;
+  }
+  const signal = (name: "SIGTERM" | "SIGINT") => {
+    serviceDiagnostic("signal", { signal: name });
+    void shutdown(true).then(finish, (error) => { shutdownFailure = error; serviceDiagnostic("shutdown_failed", { code: diagnosticCode(error) }); finish(); });
+  };
+  const sigterm = () => signal("SIGTERM"), sigint = () => signal("SIGINT");
+  process.once("SIGTERM", sigterm); process.once("SIGINT", sigint);
   try { await stopped; }
-  finally { process.off("SIGTERM", signal); process.off("SIGINT", signal); }
+  finally { process.off("SIGTERM", sigterm); process.off("SIGINT", sigint); }
   if (shutdownFailure) throw new Error("Shutdown cleanup failed; service lock retained. Inspect and explicitly reconcile before restarting", { cause: shutdownFailure });
 }

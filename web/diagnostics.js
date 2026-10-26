@@ -1,9 +1,10 @@
-// Local, bounded diagnostics. Never pass messages, payloads, URLs or real IDs here.
+// Local, bounded diagnostics. Only random transport UUIDs may cross the real-ID boundary; never record messages, payloads or URLs.
 const STORAGE_KEY = "pi-console.connection-diagnostics.v1";
 const LIMIT = 300;
 const MAX_STORED_LENGTH = 256 * 1024;
 const integer = (value, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(value) && value >= 0 && value <= max;
 const bool = value => typeof value === "boolean";
+const uuid = value => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const choice = values => value => values.includes(value);
 const methods = ["hello", "sessions.subscribe", "sessions", "host.command", "host.status", "service.restart", "service.restart.status",
   "snapshot", "command", "command.status", "resource.read", "session.read", "response.viewed", "grant", "heartbeat", "attach", "unknown"];
@@ -19,6 +20,7 @@ const schemas = {
   focus: {}, blur: {}, online: {}, offline: {},
   pagehide: { persisted: bool }, pageshow: { persisted: bool },
   connect_start: connection, socket_open: connection, handshake_complete: connection, socket_error: connection,
+  server_connection: { ...connection, serverConnectionId: uuid },
   socket_close: { ...connection, code: value => integer(value, 4999), wasClean: bool, reason: choice(["empty", "omitted"]) },
   local_close: { ...connection, cause: choice(causes), pending: value => integer(value, 32) },
   request_timeout: { ...connection, method: choice(methods), pending: value => integer(value, 32) },

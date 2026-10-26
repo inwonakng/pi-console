@@ -10,6 +10,7 @@ import { readHostRegistry, type RegisteredHost } from "../../pi/extensions/share
 import { webRelay } from "./web-relay.js";
 import type { Channel } from "./session-catalog.js";
 import { defaultRoot } from "./service-paths.js";
+import { ConnectionDiagnostics, diagnosticCode, serviceDiagnostic } from "./connection-diagnostics.js";
 
 export const DEFAULT_PORT = 8443;
 export function listenerPort(value: string | number = DEFAULT_PORT): number {
@@ -31,11 +32,12 @@ export class RemoteListener {
   private readonly server: Server;
   private readonly websocket = new WebSocketServer({ noServer: true, maxPayload: MAX_REQUEST,
     perMessageDeflate: false, allowSynchronousEvents: false, clientTracking: true });
-  private readonly peers = new Map<Duplex, { detach: (error?: Error) => void }>();
-  private readonly sockets = new Set<Duplex>();
+  private readonly peers = new Map<Duplex, { detach: (error?: Error) => void; diagnostics: ConnectionDiagnostics }>();
+  private readonly sockets = new Map<Duplex, ConnectionDiagnostics>();
   private readonly timer: NodeJS.Timeout;
   constructor(private readonly port: number,
-    connection: (stream: Duplex, onDetach: (detach: (error?: Error) => void) => void, connectionId: string) => Promise<void>,
+    connection: (stream: Duplex, onDetach: (detach: (error?: Error) => void) => void, connectionId: string,
+      diagnostics: ConnectionDiagnostics) => Promise<void>,
     web?: { root: string; serviceRoot: string; channel: Channel; hostId: string; allowedOrigins?: readonly string[] }) {
     // Load the fixed asset set at startup; never resolve request paths on disk.
     const assets = new Map<string, { body: Buffer; type: string }>();
@@ -94,9 +96,15 @@ export class RemoteListener {
     // Remote capacity cannot consume the local IPC connection budget.
     this.server.maxConnections = 64;
     this.server.on("connection", (socket) => {
-      socket.on("error", () => undefined);
-      socket.setTimeout(15000, () => socket.destroy());
-      this.sockets.add(socket); socket.once("close", () => this.sockets.delete(socket));
+      const diagnostics = new ConnectionDiagnostics(randomUUID(), "tcp");
+      socket.on("error", (error) => {
+        const current = this.sockets.get(socket) ?? diagnostics;
+        current.observed("socket_error"); current.log("error", { cause: "socket_error", code: diagnosticCode(error) });
+      });
+      socket.setTimeout(15000, () => {
+        (this.sockets.get(socket) ?? diagnostics).action("destroy", "tcp_idle_timeout"); socket.destroy();
+      });
+      this.sockets.set(socket, diagnostics); socket.once("close", () => this.sockets.delete(socket));
     });
     this.server.on("upgrade", (request, socket, head) => {
       // Non-browser clients retain trusted-network access. Browser clients must
@@ -121,29 +129,51 @@ export class RemoteListener {
       try { this.websocket.handleUpgrade(request, socket, head, (ws) => {
         release(); socket.off("close", release);
         request.socket.setTimeout(0);
-        const stream = createWebSocketStream(ws, { highWaterMark: 64 * 1024 });
-        stream.on("error", () => undefined); ws.on("error", () => undefined);
         const connectionId = randomUUID();
-        const peer = { detach: (_error?: Error) => undefined as void };
+        const diagnostics = new ConnectionDiagnostics(connectionId, "ws");
+        this.sockets.set(socket, diagnostics);
+        diagnostics.log("open");
+        // Observe the transport before stream cleanup can finish the handler.
+        ws.once("close", (code, reason) => {
+          diagnostics.observed("peer_close"); diagnostics.log("close", { closeCode: code, reason: reason.length ? "omitted" : "empty" });
+        });
+        const stream = createWebSocketStream(ws, { highWaterMark: 64 * 1024 });
+        stream.on("error", (error) => {
+          diagnostics.observed("stream_error"); diagnostics.log("error", { cause: "stream_error", code: diagnosticCode(error) });
+        });
+        ws.on("error", (error) => {
+          diagnostics.observed("websocket_error"); diagnostics.log("error", { cause: "websocket_error", code: diagnosticCode(error) });
+        });
+        stream.once("end", () => { diagnostics.observed("stream_end"); diagnostics.log("end", { cause: "stream_end" }); });
+        stream.once("close", () => { diagnostics.observed("stream_close"); diagnostics.log("close", { cause: "stream_close" }); });
+        const peer = { detach: (_error?: Error) => undefined as void, diagnostics };
         this.peers.set(stream, peer);
         const connected = target && web
-          ? webRelay(stream, target, web.channel, (detach) => { peer.detach = detach; })
-          : connection(stream, (detach) => { peer.detach = detach; }, connectionId);
+          ? webRelay(stream, target, web.channel, (detach) => { peer.detach = detach; }, diagnostics)
+          : connection(stream, (detach) => { peer.detach = detach; }, connectionId, diagnostics);
+        let rejected = false;
         void connected
-          .catch(() => stream.destroy()).finally(() => { peer.detach(); this.peers.delete(stream); ws.terminate(); });
+          .catch((error) => { rejected = true; diagnostics.action("handler_rejected", "handler_rejected", error);
+            diagnostics.action("destroy", "handler_rejected"); stream.destroy(); })
+          .finally(() => {
+            if (!rejected) diagnostics.log("handler_complete", { cause: "handler_complete" });
+            peer.detach(); this.peers.delete(stream);
+            if (stream.destroyed) diagnostics.observed("stream_close");
+            diagnostics.action("terminate", "handler_cleanup"); ws.terminate(); });
         // Detect dead connections, including half-open controllers. No reconnect/replay.
         let alive = true;
-        ws.on("pong", () => { alive = true; });
+        ws.on("pong", () => { alive = true; diagnostics.pong(); });
         const ping = () => {
           if (!alive) {
             const error = Object.assign(new Error("WebSocket heartbeat expired: no pong within 15 seconds"), { code: "heartbeat_timeout" });
-            console.error(JSON.stringify({ type: "disconnected", timestamp: new Date().toISOString(), connectionId,
-              code: error.code, message: error.message, transport: "ws", remoteAddress: request.socket.remoteAddress }));
-            peer.detach(error); stream.destroy(); ws.terminate();
-          } else { alive = false; ws.ping(); }
+            diagnostics.action("disconnect", "heartbeat_timeout", error);
+            peer.detach(error); diagnostics.action("destroy", "heartbeat_timeout"); stream.destroy();
+            diagnostics.action("terminate", "heartbeat_timeout"); ws.terminate();
+          } else { alive = false; diagnostics.ping(); ws.ping(); }
         };
         this.pings.add(ping); ws.once("close", () => { peer.detach(); this.pings.delete(ping); });
-      }); } catch { release(); socket.destroy(); }
+      }); } catch (error) { release();
+        this.sockets.get(socket)?.action("destroy", "upgrade_failed", error); socket.destroy(); }
     });
     this.timer = setInterval(() => { for (const ping of this.pings) ping(); }, 15000);
     this.timer.unref();
@@ -157,9 +187,12 @@ export class RemoteListener {
     });
   }
   close(): void {
+    serviceDiagnostic("listener_shutdown");
     clearInterval(this.timer);
-    for (const [stream, peer] of this.peers) { peer.detach(); stream.destroy(); }
-    for (const socket of this.sockets) socket.destroy();
+    for (const [stream, peer] of this.peers) {
+      peer.diagnostics.action("destroy", "listener_shutdown"); peer.detach(); stream.destroy();
+    }
+    for (const [socket, diagnostics] of this.sockets) { diagnostics.action("destroy", "listener_shutdown"); socket.destroy(); }
     this.websocket.close(); this.server.close();
   }
 }

@@ -75,6 +75,7 @@ export class ServiceClient {
         throw new Error("Incompatible host protocol or channel");
       }
       if (expectedHostId && hello.hostId !== expectedHostId) throw new Error("Host identity changed. Review its registration in pi-console Hosts before reconnecting.");
+      recordDiagnostic("server_connection", { ...this.diagnostics, serverConnectionId: hello.connectionId });
       recordDiagnostic("handshake_complete", this.diagnostics);
       return hello;
     } catch (error) { this.close(error.message, "handshake_failed"); throw error; }
