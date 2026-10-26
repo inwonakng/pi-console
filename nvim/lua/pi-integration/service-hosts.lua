@@ -305,12 +305,16 @@ function M.list()
 					end
 				end
 				local status = live.status or "Idle"
+				local active_runs = {}
+				for _, run in ipairs(host.connected and live.subagentRuns or {}) do
+					if run.status == "running" then table.insert(active_runs, run) end
+				end
 				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host_label(host),
 					connected = host.connected == true, status = host.connected and status or "Unknown", frontend_keys = frontend_keys,
 					title = session_title(row), cwd = row.cwd, directory = row.cwd,
 					location = host.alias, controller = host.connected and live.controller or nil, activity = nil,
 					workspace_cwd = row.live and row.live.cwd or row.cwd, last_focused_at = focused,
-					subagent_runs = host.connected and live.subagentRuns or {}, subagents = host.connected and #(live.subagentRuns or {}) or 0,
+					subagent_runs = active_runs, subagents = #active_runs,
 					access_mode = host.connected and live.accessMode or nil, integration_mode = host.connected and live.integrationMode or nil,
 					notification_status = host.connected and (live.notificationsEnabled and "notify on" or "notify off") or nil,
 					channel = channel, service_epoch = host.hello and host.hello.serviceEpoch,

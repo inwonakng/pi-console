@@ -535,14 +535,14 @@ function renderOverview() {
     headingRow.append(reorderHandle(key, sessionName(row)), link);
     group.append(headingRow);
     bindSessionDrag(headingRow, key);
-    const runs = host.connected ? row.live?.subagentRuns || [] : [];
+    const runs = host.connected ? (row.live?.subagentRuns || []).filter(run => run.status === "running") : [];
     if (!runs.length) return group;
     const details = text("details", "", "subagent-runs");
     details.open = expandedSubagents.has(key);
     details.addEventListener("toggle", () => {
       if (details.open) expandedSubagents.add(key); else expandedSubagents.delete(key);
     });
-    details.append(text("summary", `${runs.length} subagent${runs.length === 1 ? "" : "s"}`));
+    details.append(text("summary", `${runs.length} active subagent${runs.length === 1 ? "" : "s"}`));
     for (const run of runs) details.append(text("p", workerLabel(run)));
     const inspect = text("a", "Inspect subagents and artifacts");
     inspect.href = sessionRoute(host, row);
