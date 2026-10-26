@@ -169,6 +169,26 @@ function M.focus(id)
 	return command({ "select-window", "-t", session .. ":" .. window, ";", "select-pane", "-t", id })
 end
 
+function M.reopen_frontend(entry)
+	local instances, err = M.list()
+	if not instances then return nil, err end
+	local target
+	for _, instance in ipairs(instances) do
+		if instance.id == entry.id and instance.pid == entry.pid and instance.host_id == entry.host_id
+			and instance.session_id == entry.session_id then target = instance; break end
+	end
+	if not target then return nil, "Frontend changed; select the session again" end
+	if type(target.server) ~= "string" or target.server == "" then return nil, "Frontend is still starting; try again after restarting it" end
+	local connected, channel = pcall(vim.fn.sockconnect, "pipe", target.server, { rpc = true })
+	if not connected or channel == 0 then return nil, "Could not connect to the frontend" end
+	local ok, result = pcall(vim.fn.rpcrequest, channel, "nvim_exec_lua",
+		"return { require('pi-integration.service-frontend').reopen_selected(...) }", { target.pid, target.host_id, target.session_id })
+	vim.fn.chanclose(channel)
+	if not ok then return nil, tostring(result) end
+	if result[1] ~= true then return nil, result[2] end
+	return true
+end
+
 function M.close_frontend(entry)
 	local instances, err = M.list()
 	if not instances then return nil, err end

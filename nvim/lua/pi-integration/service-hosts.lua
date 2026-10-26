@@ -375,6 +375,8 @@ function M.open(entry, in_place)
 					saved_request(host, { id = uid(), serviceEpoch = host.hello.serviceEpoch,
 						operation = "host.resume", payload = { sessionId = entry.session_id } }, function(receipt)
 						if receipt.status ~= "completed" or not host.connected or host.connection ~= connection then return end
+						local reopened, reopen_error = tmux.reopen_frontend(pane)
+						if not reopened then notify("Session resumed, but frontend reopening failed: " .. tostring(reopen_error)); return end
 						local ok, focus_error = tmux.focus(pane.id)
 						if not ok then notify(focus_error) end
 					end)

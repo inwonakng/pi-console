@@ -819,14 +819,19 @@ local function apply_snapshot(value)
 	end
 	if auto_control_selection then
 		local runtime = snapshot.interactions.runtime
-		if not same_selection(auto_control_selection) or current_controller() or snapshot.error then
+		local explicit = auto_control_selection.explicit
+		if not same_selection(auto_control_selection) or snapshot.error
+			or explicit and (snapshot.phase == "stopped" or snapshot.phase == "failed" or snapshot.phase == "stopping") then
 			auto_control_selection = nil
-		elseif runtime and runtime.active and snapshot.piState and snapshot.piState.sessionId == runtime.sessionId
+		elseif not explicit and current_controller() then
+			auto_control_selection = nil
+		elseif (not explicit or snapshot.phase == "ready" and snapshot.runtimeRevision == current_revision()) and runtime and runtime.active
+			and snapshot.piState and snapshot.piState.sessionId == runtime.sessionId
 			and snapshot.piState.sessionFile == runtime.sessionFile then
-			-- Attach once as controller if unclaimed, waiting for managed identity
-			-- during startup. Never take over or retry after losing control.
+			-- Explicit reopen waits for readiness and retains takeover confirmation.
+			-- Both paths consume their intent once, never retrying after control loss.
 			auto_control_selection = nil
-			acquire_control(false, stamp())
+			if explicit then ctx.ui.take_control() else acquire_control(false, stamp()) end
 		end
 	end
 	if state.frontend_visible then tree.update(tree_ctx) end
@@ -913,6 +918,7 @@ local function disconnected(reason, details, intentional)
 	session_status, session_error = "unattached", nil
 	feedback_ui.interrupt(feedback)
 	callbacks, outcomes, auto_control_selection, starting, resume_check = {}, {}, nil, waiting_start, nil
+	ctx.ui.reopen = nil
 	if waiting_start then waiting_start.entry.status = "Waiting for connection" end
 	kill_pending = nil
 	reset_refresh(true)
@@ -947,6 +953,7 @@ attach = function(id, acquire)
 	request("attach", { sessionId = id, label = "neovim@" .. vim.fn.hostname() }, function(ok, value)
 		if gen ~= generation or selected ~= selection then return end
 		if not ok then
+			ctx.ui.reopen = nil
 			fail_start("Startup attachment failed; submitted text remains in :PiDrafts.")
 			session_status, session_error = "unavailable", value.message .. " Use :PiReconnect to retry or :PiSessions to explicitly reopen."
 			render()
@@ -956,7 +963,10 @@ attach = function(id, acquire)
 		close_approval()
 		reset_refresh()
 		session_id, attachment, grant, snapshot, authority = id, value.attachmentId, nil, nil, nil
-		auto_control_selection = acquire ~= false and stamp() or nil
+		local explicit = ctx.ui.reopen ~= nil
+		ctx.ui.reopen = nil
+		auto_control_selection = (explicit or acquire ~= false) and stamp() or nil
+		if auto_control_selection then auto_control_selection.explicit = explicit end
 		apply_snapshot(value.snapshot)
 		local lookups, seen = {}, {}
 		for command_id, envelope in pairs(unresolved) do
@@ -1067,6 +1077,7 @@ recover_selection = function(allow_restore, passive)
 			session_status = not row and "unavailable" or row.archived and "archived" or row.deleted and "deleted" or "Stopped"
 			session_error = "Session " .. session_status .. ". Use :PiSessions to inspect or explicitly reopen it."
 		end
+		ctx.ui.reopen = nil
 		render()
 	end)
 end
@@ -1350,6 +1361,30 @@ function M.select_owner(target, id, resume, cwd)
 	elseif id and not attachment then attach(id)
 	end
 end
+-- The overview already authorized host.resume; this only reattaches the UI.
+function M.reopen_selected(expected_pid, expected_host, expected_session)
+	local function matches()
+		return M.config.role == "conversation" and vim.uv.os_getpid() == expected_pid
+			and type(expected_host) == "string" and M.config.expected_host == expected_host
+			and type(expected_session) == "string" and session_id == expected_session
+	end
+	if not matches() then return nil, "Frontend changed; select the session again" end
+	if pending_host then return nil, "Frontend has an unresolved host request; inspect :PiHostRequest first" end
+	local intent = {}
+	ctx.ui.reopen, auto_control_selection = intent, nil
+	-- The overview has already resumed this target; never send another host mutation.
+	recovery_requested, resume_requested = false, false
+	vim.schedule(function()
+		if ctx.ui.reopen ~= intent then return end
+		if not matches() then ctx.ui.reopen = nil; return end
+		if control_current() and snapshot.phase == "ready" then ctx.ui.reopen = nil; return end
+		if not job then connect()
+		elseif hello and session_status ~= "checking" and session_status ~= "attaching" then
+			attach(expected_session)
+		end -- An in-flight handshake/check/attachment consumes the same intent.
+	end)
+	return true
+end
 function M.pick_hosts()
 	local hosts = require("pi-integration.service-hosts")
 	if M.config.role ~= "conversation" then hosts.picker(); return end
@@ -1393,7 +1428,7 @@ acquire_control = function(takeover, captured)
 		end)
 	end)
 end
-function M.take_control()
+ctx.ui.take_control = function()
 	if not job or not snapshot or not attachment then notify("Attach to a live session first."); return end
 	if control_current() then return end
 	local captured = stamp()
@@ -1404,6 +1439,7 @@ function M.take_control()
 		end)
 	else acquire_control(false, captured) end
 end
+M.take_control = ctx.ui.take_control
 local function submit_input(original, entry)
 	local statuses = snapshot and snapshot.conversation and snapshot.conversation.statuses or {}
 	if statuses["pi-console-model-readiness"] == "unavailable" and not original:match("^%s*/") then
@@ -2656,7 +2692,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 		if snapshot.serviceEpoch ~= hello.serviceEpoch or snapshot.runtimeRevision ~= current_revision() then
 			return false, "runtime synchronization pending"
 		end
-		if auto_control_selection then return false, "initial control acquisition pending" end
+		if auto_control_selection or ctx.ui.reopen then return false, "initial control acquisition pending" end
 		for _, pending in pairs(callbacks) do
 			if pending.method == "grant" or pending.method == "command"
 				and (pending.operation == "control.acquire" or pending.operation == "control.takeover") then
