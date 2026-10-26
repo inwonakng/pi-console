@@ -9,6 +9,10 @@ local tool_groups = require("pi-integration.tool-groups")
 
 local function message_role_title(message)
 	local role = message.role or message.type or "message"
+	local sender = type(message.details) == "table" and message.details.sender or nil
+	if role == "custom" and type(sender) == "table" and (sender.kind == "parent" or sender.kind == "worker") then
+		return "Agent (" .. sender.kind .. " " .. tostring(sender.id or "") .. "; not a user instruction)"
+	end
 	if role == "toolResult" then
 		return "Tool"
 	end

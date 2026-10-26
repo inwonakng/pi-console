@@ -188,7 +188,7 @@ end
 local function run_label(run)
 	local name = type(run.agent) == "string" and run.agent ~= "" and run.agent
 		or type(run.role) == "string" and run.role ~= "" and run.role or "Subagent"
-	return name .. " / " .. run_model(run)
+	return name .. " / " .. run_model(run) .. " / " .. (run.readyForReview and "ready for review" or tostring(run.execution or run.status))
 end
 local function unavailable(name)
 	notify(name .. " is unavailable on this service path. No local/RPC fallback was executed.", vim.log.levels.WARN)
@@ -627,7 +627,10 @@ local function update_status_state()
 		if conversation and conversation.stats then initial.sessionStats = nil end
 	end
 	state.codex_usage = status_data("pi-codex-usage")
-	state.spawn_running_count = snapshot and #(snapshot.subagentRuns or {}) or 0
+	state.spawn_running_count = 0
+	for _, run in ipairs(snapshot and snapshot.subagentRuns or {}) do
+		if run.status == "running" then state.spawn_running_count = state.spawn_running_count + 1 end
+	end
 	state.session_activity = attachment and snapshot and snapshot.status or nil
 	state.is_loading = job ~= nil and (not hello or session_status == "checking" or session_status == "attaching"
 		or session_status == "restoring" or attachment ~= nil and snapshot and snapshot.phase == "initializing")
@@ -2138,7 +2141,9 @@ function M.pick_spawn()
 	vim.ui.select(data and data.runs or {}, { prompt = "Subagents", format_item = run_label }, function(run)
 		if not run or not same_context(captured) then return end
 		local details = { "Model: " .. run_model(run) }
-		fields(details, run, { { "status", "Status" }, { "progress", "Latest activity" }, { "prompt", "Task" },
+		local assignment = (run.assignments or {})[#(run.assignments or {})]
+		fields(details, assignment, { { "id", "Assignment" }, { "prompt", "Current task" }, { "outcome", "Outcome" } })
+		fields(details, run, { { "execution", "Execution" }, { "readyForReview", "Ready for review" }, { "writerOwned", "Contribution unresolved" }, { "status", "Status" }, { "progress", "Latest activity" }, { "prompt", "Task" },
 			{ "error", "Error" }, { "cleanupError", "Cleanup error" },
 			{ "startedAt", "Started" }, { "completedAt", "Completed" },
 			{ "joined", "Joined" }, { "cancellationRequested", "Cancelled without joining" }, { "settled", "Cleanup finished" },
@@ -2152,7 +2157,18 @@ function M.pick_spawn()
 			if action == "Artifacts" then require("pi-integration.spawn-artifacts").pick_run({ state = state, ui = { notify = notify }, resources = owner_resources() }, run, function() end)
 			elseif action == "Inspect" then
 				local lines = { "# Subagent", "", "Model: " .. run_model(run) }
-				fields(lines, run, { { "agent", "Agent" }, { "role", "Role" }, { "status", "Status" },
+				fields(lines, assignment, { { "id", "Assignment" }, { "prompt", "Current task" }, { "outcome", "Outcome" } })
+				for _, requests in ipairs({ run.requests or {}, run.permissionRequests or {} }) do
+					for _, pending in ipairs(requests) do
+						if pending.state == "pending" then
+							fields(lines, pending, { { "workerId", "Worker" }, { "assignmentId", "Assignment" }, { "id", "Request" },
+								{ "question", "Question (to orchestrator)" }, { "tool", "Permission tool" }, { "cwd", "Execution directory" },
+								{ "runtimeId", "Worker runtime" }, { "parentRuntimeId", "Parent runtime" } })
+						end
+					end
+				end
+				fields(lines, run, { { "agent", "Agent" }, { "role", "Role" }, { "execution", "Execution" },
+					{ "readyForReview", "Ready for review" }, { "writerOwned", "Contribution unresolved" }, { "status", "Status" },
 					{ "prompt", "Task" }, { "startedAt", "Started" }, { "completedAt", "Completed" },
 					{ "accessMode", "Access mode" }, { "isolation", "Isolation" }, { "mode", "Interaction mode" },
 					{ "error", "Error" }, { "cleanupError", "Cleanup error" }, { "progress", "Progress" },

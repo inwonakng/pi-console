@@ -9,7 +9,7 @@ export const SPAWN_PERMISSION_CANCEL = "pi-spawn-permission-cancel";
 export const SPAWN_PERMISSION_FINISH = "pi-spawn-permission-finish";
 export const WORKER_TOOLS = ["spawn_report", "spawn_question"];
 export type WorkerLifetime = "bounded" | "conversational";
-export type WorkerExecution = "working" | "waiting_parent" | "idle" | "closing" | "closed" | "failed" | "cancelled";
+export type WorkerExecution = "working" | "waiting_parent" | "waiting_user" | "idle" | "closing" | "closed" | "failed" | "cancelled";
 export type AssignmentReport = {
   outcome: "completed" | "blocked";
   summary: string;

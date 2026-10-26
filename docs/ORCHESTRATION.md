@@ -52,6 +52,22 @@ Use bounded lifetime for a single assignment. Both lifetimes support clarificati
 
 Only one unresolved writer is supported. The parent cannot write the repository or run unsandboxed Bash while a child owns a contribution, including during input waits, review, failure, and cleanup. There is no override. Readonly research/review can run in parallel. Inspect with `join`, `status`, `report`, and `diff`; none integrate. Answer clarification through `reply`, permissions through `approve`/`deny` with exact request/runtime identities and the existing approval UI. Request conversational corrections with `followup`, review again, then `accept` explicitly. After acceptance, further writing needs a new worker/baseline. `stop` retains ownership; `discard` explicitly disposes a quiescent unwanted contribution. Final parent integration keeps the configured integration policy.
 
+## Worker views and lifecycle
+
+Workers stay grouped under their orchestrator in the Neovim overview/sidebar and browser session list, including input waits, review, failures and unresolved contributions. Expand the session to see its workers. Rows identify the confirmed provider/model, execution state, assignment and pending request IDs, and integration/ownership state. Closed workers remain available for artifact inspection.
+
+In Neovim, open the orchestrator and use `<leader>ps` to inspect current assignments, questions, permissions, results and recovery artifacts. In the browser, open the orchestrator's Options -> Subagents; expand a worker to read its transcript, result, brief, status, prompt or patch. Artifact reads are read-only, attachment/runtime-bound and paginated. A missing artifact is reported rather than replaced with another worker's output.
+
+Worker questions go to the orchestrator; they are not direct user-approval dialogs. The orchestrator can answer from the approved scope or ask the user through the existing question UI. Permission escalation uses the existing approval dialog, with worker/assignment/request attribution. Only the current controller can answer; observers can inspect. Agent-authored assignments and replies retain their sender in stored/model-visible context and are labeled as agent messages when displayed. Runtime wakeups and management snapshots do not add routine transcript rows.
+
+Disconnecting a frontend does not stop service-owned Pi or its workers. Reattach to the same orchestrator to inspect current state and unanswered dialogs. Completed actions are not replayed. Stop/abort and explicit shutdown still cancel work and invalidate its pending authority; stopping a writer retains its unresolved contribution and recovery artifacts. Guarded service shutdown refuses active workers and unresolved contributions. Runtime/history/workspace changes retain the existing cleanup and ownership gates. Process/service/machine termination does not automatically restart or replay assignments or approvals.
+
+## Compaction
+
+Ordinary Pi manual and automatic compaction retain the orchestrator's session identity. When that session has workers, `session_before_compact` uses Pi's exported compaction helper with the existing preparation/cut, file tracking, cancellation signal and manual instructions, plus guidance to retain approved scope, decision rationale and provenance, assignment dependencies, unresolved questions, review state, evidence references and next steps. If customization fails, ordinary Pi compaction handles the outcome without retiring the worker runtime; cancellation does not request another summary.
+
+Worker status artifacts persist assignment/request identities, delivery state, workspace ownership and permission decisions outside the summary. Live management state is reconciled at model-request boundaries without starting an extra turn. Summary text is never an acceptance or permission authority. Compaction does not restart workers or replay requests; fresh runtime startup restores historical workers as terminal/interrupted records, not live processes.
+
 ## Package loading
 
 `pi/package.json` exports `./skills` alongside extensions. The terminal wrapper, service session launcher, and spawn child launcher each pass `-e <matching-release>/pi`; Pi loads both resource types from that package. Child discovery does not authorize nested delegation: the skill has a worker-only section, the child extension returns before registering parent controls, and restricted tool lists add only the required worker protocol tools.

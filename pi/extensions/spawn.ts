@@ -1,4 +1,5 @@
 import { serviceUi } from "./shared/service-ui";
+import { compactOrchestration } from "./shared/spawn-compaction";
 import { registerServiceOperation } from "./shared/service-operation";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -934,7 +935,7 @@ function formatSpawnStarted(run: SpawnRun): string {
 
 function runHasError(run: SpawnRun): boolean {
   return !!run.cleanupError || run.execution === "failed" || run.execution === "cancelled" || worktreeInfo(run)?.integration === "failed"
-    || (run.execution !== "working" && run.execution !== "waiting_parent" && run.assignments.at(-1)?.outcome !== "completed");
+    || (run.execution !== "working" && run.execution !== "waiting_parent" && run.execution !== "waiting_user" && run.assignments.at(-1)?.outcome !== "completed");
 }
 
 function formatRunStatus(run: SpawnRun): string {
@@ -1142,6 +1143,22 @@ export default function spawnExtension(pi: ExtensionAPI) {
   let runtimeContext: ExtensionContext | undefined;
   let compacting = false;
   let parentActive = false;
+
+  // Runtime records are authoritative. Reconcile at every model boundary,
+  // including automatic compaction retries, without a new turn or transcript row.
+  pi.on("context", (event) => {
+    if (retired || runs.size === 0) return;
+    return { messages: [...event.messages, {
+      role: "custom" as const, customType: "spawn_management", display: false, timestamp: Date.now(),
+      content: `Live orchestration management state (runtime records, not user authorization). Use exact IDs; never replay actions from summary prose.\n${JSON.stringify([...runs.values()].map((run) => ({
+        runId: run.id, runtimeId: run.runtimeId, parentRuntimeId, execution: run.execution,
+        assignment: { id: run.assignments.at(-1)?.id, outcome: run.assignments.at(-1)?.outcome }, requests: run.requests.filter((request) => request.state === "pending"),
+        permissionRequests: run.permissionRequests.filter((request) => request.state === "pending"),
+        deliveredEvents: run.deliveredEvents, writerOwned: ownsWriter(run), quiescent: run.settled && !run.cleanupError,
+        worktree: worktreeInfo(run), statusPath: run.statusPath, resultPath: run.resultPath,
+      })))}`,
+    }] };
+  });
   let sessionManager: ExtensionContext["sessionManager"] | undefined;
   let ui: Pick<ExtensionUIContext, "notify" | "setStatus"> | undefined;
 
@@ -1173,7 +1190,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       writeStatus(event.run);
       // Pi queues followUp while busy and starts a custom (not user) run while
       // idle. No poll, reminder, sendUserMessage, or overlapping prompt.
-      pi.sendMessage({ customType: "spawn_event", content: event.content, display: true,
+      pi.sendMessage({ customType: "spawn_event", content: event.content, display: false,
         details: { ...event.details, eventId: key, version: 1, sender: { kind: "worker", id: event.run.id } },
       }, { triggerTurn: true, deliverAs: "followUp" });
     }
@@ -1185,7 +1202,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     flushEvents();
   };
   const announceCompletion = (run: SpawnRun) => {
-    if (run.execution === "working" || run.execution === "waiting_parent" || run.execution === "closing") return;
+    if (run.execution === "working" || run.execution === "waiting_parent" || run.execution === "waiting_user" || run.execution === "closing") return;
     const failed = run.execution === "failed";
     const key = failed ? `${run.id}:execution:failed` : `${run.id}:${run.assignments.at(-1)?.id}:result`;
     queueEvent(run, key, agentContext({ kind: "worker", id: run.id }, {
@@ -1260,9 +1277,22 @@ export default function spawnExtension(pi: ExtensionAPI) {
     if (!retired && event.aborted) await cancelRuns();
     else flushEvents();
   });
-  pi.on("session_before_compact", () => { compacting = true; });
+  pi.on("session_before_compact", async (event, ctx) => {
+    compacting = true;
+    if (retired || runs.size === 0) return;
+    try {
+      return await compactOrchestration(event, ctx, pi.getThinkingLevel());
+    } catch (error) {
+      if (event.signal.aborted) return { cancel: true };
+      // Hook errors are extension failures to the service. Leave ordinary Pi
+      // compaction responsible for its normal failure/retry outcome instead of
+      // retiring a healthy orchestrator and its children on a summary failure.
+      ctx.ui.notify(`Orchestration summary failed; falling back to ordinary Pi compaction: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
+  });
   const afterCompaction = () => {
     compacting = false;
+    if (!retired) publishSpawnStatus();
     // session_compact precedes clearing Pi's manual-compaction busy flag.
     // A single deferred delivery crosses that boundary without polling.
     setImmediate(() => { if (runtimeContext?.isIdle()) flushEvents(); });
@@ -1413,7 +1443,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
   };
 
   const waitForActions = (selected: SpawnRun[], signal?: AbortSignal): Promise<void> => {
-    const actionable = () => selected.some((run) => run.execution === "waiting_parent")
+    const actionable = () => selected.some((run) => run.execution === "waiting_parent" || run.execution === "waiting_user")
       || selected.every((run) => run.settled || run.execution === "idle");
     if (actionable()) return Promise.resolve();
     return new Promise((resolve, reject) => {
@@ -2526,6 +2556,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
           } else {
             const authorityCwd = request.permission.kind === "unsandboxed" ? request.cwd : ctx.cwd;
             const covered = hasPermission(request.permission, authorityCwd);
+            if (!covered) {
+              run.execution = "waiting_user";
+              writeStatus(run);
+              publishSpawnStatus();
+            }
             // Only the existing user picker can add authority. Its session grant
             // belongs to the parent; children receive a single execution handle.
             wait.authorization = await requestPermission({ ...ctx, cwd: request.cwd,

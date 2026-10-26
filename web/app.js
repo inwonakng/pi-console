@@ -371,7 +371,11 @@ function renderOverview() {
       if (details.open) expandedSubagents.add(key); else expandedSubagents.delete(key);
     });
     details.append(text("summary", `${runs.length} subagent${runs.length === 1 ? "" : "s"}`));
-    for (const run of runs) details.append(text("p", `${run.agent || run.role || "Subagent"}${run.selectedModel ? " / " + run.selectedModel.provider + "/" + run.selectedModel.id : ""} / ${run.readyForReview ? "ready for review" : run.execution || run.status}${run.progress ? " / " + run.progress : ""}`));
+    for (const run of runs) details.append(text("p", workerLabel(run)));
+    const inspect = text("a", "Inspect subagents and artifacts");
+    inspect.href = sessionRoute(host, row);
+    inspect.addEventListener("click", event => { event.preventDefault(); navigate(inspect.hash); });
+    details.append(inspect);
     group.append(link, details);
     return group;
   }));
@@ -798,8 +802,9 @@ function createConversation(host, row) {
     $("controller").textContent = !host.connected ? "Unknown / read only" : !row.live ? "Stopped / read only"
       : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
-    $("abort").hidden = !snapshot?.conversation.execution.running;
-    $("abort").disabled = !controlled || busy || !snapshot?.conversation.execution.running;
+    const active = snapshot?.conversation.execution.running || owner?.subagentRuns?.some(run => !run.quiescent);
+    $("abort").hidden = !active;
+    $("abort").disabled = !controlled || busy || !active;
     $("choose-directory").disabled = !host.connected;
     $("new-workspace").disabled = !host.connected;
     $("rename").disabled = !controlled || busy;
@@ -810,7 +815,46 @@ function createConversation(host, row) {
       : !row.live ? "Session stopped. Resume it from History." : !controlled ? "Take control in Options to send a prompt."
       : !ready ? "Waiting for session setup." : snapshot?.conversation.execution.running ? "Prompts sent while working are queued." : "";
     renderSettings();
+    renderWorkers();
     if (snapshot) renderInteractions();
+  }
+  let workersKey = "";
+  function renderWorkers() {
+    const runs = owner?.subagentRuns || [];
+    const key = JSON.stringify([attachment, runtimeRevision, connected, runs]);
+    if (key === workersKey) return;
+    workersKey = key;
+    const expanded = new Set([...$("workers").children].filter(node => node.open).map(node => node.dataset.runId));
+    $("workers-section").hidden = !runs.length;
+    $("workers").replaceChildren(...runs.map(worker => {
+      const details = text("details", "", "subagent-runs");
+      details.dataset.runId = worker.runId;
+      details.open = expanded.has(worker.runId);
+      details.append(text("summary", workerLabel(worker)), text("p", `Worker: ${worker.runId}`));
+      if (worker.assignment) details.append(text("p", `Assignment: ${worker.assignment.id} / ${worker.assignment.outcome || "unknown"}`), text("p", worker.assignment.prompt || ""));
+      for (const pending of worker.pendingRequests || []) details.append(text("p", `${pending.kind} to orchestrator: ${pending.id} / assignment ${pending.assignmentId} / ${pending.question || pending.tool || ""}`));
+      if (worker.error || worker.cleanupError || worker.integrationReason) details.append(text("p", [worker.error, worker.cleanupError, worker.integrationReason].filter(Boolean).join("\n")));
+      const output = text("div", ""), captured = context();
+      let selection = 0;
+      async function read(artifact, offset = 0, version) {
+        const ticket = ++selection;
+        output.replaceChildren(text("p", "Loading artifact..."));
+        try {
+          const result = await captured.client.request("resource.read", { kind: "spawn", runId: worker.runId, artifact, offset, ...(version ? { version } : {}), runtimeRevision: captured.runtimeRevision });
+          if (!sameContext(captured) || ticket !== selection || !details.isConnected) return;
+          const page = result.data;
+          output.replaceChildren(text("p", `${artifact}: bytes ${page.offset}..${page.offset + new TextEncoder().encode(page.text).length}/${page.size}`), text("pre", page.text));
+          if (page.nextOffset != null) output.append(button("Next chunk", () => read(artifact, page.nextOffset, page.version)));
+          output.append(button("Reload", () => read(artifact)));
+        } catch (error) {
+          if (sameContext(captured) && ticket === selection && details.isConnected) output.replaceChildren(text("p", error.message));
+        }
+      }
+      const actions = text("div", "", "actions");
+      for (const artifact of ["transcript", "result", "brief", "status", "agent_prompt", "patch"]) actions.append(button(artifact, () => read(artifact), !connected));
+      details.append(actions, output);
+      return details;
+    }));
   }
   function settingsKey() {
     const model = snapshot?.piState?.model;
@@ -1045,7 +1089,7 @@ function createConversation(host, row) {
           if (message.errorMessage) details.append(text("p", message.errorMessage));
           article.append(details);
         } else {
-          if (!assistant) article.append(text("div", message.role, "message-label"));
+          if (!assistant) article.append(text("div", messageLabel(message), "message-label"));
           article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key));
           if (message.role !== "assistant" && message.errorMessage) article.append(text("p", message.errorMessage));
         }
@@ -1428,6 +1472,18 @@ function updateContent(current, next) {
   return current;
 }
 
+function workerLabel(run) {
+  const model = run.selectedModel ? `${run.selectedModel.provider}/${run.selectedModel.id}` : "model not confirmed";
+  const state = run.readyForReview ? "ready for review" : run.execution || run.status;
+  const pending = (run.pendingRequests || []).map(request => `${request.kind}: ${request.id}`).join(" / ");
+  return [run.agent || run.role || "Subagent", model, state, run.writerOwned ? "contribution unresolved" : "",
+    run.integration, run.assignment ? `${run.assignment.id} (${run.assignment.outcome})` : "", pending, run.progress].filter(Boolean).join(" / ");
+}
+function messageLabel(message) {
+  const sender = message.role === "custom" && message.details?.sender;
+  return sender && ["parent", "worker"].includes(sender.kind)
+    ? `Agent (${sender.kind} ${sender.id}; not a user instruction)` : message.role;
+}
 // System prompt patches hold structured sections, not user-visible conversation text.
 function visibleMessage(message) {
   if (message.role === "custom" && message.display === false) return false;

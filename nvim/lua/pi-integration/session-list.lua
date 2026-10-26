@@ -62,6 +62,12 @@ function M.subagent_label(node)
 	if model ~= "" then name = name .. " / " .. model end
 	local progress = M.text(run.progress)
 	local state = run.readyForReview and "ready for review" or M.text(run.execution or run.status)
+	if run.writerOwned then state = state .. " / contribution unresolved" end
+	if run.integration then state = state .. " / " .. M.text(run.integration) end
+	local assignment = type(run.assignment) == "table" and run.assignment or {}
+	if assignment.id then state = state .. " / " .. M.text(assignment.id) .. " (" .. M.text(assignment.outcome) .. ")" end
+	local pending = type(run.pendingRequests) == "table" and run.pendingRequests or {}
+	for _, request in ipairs(pending) do state = state .. " / " .. M.text(request.kind) .. ": " .. M.text(request.id) end
 	return "       " .. icons.subagent_icon .. " " .. name .. " · " .. state .. (progress ~= "" and (" — " .. progress) or "")
 end
 
@@ -101,7 +107,7 @@ function M.new()
 						local running = {}
 						-- Old publishers provide only the count; current ones also provide rows.
 						for _, run in ipairs(type(entry.subagent_runs) == "table" and entry.subagent_runs or {}) do
-							if type(run) == "table" and (run.status == "running" or run.writerOwned == true) then table.insert(running, run) end
+							if type(run) == "table" then table.insert(running, run) end
 						end
 						local node = {
 							kind = "session", key = entry.organization_key, entry = entry,

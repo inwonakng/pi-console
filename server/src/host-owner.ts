@@ -42,7 +42,13 @@ type SessionActivity = {
   status: "Starting" | "Stopping" | "Stopped" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Done" | "Idle";
   completionSeq: number;
   turnOutcome?: ConversationSnapshot["execution"]["outcome"];
-  subagentRuns: { runId: string; status: string; execution?: string; writerOwned?: boolean; readyForReview?: boolean; agent?: string; role?: string; selectedModel?: { provider: string; id: string }; progress?: string }[];
+  subagentRuns: {
+    runId: string; status: string; execution?: string; writerOwned: boolean; readyForReview: boolean; quiescent: boolean;
+    agent?: string; role?: string; selectedModel?: { provider: string; id: string }; progress?: string;
+    assignment?: { id: string; prompt?: string; outcome?: string };
+    pendingRequests: { id: string; assignmentId: string; kind: "question" | "permission"; question?: string; tool?: string }[];
+    integration?: string; integrationReason?: string; error?: string; cleanupError?: string;
+  }[];
 };
 export type OwnedSessionState = SessionActivity & {
   sessionId: string;
@@ -1394,11 +1400,27 @@ export class OwnedSession {
         const value: unknown = JSON.parse(raw);
         if (object(value) && Array.isArray(value.runs)) {
           for (const run of value.runs) {
-            if (!object(run) || typeof run.runId !== "string" || typeof run.status !== "string"
-              || (run.status !== "running" && run.writerOwned !== true)) continue;
+            if (!object(run) || typeof run.runId !== "string" || typeof run.status !== "string") continue;
+            const assignment = Array.isArray(run.assignments) ? run.assignments.at(-1) : undefined;
+            const pendingRequests: SessionActivity["subagentRuns"][number]["pendingRequests"] = [];
+            for (const [kind, requests] of [["question", run.requests], ["permission", run.permissionRequests]] as const) {
+              for (const request of Array.isArray(requests) ? requests : []) {
+                if (!object(request) || request.state !== "pending" || typeof request.id !== "string" || typeof request.assignmentId !== "string") continue;
+                pendingRequests.push({ id: request.id, assignmentId: request.assignmentId, kind,
+                  question: typeof request.question === "string" ? request.question : undefined,
+                  tool: typeof request.tool === "string" ? request.tool : undefined });
+              }
+            }
             subagentRuns.push({ runId: run.runId, status: run.status,
               execution: typeof run.execution === "string" ? run.execution : undefined,
-              writerOwned: run.writerOwned === true, readyForReview: run.readyForReview === true,
+              writerOwned: run.writerOwned === true, readyForReview: run.readyForReview === true, quiescent: run.quiescent === true,
+              assignment: object(assignment) && typeof assignment.id === "string" ? { id: assignment.id,
+                prompt: typeof assignment.prompt === "string" ? assignment.prompt : undefined,
+                outcome: typeof assignment.outcome === "string" ? assignment.outcome : undefined } : undefined,
+              pendingRequests, integration: typeof run.integration === "string" ? run.integration : undefined,
+              integrationReason: typeof run.integrationReason === "string" ? run.integrationReason : undefined,
+              error: typeof run.error === "string" ? run.error : undefined,
+              cleanupError: typeof run.cleanupError === "string" ? run.cleanupError : undefined,
               agent: typeof run.agent === "string" ? run.agent : undefined,
               role: typeof run.role === "string" ? run.role : undefined,
               selectedModel: object(run.selectedModel) && typeof run.selectedModel.provider === "string" && typeof run.selectedModel.id === "string"
@@ -1611,6 +1633,9 @@ export class OwnedSession {
   stopBlockReason(): string | undefined {
     if (this.lifecyclePending) return `Session ${this.id} has a pending lifecycle outcome; stop refused`;
     if (this.done) return;
+    if (this.activity().subagentRuns.some((run) => !run.quiescent || run.writerOwned || run.pendingRequests.length)) {
+      return `Session ${this.id} has active workers or unresolved contributions; stop refused`;
+    }
     if (this.phase !== "ready" || this.stopRequested || !this.usableWorkspace() || !this.conversation.settled
       || this.admitting || this.commands.size || this.lifecyclePending || this.bundled || this.nativePending || this.aborting || this.rename || this.queueFlight || this.queueRunPending
       || this.worker?.interactionSnapshot().pending.length || this.catalog.queue(this.id).some((item) => item.status !== "failed")) {
