@@ -734,43 +734,63 @@ function createConversation(host, row) {
     renderWorkers();
     if (snapshot) renderInteractions();
   }
-  let workersKey = "";
-  function renderWorkers() {
-    const runs = owner?.subagentRuns || [];
-    const key = JSON.stringify([attachment, runtimeRevision, connected, runs]);
-    if (key === workersKey) return;
-    workersKey = key;
-    const expanded = new Set([...$("workers").children].filter(node => node.open).map(node => node.dataset.runId));
-    $("workers-section").hidden = !runs.length;
-    $("workers").replaceChildren(...runs.map(worker => {
-      const details = text("details", "", "subagent-runs");
-      details.dataset.runId = worker.runId;
-      details.open = expanded.has(worker.runId);
-      details.append(text("summary", workerLabel(worker)), text("p", `Worker: ${worker.runId}`));
-      if (worker.assignment) details.append(text("p", `Assignment: ${worker.assignment.id} / ${worker.assignment.outcome || "unknown"}`), text("p", worker.assignment.prompt || ""));
-      for (const pending of worker.pendingRequests || []) details.append(text("p", `${pending.kind} to orchestrator: ${pending.id} / assignment ${pending.assignmentId} / ${pending.question || pending.tool || ""}`));
-      if (worker.error || worker.cleanupError || worker.integrationReason) details.append(text("p", [worker.error, worker.cleanupError, worker.integrationReason].filter(Boolean).join("\n")));
-      const output = text("div", ""), captured = context();
-      let selection = 0;
-      async function read(artifact, offset = 0, version) {
-        const ticket = ++selection;
-        output.replaceChildren(text("p", "Loading artifact..."));
-        try {
-          const result = await captured.client.request("resource.read", { kind: "spawn", runId: worker.runId, artifact, offset, ...(version ? { version } : {}), runtimeRevision: captured.runtimeRevision });
-          if (!sameContext(captured) || ticket !== selection || !details.isConnected) return;
-          const page = result.data;
-          output.replaceChildren(text("p", `${artifact}: bytes ${page.offset}..${page.offset + new TextEncoder().encode(page.text).length}/${page.size}`), text("pre", page.text));
-          if (page.nextOffset != null) output.append(button("Next chunk", () => read(artifact, page.nextOffset, page.version)));
-          output.append(button("Reload", () => read(artifact)));
-        } catch (error) {
-          if (sameContext(captured) && ticket === selection && details.isConnected) output.replaceChildren(text("p", error.message));
-        }
+  const workerViews = new Map();
+  let workersContext;
+  function createWorkerView(worker, captured) {
+    const details = text("details", "", "subagent-runs"), summary = text("summary", "");
+    const info = text("div", ""), actions = text("div", "", "actions"), output = text("div", "");
+    details.dataset.runId = worker.runId;
+    details.append(summary, info, actions, output);
+    const view = { details, summary, info, actions };
+    let selection = 0;
+    const current = ticket => !disposed && connected && sameContext(captured) && ticket === selection
+      && workerViews.get(worker.runId) === view && details.isConnected;
+    async function read(artifact, offset = 0, version) {
+      if (!current(selection)) return;
+      const ticket = ++selection;
+      output.replaceChildren(text("p", "Loading artifact..."));
+      try {
+        const result = await captured.client.request("resource.read", { kind: "spawn", runId: worker.runId, artifact, offset, ...(version ? { version } : {}), runtimeRevision: captured.runtimeRevision });
+        if (!current(ticket)) return;
+        const page = result.data;
+        output.replaceChildren(text("p", `${artifact}: bytes ${page.offset}..${page.offset + new TextEncoder().encode(page.text).length}/${page.size}`), text("pre", page.text));
+        if (page.nextOffset != null) output.append(button("Next chunk", () => read(artifact, page.nextOffset, page.version)));
+        output.append(button("Reload", () => read(artifact)));
+      } catch (error) {
+        if (current(ticket)) output.replaceChildren(text("p", error.message));
       }
-      const actions = text("div", "", "actions");
-      for (const artifact of ["transcript", "result", "brief", "status", "agent_prompt", "patch"]) actions.append(button(artifact, () => read(artifact), !connected));
-      details.append(actions, output);
-      return details;
-    }));
+    }
+    for (const artifact of ["transcript", "result", "brief", "status", "agent_prompt", "patch"]) actions.append(button(artifact, () => read(artifact), !connected));
+    return view;
+  }
+  function renderWorkers() {
+    // Progress changes update metadata only. Artifact DOM, pagination closures
+    // and in-flight reads belong to the worker within this attachment/runtime.
+    if (!workersContext || !sameContext(workersContext)) {
+      workerViews.clear();
+      $("workers").replaceChildren();
+      workersContext = context();
+    }
+    const runs = owner?.subagentRuns || [], ids = new Set(runs.map(worker => worker.runId));
+    for (const [id, view] of workerViews) {
+      if (!ids.has(id)) { workerViews.delete(id); view.details.remove(); }
+    }
+    $("workers-section").hidden = !runs.length;
+    runs.forEach((worker, index) => {
+      let view = workerViews.get(worker.runId);
+      if (!view) {
+        view = createWorkerView(worker, workersContext);
+        workerViews.set(worker.runId, view);
+      }
+      view.summary.textContent = workerLabel(worker);
+      const info = [text("p", `Worker: ${worker.runId}`)];
+      if (worker.assignment) info.push(text("p", `Assignment: ${worker.assignment.id} / ${worker.assignment.outcome || "unknown"}`), text("p", worker.assignment.prompt || ""));
+      for (const pending of worker.pendingRequests || []) info.push(text("p", `${pending.kind} to orchestrator: ${pending.id} / assignment ${pending.assignmentId} / ${pending.question || pending.tool || ""}`));
+      if (worker.error || worker.cleanupError || worker.integrationReason) info.push(text("p", [worker.error, worker.cleanupError, worker.integrationReason].filter(Boolean).join("\n")));
+      view.info.replaceChildren(...info);
+      for (const action of view.actions.children) action.disabled = !connected;
+      if ($("workers").children[index] !== view.details) $("workers").insertBefore(view.details, $("workers").children[index] || null);
+    });
   }
   function settingsKey() {
     const model = snapshot?.piState?.model;

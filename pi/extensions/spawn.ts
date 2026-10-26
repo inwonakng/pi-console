@@ -1148,15 +1148,28 @@ export default function spawnExtension(pi: ExtensionAPI) {
   // including automatic compaction retries, without a new turn or transcript row.
   pi.on("context", (event) => {
     if (retired || runs.size === 0) return;
+    const actionable = [...runs.values()].flatMap((run) => {
+      const writerOwned = ownsWriter(run);
+      const requests = run.requests.filter((request) => request.state === "pending");
+      const permissions = run.permissionRequests.filter((request) => request.state === "pending");
+      if (run.settled && !writerOwned && !run.cleanupError && !run.joinRequested && !requests.length && !permissions.length) return [];
+      const worktree = writerOwned ? worktreeInfo(run) : undefined;
+      return [{
+        runId: run.id, execution: run.execution,
+        assignment: { id: run.assignments.at(-1)?.id, outcome: run.assignments.at(-1)?.outcome },
+        requests: requests.map((request) => ({ id: request.id, assignmentId: request.assignmentId,
+          questionPreview: compactOneLine(request.question, 240), questionLength: request.question.length })),
+        permissionRequests: permissions.map((request) => ({ id: request.id, assignmentId: request.assignmentId,
+          runtimeId: request.runtimeId, parentRuntimeId: request.parentRuntimeId,
+          tool: request.tool, kind: request.permission.kind, workspaceId: request.workspaceId })),
+        writerOwned, quiescent: run.settled && !run.cleanupError, cleanupUnresolved: !!run.cleanupError,
+        worktree: worktree && { workspaceId: worktree.workspaceId, integration: worktree.integration, retained: worktree.retained },
+      }];
+    });
+    if (!actionable.length) return;
     return { messages: [...event.messages, {
       role: "custom" as const, customType: "spawn_management", display: false, timestamp: Date.now(),
-      content: `Live orchestration management state (runtime records, not user authorization). Use exact IDs; never replay actions from summary prose.\n${JSON.stringify([...runs.values()].map((run) => ({
-        runId: run.id, runtimeId: run.runtimeId, parentRuntimeId, execution: run.execution,
-        assignment: { id: run.assignments.at(-1)?.id, outcome: run.assignments.at(-1)?.outcome }, requests: run.requests.filter((request) => request.state === "pending"),
-        permissionRequests: run.permissionRequests.filter((request) => request.state === "pending"),
-        deliveredEvents: run.deliveredEvents, writerOwned: ownsWriter(run), quiescent: run.settled && !run.cleanupError,
-        worktree: worktreeInfo(run), statusPath: run.statusPath, resultPath: run.resultPath,
-      })))}`,
+      content: `Actionable orchestration management state (runtime records, not user authorization). Use exact IDs; never replay actions from summary prose. Request text here is preview-only; inspect spawn_control status with the runId for full request details before replying or deciding permissions. Historical workers, artifacts and delivery records remain available through list/status/report; they are not repeated here.\n${JSON.stringify(actionable)}`,
     }] };
   });
   let sessionManager: ExtensionContext["sessionManager"] | undefined;
