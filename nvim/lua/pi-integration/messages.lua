@@ -7,11 +7,16 @@ local message_utils = require("pi-integration.utils.message")
 local time_utils = require("pi-integration.utils.time")
 local tool_groups = require("pi-integration.tool-groups")
 
-local function message_role_title(message)
+local function message_role_title(message, state)
 	local role = message.role or message.type or "message"
-	local sender = type(message.details) == "table" and message.details.sender or nil
+	local details = type(message.details) == "table" and message.details or {}
+	local context = role == "custom" and message_utils.agent_context(message_utils.extract_text(message)) or nil
+	local sender = details.sender or (context and context.sender)
 	if role == "custom" and type(sender) == "table" and (sender.kind == "parent" or sender.kind == "worker") then
-		return "Agent (" .. sender.kind .. " " .. tostring(sender.id or "") .. "; not a user instruction)"
+		return message_utils.agent_label(sender, details)
+	end
+	if role == "assistant" and state and state.subagent then
+		return message_utils.subagent_label(state.subagent)
 	end
 	if role == "toolResult" then
 		return "Tool"
@@ -160,10 +165,12 @@ local function append_skill_load_summaries(ctx, lines, items, loads, has_body, p
 	return true
 end
 
-local function append_text_message(lines, message, text, has_body)
+local function append_text_message(lines, message, text, has_body, state)
+	local context = message.role == "custom" and message_utils.agent_context(text) or nil
+	if context then text = message_utils.agent_payload_text(context.payload) or text end
 	local text_lines = vim.split(text, "\n", { plain = true })
 	add_message_separator(lines, has_body)
-	table.insert(lines, "## " .. message_role_title(message))
+	table.insert(lines, "## " .. message_role_title(message, state))
 	local header_line = #lines
 	table.insert(lines, "")
 	vim.list_extend(lines, text_lines)
@@ -195,7 +202,7 @@ local function append_assistant_blocks(ctx, lines, items, message, has_body, opt
 			return
 		end
 		add_message_separator(lines, has_body)
-		table.insert(lines, "## " .. message_role_title(message))
+		table.insert(lines, "## " .. message_role_title(message, ctx.state))
 		table.insert(lines, "")
 		started = true
 	end
@@ -388,6 +395,7 @@ local function render_dependencies(state)
 		session_file = state.session_file,
 		spawn_runs_session_file = state.spawn_runs_session_file,
 		spawn_runs = state.spawn_runs,
+		subagent = state.subagent,
 	}
 end
 
@@ -450,7 +458,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 			return false
 		end
 		add_message_separator(lines, has_body)
-		table.insert(lines, "## Assistant")
+		table.insert(lines, "## " .. message_role_title({ role = "assistant" }, ctx.state))
 		table.insert(lines, "")
 		has_body = true
 		assistant_block_open = true
@@ -619,7 +627,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 				local text = message_utils.extract_text(message)
 				if text and text ~= "" then
 					close_assistant_block()
-					append_text_message(lines, message, text, has_body)
+					append_text_message(lines, message, text, has_body, ctx.state)
 					appended = true
 					rendered_kind = "message"
 				end
@@ -628,7 +636,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 			local text = message_utils.extract_text(message)
 			if text and text ~= "" then
 				close_assistant_block()
-				append_text_message(lines, message, text, has_body)
+				append_text_message(lines, message, text, has_body, ctx.state)
 				appended = true
 				rendered_kind = "message"
 			end

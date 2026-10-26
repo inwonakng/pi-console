@@ -49,6 +49,8 @@ function M.paths(run, text)
 		end
 	end
 	artifacts.runId = run.runId or run.id
+	artifacts.agent = run.agent
+	artifacts.role = run.role
 	return found and artifacts or nil
 end
 
@@ -67,7 +69,11 @@ local function artifact_choices(artifacts, transcript_first)
 	for _, artifact in ipairs(artifact_types) do
 		local path = artifacts[artifact.key]
 		if type(path) == "string" and path ~= "" then
-			local choice = { label = artifact.label, kind = artifact.key, path = path, filetype = artifact.filetype, runId = artifacts.runId or path:match("/runs/([^/]+)/") }
+			local choice = {
+				label = artifact.label, kind = artifact.key, path = path, filetype = artifact.filetype,
+				runId = artifacts.runId or path:match("/runs/([^/]+)/"),
+				subagent = { agent = artifacts.agent, role = artifacts.role },
+			}
 			if transcript_first and artifact.key == "transcript" then
 				table.insert(choices, 1, choice)
 			else
@@ -167,7 +173,8 @@ local function select_artifact(ctx, choices, prompt, is_output, send_action)
 		if choice.kind == "send-action" then
 			send_action()
 		elseif choice.kind == "transcript" then
-			require("pi-integration.spawn-transcript").open(ctx, choice.path, "Spawn transcript", ctx.resources and { kind = "spawn", runId = choice.runId, artifact = choice.kind } or nil)
+			local query = ctx.resources and { kind = "spawn", runId = choice.runId, artifact = choice.kind } or nil
+			require("pi-integration.spawn-transcript").open(ctx, choice.path, "Spawn transcript", query, nil, choice.subagent)
 		else
 			ctx.resources.open({ kind = "spawn", runId = choice.runId, artifact = choice.kind }, "Spawn " .. choice.label, choice.filetype)
 		end

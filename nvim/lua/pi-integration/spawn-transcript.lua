@@ -121,11 +121,11 @@ local function open_item(ctx, state, parent_win)
 	return false
 end
 
-function M.open(ctx, path, title, query, contents)
+function M.open(ctx, path, title, query, contents, subagent)
 	assert(ctx.resources, "Session resources required")
 	if not contents then
 		query = query or { kind = "spawn", runId = path and path:match("/runs/([^/]+)/"), artifact = "transcript" }
-		ctx.resources.document(query, function(text, page) M.open(ctx, page.path, title, query, text) end)
+		ctx.resources.document(query, function(text, page) M.open(ctx, page.path, title, query, text, subagent) end)
 		return
 	end
 
@@ -135,6 +135,7 @@ function M.open(ctx, path, title, query, contents)
 	owner.spawn_buf = nil
 
 	local state = {
+		subagent = subagent,
 		show_nested_tools = false,
 		tool_outputs = {},
 		next_tool_output_id = 0,
@@ -203,7 +204,7 @@ function M.open(ctx, path, title, query, contents)
 	vim.keymap.set("n", "q", dismiss, { buffer = buf, silent = true, desc = "Close spawn transcript" })
 	vim.keymap.set("n", "<Esc>", dismiss, { buffer = buf, silent = true, desc = "Close spawn transcript" })
 	vim.keymap.set("n", "r", function()
-		M.open(ctx, path, title, query)
+		M.open(ctx, path, title, query, nil, subagent)
 	end, { buffer = buf, silent = true, desc = "Refresh spawn transcript" })
 	vim.keymap.set("n", "<CR>", function()
 		if not require("pi-integration.utils.markdown-links").follow((owner.workspace or {}).cwd, ctx.resources) then

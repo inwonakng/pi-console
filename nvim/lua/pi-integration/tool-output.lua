@@ -470,6 +470,45 @@ local function question_output(output)
 	return table.concat(lines, "\n"), "text"
 end
 
+local function agent_exchange_title(output)
+	if output.name == "spawn_question" then return "Question to orchestrator" end
+	if output.name == "spawn_report" then return "Assignment report" end
+	if output.name == "spawn_control" and type(output.args) == "table" and output.args.action == "reply" then
+		return "Orchestrator response"
+	end
+	return nil
+end
+
+local function agent_output(output)
+	if not is_spawn_output_name(output.name) and not agent_exchange_title(output) then return nil end
+	local context = message_utils.agent_context(output.text)
+	local details = type(output.details) == "table" and output.details or {}
+	local args = type(output.args) == "table" and output.args or {}
+	local response = context and message_utils.agent_payload_text(context.payload) or nil
+	if output.name == "spawn_question" or output.name == "spawn_report" then
+		response = type(details.text) == "string" and details.text or response
+		local body = output.name == "spawn_question" and args.question
+			or message_utils.agent_payload_text({ report = args })
+		if type(body) ~= "string" then body = "Not recorded." end
+		return table.concat({ output.name == "spawn_question" and "Question" or "Assignment report", "", body,
+			"", "Orchestrator response", "", response or "Awaiting orchestrator response." }, "\n"), "text"
+	end
+	if agent_exchange_title(output) then
+		local question
+		for _, request in ipairs(details.requests or {}) do
+			if request.id == args.requestId then question = request.question; break end
+		end
+		response = response or args.message
+		local text = "Orchestrator response\n\n" .. (response or "Not recorded.")
+		if question then text = "Question\n\n" .. question .. "\n\n" .. text end
+		return text, "text"
+	end
+	if response then
+		return message_utils.agent_label(context.sender, details) .. "\n\n" .. response, "text"
+	end
+	return nil
+end
+
 local function rendered_output(output)
 	if not output then
 		return "", "text"
@@ -480,6 +519,8 @@ local function rendered_output(output)
 	if output.is_error then
 		return output.text or "", "text"
 	end
+	local agent_text, agent_filetype = agent_output(output)
+	if agent_text then return agent_text, agent_filetype end
 	if output.name == "edit" then
 		local details = type(output.details) == "table" and output.details or {}
 		if type(details.patch) == "string" and details.patch ~= "" then
@@ -899,7 +940,8 @@ function M.summary_text(state, output_id)
 	local rendered_text = pending and output.text or rendered_output(output)
 	local lines = line_count_text(rendered_text)
 	local line_label = lines == 1 and "1 line" or (tostring(lines) .. " lines")
-	local label = "Tool: " .. tostring(output.name or "tool")
+	local exchange_title = agent_exchange_title(output)
+	local label = exchange_title or ("Tool: " .. tostring(output.name or "tool"))
 	if pending then
 		if output.display and output.display.kind == "bash" and output.display.command then
 			label = "Bash: " .. markdown_code_span(command_preview(output.display.command))
@@ -909,29 +951,23 @@ function M.summary_text(state, output_id)
 		local status = execution == "running" and "running" or "✗ interrupted"
 		return label .. " · " .. status .. (lines > 0 and (" · " .. line_label) or "")
 	end
+	if not output.is_error and exchange_title then return label .. " · " .. line_label end
 	if not output.is_error and (output.name == "spawn" or output.name == "spawn_control") then
-		label = "Subagent"
 		local details = type(output.details) == "table" and output.details or {}
+		label = message_utils.subagent_label(details)
 		if type(details.runs) == "table" then
 			local labels = {}
 			for index, run in ipairs(details.runs) do
 				run = type(run) == "table" and run or {}
-				local name = type(run.agent) == "string" and run.agent ~= "" and run.agent
-					or type(run.role) == "string" and run.role ~= "" and run.role or "Subagent"
-				table.insert(labels, name .. " " .. index .. " · " .. tostring(run.status or "unknown"))
+				table.insert(labels, message_utils.subagent_label(run) .. " " .. index .. " · " .. tostring(run.status or "unknown"))
 			end
 			return #labels > 0 and ("Subagents: " .. table.concat(labels, " · "))
-				or ("Subagents: " .. truncate_spawn_text(output.text ~= "" and output.text or "No subagents", 120))
-		end
-		if type(details.agent) == "string" and details.agent ~= "" then
-			label = label .. ": " .. details.agent
-		elseif type(details.role) == "string" and details.role ~= "" then
-			label = label .. ": " .. details.role
+				or ("Subagents: " .. truncate_spawn_text(rendered_text ~= "" and rendered_text or "No subagents", 120))
 		end
 		local status = type(details.status) == "string" and details.status or nil
-		-- Use structured progress for labels; keep raw tool text unchanged.
+		-- Prefer structured progress and keep protocol envelopes out of labels.
 		local progress_source = type(details.progress) == "string" and details.progress
-			or (run_id(details) and "" or output.text or "")
+			or (run_id(details) and "" or rendered_text or "")
 		local progress = truncate_spawn_text(progress_source, 120)
 		if status and progress == status then
 			progress = ""
@@ -1046,7 +1082,7 @@ function M.open_float(ctx, output_id, resolved)
 	end
 	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
 	local pending = call and (call.execution_status == "running" or call.execution_status == "interrupted")
-	if not pending and output.spawn and pi_spawn_artifacts.open_output(ctx, output) then
+	if not pending and not agent_exchange_title(output) and output.spawn and pi_spawn_artifacts.open_output(ctx, output) then
 		return true
 	end
 	if not pending and output.name == "edit" and not output.is_error and open_edit_diff_float(ctx, output) then
@@ -1066,7 +1102,7 @@ function M.open_float(ctx, output_id, resolved)
 	vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
 	local rendered_text, rendered_filetype = rendered_output(output)
 	if output.owner_full_text then rendered_text = output.owner_full_text end
-	if pending and output.name ~= "question" then
+	if pending and output.name ~= "question" and not agent_exchange_title(output) then
 		rendered_text, rendered_filetype = output.text, "text"
 	end
 	local full_output_note
@@ -1139,6 +1175,7 @@ function M.open_float(ctx, output_id, resolved)
 	end
 
 	local title = permission and ("Permission · " .. permission.status_label)
+		or agent_exchange_title(output)
 		or ("Tool: " .. tostring(output.name or "tool") .. (path and (" · " .. vim.fn.fnamemodify(path, ":t")) or ""))
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",
@@ -1154,6 +1191,7 @@ function M.open_float(ctx, output_id, resolved)
 	})
 
 	local wrap = output.name == "codemode" or output.name == "question" or output.name == "permission"
+		or agent_exchange_title(output) ~= nil or message_utils.agent_context(output.text) ~= nil
 	vim.api.nvim_set_option_value("wrap", wrap, { win = win })
 	if wrap then
 		vim.api.nvim_set_option_value("linebreak", true, { win = win })
