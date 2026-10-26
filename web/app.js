@@ -69,7 +69,7 @@ function reorderHandle(key, name) {
   handle.className = "reorder-handle";
   handle.setAttribute("aria-label", `Reorder ${name}`);
   handle.setAttribute("aria-describedby", "reorder-help");
-  handle.title = "Drag to reorder, or use up and down arrow keys";
+  handle.title = "Drag the session row (press and hold on touch), or use up and down arrow keys";
   handle.addEventListener("keydown", event => {
     if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
@@ -81,50 +81,95 @@ function reorderHandle(key, name) {
     [...$("session-list").children].find(node => node.dataset.key === key)?.querySelector(".reorder-handle").focus();
     $("reorder-status").textContent = `${name} moved ${event.key === "ArrowUp" ? "up" : "down"}.`;
   });
-  handle.addEventListener("pointerdown", event => {
-    if (event.button !== 0 || sessionDrag) return;
-    const entry = handle.closest(".session-entry");
-    sessionDrag = { key, entry, handle, pointerId: event.pointerId, startY: event.clientY, initial: [...sessionOrder], moved: false };
-    const list = $("session-list");
-    list.addEventListener("pointermove", move);
-    list.addEventListener("pointerup", finish);
-    list.addEventListener("pointercancel", finish);
-    list.addEventListener("lostpointercapture", finish);
-    list.setPointerCapture(event.pointerId);
-  });
-  const move = event => {
+  return handle;
+}
+function bindSessionDrag(heading, key) {
+  const list = $("session-list");
+  let holdTimer;
+  const start = (point, touch) => {
+    sessionDrag = { key, entry: heading.closest(".session-entry"), pointerId: point.pointerId,
+      startX: point.clientX, startY: point.clientY, touch, active: !touch, initial: [...sessionOrder], moved: false };
+    window.addEventListener("blur", cancel);
+  };
+  const move = point => {
     const drag = sessionDrag;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    if (!drag.moved && Math.abs(event.clientY - drag.startY) < 5) return;
+    const distance = Math.hypot(point.clientX - drag.startX, point.clientY - drag.startY);
+    if (!drag.active) {
+      if (distance > 8) finish(true);
+      return;
+    }
+    if (!drag.moved && distance < 5) return;
+    if (!drag.moved && !drag.touch) list.setPointerCapture(drag.pointerId);
     drag.moved = true;
     drag.entry.classList.add("reordering");
     const overview = $("overview"), bounds = overview.getBoundingClientRect();
-    if (event.clientY < bounds.top + 60) overview.scrollTop -= 16;
-    else if (event.clientY > bounds.bottom - 60) overview.scrollTop += 16;
-    const over = document.elementFromPoint(event.clientX, event.clientY)?.closest("#session-list > .session-entry");
+    if (point.clientY < bounds.top + 60) overview.scrollTop -= 16;
+    else if (point.clientY > bounds.bottom - 60) overview.scrollTop += 16;
+    const over = document.elementFromPoint(point.clientX, point.clientY)?.closest("#session-list > .session-entry");
     if (!over || over === drag.entry) return;
-    const rect = over.getBoundingClientRect(), after = event.clientY > rect.top + rect.height / 2;
+    const rect = over.getBoundingClientRect(), after = point.clientY > rect.top + rect.height / 2;
     moveSession(key, over.dataset.key, after);
     const before = after ? over.nextSibling : over;
     if (before !== drag.entry) over.parentElement.insertBefore(drag.entry, before);
   };
-  const finish = event => {
-    if (!sessionDrag || sessionDrag.pointerId !== event.pointerId) return;
+  const finish = (cancelled = false) => {
     const drag = sessionDrag;
+    if (!drag) return;
     sessionDrag = null;
-    if (event.type === "pointercancel") sessionOrder = [...drag.initial, ...sessionOrder.filter(key => !drag.initial.includes(key))];
+    clearTimeout(holdTimer);
+    window.removeEventListener("blur", cancel);
+    document.removeEventListener("pointermove", pointerMove);
+    document.removeEventListener("pointerup", pointerFinish);
+    document.removeEventListener("pointercancel", pointerFinish);
+    list.removeEventListener("lostpointercapture", pointerFinish);
+    document.removeEventListener("touchmove", touchMove);
+    document.removeEventListener("touchend", touchFinish);
+    document.removeEventListener("touchcancel", touchFinish);
+    if (!drag.touch && list.hasPointerCapture(drag.pointerId)) list.releasePointerCapture(drag.pointerId);
+    if (cancelled) sessionOrder = [...drag.initial, ...sessionOrder.filter(key => !drag.initial.includes(key))];
     if (drag.moved) saveSessionOrder();
     drag.entry.classList.remove("reordering");
-    const list = $("session-list");
-    list.removeEventListener("pointermove", move);
-    list.removeEventListener("pointerup", finish);
-    list.removeEventListener("pointercancel", finish);
-    list.removeEventListener("lostpointercapture", finish);
-    if (list.hasPointerCapture(event.pointerId)) list.releasePointerCapture(event.pointerId);
+    // Leave ordinary taps intact, including their original link target.
+    if (!drag.moved && !(drag.touch && drag.active)) return;
+    const suppressClick = event => { event.preventDefault(); event.stopImmediatePropagation(); };
+    list.addEventListener("click", suppressClick, true);
+    setTimeout(() => list.removeEventListener("click", suppressClick, true), 0);
     renderOverview();
-    [...$("session-list").children].find(node => node.dataset.key === key)?.querySelector(".reorder-handle").focus({ preventScroll: true });
+    [...list.children].find(node => node.dataset.key === key)?.querySelector(".reorder-handle").focus({ preventScroll: true });
   };
-  return handle;
+  const cancel = () => finish(true);
+  const pointerMove = event => { if (event.pointerId === sessionDrag?.pointerId) move(event); };
+  const pointerFinish = event => { if (event.pointerId === sessionDrag?.pointerId) finish(event.type !== "pointerup"); };
+  const touchMove = event => {
+    if (event.touches.length !== 1) { finish(true); return; }
+    if (sessionDrag.active) event.preventDefault();
+    move(event.touches[0]);
+  };
+  const touchFinish = event => {
+    if (sessionDrag.active) event.preventDefault();
+    finish(event.type === "touchcancel" || event.touches.length > 0);
+  };
+  heading.addEventListener("pointerdown", event => {
+    if (event.pointerType === "touch" || event.button !== 0 || sessionDrag) return;
+    start(event, false);
+    document.addEventListener("pointermove", pointerMove);
+    document.addEventListener("pointerup", pointerFinish);
+    document.addEventListener("pointercancel", pointerFinish);
+    list.addEventListener("lostpointercapture", pointerFinish);
+  });
+  heading.addEventListener("touchstart", event => {
+    if (sessionDrag || event.touches.length !== 1) return;
+    start(event.touches[0], true);
+    // Keep native scrolling until a stationary press activates reordering.
+    holdTimer = setTimeout(() => {
+      sessionDrag.active = true;
+      sessionDrag.entry.classList.add("reordering");
+    }, 400);
+    document.addEventListener("touchmove", touchMove, { passive: false });
+    document.addEventListener("touchend", touchFinish, { passive: false });
+    document.addEventListener("touchcancel", touchFinish, { passive: false });
+  }, { passive: true });
+  heading.addEventListener("contextmenu", event => { if (sessionDrag?.touch) event.preventDefault(); });
 }
 // Disconnecting a session keeps unsent text available in this page.
 const stoppedPromptDrafts = new Map();
@@ -397,6 +442,7 @@ function renderOverview() {
     const headingRow = text("div", "", "session-entry-heading");
     headingRow.append(reorderHandle(key, sessionName(row)), link);
     group.append(headingRow);
+    bindSessionDrag(headingRow, key);
     const runs = host.connected ? row.live?.subagentRuns || [] : [];
     if (!runs.length) return group;
     const details = text("details", "", "subagent-runs");
