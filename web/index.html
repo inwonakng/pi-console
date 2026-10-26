@@ -26,17 +26,9 @@
         <form id="connection-form" class="connection-form"><span id="channel" aria-label="Server channel"></span><button id="connect" type="submit">Connect</button></form>
         <div id="hosts" aria-label="Registered hosts"></div>
       </details>
-      <details class="hosts-panel">
-        <summary>Diagnostics</summary>
-        <label class="diagnostics-toggle"><input id="load-timings" type="checkbox">Show session load timings</label>
-      </details>
       <nav id="session-list" aria-label="Open sessions"><p class="empty">Connect to see sessions across registered hosts.</p></nav>
     </section>
   </main>
-  <section id="load-diagnostics" aria-label="Session load timings" hidden>
-    <div class="load-diagnostics-heading"><span>Session load timings</span><button id="hide-load-timings" type="button">Hide</button></div>
-    <pre id="load-diagnostics-output"></pre>
-  </section>
   <template id="conversation-template">
     <section class="conversation" aria-label="Session" hidden>
       <div data-id="notice" class="notice" role="alert" hidden></div>
@@ -85,7 +77,7 @@
           <details data-id="queue-panel" class="queue-panel" hidden><summary data-id="queue-summary">Queued prompts</summary><div data-id="queue"></div></details>
           <section data-id="workers-section" class="option-section" hidden><h3>Subagents</h3><div data-id="workers"></div></section>
           <section class="option-section"><h3>Session actions</h3><div class="session-actions"><button data-id="new-workspace">New in this workspace</button><button data-id="rename" disabled>Rename session</button><button data-id="detach">Disconnect from session</button><button data-id="stop" class="danger" disabled>Stop session</button></div></section>
-          <section class="option-section"><h3>Diagnostics</h3><button data-id="layout-diagnostics" type="button">Toggle layout diagnostics</button><button data-id="load-timings" type="button">Toggle load timings</button></section>
+          <section class="option-section"><h3>Diagnostics</h3><button data-id="layout-diagnostics" type="button">Toggle layout diagnostics</button></section>
           <p data-id="command-status" class="command-status" role="status"></p>
         </div>
       </section>
