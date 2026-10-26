@@ -863,7 +863,7 @@ local function poll_restart(host, pending)
 				host.restart = nil
 				notify(restart_message(host, receipt))
 				if receipt.error and receipt.error.code == "session_busy" and not pending.force then
-					vim.ui.select({ "Cancel", "Force restart server" }, { prompt = host.alias .. ": interrupt owned work? History/workspaces kept; sessions stay stopped." }, function(choice)
+					vim.ui.select({ "Force restart server", "Cancel" }, { prompt = host.alias .. ": interrupt owned work? History/workspaces kept; sessions stay stopped." }, function(choice)
 						if choice == "Force restart server" then restart_server(host, true) end
 					end)
 				end
@@ -882,7 +882,7 @@ restart_server = function(host, force)
 	if host.restart then notify("A restart is pending. Use Last server restart; it will not be replayed."); return end
 	local identity, epoch, connection = host.host_id, host.hello.serviceEpoch, host.connection
 	local label = force and "Force restart server" or "Restart server"
-	vim.ui.select({ "Cancel", label }, { prompt = label .. " on " .. host_label(host) .. " [" .. channel .. "]? "
+	vim.ui.select({ label, "Cancel" }, { prompt = label .. " on " .. host_label(host) .. " [" .. channel .. "]? "
 		.. (force and "Interrupts owned work." or "The server must be idle.") }, function(choice)
 		if choice ~= label then return end
 		if host.host_id ~= identity or host.connection ~= connection or host.hello.serviceEpoch ~= epoch then notify("Host connection changed; select restart again"); return end
