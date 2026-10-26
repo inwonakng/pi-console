@@ -1,5 +1,6 @@
 local floats = require("pi-integration.floats")
 local buffer_utils = require("pi-integration.utils.buffer")
+local markdown_render = require("pi-integration.markdown-render")
 
 local M = {}
 
@@ -97,7 +98,10 @@ local function open_text(ctx, title, path, filetype, is_output, page, query, anc
 	})
 
 	ctx.resources.qualify(buf, title, query.kind == "file" and path or nil)
+	local markdown = vim.bo[buf].filetype == "markdown"
+	if markdown then markdown_render.prepare_buffer(buf, { latex = true }) end
 	local width = math.min(math.max(72, math.floor(vim.o.columns * 0.82)), vim.o.columns - 4)
+	if markdown then width = math.min(width, 100) end
 	local height = math.min(math.max(16, math.floor(vim.o.lines * 0.75)), vim.o.lines - 4)
 	local row = math.max(1, math.floor((vim.o.lines - height) / 2))
 	local col = math.max(0, math.floor((vim.o.columns - width) / 2))
@@ -113,6 +117,9 @@ local function open_text(ctx, title, path, filetype, is_output, page, query, anc
 		title_pos = "left",
 	})
 	vim.api.nvim_set_option_value("wrap", true, { win = win })
+	vim.api.nvim_set_option_value("linebreak", true, { win = win })
+	vim.api.nvim_set_option_value("breakindent", true, { win = win })
+	if markdown then markdown_render.render(buf, win, { latex = true }) end
 	vim.api.nvim_set_option_value("number", false, { win = win })
 	vim.api.nvim_set_option_value("relativenumber", false, { win = win })
 	state.spawn_buf = buf

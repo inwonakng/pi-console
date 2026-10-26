@@ -2175,12 +2175,28 @@ function M.new_side()
 end
 function M.abort_side() command("side.abort", {}) end
 function M.pick_spawn()
+	-- Keep subagent metadata compact, with task text and paths on separate lines.
+	local function fields(lines, data, names)
+		if type(data) ~= "table" then return end
+		for _, field in ipairs(names) do
+			local value = data[field[1]]
+			if value ~= nil and value ~= vim.NIL then
+				table.insert(lines, "**" .. field[2] .. ":**")
+				table.insert(lines, "")
+				vim.list_extend(lines, vim.split(tostring(value), "\n", { plain = true }))
+				table.insert(lines, "")
+			end
+		end
+	end
 	local data, captured = status_data("pi-spawn-runs"), stamp()
 	vim.ui.select(data and data.runs or {}, { prompt = "Subagents", format_item = run_label }, function(run)
 		if not run or not same_context(captured) then return end
-		local details = { "Model: " .. run_model(run) }
+		local details = { "# Subagent", "", "**Model:** " .. run_model(run), "" }
+		fields(details, run, { { "agent", "Subagent profile" }, { "role", "Role" } })
+		vim.list_extend(details, { "## Assignment", "" })
 		local assignment = (run.assignments or {})[#(run.assignments or {})]
 		fields(details, assignment, { { "id", "Assignment" }, { "prompt", "Current task" }, { "outcome", "Outcome" } })
+		vim.list_extend(details, { "## Execution", "" })
 		fields(details, run, { { "execution", "Execution" }, { "readyForReview", "Ready for review" }, { "writerOwned", "Contribution unresolved" }, { "status", "Status" }, { "progress", "Latest activity" }, { "prompt", "Task" },
 			{ "error", "Error" }, { "cleanupError", "Cleanup error" },
 			{ "startedAt", "Started" }, { "completedAt", "Completed" },
@@ -2194,7 +2210,7 @@ function M.pick_spawn()
 			if not same_context(captured) then return end
 			if action == "Artifacts" then require("pi-integration.spawn-artifacts").pick_run({ state = state, ui = { notify = notify }, resources = owner_resources() }, run, function() end)
 			elseif action == "Inspect" then
-				local lines = { "# Subagent", "", "Model: " .. run_model(run) }
+				local lines = { "# Subagent", "", "**Model:** " .. run_model(run), "", "## Assignment", "" }
 				fields(lines, assignment, { { "id", "Assignment" }, { "prompt", "Current task" }, { "outcome", "Outcome" } })
 				for _, requests in ipairs({ run.requests or {}, run.permissionRequests or {} }) do
 					for _, pending in ipairs(requests) do
@@ -2205,7 +2221,8 @@ function M.pick_spawn()
 						end
 					end
 				end
-				fields(lines, run, { { "agent", "Agent" }, { "role", "Role" }, { "execution", "Execution" },
+				vim.list_extend(lines, { "## Profile and execution", "" })
+				fields(lines, run, { { "agent", "Subagent profile" }, { "role", "Role" }, { "execution", "Execution" },
 					{ "readyForReview", "Ready for review" }, { "writerOwned", "Contribution unresolved" }, { "status", "Status" },
 					{ "prompt", "Task" }, { "startedAt", "Started" }, { "completedAt", "Completed" },
 					{ "accessMode", "Access mode" }, { "isolation", "Isolation" }, { "mode", "Interaction mode" },
@@ -2219,7 +2236,11 @@ function M.pick_spawn()
 				fields(lines, run.integrationBlock, { { "integration", "Integration blocked" }, { "reason", "Reason" } })
 				for _, path in ipairs(run.changedFiles or {}) do table.insert(lines, "Changed: " .. path) end
 				for _, path in ipairs(run.unpreservedFiles or {}) do table.insert(lines, "Not preserved: " .. path) end
-				draft_buffer(scratch_name("owner-spawn"), table.concat(lines, "\n"))
+				local buf = draft_buffer(scratch_name("owner-spawn"), table.concat(lines, "\n"))
+				local markdown = require("pi-integration.markdown-render")
+				markdown.prepare_buffer(buf)
+				vim.wo.wrap, vim.wo.linebreak = true, true
+				markdown.render(buf, vim.api.nvim_get_current_win())
 			elseif action == "Join" or action == "Stop" then command(action == "Join" and "spawn.join" or "spawn.stop", { id = run.runId }, nil, captured) end
 		end)
 	end)

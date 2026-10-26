@@ -27,6 +27,7 @@ type ReadInput = {
   artifact?: Artifact;
   offset?: number;
   version?: string;
+  view?: "transcript";
 };
 type TextChunk = { text: string; path: string; offset: number; nextOffset: number | null; version: string; size: number };
 type FileEntry = { path: string; kind: "file" | "directory" };
@@ -35,6 +36,7 @@ type Opened = Target & { file: FileHandle; stamp: BigIntStats; canonical: string
 
 const CHUNK_BYTES = 64 * 1024;
 const RECORD_BYTES = 16 * 1024 * 1024;
+const VIEW_BYTES = 4 * 1024 * 1024;
 const SCAN_BYTES = 256 * 1024 * 1024;
 const DIRECTORY_ENTRIES = 10_000;
 const RUNS = 256;
@@ -65,10 +67,12 @@ function exact(value: unknown, keys: readonly string[]): value is Record<string,
   return object(value) && Object.keys(value).every((key) => keys.includes(key));
 }
 function readInput(value: unknown): ReadInput {
-  if (!exact(value, ["kind", "path", "runId", "artifact", "offset", "version"])
+  if (!exact(value, ["kind", "path", "runId", "artifact", "offset", "version", "view"])
     || typeof value.kind !== "string" || !["history", "file", "skill", "output", "spawn"].includes(value.kind)
     || (value.path !== undefined && !pathString(value.path)) || !offset(value.offset)
     || (value.version !== undefined && (typeof value.version !== "string" || !/^[a-f0-9]{64}$/.test(value.version)))
+    || (value.view !== undefined && (value.view !== "transcript" || value.kind !== "spawn" || value.artifact !== "transcript"
+      || value.offset !== undefined || value.version !== undefined))
     || ((value.offset as number | undefined) ?? 0) > 0 && value.version === undefined) {
     refuse("resource_payload", "Invalid read payload or missing continuation version");
   }
@@ -133,7 +137,7 @@ export async function canonical(target: Target, check: () => void): Promise<stri
 export function fingerprint(stamp: BigIntStats): string {
   return createHash("sha256").update([stamp.dev, stamp.ino, stamp.mode, stamp.uid, stamp.size, stamp.mtimeNs, stamp.ctimeNs].join(":")).digest("hex");
 }
-async function openTarget(target: Target, check: () => void): Promise<Opened> {
+async function openTarget(target: Target, check: () => void, appendOnly = false): Promise<Opened> {
   const path = await canonical(target, check);
   // NONBLOCK also prevents a raced FIFO from waiting for a writer before fstat.
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -145,7 +149,8 @@ async function openTarget(target: Target, check: () => void): Promise<Opened> {
       refuse("resource_denied", "Resource must be single-linked and owned by the service user");
     }
     const opened = { ...target, file, stamp, canonical: path };
-    await unchanged(opened, check);
+    if (appendOnly) await appended(opened, check);
+    else await unchanged(opened, check);
     return opened;
   } catch (error) { await file.close(); throw error; }
 }
@@ -154,6 +159,18 @@ async function unchanged(opened: Opened, check: () => void): Promise<void> {
   if (await canonical(opened, check) !== opened.canonical
     || fingerprint(await opened.file.stat({ bigint: true })) !== fingerprint(opened.stamp)
     || fingerprint(await lstat(opened.canonical, { bigint: true })) !== fingerprint(opened.stamp)) changed();
+  check();
+}
+/** Only transcript snapshots permit growth. Recheck the named file and descriptor,
+ * including ownership/link count, while the caller verifies the captured bytes. */
+async function appended(opened: Opened, check: () => void): Promise<void> {
+  check();
+  if (await canonical(opened, check) !== opened.canonical) changed();
+  for (const stamp of [await opened.file.stat({ bigint: true }), await lstat(opened.canonical, { bigint: true })]) {
+    if (!stamp.isFile() || stamp.dev !== opened.stamp.dev || stamp.ino !== opened.stamp.ino
+      || stamp.mode !== opened.stamp.mode || stamp.uid !== opened.stamp.uid || stamp.nlink !== opened.stamp.nlink
+      || stamp.size < opened.stamp.size) changed();
+  }
   check();
 }
 function decode(bytes: Buffer): string {
@@ -198,6 +215,65 @@ async function chunk(target: Target, input: ReadInput, check: () => void): Promi
     return { text, path: opened.canonical, offset: start, nextOffset: start + length < size ? start + length : null, version, size };
   } finally { await opened.file.close(); }
 }
+// Match spawn-transcript.read_messages: streaming message snapshots and protocol
+// chatter are never rendered. Keep permission entries and all inspectable tools.
+function transcriptRecord(record: unknown): boolean {
+  if (!object(record)) return false;
+  if (["message", "compaction", "branch_summary"].includes(String(record.type))) return true;
+  if (record.type === "custom" && record.customType === "pi-permission-history") return true;
+  const event = object(record.event) ? record.event : undefined;
+  return !!event && ["entry_appended", "message_end", "tool_execution_start", "tool_execution_update",
+    "tool_execution_end", "agent_end", "agent_settled", "child_exit"].includes(String(event.type));
+}
+async function transcriptView(target: Target, check: () => void): Promise<TextChunk> {
+  const opened = await openTarget(target, check, true);
+  try {
+    const size = Number(opened.stamp.size);
+    if (size > SCAN_BYTES) refuse("resource_oversize", "Transcript snapshot exceeds the 256 MiB scan limit; use raw paged text");
+    const parts: string[] = [];
+    let fragments: Buffer[] = [], recordSize = 0, viewSize = 0;
+    const captured = createHash("sha256");
+    for (let position = 0; position < size; position += CHUNK_BYTES) {
+      const block = await readBytes(opened, position, Math.min(CHUNK_BYTES, size - position), check);
+      captured.update(block);
+      let start = 0;
+      for (;;) {
+        const end = block.indexOf(10, start);
+        const fragment = block.subarray(start, end === -1 ? block.length : end);
+        recordSize += fragment.length;
+        if (recordSize > RECORD_BYTES) refuse("resource_oversize", "JSONL record exceeds 16 MiB");
+        fragments.push(fragment);
+        if (end === -1) break;
+        const bytes = Buffer.concat(fragments, recordSize);
+        fragments = []; recordSize = 0;
+        if (bytes.length) {
+          const text = decode(bytes);
+          let record: unknown;
+          try { record = JSON.parse(text); }
+          catch { refuse("resource_metadata", "Invalid JSONL record in transcript"); }
+          if (transcriptRecord(record)) {
+            viewSize += bytes.length + 1;
+            if (viewSize > VIEW_BYTES) refuse("resource_oversize", "Rendered transcript exceeds 4 MiB; use raw paged text");
+            parts.push(text + "\n");
+          }
+        }
+        start = end + 1;
+      }
+      await yieldTurn(); check();
+    }
+    // An unfinished tail (including a split UTF-8 sequence) is not yet a record.
+    // Verify the entire captured extent, rather than treating mtime changes from
+    // normal appends as conflicts or accepting edits to previously read bytes.
+    const verified = createHash("sha256");
+    for (let position = 0; position < size; position += CHUNK_BYTES) {
+      verified.update(await readBytes(opened, position, Math.min(CHUNK_BYTES, size - position), check));
+      await yieldTurn(); check();
+    }
+    if (captured.digest("hex") !== verified.digest("hex")) changed();
+    await appended(opened, check);
+    return { text: parts.join(""), path: opened.canonical, offset: 0, nextOffset: null, version: fingerprint(opened.stamp), size };
+  } finally { await opened.file.close(); }
+}
 export async function metadata(target: Target, check: () => void, budget: { bytes: number }): Promise<Record<string, unknown>> {
   const opened = await openTarget({ ...target, owned: true }, check);
   try {
@@ -236,8 +312,16 @@ class Provenance {
   private async validateRun(id: string, ancestors: readonly string[]): Promise<Record<string, unknown> | undefined> {
     const { context } = this;
     let status: Record<string, unknown>;
-    try { status = await metadata({ root: context.workspacesRoot, path: join(context.workspacesRoot, "runs", id, "status.json") }, context.check, this.metadataBudget); }
-    catch (error) { if (missing(error)) return; throw error; }
+    const target = { root: context.workspacesRoot, path: join(context.workspacesRoot, "runs", id, "status.json") };
+    try {
+      try { status = await metadata(target, context.check, this.metadataBudget); }
+      catch (error) {
+        // Status is atomically replaced as the worker progresses. Retry that
+        // small provenance read once, never the growing transcript or all files.
+        if (!(error instanceof CommandError) || error.code !== "resource_conflict") throw error;
+        status = await metadata(target, context.check, this.metadataBudget);
+      }
+    } catch (error) { if (missing(error)) return; throw error; }
     if (status.runId !== id || !pathString(status.parentSessionFile) || !isAbsolute(status.parentSessionFile)) return;
     if (await this.sameSession(status.parentSessionFile, context.sessionFile)) return status;
     const runsRoot = join(context.workspacesRoot, "runs");
@@ -435,7 +519,7 @@ export async function readResource(context: ResourceContext, input: unknown): Pr
         break;
       }
     }
-    return chunk(target, request, context.check);
+    return request.view === "transcript" ? transcriptView(target, context.check) : chunk(target, request, context.check);
   });
 }
 

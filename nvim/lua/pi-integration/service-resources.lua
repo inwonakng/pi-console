@@ -43,14 +43,17 @@ function M.new(options)
 		vim.bo[buf].modifiable, vim.bo[buf].readonly = false, true
 		resource.bind(buf, path)
 	end
-	function resource.read(query, callback)
+	function resource.read(query, callback, on_error)
 		if not alive() then options.notify("Session context changed; reopen the resource."); return end
 		viewer_sequence = viewer_sequence + 1
 		local ticket = viewer_sequence
 		local function fetch(payload)
 			options.request("resource.read", vim.tbl_extend("force", payload, { runtimeRevision = captured.revision }), function(ok, result)
 				if not alive() or ticket ~= viewer_sequence then return end
-				if not ok then options.notify(result.message or "Could not read resource"); return end
+				if not ok then
+					if on_error then on_error(result) else options.notify(result.message or "Could not read resource") end
+					return
+				end
 				callback(result.data)
 			end)
 		end

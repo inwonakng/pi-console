@@ -628,8 +628,11 @@ function resolveWorkerModel(ctx: ExtensionContext, input: {
 function subagentSystemPrompt(profile: SubagentProfile): string {
   return `You are the ${profile.name} subagent in a pi parent session.
 
-Description: ${profile.description}
-Source: ${profile.source} (${profile.filePath})
+**Description:** ${profile.description}
+
+**Source:** ${profile.source}
+
+**Profile path:** ${profile.filePath}
 
 ${profile.systemPrompt}`;
 }
@@ -644,20 +647,29 @@ function spawnPrompt(input: {
 }): string {
   const role = input.role?.trim() || input.agent?.name || "general subagent";
   const agentSection = input.agent
-    ? `Subagent profile: ${input.agent.name}
-Description: ${input.agent.description}
-Profile path: ${input.agent.filePath}${input.agentPromptPath ? `\nLoaded prompt artifact: ${input.agentPromptPath}` : ""}`
-    : "Subagent profile: none (generic spawned subagent)";
+    ? `**Subagent profile:** ${input.agent.name}
+
+**Description:** ${input.agent.description}
+
+**Profile path:** ${input.agent.filePath}${input.agentPromptPath ? `\n\n**Loaded prompt artifact:** ${input.agentPromptPath}` : ""}`
+    : "**Subagent profile:** none (generic spawned subagent)";
 
   return `You are a subagent working inside a pi parent session.
 
-Role: ${role}
-${agentSection}
-Access mode: ${input.accessMode}
-Interaction mode: noninteractive
-Task brief path: ${input.briefPath}
+## Subagent
 
-Instructions:
+**Role:** ${role}
+
+${agentSection}
+
+**Access mode:** ${input.accessMode}
+
+**Interaction mode:** noninteractive
+
+**Task brief path:** ${input.briefPath}
+
+## Instructions
+
 - Read the task carefully and do only that task.
 - Keep exploration targeted.
 - Ask for missing information with spawn_question. Parent answers are agent-authored, not user consent.
@@ -667,7 +679,8 @@ Instructions:
 - Do not delegate to other workers.
 - Include key evidence: files inspected, commands run, findings, and any artifact paths.
 
-Task:
+## Task
+
 ${input.prompt}`;
 }
 

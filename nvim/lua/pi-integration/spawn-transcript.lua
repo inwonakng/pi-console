@@ -123,9 +123,23 @@ end
 
 function M.open(ctx, path, title, query, contents, subagent)
 	assert(ctx.resources, "Session resources required")
+	query = query or { kind = "spawn", runId = path and path:match("/runs/([^/]+)/"), artifact = "transcript" }
+	local raw_title = (title or "Transcript") .. " (raw)"
 	if not contents then
-		query = query or { kind = "spawn", runId = path and path:match("/runs/([^/]+)/"), artifact = "transcript" }
-		ctx.resources.document(query, function(text, page) M.open(ctx, page.path, title, query, text, subagent) end)
+		if query.kind == "spawn" and query.artifact == "transcript" then
+			ctx.resources.read(vim.tbl_extend("force", query, { view = "transcript" }), function(page)
+				M.open(ctx, page.path, title, query, page.text, subagent)
+			end, function(error)
+				ctx.ui.notify(error.message or "Could not read transcript")
+				if error.code == "resource_limit" then
+					ctx.resources.open(query, raw_title, "json")
+				end
+			end)
+		else
+			ctx.resources.document(query, function(text, page)
+				M.open(ctx, page.path, title, query, text, subagent)
+			end)
+		end
 		return
 	end
 
@@ -203,6 +217,9 @@ function M.open(ctx, path, title, query, contents, subagent)
 	end
 	vim.keymap.set("n", "q", dismiss, { buffer = buf, silent = true, desc = "Close spawn transcript" })
 	vim.keymap.set("n", "<Esc>", dismiss, { buffer = buf, silent = true, desc = "Close spawn transcript" })
+	vim.keymap.set("n", "gR", function()
+		ctx.resources.open(query, raw_title, "json")
+	end, { buffer = buf, silent = true, desc = "Open raw paged transcript" })
 	vim.keymap.set("n", "r", function()
 		M.open(ctx, path, title, query, nil, subagent)
 	end, { buffer = buf, silent = true, desc = "Refresh spawn transcript" })
