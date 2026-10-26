@@ -26,6 +26,12 @@
         <summary>Hosts <span id="connection-state" role="status">Disconnected</span></summary>
         <form id="connection-form" class="connection-form"><span id="channel" aria-label="Server channel"></span><button id="connect" type="submit">Connect</button></form>
         <div id="hosts" aria-label="Registered hosts"></div>
+        <section id="overview-diagnostics" class="connection-diagnostics" aria-label="Connection diagnostics">
+          <h3>Diagnostics</h3>
+          <div class="session-actions"><button data-id="export-diagnostics" type="button">Export diagnostics</button><button data-id="clear-diagnostics" type="button">Clear diagnostics</button></div>
+          <p class="muted">Last 300 connection and page events, kept in this tab across reloads until cleared or the tab closes when browser storage is available; otherwise memory only. No messages, names, URLs or credentials. Export saves or shares a local JSON file; nothing is uploaded automatically.</p>
+          <p data-id="diagnostics-status" role="status"></p>
+        </section>
       </details>
       <p id="reorder-help" class="sr-only">Drag a session's reorder handle, or focus it and use the up and down arrow keys.</p>
       <p id="reorder-status" class="sr-only" role="status"></p>
@@ -81,7 +87,12 @@
           <details data-id="queue-panel" class="queue-panel" hidden><summary data-id="queue-summary">Queued prompts</summary><div data-id="queue"></div></details>
           <section data-id="workers-section" class="option-section" hidden><h3>Subagents</h3><div data-id="workers"></div></section>
           <section class="option-section"><h3>Session actions</h3><div class="session-actions"><button data-id="new-workspace">New in this workspace</button><button data-id="rename" disabled>Rename session</button><button data-id="detach">Disconnect from session</button><button data-id="stop" class="danger" disabled>Stop session</button></div></section>
-          <section class="option-section"><h3>Diagnostics</h3><button data-id="layout-diagnostics" type="button">Toggle layout diagnostics</button></section>
+          <section data-id="connection-diagnostics" class="option-section connection-diagnostics">
+            <h3>Diagnostics</h3>
+            <div class="session-actions"><button data-id="export-diagnostics" type="button">Export diagnostics</button><button data-id="clear-diagnostics" type="button">Clear diagnostics</button><button data-id="layout-diagnostics" type="button">Toggle layout diagnostics</button></div>
+            <p class="muted">Last 300 connection and page events, kept in this tab across reloads until cleared or the tab closes when browser storage is available; otherwise memory only. No messages, names, URLs or credentials. Export saves or shares a local JSON file; nothing is uploaded automatically.</p>
+            <p data-id="diagnostics-status" role="status"></p>
+          </section>
           <p data-id="command-status" class="command-status" role="status"></p>
         </div>
       </section>

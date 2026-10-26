@@ -1,13 +1,16 @@
 // Browser adapter for the existing LF-delimited service protocol. Authentication
 // and permission to upgrade a browser connection belong to the host listener.
+import { diagnosticConnection, diagnosticMethod, diagnosticCause, diagnosticServiceCode, recordDiagnostic } from "./diagnostics.js";
+
 export function requestId() {
   // randomUUID() is unavailable on non-local HTTP origins; getRandomValues works.
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
 export class ServiceClient {
-  constructor(onEvent) {
+  constructor(onEvent, diagnostics = {}) {
     this.onEvent = onEvent;
+    this.diagnostics = diagnosticConnection(diagnostics.role, diagnostics.hostGroup);
     this.pending = new Map();
     this.socket = null;
     this.closed = false;
@@ -19,7 +22,9 @@ export class ServiceClient {
       throw new Error("Invalid same-origin host stream");
     }
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    recordDiagnostic("connect_start", this.diagnostics);
     const socket = this.socket = new WebSocket(url);
+    socket.addEventListener("open", () => recordDiagnostic("socket_open", this.diagnostics));
     socket.binaryType = "arraybuffer";
     let buffer = "";
     const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -43,15 +48,22 @@ export class ServiceClient {
               delivery: record.error?.delivery || (record.error?.code === "service_disconnected" ? "uncertain" : "rejected"),
             }));
           } else {
+            if (record.type === "disconnected") recordDiagnostic("service_disconnected", { ...this.diagnostics, code: diagnosticServiceCode(record.code) });
             // Preserve response/event ordering when several records share a frame.
             queueMicrotask(() => { if (!this.closed) this.onEvent(record); });
           }
         }
-      } catch (error) { this.close(error.message); }
+      } catch (error) { this.close(error.message, "invalid_record"); }
     });
-    socket.addEventListener("close", () => this.close("Disconnected. Commands were not replayed; inspect the session before sending again."));
-    socket.addEventListener("error", () => this.close("Connection failed. Check the host's browser connection setup, then reconnect."));
-    const deadline = setTimeout(() => this.close("Connection timed out"), 10000);
+    socket.addEventListener("close", event => {
+      recordDiagnostic("socket_close", { ...this.diagnostics, code: event.code, wasClean: event.wasClean, reason: event.reason ? "omitted" : "empty" });
+      this.close("Disconnected. Commands were not replayed; inspect the session before sending again.", "socket_closed");
+    });
+    socket.addEventListener("error", () => {
+      recordDiagnostic("socket_error", this.diagnostics);
+      this.close("Connection failed. Check the host's browser connection setup, then reconnect.", "socket_error");
+    });
+    const deadline = setTimeout(() => this.close("Connection timed out", "connect_timeout"), 10000);
     try {
       await new Promise((resolve, reject) => {
         socket.addEventListener("open", resolve, { once: true });
@@ -63,8 +75,9 @@ export class ServiceClient {
         throw new Error("Incompatible host protocol or channel");
       }
       if (expectedHostId && hello.hostId !== expectedHostId) throw new Error("Host identity changed. Review its registration in pi-console Hosts before reconnecting.");
+      recordDiagnostic("handshake_complete", this.diagnostics);
       return hello;
-    } catch (error) { this.close(error.message); throw error; }
+    } catch (error) { this.close(error.message, "handshake_failed"); throw error; }
     finally { clearTimeout(deadline); }
   }
 
@@ -76,15 +89,19 @@ export class ServiceClient {
     const record = JSON.stringify({ id, method, payload }) + "\n";
     if (new TextEncoder().encode(record).length > 2 * 1024 * 1024) return Promise.reject(Object.assign(new Error("Request is too large"), { delivery: "not_sent" }));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.close("Lost connection to the server. Your last action may still have gone through. Reconnect and check before trying again."), 30000);
+      const timer = setTimeout(() => {
+        recordDiagnostic("request_timeout", { ...this.diagnostics, method: diagnosticMethod(method), pending: this.pending.size });
+        this.close("Lost connection to the server. Your last action may still have gone through. Reconnect and check before trying again.", "request_timeout");
+      }, 30000);
       this.pending.set(id, { resolve, reject, timer });
       try { this.socket.send(record); }
-      catch (error) { this.close(error.message); }
+      catch (error) { this.close(error.message, "send_failed"); }
     });
   }
 
-  close(message = "Disconnected") {
+  close(message = "Disconnected", cause = "unspecified") {
     if (this.closed) return;
+    recordDiagnostic("local_close", { ...this.diagnostics, cause: diagnosticCause(cause), pending: this.pending.size });
     this.closed = true;
     this.socket?.close();
     for (const pending of this.pending.values()) {

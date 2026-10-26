@@ -1,6 +1,7 @@
 import { ServiceClient, requestId } from "./client.js";
 import { renderMarkdown } from "./markdown.js";
 import { snapshotQuery, mergeSnapshot } from "./snapshot.js";
+import { exportDiagnostics, clearDiagnostics } from "./diagnostics.js";
 
 const $ = id => document.getElementById(id);
 const channel = document.documentElement.dataset.piChannel;
@@ -19,6 +20,22 @@ const button = (label, action, disabled = false) => {
   return node;
 };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const diagnosticHosts = new WeakMap();
+let nextDiagnosticHost = 0;
+function connectionDiagnostics(host, role) {
+  if (!diagnosticHosts.has(host)) diagnosticHosts.set(host, ++nextDiagnosticHost);
+  return { role, hostGroup: diagnosticHosts.get(host) };
+}
+function bindDiagnostics(panel) {
+  const status = panel.querySelector('[data-id="diagnostics-status"]');
+  panel.querySelector('[data-id="export-diagnostics"]').addEventListener("click", () => {
+    void exportDiagnostics().then(message => { status.textContent = message; }).catch(() => {
+      status.textContent = "Could not export diagnostics on this browser.";
+    });
+  });
+  panel.querySelector('[data-id="clear-diagnostics"]').addEventListener("click", () => { status.textContent = clearDiagnostics(); });
+}
+bindDiagnostics($("overview-diagnostics"));
 const sessionName = row => row?.name || row?.cwd?.split("/").filter(Boolean).pop() || "Untitled session";
 const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
@@ -160,7 +177,7 @@ function sameOwner(host, value) {
 }
 function setSummaries(host, value) {
   if (!sameOwner(host, value) || !Array.isArray(value.sessions)) {
-    host.client.close("Host identity changed. Reconnect explicitly."); return;
+    host.client.close("Host identity changed. Reconnect explicitly.", "host_identity_changed"); return;
   }
   host.sessions = value.sessions;
   rememberSessions(host);
@@ -185,7 +202,7 @@ async function connectHost(host) {
       renderScreens();
       if ($("history-dialog").open) renderHistory();
     } else if (record.type === "summaries" && host.hello) setSummaries(host, record.result);
-  });
+  }, connectionDiagnostics(host, "host"));
   host.client = next;
   renderOverview();
   try {
@@ -195,7 +212,7 @@ async function connectHost(host) {
     host.connected = true;
     setSummaries(host, await next.request("sessions.subscribe"));
     route();
-  } catch (error) { host.connected = false; host.error = error.message; next.close(error.message); }
+  } catch (error) { host.connected = false; host.error = error.message; next.close(error.message, "host_setup_failed"); }
   finally { host.connecting = false; renderOverview(); }
 }
 async function connectAll() {
@@ -223,7 +240,7 @@ async function connectAll() {
     });
     for (const host of previous) {
       if (!hosts.includes(host) || host.enabled === false) {
-        host.client?.close("Host registration removed, disabled or changed.");
+        host.client?.close("Host registration removed, disabled or changed.", "host_registration_changed");
         for (const conversation of conversations.values()) if (conversation.host === host) conversation.disconnect();
       }
     }
@@ -282,7 +299,7 @@ async function restartHost(host, force = false) {
         notice(`${host.alias}: ${host.restartMessage}`);
         return;
       }
-      host.client.close("Refreshing the replacement server identity.");
+      host.client.close("Refreshing the replacement server identity.", "server_identity_refresh");
     }
     throw new Error(`Restart ${query.id} is unconfirmed. Check Last restart or service.log before retrying. Restart was not replayed.`);
   } catch (error) {
@@ -626,10 +643,10 @@ document.addEventListener("visibilitychange", refreshViewedStatus);
 window.addEventListener("hashchange", route);
 window.addEventListener("popstate", route);
 window.addEventListener("pagehide", event => {
-  for (const host of hosts) host.client?.close();
+  for (const host of hosts) host.client?.close(undefined, "pagehide");
   for (const conversation of conversations.values()) {
-    if (event.persisted) conversation.disconnect("Page suspended. Reconnect explicitly to continue.");
-    else conversation.dispose();
+    if (event.persisted) conversation.disconnect("Page suspended. Reconnect explicitly to continue.", "pagehide");
+    else conversation.dispose("pagehide");
   }
 });
 window.addEventListener("pageshow", event => {
@@ -743,7 +760,7 @@ function createConversation(host, row) {
     } else if (record.type === "update" && record.update.sessionId === selectedId) {
       const update = record.update;
       if (update.serviceEpoch !== hello.serviceEpoch || update.sequence !== streamSequence + 1) {
-        client.close("Session stream changed or skipped an update. Reconnect for a fresh snapshot.");
+        client.close("Session stream changed or skipped an update. Reconnect for a fresh snapshot.", "stream_changed");
         return;
       }
       streamSequence = update.sequence;
@@ -1396,6 +1413,7 @@ function createConversation(host, row) {
       else scheduleViewedResponse();
     }
   }));
+  bindDiagnostics($("connection-diagnostics"));
   $("layout-diagnostics").addEventListener("click", toggleViewportDiagnostics);
   $("refresh-settings").addEventListener("click", () => { void loadSettings(); });
   $("abort").addEventListener("click", () => run(() => command("turn.abort")));
@@ -1504,12 +1522,12 @@ function createConversation(host, row) {
       if (disposed) return;
       const currentRow = host.sessions.find(item => item.id === selectedId);
       if (!currentRow?.live) throw new Error("This session is stopped. Open History to resume it explicitly.");
-      client?.close();
-      const next = new ServiceClient(record => { if (!disposed && client === next) receive(record); });
+      client?.close(undefined, "session_reconnect");
+      const next = new ServiceClient(record => { if (!disposed && client === next) receive(record); }, connectionDiagnostics(host, "session"));
       client = next;
       grant = null;
       hello = await next.connect(channel, host.stream, host.hello.hostId);
-      if (disposed) { next.close(); return; }
+      if (disposed) { next.close(undefined, "session_disposed"); return; }
       connected = true;
       try {
         const value = await next.request("attach", { sessionId: selectedId, label: controllerLabel });
@@ -1520,7 +1538,7 @@ function createConversation(host, row) {
         transcriptKey = interactionKey = "";
         viewedResponse = null;
         applySnapshot(value.snapshot);
-      } catch (error) { next.close(error.message); throw error; }
+      } catch (error) { next.close(error.message, "session_attach_failed"); throw error; }
     });
   }
   return {
@@ -1530,7 +1548,7 @@ function createConversation(host, row) {
     viewed() { if (snapshot) renderSession(); },
     connected: () => connected,
     rebind(current) { host = current; if (snapshot) renderSession(); },
-    disconnect(message = "Host registration removed, disabled or changed.") { client?.close(message); },
+    disconnect(message = "Host registration removed, disabled or changed.", cause = "host_registration_changed") { client?.close(message, cause); },
     syncRow(value) {
       row = value || { ...row, live: undefined };
       if (!row.live) {
@@ -1563,12 +1581,12 @@ function createConversation(host, row) {
       if (snapshot) renderSession();
       (activeScreen === "options" ? $("options-screen") : $("chat-screen")).focus({ preventScroll: true });
     },
-    dispose() {
+    dispose(cause = "session_disposed") {
       disposed = true;
       clearInterval(heartbeat); clearTimeout(refreshTimer);
       cancelAnimationFrame(viewFrame);
       transcriptResize.disconnect();
-      client?.close();
+      client?.close(undefined, cause);
     },
   };
 }

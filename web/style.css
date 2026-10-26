@@ -83,6 +83,10 @@ label { font-size: 12px; color: var(--muted); }
 .host-state span { overflow-wrap: anywhere; min-width: 0; }
 .host-message, .host-error { flex-basis: 100%; overflow-wrap: anywhere; }
 .host-error { color: var(--danger); }
+#overview-diagnostics { margin: 0 12px; padding: 12px 0; border-top: 1px solid var(--border); }
+.connection-diagnostics h3, .connection-diagnostics .session-actions { margin-bottom: 10px; }
+.connection-diagnostics p { font-size: 12px; }
+[data-id="diagnostics-status"]:not(:empty) { margin-top: 10px; }
 #session-list { border-top: 1px solid var(--border); }
 .empty { padding: 24px; font-size: 12px; }
 .session-entry { border-bottom: 1px solid var(--border); }
