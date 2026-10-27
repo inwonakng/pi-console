@@ -55,20 +55,39 @@ end
 
 function M.subagent_label(node)
 	local run = node.run
-	local name = M.text(run.agent)
-	if name == "" then name = M.text(run.role) end
-	if name == "" then name = "Subagent" end
-	local model = type(run.selectedModel) == "table" and (M.text(run.selectedModel.provider) .. "/" .. M.text(run.selectedModel.id)) or ""
-	if model ~= "" then name = name .. " / " .. model end
-	local progress = M.text(run.progress)
-	local state = run.readyForReview and "ready for review" or M.text(run.execution or run.status)
-	if run.writerOwned then state = state .. " / contribution unresolved" end
-	if run.integration then state = state .. " / " .. M.text(run.integration) end
-	local assignment = type(run.assignment) == "table" and run.assignment or {}
-	if assignment.id then state = state .. " / " .. M.text(assignment.id) .. " (" .. M.text(assignment.outcome) .. ")" end
+	local execution = M.text(run.execution or run.status)
+	local states = {
+		working = "Working", running = "Working", waiting_parent = "Waiting for parent", waiting_user = "Waiting for user",
+		idle = "Idle", closing = "Stopping", closed = "Closed", failed = "Failed", cancelled = "Cancelled",
+		completed = "Done", error = "Error", aborted = "Stopped",
+	}
+	local state = states[execution] or (execution ~= "" and execution or "Unknown")
 	local pending = type(run.pendingRequests) == "table" and run.pendingRequests or {}
-	for _, request in ipairs(pending) do state = state .. " / " .. M.text(request.kind) .. ": " .. M.text(request.id) end
-	return "       " .. icons.subagent_icon .. " " .. name .. " · " .. state .. (progress ~= "" and (" — " .. progress) or "")
+	for _, request in ipairs(pending) do
+		if request.kind == "question" then state = "Waiting for reply" end
+		if request.kind == "permission" then state = "Waiting for approval"; break end
+	end
+	local parts = { state }
+	if (execution == "working" or execution == "running") and #pending == 0 then
+		local progress = M.text(run.progress)
+		local agent = M.text(run.agent)
+		local prefix = agent ~= "" and (agent .. " subagent ") or "Subagent "
+		if progress:sub(1, #prefix) == prefix then progress = progress:sub(#prefix + 1) end
+		-- Keep activity, without startup IDs, tool arguments, or report contents.
+		if progress:match("^%S+ started %(") then progress = "" end
+		progress = progress:match("^(running %S+)") or progress:match("^(completed %S+)")
+			or progress:gsub("^(writing final report):.*", "%1…")
+		if progress ~= "" then table.insert(parts, progress) end
+	end
+	local code_states = {
+		pending = "pending", applied = "integrated", none = "no changes",
+		needs_parent = "needs attention", failed = "integration failed",
+	}
+	local code = code_states[run.integration]
+	if run.readyForReview and (not code or run.integration == "pending") then code = "ready for review" end
+	if not code and run.writerOwned then code = "unresolved" end
+	if code then table.insert(parts, "code: " .. code) end
+	return "       " .. icons.subagent_icon .. " " .. table.concat(parts, " · ")
 end
 
 function M.new()
