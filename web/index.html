@@ -103,8 +103,10 @@
       <h2>New session</h2>
       <label for="create-host">Execution host</label><select id="create-host" required></select>
       <label for="cwd">Directory on the host</label>
-      <input id="cwd" placeholder="/absolute/project/path" required autocomplete="off">
-      <p class="muted">Use the execution host's path, not this device's.</p>
+      <input id="cwd" placeholder="/absolute/project/path or ~/project" required autocomplete="off" autocapitalize="none" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="cwd-suggestions" aria-describedby="cwd-help cwd-status">
+      <div id="cwd-suggestions" role="listbox" aria-label="Directory suggestions" hidden></div>
+      <p id="cwd-status" class="muted" role="status" hidden></p>
+      <p id="cwd-help" class="muted">Use the execution host's path, not this device's. ~ expands to its home directory.</p>
       <div class="dialog-actions"><button id="cancel-create" type="button">Cancel</button><button type="submit">Create session</button></div>
     </form>
   </dialog>

@@ -215,6 +215,10 @@ dialog p { font-size: 12px; margin-top: 10px; }
 .dialog-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .dialog-heading button { flex-shrink: 0; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+#cwd-suggestions { max-height: 220px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border); border-radius: 6px; margin-top: 4px; }
+.directory-option { padding: 10px 12px; min-height: 44px; overflow-wrap: anywhere; cursor: pointer; font-size: 12px; }
+.directory-option[aria-selected="true"] { background: var(--hover); outline: 1px solid var(--accent); outline-offset: -1px; }
+@media (hover: hover) { .directory-option:hover { background: var(--hover); } }
 #history-dialog { width: min(900px, calc(100% - 32px)); }
 #history-dialog .filters { padding: 0; }
 .history-row { display: flex; align-items: center; gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--border); }

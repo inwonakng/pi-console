@@ -615,7 +615,87 @@ function showCreate(inWorkspace = false) {
   if (!host) { notice("Connect to an execution host first."); return; }
   $("create-host").value = host.key;
   $("cwd").value = inWorkspace ? conversation?.cwd() || "" : "";
+  $("cwd").setCustomValidity("");
   $("create-dialog").showModal();
+  refreshDirectories();
+}
+
+let directoryTimer, directoryGeneration = 0, directorySelection = -1;
+function clearDirectories() {
+  clearTimeout(directoryTimer);
+  directoryGeneration++;
+  directorySelection = -1;
+  $("cwd-suggestions").replaceChildren();
+  $("cwd-suggestions").hidden = true;
+  $("cwd").setAttribute("aria-expanded", "false");
+  $("cwd").removeAttribute("aria-activedescendant");
+  directoryStatus("");
+}
+function directoryStatus(message) {
+  $("cwd-status").textContent = message;
+  $("cwd-status").hidden = !message;
+}
+function selectDirectory(path) {
+  $("cwd").value = path.endsWith("/") ? path : path + "/";
+  $("cwd").setCustomValidity("");
+  $("cwd").focus();
+  refreshDirectories();
+}
+function renderDirectories(paths) {
+  directorySelection = -1;
+  $("cwd").removeAttribute("aria-activedescendant");
+  $("cwd-suggestions").replaceChildren(...paths.map((path, index) => {
+    const option = text("div", path, "directory-option");
+    option.id = `cwd-option-${index}`;
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", "false");
+    option.addEventListener("pointerdown", event => event.preventDefault());
+    option.addEventListener("click", () => selectDirectory(path));
+    return option;
+  }));
+  $("cwd-suggestions").hidden = !paths.length;
+  $("cwd").setAttribute("aria-expanded", String(Boolean(paths.length)));
+}
+function refreshDirectories() {
+  clearDirectories();
+  if (!$("create-dialog").open) return;
+  const host = hosts.find(host => host.key === $("create-host").value);
+  if (!host?.connected || navigator.onLine === false) { directoryStatus("Connect to this host while online for suggestions."); return; }
+  const value = $("cwd").value.trim();
+  if (!value) {
+    // Host summaries are already ordered by most recent session activity.
+    const paths = [...new Set(host.sessions.map(row => row.cwd))].slice(0, 10);
+    renderDirectories(paths);
+    directoryStatus(paths.length ? "Recent directories" : "Type an absolute path or ~/ to browse directories.");
+    return;
+  }
+  if (!value.startsWith("/") && value !== "~" && !value.startsWith("~/")) {
+    directoryStatus("Use an absolute directory path or ~/ on the host.");
+    return;
+  }
+  const generation = directoryGeneration, connection = host.client, epoch = host.hello.serviceEpoch;
+  const current = () => generation === directoryGeneration && $("create-dialog").open
+    && host.client === connection && host.hello.serviceEpoch === epoch;
+  const slash = value.lastIndexOf("/");
+  const parent = value === "~" ? "~" : value.slice(0, slash + 1);
+  const prefix = value === "~" ? "" : value.slice(slash + 1);
+  directoryTimer = setTimeout(async () => {
+    const paths = [];
+    let offset;
+    directoryStatus("Loading directories...");
+    try {
+      do {
+        const page = await connection.request("host.directories", { serviceEpoch: epoch, path: parent, ...(offset === undefined ? {} : { offset }) });
+        if (!current()) return;
+        paths.push(...page.entries.filter(path => path.slice(path.lastIndexOf("/") + 1).startsWith(prefix)));
+        offset = page.nextOffset;
+      } while (paths.length < 10 && offset !== null);
+      renderDirectories(paths.slice(0, 10));
+      directoryStatus(paths.length ? "" : "No matching directories.");
+    } catch (error) {
+      if (current()) directoryStatus(`Could not suggest directories: ${error.message}`);
+    }
+  }, 150);
 }
 function renderScreens() {
   for (const [key, conversation] of conversations) {
@@ -760,25 +840,58 @@ $("refresh-app").addEventListener("click", () => location.reload());
 $("connection-form").addEventListener("submit", event => { event.preventDefault(); perform(connectAll); });
 $("new-session").addEventListener("click", () => showCreate());
 $("cancel-create").addEventListener("click", () => $("create-dialog").close());
-$("create-host").addEventListener("change", () => { $("cwd").value = ""; });
+$("create-host").addEventListener("change", () => {
+  $("cwd").value = "";
+  $("cwd").setCustomValidity("");
+  refreshDirectories();
+});
+$("create-dialog").addEventListener("close", clearDirectories);
 $("create-form").addEventListener("submit", event => {
   event.preventDefault();
   const host = hosts.find(host => host.key === $("create-host").value);
   const cwd = $("cwd").value.trim();
-  if (!cwd.startsWith("/")) { $("cwd").setCustomValidity("Use an absolute directory path on the host."); $("cwd").reportValidity(); return; }
+  if (!cwd.startsWith("/") && cwd !== "~" && !cwd.startsWith("~/")) {
+    $("cwd").setCustomValidity("Use an absolute directory path or ~/ on the host.");
+    $("cwd").reportValidity();
+    return;
+  }
   const submit = $("create-form").querySelector('[type="submit"]');
   if (submit.disabled) return;
   submit.disabled = true;
   perform(async () => {
     try {
-      const id = await hostCommand(host, "host.create", { cwd });
+      if (!host?.connected || navigator.onLine === false) throw new Error("Connect to this host while online first.");
+      const connection = host.client, epoch = host.hello.serviceEpoch;
+      const path = cwd.startsWith("~")
+        ? (await connection.request("host.directories", { serviceEpoch: epoch, path: cwd })).path : cwd;
+      if (host.client !== connection || host.hello.serviceEpoch !== epoch) throw new Error("Host connection changed; create the session again.");
+      const id = await hostCommand(host, "host.create", { cwd: path });
       setSummaries(host, await host.client.request("sessions.subscribe"));
       $("create-dialog").close();
       navigate(sessionRoute(host, { id }));
     } finally { submit.disabled = false; }
   });
 });
-$("cwd").addEventListener("input", () => $("cwd").setCustomValidity(""));
+$("cwd").addEventListener("input", () => { $("cwd").setCustomValidity(""); refreshDirectories(); });
+$("cwd").addEventListener("focus", refreshDirectories);
+$("cwd").addEventListener("blur", clearDirectories);
+$("cwd").addEventListener("keydown", event => {
+  if (event.isComposing) return;
+  const options = [...$("cwd-suggestions").children];
+  if (event.key === "Escape" && options.length) { event.preventDefault(); clearDirectories(); return; }
+  if (["ArrowDown", "ArrowUp"].includes(event.key) && options.length) {
+    event.preventDefault();
+    directorySelection = directorySelection < 0 ? (event.key === "ArrowDown" ? 0 : options.length - 1)
+      : (directorySelection + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+    options.forEach((option, index) => option.setAttribute("aria-selected", String(index === directorySelection)));
+    const selected = options[directorySelection];
+    $("cwd").setAttribute("aria-activedescendant", selected.id);
+    selected.scrollIntoView({ block: "nearest" });
+  } else if (event.key === "Enter" && directorySelection >= 0) {
+    event.preventDefault();
+    selectDirectory(options[directorySelection].textContent);
+  }
+});
 $("search").addEventListener("input", renderOverview);
 $("host-filter").addEventListener("change", renderOverview);
 $("history").addEventListener("click", showHistory);
