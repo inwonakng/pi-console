@@ -1300,6 +1300,110 @@ function removeWorkspaceLocked(record: WorkspaceRecord, finalLifecycle: "integra
   return record;
 }
 
+export type WorkspaceCleanup = { workspaces: number; runs: number; failed: number };
+
+/** Owner-only retention. The server fences session admission for the entire sweep. */
+export async function cleanupWorkspaces(cutoff: number, protectedSessions: string[], protectedCwds: string[]): Promise<WorkspaceCleanup> {
+  if (!Number.isFinite(cutoff) || cutoff > Date.now() - 7 * 24 * 60 * 60 * 1000) throw new Error("Invalid workspace retention cutoff");
+  ensureDirectories();
+  const result: WorkspaceCleanup = { workspaces: 0, runs: 0, failed: 0 };
+  const safeId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id);
+  const protectedSession = (path: string | undefined) => !!path && protectedSessions.some(file => sameSessionFile(file, path));
+  // lstat never follows worktree symlinks. Directory times also catch deletions.
+  const inactive = (path: string, recursive = false): boolean => {
+    const pending = [path];
+    while (pending.length) {
+      const current = pending.pop()!;
+      let info: ReturnType<typeof lstatSync>;
+      try { info = lstatSync(current); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+      if (Math.max(info.mtimeMs, info.ctimeMs) >= cutoff) return false;
+      if (recursive && info.isDirectory()) for (const name of readdirSync(current)) pending.push(join(current, name));
+    }
+    return true;
+  };
+  type CleanupRun = { id: string; path: string; parentSessionFile?: string; childSessionFile?: string; workspaceId?: string;
+    ownerPid?: number; settled: boolean; cleanupError: boolean };
+  const runs = new Map<string, CleanupRun>();
+  const runsRoot = join(WORKSPACE_ROOT, "runs");
+  if (existsSync(runsRoot)) for (const entry of readdirSync(runsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !safeId(entry.name)) continue;
+    const path = join(runsRoot, entry.name);
+    try {
+      const data = JSON.parse(readFileSync(join(path, "status.json"), "utf8")) as Record<string, unknown>;
+      if (data.runId !== entry.name) throw new Error("Invalid run record");
+      const worktree = data.worktree as { workspaceId?: unknown } | null | undefined;
+      runs.set(entry.name, { id: entry.name, path, parentSessionFile: typeof data.parentSessionFile === "string" ? data.parentSessionFile : undefined,
+        childSessionFile: typeof data.childSessionFile === "string" ? data.childSessionFile : undefined,
+        workspaceId: typeof worktree?.workspaceId === "string" ? worktree.workspaceId : undefined,
+        ownerPid: typeof data.ownerPid === "number" && Number.isSafeInteger(data.ownerPid) && data.ownerPid > 0 ? data.ownerPid : undefined,
+        settled: data.settled === true, cleanupError: !!data.cleanupError });
+    } catch { result.failed++; }
+  }
+  const runExpired = (run: CleanupRun): boolean => run.settled && !run.cleanupError
+    && !(run.ownerPid !== undefined && processAlive(run.ownerPid))
+    && !protectedSession(run.parentSessionFile) && !protectedSession(run.childSessionFile)
+    && (!run.parentSessionFile || inactive(run.parentSessionFile))
+    && (!run.childSessionFile || inactive(run.childSessionFile)) && inactive(run.path, true);
+  const recordExpired = (record: WorkspaceRecord): boolean => {
+    if (!safeId(record.id) || !Number.isFinite(Date.parse(record.updatedAt)) || Date.parse(record.updatedAt) >= cutoff
+      || record.managedCleanupPending || record.integrationCommit?.status === "prepared" || record.integrationCommit?.undo?.status === "prepared"
+      || record.lifecycle === "integration_pending" || record.lifecycle === "discard_pending"
+      || record.integrationReview && !isWorkspaceFinalized(record)
+      || protectedSession(record.sourceSessionFile) || protectedSession(record.targetSessionFile)
+      || protectedCwds.some(cwd => pathInside(record.worktreePath, cwd))) return false;
+    if (lstatSync(record.worktreePath, { throwIfNoEntry: false })?.isSymbolicLink()
+      || canonicalPath(record.worktreePath) !== canonicalPath(join(TREES_DIR, record.id))) throw new Error("Worktree is outside its managed location");
+    const linkedRuns = [...runs.values()].filter(run => run.id === record.runId || run.workspaceId === record.id);
+    if (record.runId && !runs.has(record.runId) && existsSync(join(runsRoot, record.runId))) return false;
+    return linkedRuns.every(runExpired) && (!record.sourceSessionFile || inactive(record.sourceSessionFile))
+      && (!record.targetSessionFile || inactive(record.targetSessionFile))
+      && inactive(record.worktreePath, true) && inactive(join(ARTIFACTS_DIR, record.id), true);
+  };
+  // Remove children first, including finalized records whose ancestry locates Git.
+  const records = listWorkspaces();
+  const depth = (record: WorkspaceRecord): number => {
+    const seen = new Set([record.id]);
+    let parent = record.parentWorkspaceId;
+    while (parent) {
+      if (seen.has(parent)) throw new Error("Cyclic workspace ancestry");
+      seen.add(parent);
+      parent = records.find(record => record.id === parent)?.parentWorkspaceId;
+    }
+    return seen.size;
+  };
+  records.sort((left, right) => depth(right) - depth(left));
+  for (const initial of records) {
+    try {
+      if (!recordExpired(initial)) continue;
+      const removed = await withWorkspaceLock(initial.id, async record => {
+        // Recheck activity after taking the same lock as integration and discard.
+        if (!recordExpired(record) || listWorkspaces().some(child => child.parentWorkspaceId === record.id)) return false;
+        assertManagedCleanup(record);
+        assertCommitSettled(record);
+        const gitDir = cleanupGitDirectory(record);
+        if (existsSync(record.worktreePath)) gitBuffer(gitDir, ["worktree", "remove", "--force", record.worktreePath]);
+        const prefix = `refs/pi/workspaces/${record.id}/`;
+        for (const ref of gitText(gitDir, ["for-each-ref", "--format=%(refname)", prefix]).split("\n")) {
+          if (ref.startsWith(prefix)) deleteRef(gitDir, ref);
+        }
+        rmSync(join(ARTIFACTS_DIR, record.id), { recursive: true, force: true });
+        rmSync(recordPath(record.id));
+        return true;
+      });
+      if (removed) result.workspaces++;
+    } catch { result.failed++; }
+  }
+  for (const run of runs.values()) {
+    try {
+      if (listWorkspaces().some(record => record.runId === run.id || record.id === run.workspaceId) || !runExpired(run)) continue;
+      rmSync(run.path, { recursive: true });
+      result.runs++;
+    } catch { result.failed++; }
+  }
+  return result;
+}
+
 function branchAt(cwd: string): string | undefined {
   const symbolic = gitTextOrUndefined(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
   if (symbolic) {

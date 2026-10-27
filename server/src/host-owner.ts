@@ -128,6 +128,8 @@ export class HostOwner {
   private readonly hostOptionsFlights = new Map<string | undefined, Promise<CachedHostOptions>>();
   private readonly savedMutations = new Set<string>();
   private helperUnresolved?: Error;
+  private workspaceCleanup?: Promise<void>;
+  private workspaceCleanupRunning = false;
 
   private constructor(private readonly catalog: SessionCatalog, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, private readonly resources: HostResources) {
     void catalog.whenFailed.then((error) => {
@@ -337,6 +339,7 @@ export class HostOwner {
 
   async create(cwd: string): Promise<OwnedSession> {
     this.assertOpen();
+    if (this.workspaceCleanupRunning) throw new CommandError("session_busy", "Workspace cleanup in progress; retry opening the session");
     this.catalog.assertLaunchAllowed();
     this.creating++;
     try { return this.resume((await this.catalog.create(cwd)).id); }
@@ -346,6 +349,7 @@ export class HostOwner {
   /** Register synchronously, before any file checks, commits or child startup. */
   resume(id: string, recoverOnly = false): OwnedSession {
     this.assertOpen();
+    if (this.workspaceCleanupRunning) throw new CommandError("session_busy", "Workspace cleanup in progress; retry opening the session");
     this.catalog.assertExecutionAllowed();
     if (this.savedMutations.has(id)) throw new CommandError("session_busy", "Saved-session operation in progress; resume explicitly after inspecting its outcome");
     const record = this.catalog.get(id);
@@ -359,7 +363,7 @@ export class HostOwner {
     if (recoverOnly && record.stopReason !== "service_shutdown") throw new CommandError("session_unavailable", "Session was not stopped by service shutdown; explicitly reopen it first");
     const previousState = previous?.snapshot();
     const session = new OwnedSession(this.catalog, record, this.options, previousState?.runtimeRevision ?? 0, previousState?.sequence ?? 0, () => {
-      if (this.savedMutations.size) throw new CommandError("session_busy", "Saved-session lifecycle operation in progress; retry workspace changes explicitly after inspecting its outcome");
+      if (this.savedMutations.size || this.workspaceCleanupRunning) throw new CommandError("session_busy", "Saved-session operation or workspace cleanup in progress; retry workspace changes explicitly after inspecting its outcome");
     }, (notification) => {
       if (!this.closing) this.notifications.emit("notification", { ...notification, hostId: this.hostId, serviceEpoch: this.serviceEpoch, sessionId: id });
     });
@@ -468,11 +472,55 @@ export class HostOwner {
     return task.finally(() => { this.hostAdmitting--; });
   }
 
+  /** Background maintenance uses the same admission lane as saved-session deletion. */
+  cleanupWorkspaces(): Promise<void> {
+    if (this.workspaceCleanup) return this.workspaceCleanup;
+    this.hostAdmitting++;
+    const task = this.hostAdmission.then(async () => {
+      this.assertOpen();
+      this.catalog.assertLaunchAllowed();
+      if (this.creating || inspectEpoch(this.catalog.processRegistry, this.serviceEpoch).some(job => job.status === "unresolved")) return;
+      const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const protectedSessions = new Set<string>();
+      const protectedCwds: string[] = [];
+      for (const record of this.catalog.list()) {
+        const live = this.lookup(record.id);
+        if (live) {
+          if (live.summary().phase !== "ready" || live.workspaceTransitionPending) return;
+          protectedCwds.push(live.summary().cwd);
+        }
+        if (live || Date.parse(record.lastActivityAt ?? record.createdAt) >= cutoff
+          || record.acceptedQueue?.some(item => item.status !== "failed")) protectedSessions.add(this.catalog.sessionFile(record.id));
+      }
+      this.workspaceCleanupRunning = true;
+      try {
+        const result = await savedSessionHelper({ binary: this.options.binary, appRoot: this.options.appRoot,
+          sessionDirectory: join(this.catalog.root, "sessions"), workspaceRoot: join(this.catalog.root, "workspaces"),
+          environment: this.options.environment, assertExecutionAllowed: () => this.catalog.assertExecutionAllowed() },
+        { action: "cleanup", cutoff, protectedSessions: [...protectedSessions], protectedCwds });
+        if (!result.success) throw new Error("Workspace cleanup did not complete");
+        console.error(JSON.stringify({ type: "workspace_cleanup", timestamp: new Date().toISOString(),
+          workspaces: result.workspaces, runs: result.runs, failed: result.failed }));
+      } catch (error) {
+        if (error instanceof SavedHelperUnresolved) {
+          this.helperUnresolved = error;
+          for (const session of this.sessions.values()) session.storageFailed(error);
+        }
+        throw error;
+      } finally {
+        this.workspaceCleanupRunning = false;
+      }
+    });
+    this.workspaceCleanup = task.finally(() => { this.hostAdmitting--; this.workspaceCleanup = undefined; });
+    this.hostAdmission = this.workspaceCleanup.then(() => undefined, () => undefined);
+    return this.workspaceCleanup;
+  }
+
   /** Administrative local shutdown. Fence all admissions synchronously after
    * preflight, before awaiting any child. No frontend disconnect calls this. */
   async shutdown(force = false): Promise<void> {
     this.assertOpen();
-    if (this.creating || this.hostAdmitting) throw new CommandError("session_busy", "Host lifecycle admission is in progress; inspect and retry explicitly");
+    if (this.creating || this.hostAdmitting > (this.workspaceCleanup ? 1 : 0)) throw new CommandError("session_busy", "Host lifecycle admission is in progress; inspect and retry explicitly");
     if (!force) {
       for (const session of this.sessions.values()) {
         const reason = session.stopBlockReason();
@@ -486,6 +534,9 @@ export class HostOwner {
       }
     }
     this.closing = true;
+    // Drain maintenance before closing its managed transport or catalog authority.
+    if (this.workspaceCleanup) await this.workspaceCleanup.catch(() => undefined);
+    if (this.helperUnresolved) throw this.helperUnresolved;
     // stop() revokes runtime execution before its first await.
     const results = await Promise.allSettled([...this.sessions.values()].map((session) => session.stop()));
     const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
@@ -500,6 +551,8 @@ export class HostOwner {
     }
     this.assertOpen();
     this.closing = true;
+    if (this.workspaceCleanup) await this.workspaceCleanup.catch(() => undefined);
+    if (this.helperUnresolved) throw this.helperUnresolved;
     await this.catalog.close();
   }
 

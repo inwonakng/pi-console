@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { constants, accessSync, lstatSync, openSync, closeSync, fstatSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { delimiter, join, resolve } from "node:path";
-import { removeWorkspace, sameSessionFile, sessionWorkspacesForDeletion } from "../extensions/shared/workspace";
+import { cleanupWorkspaces, removeWorkspace, sameSessionFile, sessionWorkspacesForDeletion } from "../extensions/shared/workspace";
 
 function trashCommand(): string[] | undefined {
   for (const [binary, args] of [["trash", []], ["gio", ["trash"]]] as const) {
@@ -45,6 +45,14 @@ export default function savedSessions(pi: ExtensionAPI) {
         const p = input as Record<string, unknown>;
         // Session paths are derived from the catalog by the owner, never forwarded from a frontend.
         const directory = process.env.PI_CONSOLE_SAVED_SESSION_DIR;
+        if (p.action === "cleanup") {
+          if (!directory || typeof p.cutoff !== "number" || !Array.isArray(p.protectedSessions) || !Array.isArray(p.protectedCwds)
+            || ![...p.protectedSessions, ...p.protectedCwds].every(path => typeof path === "string" && path.startsWith("/"))
+            || Object.keys(p).some(key => !["action", "cutoff", "protectedSessions", "protectedCwds"].includes(key))) throw new Error("Invalid workspace cleanup request");
+          const result = await cleanupWorkspaces(p.cutoff, p.protectedSessions, p.protectedCwds);
+          ctx.ui.setStatus("pi-saved-session-result", JSON.stringify({ success: true, ...result }));
+          return;
+        }
         if (!directory || typeof p.sessionId !== "string" || !/^[\w-]{1,128}$/.test(p.sessionId)
           || typeof p.action !== "string" || !["preview", "delete"].includes(p.action)
           || Object.keys(p).some(key => !["action", "sessionId", "expectedVersion", "mode", "confirmed"].includes(key))) throw new Error("Invalid saved-session request");

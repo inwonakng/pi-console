@@ -60,6 +60,15 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
   void ready.catch(() => undefined);
   let stopping = false;
   let shutdownFailure: unknown;
+  let cleanupTimer: NodeJS.Timeout | undefined;
+  const cleanup = async (): Promise<void> => {
+    if (stopping) return;
+    try { await owner.cleanupWorkspaces(); }
+    catch (error) { console.error(JSON.stringify({ type: "workspace_cleanup", timestamp: new Date().toISOString(), error: diagnosticCode(error) })); }
+    finally {
+      if (!stopping) cleanupTimer = setTimeout(() => { void cleanup(); }, 24 * 60 * 60 * 1000);
+    }
+  };
   const server = createServer((socket) => {
     const diagnostics = new ConnectionDiagnostics(randomUUID(), "local");
     if (stopping || clients.size >= 64) { diagnostics.action("destroy", "admission_rejected"); socket.destroy(); return; }
@@ -80,6 +89,7 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
     const task = owner.shutdown(force);
     stopping = true;
     if (owner.shutdownStarted) {
+      clearTimeout(cleanupTimer);
       serviceDiagnostic("shutdown_started");
       remoteNotifications.stop();
       for (const stop of summaryStops) stop();
@@ -421,6 +431,7 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
     }
   }
   function finish(): void {
+    clearTimeout(cleanupTimer);
     serviceDiagnostic("finish");
     remoteNotifications.stop();
     for (const stop of summaryStops) stop();
@@ -449,6 +460,7 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
     console.log(JSON.stringify({ network: listenerAddresses(port) }));
     serviceDiagnostic("ready");
     startReady();
+    cleanupTimer = setTimeout(() => { void cleanup(); }, 30_000);
   } catch (error) {
     serviceDiagnostic("startup_failed", { code: diagnosticCode(error) });
     startFailed(error); remoteNotifications.stop(); remote?.close(); server.close();
