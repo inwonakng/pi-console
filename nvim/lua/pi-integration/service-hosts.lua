@@ -296,12 +296,13 @@ function M.list()
 			if row.live then
 				local id = vim.json.encode({ identity, row.id })
 				local live = row.live or {}
-				local focused
+				local focused, initial_group
 				local frontend_keys = {}
 				for _, pane in ipairs(attachments or {}) do
 					if pane.host_id == identity and pane.session_id == row.id then
 						table.insert(frontend_keys, "frontend:" .. vim.json.encode({ pane.id, pane.pid }))
 						focused = math.max(focused or 0, pane.last_focused_at or 0)
+						initial_group = initial_group or pane.initial_group
 					end
 				end
 				local status = live.status or "Idle"
@@ -310,7 +311,7 @@ function M.list()
 					if run.status == "running" then table.insert(active_runs, run) end
 				end
 				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host_label(host),
-					connected = host.connected == true, status = host.connected and status or "Unknown", frontend_keys = frontend_keys,
+					connected = host.connected == true, status = host.connected and status or "Unknown", frontend_keys = frontend_keys, initial_group = initial_group,
 					title = session_title(row), cwd = row.cwd, directory = row.cwd,
 					location = host.alias, controller = host.connected and live.controller or nil, activity = nil,
 					workspace_cwd = row.live and row.live.cwd or row.cwd, last_focused_at = focused,
@@ -662,7 +663,7 @@ local function sorted_hosts()
 	end)
 	return choices
 end
-function M.new_conversation()
+function M.new_conversation(group_id)
 	M.select_host(function(host)
 		local connection = host.connection
 		local epoch = host.hello.serviceEpoch
@@ -673,18 +674,18 @@ function M.new_conversation()
 			end }, function(cwd)
 			if not current() then return end
 			local frontend = require("pi-integration.service-frontend")
-			local opened, err = require("pi-integration.backends.tmux").launch_service(frontend.config.launcher, M.target(host), nil, cwd)
+			local opened, err = require("pi-integration.backends.tmux").launch_service(frontend.config.launcher, M.target(host), nil, cwd, nil, group_id)
 			if not opened then notify(err) end
 		end)
 	end)
 end
-function M.new_in_project(entry)
+function M.new_in_project(entry, group_id)
 	local host = M.find(entry.host_id or entry.frontend_host_id)
 	if not host or not host.connected then return nil, "Host disconnected" end
 	local cwd = entry.directory or entry.cwd
 	if type(cwd) ~= "string" or cwd == "" then return nil, "Choose a directory on the selected host first" end
 	local opened, err = require("pi-integration.backends.tmux").launch_service(
-		require("pi-integration.service-frontend").config.launcher, M.target(host), nil, cwd)
+		require("pi-integration.service-frontend").config.launcher, M.target(host), nil, cwd, nil, group_id)
 	return opened, err
 end
 

@@ -349,10 +349,18 @@ function M.open(config)
 		control_selected("toggle_notifications")
 	end, "Toggle selected conversation notifications")
 	map("<leader>s", function() require("pi-integration.service-hosts").history_picker() end, "Pick session")
-	map("<leader>pn", function() require("pi-integration.service-hosts").new_conversation() end, "New conversation with chosen host/project")
+	local function selected_group()
+		local node = selected()
+		return node and (node.kind == "group" and node.id or node.group_id) or nil
+	end
+	local function new_conversation()
+		require("pi-integration.service-hosts").new_conversation(selected_group())
+	end
+	map("<leader>pn", new_conversation, "New conversation with chosen host/project")
+	vim.api.nvim_buf_create_user_command(list_buf, "PiNew", new_conversation, {})
 	map("<leader>pN", function()
 		local entry = require_selected()
-		if entry then report(require("pi-integration.service-hosts").new_in_project(entry)) end
+		if entry then report(require("pi-integration.service-hosts").new_in_project(entry, selected_group())) end
 	end, "New conversation in selected project")
 	map("<leader>?", function()
 		local lines = { "# 󰕮 Help", "", "## Keys", "" }

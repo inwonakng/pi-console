@@ -85,7 +85,7 @@ local function publish_attachment(heartbeat_only)
 	tmux.publish({ version = 1, frontend_attachment = true, host_id = identity, session_id = session_id,
 		pid = vim.uv.os_getpid(), server = vim.v.servername ~= "" and vim.v.servername or vim.fn.serverstart(),
 		updated = os.time(), cwd = not session_id and selected_cwd or state.session_cwd or selected_cwd,
-		title = name, slug = slug,
+		title = name, slug = slug, initial_group = state.initial_group,
 		status = status, last_focused_at = state.last_focused_at,
 		service_epoch = snapshot and snapshot.serviceEpoch, runtime_revision = snapshot and snapshot.runtimeRevision }, heartbeat_only)
 end
@@ -2643,11 +2643,13 @@ local function follow_resumed_selection()
 	end
 end
 function M.open(restore)
+	state.initial_group = vim.env.PI_CONSOLE_INITIAL_GROUP
+	vim.env.PI_CONSOLE_INITIAL_GROUP = nil
 	selected_cwd = not M.config.service_remote and vim.fn.getcwd() or nil
 	if restore then assert(restore.role == M.config.role, "Restart cannot change frontend role") end
 	if M.config.role ~= "conversation" then
 		local hosts = require("pi-integration.service-hosts")
-		for name, fn in pairs({ PiHosts = M.pick_hosts, PiSessions = M.pick_session, PiNew = hosts.new_conversation,
+		for name, fn in pairs({ PiHosts = M.pick_hosts, PiSessions = M.pick_session, PiNew = function() hosts.new_conversation() end,
 			PiManagement = hosts.management_operations, PiSavedOperations = hosts.saved_operations, PiConsoleRestart = M.restart_console }) do
 			vim.api.nvim_create_user_command(name, fn, {})
 		end

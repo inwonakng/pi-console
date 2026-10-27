@@ -247,9 +247,12 @@ local function launch_window(shell_command, cwd, entry, callback)
 	end)
 end
 
-function M.launch_service(launcher, target, session_id, cwd, resume)
+function M.launch_service(launcher, target, session_id, cwd, resume, group_id)
 	if not M.available() then return nil, "Opening a conversation window requires tmux" end
 	local args = { "bash", launcher }
+	if not session_id and group_id and group_id ~= "" then
+		args = { "env", "PI_CONSOLE_INITIAL_GROUP=" .. group_id, "bash", launcher }
+	end
 	if session_id then vim.list_extend(args, { resume and "--resume" or "--attach", session_id })
 	else
 		if not cwd or cwd == "" then return nil, "New conversation requires a directory on the selected host" end
@@ -266,7 +269,8 @@ function M.launch_service(launcher, target, session_id, cwd, resume)
 	if key then pending_launches[key] = true end
 	-- This is a local frontend window; an owner's cwd is never a local tmux path.
 	launch_window(shell_command, vim.fn.getcwd(), { frontend_attachment = true,
-		host_id = target.expected_host, session_id = session_id, title = "Conversation" }, function(opened, err)
+		host_id = target.expected_host, session_id = session_id, title = "Conversation",
+		initial_group = not session_id and group_id or nil }, function(opened, err)
 		if key then pending_launches[key] = nil end
 		if not opened then require("pi-integration.logs").notify(err, vim.log.levels.ERROR) end
 	end)

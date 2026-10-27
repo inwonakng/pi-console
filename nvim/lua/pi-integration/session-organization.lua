@@ -140,7 +140,8 @@ local function sync(state, entries)
 		end
 		visible[key] = true
 		if not locate(state, key) then
-			table.insert(state.ungrouped, key)
+			local destination = group_keys(state, entry.initial_group) or state.ungrouped
+			table.insert(destination, key)
 		end
 	end
 	local lists = { state.ungrouped }
