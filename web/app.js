@@ -41,7 +41,7 @@ const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
 let hosts = [], conversations = new Map(), activeKey = null, activeScreen = "overview", connecting = false, generation = 0;
 let controllerLabel = "webui";
-let pageLeaving = false, recoveryTimer, recoveryRunning = false, recoveryCheck = false;
+let pageLeaving = false, recoveryTimer, recoveryCheck = false;
 const recoveryState = () => ({ attempt: 0, due: 0, blocked: false });
 const canRecover = () => !pageLeaving && !document.hidden && navigator.onLine !== false;
 const registered = host => hosts.includes(host) && host.enabled !== false;
@@ -60,38 +60,35 @@ function scheduleRecovery(check = false) {
   recoveryCheck ||= check;
   clearTimeout(recoveryTimer);
   recoveryTimer = null;
-  if (!canRecover() || recoveryRunning) return;
+  if (!canRecover()) return;
   recoveryTimer = setTimeout(recoverConnections, check ? 100 : 1000);
 }
-async function recoverConnections() {
+function recoverConnections() {
   recoveryTimer = null;
-  if (!canRecover() || recoveryRunning) return;
-  recoveryRunning = true;
+  if (!canRecover()) return;
   const check = recoveryCheck;
   recoveryCheck = false;
-  try {
-    await Promise.allSettled(hosts.filter(registered).map(async host => {
-      const state = host.recovery;
-      if (state.blocked || !canRecover()) return;
-      if (!host.connected) {
-        if (Date.now() >= state.due) await connectHost(host, true);
-      } else if (check && !host.connecting) {
-        const connection = host.client;
-        try {
+  for (const host of hosts.filter(registered)) {
+    if (host.recovering || host.recovery.blocked) continue;
+    host.recovering = (async () => {
+      const state = host.recovery, connection = host.client;
+      try {
+        if (!host.connected) {
+          if (Date.now() >= state.due) await connectHost(host, true);
+        } else if (check && !host.connecting) {
           await connection.probe();
           if (!canRecover() || !registered(host) || host.client !== connection || connection.closed) return;
           const summaries = await connection.request("sessions.subscribe");
           if (host.client === connection && registered(host) && !connection.closed) setSummaries(host, summaries);
-        } catch {
-          if (host.client === connection && connection.recoveryBlocked) state.blocked = true;
         }
+      } catch {
+        if (host.client === connection && connection?.recoveryBlocked) state.blocked = true;
       }
-    }));
-    if (canRecover()) await Promise.allSettled([...conversations.values()].map(conversation => conversation.recover(check)));
-  } finally {
-    recoveryRunning = false;
-    scheduleRecovery(recoveryCheck);
+    })().finally(() => { host.recovering = null; });
   }
+  // Each host and attachment progresses without waiting for another host's handshake.
+  for (const conversation of conversations.values()) void conversation.recover(check);
+  scheduleRecovery(recoveryCheck);
 }
 const expandedSubagents = new Set();
 const sessionOrderStorage = `pi-console:${channel}:session-order`;
@@ -1074,7 +1071,8 @@ function createConversation(host, row) {
   $("options-title").textContent = sessionName(row);
   let client, hello, snapshot, attachment, grant, owner;
   let busy = false, connected = false, disposed = false;
-  let reconnectPromise, reconnectingClient, connectionAttempt = 0, recoveryAllowed = true;
+  let reconnectPromise, reconnectingClient, recoverPromise, connectionAttempt = 0, recoveryAllowed = true;
+  let controlIntent, controlGeneration = 0, controlAcquiring, restoringControl;
   const recovery = recoveryState();
   let streamSequence = 0, authoritySequence = 0, runtimeRevision = 0;
   let refreshTimer, refreshing = false, dirty = false;
@@ -1120,6 +1118,35 @@ function createConversation(host, row) {
   }
   function controlsCurrent() {
     return navigator.onLine !== false && !pageLeaving && registered(host) && host.connected && row.live && grantCurrent();
+  }
+  function clearControlIntent() {
+    controlIntent = null;
+    ++controlGeneration;
+    const acquiring = controlAcquiring;
+    controlAcquiring = null;
+    // Detaching also cancels an automatic acquire already delivered to the service.
+    if (acquiring && sameContext(acquiring.context)) acquiring.context.client.close(undefined, "session_reconnect");
+  }
+  function intentMatches() {
+    return controlIntent && controlIntent.host === host && registered(host) && row.live
+      && !host.recovery.blocked && !host.client?.recoveryBlocked
+      && !["stopping", "stopped", "failed"].includes(owner?.phase)
+      && controlIntent.hostId === hello?.hostId && controlIntent.hostId === host.hello?.hostId
+      && controlIntent.serviceEpoch === hello?.serviceEpoch && controlIntent.serviceEpoch === host.hello?.serviceEpoch
+      && controlIntent.runtimeRevision === runtimeRevision;
+  }
+  function canRenewControl() {
+    return !disposed && !pageLeaving && navigator.onLine !== false && !client?.closed && grantCurrent() && intentMatches();
+  }
+  function observeControlOwner() {
+    if (!controlIntent) return;
+    if (!intentMatches()) { clearControlIntent(); return; }
+    const controller = owner?.controller;
+    if (!controller) return;
+    if (controller.attachmentId === controlIntent.controller.attachmentId && controller.grantId === controlIntent.controller.grantId) return;
+    if (controlAcquiring?.generation === controlGeneration && controller.attachmentId === attachment) {
+      controlIntent.controller = { ...controller };
+    } else clearControlIntent();
   }
   function context() { return { client, selectedId, attachment, runtimeRevision }; }
   function sameContext(captured) {
@@ -1167,6 +1194,7 @@ function createConversation(host, row) {
       connected = false;
       grant = null;
       attachment = null;
+      if (client.recoveryBlocked) clearControlIntent();
       clearTimeout(refreshTimer);
       refreshTimer = null;
       if (wasConnected && recoveryAllowed && registered(host) && !pageLeaving) recoveryFailed(recovery, client);
@@ -1192,10 +1220,11 @@ function createConversation(host, row) {
       if (update.sequence > authoritySequence) {
         authoritySequence = update.sequence;
         controlsChanged = runtimeRevision !== update.runtimeRevision || Boolean(update.owner);
-        if (runtimeRevision !== update.runtimeRevision) grant = null;
+        if (runtimeRevision !== update.runtimeRevision) { clearControlIntent(); grant = null; }
         runtimeRevision = update.runtimeRevision;
         if (update.owner) owner = { ...update.owner, sequence: update.sequence };
         if (grant && !grantCurrent()) { grant = null; controlsChanged = true; }
+        observeControlOwner();
       }
       if (update.command) {
         const receipt = update.command;
@@ -1237,12 +1266,14 @@ function createConversation(host, row) {
     snapshot = value;
     if (value.sequence >= authoritySequence) {
       authoritySequence = value.sequence;
-      if (runtimeRevision !== value.runtimeRevision) grant = null;
+      if (runtimeRevision !== value.runtimeRevision) { clearControlIntent(); grant = null; }
       runtimeRevision = value.runtimeRevision;
       owner = value;
     }
     if (grant && !grantCurrent()) grant = null;
+    observeControlOwner();
     renderSession();
+    void restoreControl();
   }
   function renderControls() {
     const controlled = Boolean(controlsCurrent());
@@ -1832,21 +1863,70 @@ function createConversation(host, row) {
 
   async function acquireControl(takeover = false) {
     if (controlsCurrent()) return;
-    const captured = context();
+    clearControlIntent();
+    const captured = context(), generation = controlGeneration;
     await command(takeover ? "control.takeover" : "control.acquire", takeover ? { confirmed: true } : {});
-    if (!sameContext(captured)) return;
+    if (!sameContext(captured) || generation !== controlGeneration) return;
     const value = await captured.client.request("grant");
-    if (sameContext(captured)) {
+    if (sameContext(captured) && generation === controlGeneration && value?.attachmentId === attachment) {
       grant = value;
-      if (!controlsCurrent()) scheduleRefresh();
-      else scheduleViewedResponse();
+      controlIntent = { host, hostId: hello.hostId, serviceEpoch: hello.serviceEpoch, runtimeRevision,
+        controller: { attachmentId: value.attachmentId, grantId: value.grantId } };
+      scheduleRefresh();
+      scheduleViewedResponse();
     }
+  }
+  function restoreControl() {
+    if (restoringControl || !controlIntent || busy || !connected || !host.connected || !row.live
+      || disposed || pageLeaving || navigator.onLine === false || client.closed || grantCurrent()) return;
+    observeControlOwner();
+    if (!controlIntent) return;
+    const intent = controlIntent, captured = context(), generation = controlGeneration;
+    const current = () => sameContext(captured) && controlIntent === intent && generation === controlGeneration && intentMatches();
+    restoringControl = (async () => {
+      try {
+        // Never infer authority from the display label or a cached disconnected owner.
+        const value = await captured.client.request("snapshot", snapshotQuery(snapshot, hello));
+        if (!current()) return;
+        if (value.sessionId !== selectedId || value.serviceEpoch !== intent.serviceEpoch || value.runtimeRevision !== intent.runtimeRevision) {
+          clearControlIntent();
+          return;
+        }
+        applySnapshot(value);
+        if (!current() || grantCurrent()) return;
+        if (owner?.controller) {
+          // A previous attachment may still hold our last grant until detach/expiry.
+          if (owner.controller.attachmentId !== attachment) return;
+        } else {
+          controlAcquiring = { generation, context: captured };
+          await command("control.acquire");
+          if (!current()) return;
+        }
+        const recovered = await captured.client.request("grant");
+        if (!current() || recovered?.attachmentId !== attachment) return;
+        grant = recovered;
+        intent.controller = { attachmentId: recovered.attachmentId, grantId: recovered.grantId };
+        scheduleRefresh();
+        scheduleViewedResponse();
+        renderControls();
+      } catch (error) {
+        if (current()) {
+          if (["stale_epoch", "stale_runtime", "session_unavailable", "attachment_closed"].includes(error.code)) clearControlIntent();
+          else if (error.code === "control_claimed") scheduleRefresh();
+        }
+      } finally {
+        if (controlAcquiring?.generation === generation) controlAcquiring = null;
+        restoringControl = null;
+      }
+    })();
+    return restoringControl;
   }
   $("control").addEventListener("click", () => run(async () => {
     if (controlsCurrent()) {
+      clearControlIntent();
       const captured = context();
-      await command("control.release");
-      if (sameContext(captured)) grant = null;
+      try { await command("control.release"); }
+      finally { if (sameContext(captured)) grant = null; }
       return;
     }
     const takeover = Boolean(owner?.controller);
@@ -1959,11 +2039,14 @@ function createConversation(host, row) {
   transcriptResize.observe($("transcript"));
   const heartbeat = setInterval(() => {
     scheduleViewedResponse();
-    if (!canRecover() || !controlsCurrent()) return;
+    if (!canRenewControl()) { void restoreControl(); return; }
     const captured = context();
     const token = grant.token;
     client.request("heartbeat", { controlToken: token }).catch(error => {
-      if (sameContext(captured) && grant?.token === token) { grant = null; notice(error.message); renderControls(); }
+      if (sameContext(captured) && grant?.token === token) {
+        grant = null; notice(error.message); renderControls();
+        void restoreControl();
+      }
     });
   }, 5000);
   function reconnect(automatic = false) {
@@ -1993,12 +2076,14 @@ function createConversation(host, row) {
         attachment = null;
         const nextHello = await next.connect(channel, target.stream, identity);
         if (!current() || next.closed || !row.live) { next.close(undefined, "session_disposed"); return; }
+        if (controlIntent && (controlIntent.hostId !== nextHello.hostId || controlIntent.serviceEpoch !== nextHello.serviceEpoch)) clearControlIntent();
         hello = nextHello;
         const value = await next.request("attach", { sessionId: selectedId, label: controllerLabel });
         if (!current() || next.closed || !row.live) { next.close(undefined, "session_disposed"); return; }
         attachment = value.attachmentId;
         streamSequence = value.snapshot.sequence;
         authoritySequence = 0;
+        if (controlIntent && controlIntent.runtimeRevision !== value.snapshot.runtimeRevision) clearControlIntent();
         runtimeRevision = value.snapshot.runtimeRevision;
         owner = null;
         transcriptKey = interactionKey = optionsKey = "";
@@ -2011,7 +2096,7 @@ function createConversation(host, row) {
         next?.close(error.message, "session_attach_failed");
         if (!current()) return;
         // Session disappearance is not permission to resume its saved history.
-        if (["session_unavailable", "session_not_found"].includes(error.code)) recoveryAllowed = false;
+        if (["session_unavailable", "session_not_found"].includes(error.code)) { recoveryAllowed = false; clearControlIntent(); }
         else recoveryFailed(recovery, next || hostClient);
         if (!automatic) notice(error.message);
       } finally {
@@ -2024,20 +2109,27 @@ function createConversation(host, row) {
     renderControls();
     return reconnectPromise;
   }
-  async function recover(check) {
+  function recover(check) {
+    if (recoverPromise) return recoverPromise;
     if (disposed || !recoveryAllowed || !registered(host) || host.recovery.blocked || recovery.blocked || !canRecover() || !row.live) return;
-    if (connected && host.connected && hello.serviceEpoch !== host.hello.serviceEpoch) client.close("Host service restarted. Recovering read only.", "stream_changed");
-    if (!connected) {
-      if (host.connected && Date.now() >= recovery.due) await reconnect(true);
-    } else if (check) {
-      const captured = context();
-      try {
-        await captured.client.probe();
-        if (canRecover() && sameContext(captured)) scheduleRefresh();
-      } catch {
-        if (captured.client === client && captured.client.recoveryBlocked) recovery.blocked = true;
+    recoverPromise = (async () => {
+      if (connected && host.connected && hello.serviceEpoch !== host.hello.serviceEpoch) {
+        clearControlIntent();
+        client.close("Host service restarted. Recovering read only.", "stream_changed");
       }
-    }
+      if (!connected) {
+        if (host.connected && Date.now() >= recovery.due) await reconnect(true);
+      } else if (check) {
+        const captured = context();
+        try {
+          await captured.client.probe();
+          if (canRecover() && sameContext(captured)) scheduleRefresh();
+        } catch {
+          if (captured.client === client && captured.client.recoveryBlocked) recovery.blocked = true;
+        }
+      }
+    })().finally(() => { recoverPromise = null; });
+    return recoverPromise;
   }
   return {
     get host() { return host; },
@@ -2048,6 +2140,7 @@ function createConversation(host, row) {
     connected: () => connected,
     rebind(current) {
       if (disposed || host === current) return;
+      clearControlIntent();
       ++connectionAttempt;
       connected = false; grant = null; attachment = null;
       clearTimeout(refreshTimer); refreshTimer = null;
@@ -2056,6 +2149,7 @@ function createConversation(host, row) {
       if (snapshot) renderSession();
     },
     disconnect(message = "Host registration removed, disabled or changed.", cause = "host_registration_changed") {
+      clearControlIntent();
       ++connectionAttempt;
       if (cause !== "pagehide") recoveryAllowed = false;
       connected = false; grant = null; attachment = null;
@@ -2068,7 +2162,9 @@ function createConversation(host, row) {
     },
     syncRow(value) {
       row = value || { ...row, live: undefined };
+      observeControlOwner();
       if (!row.live) {
+        clearControlIntent();
         recoveryAllowed = false;
         if (reconnectPromise && !connected) {
           ++connectionAttempt;
@@ -2104,6 +2200,7 @@ function createConversation(host, row) {
       (activeScreen === "options" ? $("options-screen") : $("chat-screen")).focus({ preventScroll: true });
     },
     dispose(cause = "session_disposed") {
+      clearControlIntent();
       disposed = true;
       ++connectionAttempt;
       recoveryAllowed = false;
