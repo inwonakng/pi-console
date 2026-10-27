@@ -49,12 +49,12 @@ function M.open(transcript_buf, input_buf)
 	local width, th, ih, row, col = geometry()
 	transcript_win = vim.api.nvim_open_win(transcript_buf, false, {
 		relative = "editor", width = width, height = th, row = row, col = col,
-		style = "minimal", border = "rounded", title = " Side conversation | ask | ? keys ",
+		style = "minimal", border = "rounded", title = " Side conversation | ask | <leader>? keys ",
 	})
 	input_win = vim.api.nvim_open_win(input_buf, true, {
 		relative = "editor", width = width, height = ih, row = row + th + 2, col = col,
 		style = "minimal", border = "rounded", title = " Side input ",
-		footer = " ? keys ",
+		footer = " <leader>? keys ",
 	})
 	vim.api.nvim_clear_autocmds({ group = window_group, event = "WinClosed" })
 	for _, win in ipairs({ transcript_win, input_win }) do
@@ -65,7 +65,7 @@ function M.open(transcript_buf, input_buf)
 		})
 	end
 	for _, buf in ipairs({ transcript_buf, input_buf }) do
-		vim.keymap.set("n", "?", function()
+		vim.keymap.set("n", "<leader>?", function()
 			require("pi-integration.help").toggle_window(help_state, {
 				name = "pi://side-help", title = "Side conversation keys", parent = vim.api.nvim_get_current_win(),
 				lines = {

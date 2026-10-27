@@ -120,7 +120,7 @@ end
 function M.render_statusline()
 	local win = vim.g.statusline_winid or vim.api.nvim_get_current_win()
 	return build_info.statusline(vim.api.nvim_win_get_width(win), {
-		" 󰕮", "Enter open", "Tab expand", "j/k move", "<leader>pg group", "p pin", "dd stop/delete group", "/ filter", "<leader>? keys",
+		" 󰕮", "Enter open", "Tab expand", "j/k move", "<leader>? keys", "/ filter",
 	})
 end
 

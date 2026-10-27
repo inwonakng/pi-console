@@ -36,7 +36,7 @@ function M.open(options, workspace_id, pinned)
 	local help_state, help_lines, displayed = {}, {}, nil
 	local help_name = scratch_name("help")
 	local function bind_help(buf)
-		vim.keymap.set("n", "?", function()
+		vim.keymap.set("n", "<leader>?", function()
 			local output = vim.list_extend({}, help_lines)
 			if displayed then
 				vim.list_extend(output, { "", "## Displayed file", displayed.path,
@@ -273,7 +273,7 @@ function M.open(options, workspace_id, pinned)
 			":write saves only text. gO inspects saved file content without replacing drafts.",
 			"gS looks up the original command; gD shows the patch.",
 			"Historical reviews cannot save, stage, unstage, or restore.",
-			"", "? opens help from any review pane; q or Esc closes help.",
+			"", "<leader>? opens help from any review pane; q or Esc closes help.",
 		})
 		if present(review.stageUnsupported) then table.insert(help_lines, "Stage all: " .. review.stageUnsupported) end
 		if present(review.unstageUnsupported) then table.insert(help_lines, "Unstage all: " .. review.unstageUnsupported) end

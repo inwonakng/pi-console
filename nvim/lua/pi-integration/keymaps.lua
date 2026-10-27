@@ -10,7 +10,8 @@ M.specs = {
 	shared = {
 		{ lhs = "<leader>a", action = "cycle_access_mode", desc = "Cycle access mode" },
 		{ lhs = "<leader>i", action = "cycle_integration_mode", desc = "Cycle integration mode" },
-		{ lhs = "<leader>?", action = "show_help", desc = "Pi help" },
+		{ lhs = "<leader>?", action = "show_help", desc = "Session help" },
+		{ lhs = "<leader>ph", action = "pick_hosts", desc = "Hosts" },
 		{ lhs = "<leader>/", action = "pick_command", desc = "Pick Pi command" },
 		{ lhs = "<leader>pi", action = "show_input", desc = "Show Pi input" },
 		{ lhs = "<leader>pa", action = "restore_pending_action", desc = "Restore pending action" },
@@ -121,9 +122,6 @@ end
 function M.setup(ctx)
 	local input_specs = M.merged("input")
 	local transcript_specs = M.merged("transcript")
-	local specs = { { lhs = "<leader>ph", action = "pick_hosts", desc = "Hosts" } }
-	vim.list_extend(input_specs, specs)
-	vim.list_extend(transcript_specs, specs)
 
 	-- A bare q waits for a macro register and stalls scheduled UI updates.
 	for _, buf in ipairs({ ctx.state.input_buf, ctx.state.transcript_buf }) do

@@ -546,9 +546,9 @@ end
 local function action_hint(ctx)
 	ctx.state.tree_writable = not not ctx.tree.writable(ctx.state.tree_context)
 	if not ctx.state.tree_writable then
-		return hint_line({ { "r", "Refresh (read-only)" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
+		return hint_line({ { "r", "Refresh (read-only)" }, { "/", "Search" }, { "<leader>?", "Help" }, { "q", "Close" } })
 	end
-	return hint_line({ { "Enter", "Jump" }, { "c", "Clone" }, { "d", "Delete" }, { "/", "Search" }, { "?", "Help" }, { "q", "Close" } })
+	return hint_line({ { "Enter", "Jump" }, { "c", "Clone" }, { "d", "Delete" }, { "/", "Search" }, { "<leader>?", "Help" }, { "q", "Close" } })
 end
 
 local function update_action_hint(ctx)
@@ -838,7 +838,7 @@ local function show_tree(ctx, position, reuse)
 	vim.keymap.set("n", "<CR>", function()
 		jump_to_node(ctx, false)
 	end, { buffer = state.tree_buf, desc = "Jump to tree entry" })
-	vim.keymap.set("n", "?", function()
+	vim.keymap.set("n", "<leader>?", function()
 		state.tree_help = state.tree_help or {}
 		help.toggle_window(state.tree_help, {
 			name = "pi://tree-help", title = "History keys", parent = state.tree_win,
