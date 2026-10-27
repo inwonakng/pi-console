@@ -2035,6 +2035,11 @@ local function kill_session(confirmed)
 	if confirmed then stop(label)
 	else vim.ui.select({ label, "Cancel" }, { prompt = "Stop session and close its controller?" }, stop) end
 end
+function M.controls_session(entry)
+	return control_current() and hello and hello.hostId == entry.host_id and hello.serviceEpoch == entry.service_epoch
+		and session_id == entry.session_id and entry.controller and entry.controller.attachmentId == attachment
+		and entry.controller.grantId == grant.grantId
+end
 function M.kill_session()
 	kill_session(false)
 end

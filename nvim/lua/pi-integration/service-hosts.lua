@@ -945,7 +945,12 @@ function M.manage(entry, action, argument)
 		end)
 	end
 	if action == "kill" then
-		vim.ui.select({ "Stop session", "Cancel" }, { prompt = "Stop session and close its controller?" }, function(choice)
+		local prompt = "Stop session and close its controller?"
+		if entry.controller and not frontend.controls_session(entry) then
+			prompt = 'Session "' .. entry.title .. '" on ' .. host.alias .. ' is controlled by '
+				.. entry.controller.label .. '. Stop it and close that controller? Active work will be interrupted; history is preserved.'
+		end
+		vim.ui.select({ "Stop session", "Cancel" }, { prompt = prompt }, function(choice)
 			if choice == "Stop session" then send() end
 		end)
 	else send() end
