@@ -139,6 +139,21 @@ function bindSessionDrag(heading, key) {
       startX: point.clientX, startY: point.clientY, touch, active: !touch, initial: [...sessionOrder], moved: false };
     window.addEventListener("blur", cancel);
   };
+  const lift = () => {
+    const drag = sessionDrag;
+    const rect = drag.entry.getBoundingClientRect();
+    // Keep the real entry in the list as the drop gap and touch-event target.
+    drag.preview = drag.entry.cloneNode(true);
+    drag.preview.classList.add("session-drag-preview");
+    drag.preview.setAttribute("aria-hidden", "true");
+    drag.preview.inert = true;
+    Object.assign(drag.preview.style, { left: `${rect.left + 8}px`, top: `${rect.top}px`, width: `${rect.width - 16}px` });
+    document.body.append(drag.preview);
+    drag.entry.classList.add("reordering");
+    if (drag.touch) {
+      try { navigator.vibrate?.(15); } catch { /* Haptics are optional; dragging must still work. */ }
+    }
+  };
   const move = point => {
     const drag = sessionDrag;
     const distance = Math.hypot(point.clientX - drag.startX, point.clientY - drag.startY);
@@ -148,8 +163,10 @@ function bindSessionDrag(heading, key) {
     }
     if (!drag.moved && distance < 5) return;
     if (!drag.moved && !drag.touch) list.setPointerCapture(drag.pointerId);
+    if (!drag.preview) lift();
     drag.moved = true;
-    drag.entry.classList.add("reordering");
+    drag.preview.style.setProperty("--drag-x", `${point.clientX - drag.startX}px`);
+    drag.preview.style.setProperty("--drag-y", `${point.clientY - drag.startY}px`);
     const overview = $("overview"), bounds = overview.getBoundingClientRect();
     if (point.clientY < bounds.top + 60) overview.scrollTop -= 16;
     else if (point.clientY > bounds.bottom - 60) overview.scrollTop += 16;
@@ -177,6 +194,7 @@ function bindSessionDrag(heading, key) {
     if (cancelled) sessionOrder = [...drag.initial, ...sessionOrder.filter(key => !drag.initial.includes(key))];
     if (drag.moved) saveSessionOrder();
     drag.entry.classList.remove("reordering");
+    drag.preview?.remove();
     // Leave ordinary taps intact, including their original link target.
     if (!drag.moved && !(drag.touch && drag.active)) return;
     const suppressClick = event => { event.preventDefault(); event.stopImmediatePropagation(); };
@@ -211,7 +229,7 @@ function bindSessionDrag(heading, key) {
     // Keep native scrolling until a stationary press activates reordering.
     holdTimer = setTimeout(() => {
       sessionDrag.active = true;
-      sessionDrag.entry.classList.add("reordering");
+      lift();
     }, 400);
     document.addEventListener("touchmove", touchMove, { passive: false });
     document.addEventListener("touchend", touchFinish, { passive: false });
