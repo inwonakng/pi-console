@@ -1748,7 +1748,7 @@ export class OwnedSession {
       const exit = await this.worker!.waitForExit();
       if (!this.stopRequested) throw new Error(exit.error ?? "Pi exited unexpectedly");
     } catch (error) {
-      if (!this.stopRequested) this.error = asError(error);
+      if (!this.stopRequested) this.error ??= asError(error);
     } finally {
       try {
         if (this.worker) {
@@ -1959,7 +1959,8 @@ export class OwnedSession {
       || (event.type === "extension_ui_request" && event.method === "setStatus"
         && ["pi-console-runtime", "pi-console-dialog", "pi-project-trust", "pi-workspace", "pi-workspace-continuation"].includes(event.statusKey))) this.changed();
     if (event.type === "agent_settled" || event.type === "compaction_end"
-      || (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-history-changed")) {
+      || (event.type === "extension_ui_request" && event.method === "setStatus"
+        && ["pi-history-changed", "pi-workspace"].includes(event.statusKey))) {
       this.retain({ type: "invalidate_history" });
       this.scheduleRefresh();
     }
@@ -2057,7 +2058,8 @@ export class OwnedSession {
   }
 
   private historyIdle(): boolean {
-    return this.conversation.idle && !this.conversation.compacting && !this.conversation.sessionState?.isStreaming;
+    return this.worker?.interactionRuntime()?.active === true && !this.workspacePending()
+      && this.conversation.idle && !this.conversation.compacting && !this.conversation.sessionState?.isStreaming;
   }
 
   private currentHistory(flight: HistoryFlight): boolean {
@@ -2121,28 +2123,29 @@ export class OwnedSession {
       do {
         this.refreshAgain = false;
         const revision = this.runtimeRevision;
-        await worker.request({ type: "get_state" }, checkRuntime);
-        if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
-        if (checkRuntime) {
-          checkRuntime();
-          this.checkIdentity();
-        }
-        if (!this.historyIdle()) return;
-        await worker.request({ type: "get_session_stats" });
-        if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
-        if (!this.historyIdle()) return;
+        const guard = () => {
+          checkRuntime?.();
+          if (worker !== this.worker || revision !== this.runtimeRevision || !this.historyIdle()) {
+            throw new CommandError("stale_runtime", "History capture context changed");
+          }
+        };
         try {
-          await this.readHistory(worker, "projected-tail", () => {
-            checkRuntime?.();
-            if (worker !== this.worker || revision !== this.runtimeRevision || !this.historyIdle()) {
-              throw new CommandError("stale_runtime", "History capture context changed");
-            }
-          });
+          await worker.request({ type: "get_state" }, guard);
+          if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
+          if (checkRuntime) {
+            checkRuntime();
+            this.checkIdentity();
+          }
+          if (!this.historyIdle()) return;
+          await worker.request({ type: "get_session_stats" }, guard);
+          if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
+          if (!this.historyIdle()) return;
+          await this.readHistory(worker, "projected-tail", guard);
         } catch (error) {
           if (!(error instanceof CommandError) || !["stale_runtime", "session_busy"].includes(error.code)) throw error;
-          // Pi may become busy after dispatch but before its synchronous capture.
-          // Wait for settlement/compaction_end, preserving any already-coalesced
-          // completion signal instead of immediately retrying a known-busy read.
+          // A handoff can invalidate queued reads before dispatch or capture.
+          // Runtime/workspace readiness or settlement resumes refresh; preserve
+          // coalesced signals without retrying an inactive or busy runtime.
           if (error.code !== "session_busy") this.refreshAgain = true;
           return;
         }
@@ -2166,7 +2169,7 @@ export class OwnedSession {
       if (this.refresh) this.refreshAgain = true;
     }).catch((error: unknown) => {
       if (this.stopRequested || this.exit) return;
-      this.error = asError(error);
+      this.error ??= asError(error);
       if (this.worker) void this.worker.stop();
       this.changed();
     });
