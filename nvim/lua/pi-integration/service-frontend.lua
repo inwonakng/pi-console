@@ -1954,26 +1954,6 @@ function M.new_session()
 	if M.config.role ~= "conversation" then return require("pi-integration.service-hosts").new_conversation() end
 	with_new_session_cwd(function(cwd) M.select_owner(M.config, nil, false, cwd) end)
 end
-function M.change_cwd(path)
-	if not hello or not job then notify("Connect to a host before choosing its directory."); return end
-	local captured, epoch = stamp(), hello.serviceEpoch
-	if path then
-		request("host.directories", { serviceEpoch = epoch, path = path, offset = 0 }, function(ok, page)
-			if not hello or hello.serviceEpoch ~= epoch or not same_selection(captured) then return end
-			if ok then M.select_owner(M.config, nil, false, page.path)
-			else notify(page.message or "Directory unavailable", vim.log.levels.WARN) end
-		end)
-		return
-	end
-	require("pi-integration.directory-history").owner_input({ label = current_owner_label(),
-		key = (vim.env.PI_CONSOLE_CHANNEL or "stable") .. "/" .. hello.hostId,
-		current = function() return hello and hello.serviceEpoch == epoch and same_selection(captured) end,
-		request = function(query, callback)
-			request("host.directories", vim.tbl_extend("force", query, { serviceEpoch = epoch }), callback)
-		end }, function(cwd)
-		if hello and hello.serviceEpoch == epoch and same_selection(captured) then M.select_owner(M.config, nil, false, cwd) end
-	end)
-end
 function M.restart()
 	if not session_id then notify("Connection ready; no conversation worker exists yet."); return end
 	local captured, label = stamp(), "Restart conversation worker"
@@ -1997,16 +1977,16 @@ function M.close_unstarted(expected_pid)
 	end)
 	return true
 end
-local function kill_session(confirmed)
+local function kill_session(confirmed, on_stopped)
 	if kill_pending then notify("Stop already pending; no duplicate request sent."); return end
 	if not can_kill_session() then notify("Stop requires control of a started, live session (:PiControl). Use Detach for a new frontend."); return end
-	if not can_close_frontend() then return end
+	if not on_stopped and not can_close_frontend() then return end
 	local captured, label = stamp(), "Stop session"
 	kill_pending = captured
 	captured.status = "confirming"
 	local function stop(choice)
 		if kill_pending ~= captured then return end
-		if choice ~= label or not current(captured) or not can_kill_session() or not can_close_frontend() then
+		if choice ~= label or not current(captured) or not can_kill_session() or not on_stopped and not can_close_frontend() then
 			kill_pending = nil
 			render()
 			return
@@ -2024,9 +2004,12 @@ local function kill_session(confirmed)
 			if kill_pending ~= captured then return end
 			if receipt.status == "uncertain" then captured.status = "unknown" else kill_pending = nil end
 			if receipt.status == "completed" then
-				local preserved = backup()
-				if preserved and can_close_frontend() then vim.cmd("qall!")
-				else M.detach() end
+				if on_stopped then on_stopped()
+				else
+					local preserved = backup()
+					if preserved and can_close_frontend() then vim.cmd("qall!")
+					else M.detach() end
+				end
 			else render() end
 		end)
 		if sent then notify("Stopping session...")
@@ -2042,6 +2025,45 @@ function M.controls_session(entry)
 end
 function M.kill_session()
 	kill_session(false)
+end
+function M.change_cwd(path)
+	if not hello or not job then notify("Connect to a host before choosing its directory."); return end
+	local captured, epoch = stamp(), hello.serviceEpoch
+	local function selection_current()
+		return hello and hello.serviceEpoch == epoch and same_selection(captured)
+	end
+	local function switch(cwd)
+		if not selection_current() then return end
+		local function open() M.select_owner(M.config, nil, false, cwd) end
+		-- Unused, eagerly allocated windows do not have a conversation to leave.
+		if not session_id or ctx.ui.window_id and not ctx.ui.window_submission then open(); return end
+		local choices = { "Detach and switch", "Open in a new tab", "Cancel" }
+		if can_kill_session() then table.insert(choices, 1, "Stop and switch") end
+		vim.ui.select(choices, { prompt = "Change directory: " .. (state.session_cwd or new_session_cwd() or "Unknown") .. " -> " .. cwd }, function(choice)
+			if not selection_current() then return end
+			if choice == "Stop and switch" then
+				if backup() then kill_session(true, open) end
+			elseif choice == "Detach and switch" then open()
+			elseif choice == "Open in a new tab" then
+				local opened, err = require("pi-integration.backends.tmux").launch_service(M.config.launcher, M.config, nil, cwd)
+				if not opened then notify(err) end
+			end
+		end)
+	end
+	if path then
+		request("host.directories", { serviceEpoch = epoch, path = path, offset = 0 }, function(ok, page)
+			if not selection_current() then return end
+			if ok then switch(page.path)
+			else notify(page.message or "Directory unavailable", vim.log.levels.WARN) end
+		end)
+		return
+	end
+	require("pi-integration.directory-history").owner_input({ label = current_owner_label(),
+		key = (vim.env.PI_CONSOLE_CHANNEL or "stable") .. "/" .. hello.hostId,
+		current = selection_current,
+		request = function(query, callback)
+			request("host.directories", vim.tbl_extend("force", query, { serviceEpoch = epoch }), callback)
+		end }, switch)
 end
 function M.quit()
 	if not session_id then return M.detach_frontend() end

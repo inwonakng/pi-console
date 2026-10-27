@@ -70,7 +70,7 @@ function M.toggle(ctx)
 		"## Commands",
 		"",
 		"- `:PiControl` acquire control; confirm before replacing another controller.",
-		"- `:PiCd [directory]` choose a directory on the current host before starting a conversation.",
+		"- `:PiCd [directory]` start in another directory on the current host. Existing conversations prompt to stop (controllers only), detach, open a new tab, or cancel; unused new windows switch directly.",
 		"- `:PiCommand` pick a slash command, template, or skill from the attached runtime; input / completion also discovers them.",
 		"- `:PiPending` restore a pending picker. Esc hides it; Ctrl-q cancels the request. Viewers inspect only.",
 		"- `:PiQueue` inspect, edit, or remove queued messages. Ctrl+Enter saves an edit; editing pauses dispatch while connected.",
