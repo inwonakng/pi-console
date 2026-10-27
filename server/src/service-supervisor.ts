@@ -119,7 +119,7 @@ export class ServiceSupervisor {
     for (const key of ["USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "PI_CODING_AGENT_DIR"]) if (process.env[key]) environment[key] = process.env[key]!;
     for (const key of ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "ALERTER",
       "PI_NOTIFICATION_ICON", "PI_NOTIFICATION_SOUND", "PI_NOTIFICATION_TIMEOUT", "PI_COMPLETION_SOUND",
-      "PI_COMPLETION_NOTIFICATION_TIMEOUT", "PI_PERMISSION_SOUND", "PI_PERMISSION_NOTIFICATION_TIMEOUT"]) {
+      "PI_COMPLETION_NOTIFICATION_TIMEOUT", "PI_PERMISSION_SOUND", "PI_PERMISSION_NOTIFICATION_TIMEOUT", "PI_ERROR_SOUND"]) {
       if (process.env[key] !== undefined) environment[key] = process.env[key]!;
     }
     if (Object.values(environment).some((v) => /[\0\r\n]/.test(v))) throw new Error("Service environment must not contain NUL/newline characters");

@@ -11,7 +11,7 @@ const disabledSounds = new Set(["0", "false", "no", "none", "off", "silent"]);
 export function validDesktopNotification(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value)
 		&& typeof value.id === "string" && /^[\w-]{1,128}$/.test(value.id)
-		&& ["input", "completion"].includes(value.kind)
+		&& ["input", "completion", "error"].includes(value.kind)
 		&& typeof value.title === "string" && value.title.length > 0 && value.title.length <= 256 && !value.title.includes("\0")
 		&& typeof value.body === "string" && value.body.length <= 8192 && !value.body.includes("\0");
 }
@@ -66,8 +66,10 @@ export function deliverDesktopNotification({ title, body, kind, onError }) {
 	if (!notifier) return false;
 	const input = kind === "input";
 	const icon = notificationIconPath();
-	const sound = configuredSound(input ? "PI_PERMISSION_SOUND" : "PI_COMPLETION_SOUND",
-		process.platform === "linux" ? (input ? "dialog-information" : "complete") : (input ? "Ping" : "Glass"));
+	const error = kind === "error";
+	const sound = configuredSound(input ? "PI_PERMISSION_SOUND" : error ? "PI_ERROR_SOUND" : "PI_COMPLETION_SOUND",
+		process.platform === "linux" ? (input ? "dialog-information" : error ? "dialog-error" : "complete")
+			: (input ? "Ping" : error ? "Sosumi" : "Glass"));
 	const timeout = configuredTimeout(input ? "PI_PERMISSION_NOTIFICATION_TIMEOUT" : "PI_COMPLETION_NOTIFICATION_TIMEOUT", input ? 15 : 8);
 	let args;
 	if (notifier.kind === "alerter") {
