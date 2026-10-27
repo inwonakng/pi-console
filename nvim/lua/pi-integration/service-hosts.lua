@@ -5,6 +5,7 @@ local hosts, started, timer = {}, false, nil
 local forgotten_explicit = {}
 local reminder_checked = {}
 local saved_request
+local opening = {}
 local initial = { version = 1, hosts = {} }
 local channel = vim.env.PI_CONSOLE_CHANNEL or "stable"
 local function notify(message) require("pi-integration.logs").notify(tostring(message), vim.log.levels.WARN, { title = "Pi hosts" }) end
@@ -360,11 +361,20 @@ function M.open(entry, in_place)
 	if entry.frontend_pane then return require("pi-integration.backends.tmux").focus(entry.frontend_pane) end
 	local host = M.find(entry.host_id)
 	if not host or not host.connected then return nil, "Host disconnected; cached rows cannot be attached or mutated" end
+	local resume = entry.status == "Stopped"
 	for _, row in ipairs(host.rows or {}) do
-		if row.id == entry.session_id and row.archived then notify("Conversation is archived on " .. host.alias .. "; explicitly unarchive it in :PiSessions before resuming."); return true end
+		if row.id == entry.session_id then
+			if row.archived then notify("Conversation is archived on " .. host.alias .. "; explicitly unarchive it in :PiSessions before resuming."); return true end
+			-- Picker rows can predate the overview's current live summary.
+			if row.live then resume = false end
+		end
 	end
 	local connection = host.connection
-	local function select(resume)
+	local key = host.host_id .. "/" .. entry.session_id
+	local intent = opening[key]
+	if intent and intent.connection ~= connection then opening[key], intent = nil, nil end
+	if intent and not intent.completed then return true end
+	local function select(reopen)
 		if not host.connected or host.connection ~= connection then notify("Host connection changed; select the session again"); return end
 		local frontend = require("pi-integration.service-frontend")
 		if in_place == nil then in_place = frontend.config.role == "conversation" end
@@ -375,27 +385,62 @@ function M.open(entry, in_place)
 		if not panes then notify(err); return end
 		for _, pane in ipairs(panes) do
 			if pane.host_id == entry.host_id and pane.session_id == entry.session_id then
-				if resume then
-					-- Focusing a stopped attachment does not authorize an owner resume.
-					saved_request(host, { id = uid(), serviceEpoch = host.hello.serviceEpoch,
-						operation = "host.resume", payload = { sessionId = entry.session_id } }, function(receipt)
-						if receipt.status ~= "completed" or not host.connected or host.connection ~= connection then return end
-						local reopened, reopen_error = tmux.reopen_frontend(pane)
-						if not reopened then notify("Session resumed, but frontend reopening failed: " .. tostring(reopen_error)); return end
-						local ok, focus_error = tmux.focus(pane.id)
-						if not ok then notify(focus_error) end
-					end)
-				else
-					local ok, focus_error = tmux.focus(pane.id)
-					if not ok then notify(focus_error) end
+				if reopen then
+					local reopened, reopen_error = tmux.reopen_frontend(pane)
+					if not reopened then notify("Session resumed, but frontend reopening failed: " .. tostring(reopen_error)); return end
 				end
+				local ok, focus_error = tmux.focus(pane.id)
+				if not ok then notify(focus_error) end
 				return
 			end
 		end
-		local opened, failure = tmux.launch_service(frontend.config.launcher, M.target(host), entry.session_id, nil, resume)
+		local opened, failure = tmux.launch_service(frontend.config.launcher, M.target(host), entry.session_id, nil, reopen and "reopen" or false)
 		if not opened then notify(failure) end
 	end
-	select(entry.status == "Stopped")
+	local function resume_session()
+		intent = { connection = connection }
+		opening[key] = intent
+		-- Durable ID/outcome handling stays on the overview connection. Its receipt
+		-- confirms registration, not readiness: editor startup overlaps hydration.
+		saved_request(host, { id = uid(), serviceEpoch = host.hello.serviceEpoch,
+			operation = "host.resume", payload = { sessionId = entry.session_id } }, function(receipt)
+			if receipt.status ~= "completed" then
+				if opening[key] == intent then opening[key] = nil end
+				return -- Unknown/failed work is inspected, never replayed by a new editor.
+			end
+			intent.completed = true
+			select(true)
+		end)
+	end
+	local frontend = require("pi-integration.service-frontend")
+	local local_selection = in_place == true or in_place == nil and frontend.config.role == "conversation"
+	if intent and intent.completed and not local_selection and entry.status == "Stopped" then
+		if not require("pi-integration.backends.tmux").available() then return nil, "Opening a conversation from this view requires tmux" end
+		if intent.checking then return true end
+		intent.checking = true
+		local epoch = host.hello.serviceEpoch
+		-- Discovery can miss a worker's entire lifetime. A read issued after its
+		-- registration receipt distinguishes a stopped worker from a stale row.
+		connection.request("sessions", {}, function(ok, result)
+			if opening[key] ~= intent or not host.connected or host.connection ~= connection
+				or host.hello.serviceEpoch ~= epoch then return end
+			intent.checking = nil
+			if not ok then notify(result.message or "Session state unavailable; no resume was sent"); return end
+			if result.serviceEpoch ~= epoch then return end
+			for _, row in ipairs(result.sessions or {}) do
+				if row.id == entry.session_id then
+					if row.archived or row.deleted then notify("Session is archived or deleted; no resume was sent"); return end
+					if row.live then select(true)
+					else opening[key] = nil; resume_session() end
+					return
+				end
+			end
+			notify("Session no longer exists; no resume was sent")
+		end)
+	elseif resume and not local_selection and not intent then
+		if not require("pi-integration.backends.tmux").available() then return nil, "Opening a conversation from this view requires tmux" end
+		resume_session()
+	else select(intent and intent.completed or false) end
 	return true
 end
 saved_request = function(host, envelope, callback)

@@ -1,7 +1,60 @@
+import { setImmediate as yieldTurn } from "node:timers/promises";
 import type { RpcResponse } from "@earendil-works/pi-coding-agent";
-import type { PiMessage } from "./pi-conversation.js";
+import { messageKey, type PiMessage } from "./pi-conversation.js";
 import { object } from "./pi-records.js";
 import { CommandError } from "./session-commands.js";
+import { readResource, type ResourceContext } from "./resource-reads.js";
+
+export type TranscriptPreview = { messages: PiMessage[]; messageKeys: string[]; omittedMessages: number };
+
+/** Best-effort saved-history fallback. Complex projections remain worker-owned. */
+export async function savedHistoryPreview(context: ResourceContext): Promise<TranscriptPreview | undefined> {
+  let page = await readResource(context, { kind: "history" });
+  if (page.size > 16 * 1024 * 1024) return;
+  const version = page.version;
+  let text = page.text;
+  while (page.nextOffset !== null) {
+    page = await readResource(context, { kind: "history", offset: page.nextOffset, version });
+    text += page.text;
+  }
+  context.check();
+  if (!text.endsWith("\n")) return;
+  const entries = new Map<string, Record<string, unknown>>();
+  let leaf: string | undefined;
+  let records = 0;
+  for (const line of text.split("\n")) {
+    if (++records % 128 === 0) { await yieldTurn(); context.check(); }
+    if (!line) continue;
+    const entry: unknown = JSON.parse(line);
+    if (!object(entry)) return;
+    if (entry.type === "session") continue;
+    // Only ordinary messages and inert metadata. Compaction, context edits and
+    // custom-message projection belong to the worker, including future types.
+    if (!["message", "thinking_level_change", "model_change", "usage", "custom", "label", "session_info"].includes(String(entry.type))) return;
+    if (typeof entry.id !== "string" || entries.has(entry.id)
+      || entry.parentId !== null && typeof entry.parentId !== "string") return;
+    entries.set(entry.id, entry);
+    leaf = entry.id;
+  }
+  const messages: PiMessage[] = [];
+  const seen = new Set<string>();
+  while (leaf) {
+    if (seen.has(leaf)) return;
+    seen.add(leaf);
+    if (seen.size % 128 === 0) { await yieldTurn(); context.check(); }
+    const entry = entries.get(leaf);
+    if (!entry) return;
+    if (entry.type === "message") {
+      if (!object(entry.message) || typeof entry.message.role !== "string") return;
+      messages.push(entry.message as PiMessage);
+    }
+    leaf = entry.parentId as string | undefined;
+  }
+  messages.reverse();
+  const omittedMessages = Math.max(0, messages.length - 512);
+  const tail = messages.slice(omittedMessages);
+  return { messages: tail, messageKeys: tail.map(messageKey), omittedMessages };
+}
 
 // Keep in step with pi/extensions/shared/service-history.ts. No public pagination.
 export const HISTORY_COMMAND = "pi-console-history-read";

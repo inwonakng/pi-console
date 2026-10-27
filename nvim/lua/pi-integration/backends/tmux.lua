@@ -253,7 +253,7 @@ function M.launch_service(launcher, target, session_id, cwd, resume, group_id)
 	if not session_id and group_id and group_id ~= "" then
 		args = { "env", "PI_CONSOLE_INITIAL_GROUP=" .. group_id, "bash", launcher }
 	end
-	if session_id then vim.list_extend(args, { resume and "--resume" or "--attach", session_id })
+	if session_id then vim.list_extend(args, { resume == "reopen" and "--reopen" or resume and "--resume" or "--attach", session_id })
 	else
 		if not cwd or cwd == "" then return nil, "New conversation requires a directory on the selected host" end
 		vim.list_extend(args, { "--new", "--cwd", cwd })

@@ -72,11 +72,11 @@ if [ "${1-}" = "tmux" ]; then
     esac
 fi
 
-unset PI_CONSOLE_SESSION PI_CONSOLE_SERVICE_NEW PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CWD PI_CONSOLE_SERVICE_EXPECTED_HOST
+unset PI_CONSOLE_SESSION PI_CONSOLE_SERVICE_NEW PI_CONSOLE_OVERVIEW PI_CONSOLE_SIDEBAR PI_CONSOLE_SERVICE_SESSION PI_CONSOLE_SERVICE_RESUME PI_CONSOLE_SERVICE_REOPEN PI_CONSOLE_SERVICE_ROOT PI_CONSOLE_SERVICE_REMOTE PI_CONSOLE_SERVICE_CWD PI_CONSOLE_SERVICE_EXPECTED_HOST
 selection=
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --overview|--sidebar|--new|--attach|--resume)
+        --overview|--sidebar|--new|--attach|--resume|--reopen)
             [ -z "$selection" ] || usage
             selection=$1 ;;
     esac
@@ -90,6 +90,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --attach) export PI_CONSOLE_SERVICE_SESSION=$2 ;;
         --resume) export PI_CONSOLE_SERVICE_SESSION=$2 PI_CONSOLE_SERVICE_RESUME=1 ;;
+        --reopen) export PI_CONSOLE_SERVICE_SESSION=$2 PI_CONSOLE_SERVICE_REOPEN=1 ;;
         --root) export PI_CONSOLE_SERVICE_ROOT=$2 ;;
         --remote) export PI_CONSOLE_SERVICE_REMOTE=$2 ;;
         --cwd) export PI_CONSOLE_SERVICE_CWD=$2 ;;

@@ -1,11 +1,11 @@
-import { HISTORY_COMMAND, HISTORY_STATUS, HistoryRead, type HistoryKind, type HistoryData, type ProjectedTail } from "./session-history.js";
-import { open } from "node:fs/promises";
+import { HISTORY_COMMAND, HISTORY_STATUS, HistoryRead, savedHistoryPreview, type TranscriptPreview, type HistoryKind, type HistoryData, type ProjectedTail } from "./session-history.js";
+import { lstat, open } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { DESKTOP_NOTIFICATION_STATUS, validDesktopNotification, type DesktopNotification } from "../../pi/extensions/shared/desktop-notification.mjs";
 import { completeHostFiles } from "./host-discovery.js";
 import { tmpdir } from "node:os";
 import { WorkspaceReviews, type ReviewMutation } from "./workspace-reviews.js";
-import { readResource, completeFiles, completeDirectory, type ResourceContext } from "./resource-reads.js";
+import { fingerprint, readResource, completeFiles, completeDirectory, type ResourceContext } from "./resource-reads.js";
 import { hostCommand, hostFingerprint, type HostReceipt } from "./host-commands.js";
 import { inspectEpoch } from "../../pi/scripts/managed-process.mjs";
 import { createHash, randomUUID } from "node:crypto";
@@ -68,10 +68,11 @@ export type OwnedSessionState = SessionActivity & {
   controller?: Controller;
   error?: string;
   exit?: PiExit;
-  startupTimings?: { validationMs: number; workerMs: number; historyMs: number };
+  startupTimings?: { validationMs: number; workerMs: number; historyMs: number;
+    rpcReadyMs: number; commandDiscoveryMs: number; historyCapabilityMs: number; trustMs: number; workspaceMs: number };
 };
 export type SnapshotCursor = { sessionId: string; serviceEpoch: string; runtimeRevision: number; conversationRevisions: ConversationRevisions };
-export type OwnedSessionSnapshot = OwnedSessionState & { sequence: number; conversation: ConversationSnapshot; conversationRevisions: ConversationRevisions; commands: CommandReceipt[]; acceptedQueue: AcceptedQueueSnapshot };
+export type OwnedSessionSnapshot = OwnedSessionState & { sequence: number; preview?: TranscriptPreview; conversation: ConversationSnapshot; conversationRevisions: ConversationRevisions; commands: CommandReceipt[]; acceptedQueue: AcceptedQueueSnapshot };
 export type OwnedSessionPatch = Omit<OwnedSessionSnapshot, "conversation"> & { conversationSections: ConversationSections };
 export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevision" | "controller" | keyof SessionActivity> & {
   sequence: number;
@@ -367,7 +368,7 @@ export class HostOwner {
       if (this.savedMutations.size || this.workspaceCleanupRunning) throw new CommandError("session_busy", "Saved-session operation or workspace cleanup in progress; retry workspace changes explicitly after inspecting its outcome");
     }, (notification) => {
       if (!this.closing) this.notifications.emit("notification", { ...notification, hostId: this.hostId, serviceEpoch: this.serviceEpoch, sessionId: id });
-    });
+    }, previous?.retainedTranscript());
     this.sessions.set(id, session);
     return session;
   }
@@ -580,6 +581,9 @@ export class OwnedSession {
   private phase: OwnedSessionState["phase"] = "initializing";
   private startupTimings?: OwnedSessionState["startupTimings"];
   private readonly conversation = new PiConversation();
+  private preview?: TranscriptPreview;
+  private retainedHistory?: { version: string; historyRevision: number };
+  private previewGeneration = 0;
   private readonly viewers = new Set<SessionSubscription>();
   private readonly reservations = new QueueReservations(() => this.queueChanged());
   private readonly control = new SessionControl(() => {
@@ -646,7 +650,8 @@ export class OwnedSession {
   private rejectReady!: (error: Error) => void;
 
   constructor(private readonly catalog: SessionCatalog, private readonly record: CatalogSession, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, revision: number, sequence = 0, private readonly assertSavedIdle: () => void = () => {},
-    private readonly notify: (notification: DesktopNotification) => void = () => {}) {
+    private readonly notify: (notification: DesktopNotification) => void = () => {},
+    private readonly previousTranscript?: { preview: TranscriptPreview; version: string; piSessionId: string }) {
     this.runtimeRevision = revision;
     this.sequence = sequence;
     this.initialized = new Promise<void>((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
@@ -662,15 +667,49 @@ export class OwnedSession {
   ready(): Promise<void> { return this.initialized; }
 
   snapshot(): OwnedSessionSnapshot {
-    return { ...this.ownerState(), sequence: this.sequence, conversation: this.conversation.snapshot(), conversationRevisions: this.conversation.sectionRevisions(),
+    return { ...this.ownerState(), sequence: this.sequence, preview: structuredClone(this.preview), conversation: this.conversation.snapshot(), conversationRevisions: this.conversation.sectionRevisions(),
       commands: this.catalog.recentCommands(this.id), acceptedQueue: this.queueSnapshot() };
   }
 
   snapshotSince(known?: SnapshotCursor): OwnedSessionSnapshot | OwnedSessionPatch {
     // Never reuse sections across a service or runtime replacement.
     if (!known || known.sessionId !== this.id || known.serviceEpoch !== this.catalog.epoch || known.runtimeRevision !== this.runtimeRevision) return this.snapshot();
-    return { ...this.ownerState(), sequence: this.sequence, conversationSections: this.conversation.changedSections(known.conversationRevisions),
+    return { ...this.ownerState(), sequence: this.sequence, preview: structuredClone(this.preview), conversationSections: this.conversation.changedSections(known.conversationRevisions),
       conversationRevisions: this.conversation.sectionRevisions(), commands: this.catalog.recentCommands(this.id), acceptedQueue: this.queueSnapshot() };
+  }
+
+  /** Only a file-stable, authoritative history baseline may cross owner replacement. */
+  retainedTranscript(): { preview: TranscriptPreview; version: string; piSessionId: string } | undefined {
+    if (!this.finished || !this.retainedHistory) return;
+    const { messages, messageKeys, omittedMessages, historyRevision } = this.conversation.snapshot();
+    if (historyRevision !== this.retainedHistory.historyRevision) return;
+    return { preview: { messages, messageKeys, omittedMessages }, version: this.retainedHistory.version, piSessionId: this.record.piSessionId };
+  }
+
+  private async loadPreview(): Promise<void> {
+    const generation = this.previewGeneration;
+    const check = () => {
+      const record = this.catalog.get(this.id);
+      if (generation !== this.previewGeneration || this.phase !== "initializing" || this.conversation.hydrated
+        || record.deleted || record.archived || record.piSessionId !== this.record.piSessionId) {
+        throw new CommandError("stale_runtime", "Preview context changed");
+      }
+    };
+    try {
+      check();
+      await this.catalog.validateSessionFile(this.id);
+      const sessionFile = this.catalog.sessionFile(this.id);
+      const version = fingerprint(await lstat(sessionFile, { bigint: true }));
+      check();
+      const retained = this.previousTranscript;
+      const preview = retained?.piSessionId === this.record.piSessionId && retained.version === version ? retained.preview
+        : await savedHistoryPreview({ sessionFile, cwd: this.record.cwd, workspaceRoot: this.record.cwd,
+          workspacesRoot: join(this.catalog.root, "workspaces"), tempRoot: tmpdir(), skillPaths: [], liveOutputPaths: [], check });
+      if (!preview || fingerprint(await lstat(sessionFile, { bigint: true })) !== version) return;
+      check();
+      this.preview = preview;
+      this.changed();
+    } catch { /* Preview failure never changes startup, authority or its outcome. */ }
   }
 
   /** No conversation, queued text, interaction contents or control secrets. */
@@ -1876,7 +1915,10 @@ export class OwnedSession {
 
   private async runOnce(): Promise<void> {
     const started = performance.now();
-    this.startupTimings = { validationMs: 0, workerMs: 0, historyMs: 0 };
+    this.startupTimings = { validationMs: 0, workerMs: 0, historyMs: 0,
+      rpcReadyMs: 0, commandDiscoveryMs: 0, historyCapabilityMs: 0, trustMs: 0, workspaceMs: 0 };
+    // Separate from hostAdmission and never awaited by resume/worker startup.
+    void this.loadPreview();
     let owned = false;
     try {
       const header = await this.catalog.validateSessionFile(this.id);
@@ -1960,6 +2002,8 @@ export class OwnedSession {
         this.error = new Error("Session ownership cleanup failed; recovery is required", { cause: error });
       }
       this.control.revoke();
+      this.preview = undefined;
+      this.previewGeneration++;
       this.phase = this.error ? "failed" : "stopped";
       this.done = true;
       this.rejectReady(this.error ?? new Error("Session stopped before startup completed"));
@@ -1971,12 +2015,17 @@ export class OwnedSession {
     // Workspace publication can queue a same-child cwd/runtime replacement.
     // Repeat initialization against that fresh context, never against a view.
     for (let pass = 0; pass < 8; pass++) {
+      let stage = performance.now();
       await worker.ready();
+      this.startupTimings!.rpcReadyMs += performance.now() - stage;
       this.checkIdentity();
       this.checkRunning();
       const revision = this.runtimeRevision;
+      stage = performance.now();
       const commands = await worker.request({ type: "get_commands" });
+      this.startupTimings!.commandDiscoveryMs += performance.now() - stage;
       if (commands.command !== "get_commands") throw new Error("Unexpected Pi command discovery response");
+      stage = performance.now();
       try {
         await this.ensureHistoryCapability(worker, () => {
           this.checkRunning();
@@ -1985,7 +2034,7 @@ export class OwnedSession {
       } catch (error) {
         if (error instanceof CommandError && error.code === "stale_runtime") continue;
         throw error;
-      }
+      } finally { this.startupTimings!.historyCapabilityMs += performance.now() - stage; }
       for (const name of ["pi-trust-setup", "pi-workspace-publish"]) {
         if (!commands.data.commands.some((command) => command.name === name && command.source === "extension")) {
           throw new Error(`Required pi-console extension command is missing: ${name}`);
@@ -1993,7 +2042,9 @@ export class OwnedSession {
       }
       this.trust = undefined;
       this.changed();
+      stage = performance.now();
       const trustReply = await worker.request({ type: "prompt", message: "/pi-trust-setup" });
+      this.startupTimings!.trustMs += performance.now() - stage;
       this.checkRunning();
       const trust = this.trust as TrustStatus | undefined;
       if (trustReply.command !== "prompt" || trustReply.data.disposition !== "handled" || !trust || trust.state === "error") {
@@ -2004,6 +2055,7 @@ export class OwnedSession {
       if (trust.state !== "ready") throw new Error("Project trust setup did not finish");
       this.workspace = undefined;
       this.changed();
+      stage = performance.now();
       const published = await worker.request({ type: "prompt", message: "/pi-workspace-publish" });
       if (published.command !== "prompt" || published.data.disposition !== "handled") throw new Error("Workspace publication was not handled");
       this.checkRunning();
@@ -2013,6 +2065,7 @@ export class OwnedSession {
         await new Promise<void>((resolve) => { this.wake = resolve; });
       }
       this.checkRunning();
+      this.startupTimings!.workspaceMs += performance.now() - stage;
       // Restoration replaces the cwd-bound runtime and clears its Pi state.
       // Check that new context on the next pass before the final hydration.
       if (revision !== this.runtimeRevision) continue;
@@ -2049,6 +2102,8 @@ export class OwnedSession {
       // Branch/history edits can keep the same Pi runtime UUID. Fence queued
       // text and deferred commands against that changed conversation context.
       this.runtimeRevision++;
+      this.preview = undefined;
+      this.previewGeneration++;
     }
     if (event.type === "agent_settled") {
       this.queueRunPending = false;
@@ -2092,6 +2147,10 @@ export class OwnedSession {
         } else {
           if (typeof value.transitionPending !== "boolean") throw new Error("Invalid Pi workspace transition status");
           workspaceChanged = this.workspaceWorkerRevision !== statusRevision || JSON.stringify(this.workspace) !== JSON.stringify(value);
+          if (value.transitionPending || this.workspace && this.workspace.cwd !== value.cwd) {
+            this.preview = undefined;
+            this.previewGeneration++;
+          }
           this.workspace = value as WorkspaceStatus;
           this.workspaceWorkerRevision = statusRevision;
         }
@@ -2305,6 +2364,8 @@ export class OwnedSession {
     };
     this.historyReads.set(identity.invocationId, flight);
     try {
+      // Capture around the worker's authoritative projection, never at stop time.
+      const before = kind === "projected-tail" ? await this.historyFingerprint() : undefined;
       await this.ensureHistoryCapability(worker, guard);
       await worker.request({ type: "prompt", message: flight.message }, () => {
         guard();
@@ -2316,8 +2377,22 @@ export class OwnedSession {
       guard();
       if (flight.error) throw flight.error;
       if (!flight.data) throw new Error("Missing history result");
+      if (kind === "projected-tail" && before) {
+        const history = this.conversation.sectionRevisions().history;
+        const after = await this.historyFingerprint();
+        guard();
+        if (before === after && this.conversation.hydrated
+          && history === this.conversation.sectionRevisions().history && this.currentHistory(flight)) {
+          this.retainedHistory = { version: before, historyRevision: this.conversation.snapshot().historyRevision };
+        }
+      }
       return flight.data;
     } finally { this.historyReads.delete(identity.invocationId); }
+  }
+
+  private async historyFingerprint(): Promise<string | undefined> {
+    try { return fingerprint(await lstat(this.catalog.sessionFile(this.id), { bigint: true })); }
+    catch { return; }
   }
 
   private async ensureHistoryCapability(worker: PiProcess, guard: () => void, discovery?: RpcResponse): Promise<void> {
@@ -2430,6 +2505,9 @@ export class OwnedSession {
   }
 
   private retain(change: ConversationChange): void {
+    if (change.type === "history" || change.type === "invalidate_history" || change.type === "event"
+      && ["message_start", "message_end", "entry_appended"].includes(change.event.type)) this.retainedHistory = undefined;
+    if (change.type === "history") { this.preview = undefined; this.previewGeneration++; }
     this.conversation.apply(structuredClone(change));
     if (change.type === "invalidate_history" && this.refresh) this.refreshAgain = true;
     // History baselines can exceed the subscription's 8-MiB backlog budget.
@@ -2466,6 +2544,10 @@ export class OwnedSession {
   private syncRevision(): void {
     const revision = this.worker?.interactionRevision ?? 0;
     if (revision !== this.workerRevision) {
+      if (this.workerRevision > 0) {
+        this.preview = undefined;
+        this.previewGeneration++;
+      }
       this.queueRunPending = false;
       this.turnRecipient = undefined;
       this.mainEffectsAmbiguous = false;

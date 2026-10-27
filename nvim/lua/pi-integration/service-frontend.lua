@@ -423,6 +423,7 @@ local function command(operation, payload, callback, captured, terminal, submiss
 	if not hello or not vim.tbl_contains(hello.capabilities or {}, operation) then unavailable(operation); return end
 	if captured and not current(captured) then notify("Stale editor/dialog; its text remains a local draft.", vim.log.levels.WARN); return end
 	if not operation:match("^control%.") and not control_current() then notify("Viewer: use :PiControl first.", vim.log.levels.WARN); return end
+	local sent_selection = stamp()
 	local envelope = { version = 1, id = uid(), sessionId = session_id, serviceEpoch = snapshot.serviceEpoch,
 		runtimeRevision = current_revision(), operation = operation, payload = object_payload(payload) }
 	if operation ~= "control.acquire" and operation ~= "control.takeover" then envelope.controlToken = grant and grant.token end
@@ -456,7 +457,7 @@ local function command(operation, payload, callback, captured, terminal, submiss
 		feedback_ui.receipt(feedback, envelope.id, ok, result)
 		-- Keep pending IDs for status recovery, never for blocking a new send.
 		if result.delivery == "not_sent" then unresolved[envelope.id] = nil end
-		if callback then callback(ok, result) end
+		if callback and same_selection(sent_selection) then callback(ok, result) end
 		if not ok and result.delivery == "not_sent" then outcomes[envelope.id] = nil end
 		if ok and result.status ~= "accepted" and outcomes[envelope.id] then
 			local outcome = outcomes[envelope.id]; outcomes[envelope.id] = nil
@@ -677,11 +678,23 @@ render = function(metadata_only)
 	if pending_new_session then vim.schedule(function() sync_new_session() end) end
 	if not valid(state.transcript_buf) then return end
 	local conversation = snapshot and snapshot.conversation
+	local display_snapshot = snapshot
+	local previewing = snapshot and snapshot.preview and not conversation.hydrated
+	if previewing then
+		-- Display data only: never merge preview into authority, feedback or approvals.
+		conversation = snapshot.preview
+		display_snapshot = { conversation = conversation, acceptedQueue = { items = {} } }
+	end
 	update_status_state()
 	publish_attachment()
 	if sync_pending then vim.schedule(sync_pending) end
 	if not state.frontend_visible then return end
 	layout.update_input_sidebar(ctx)
+	if valid(state.input_buf) then
+		vim.bo[state.input_buf].modifiable = not session_id or ctx.ui.window_id ~= nil
+			or snapshot ~= nil and snapshot.phase == "ready" and snapshot.conversation.hydrated
+				and snapshot.runtimeRevision == current_revision()
+	end
 	local inputs = { messages = conversation and conversation.messages, keys = conversation and conversation.messageKeys,
 		partial = conversation and conversation.partialAssistant, tools = conversation and conversation.tools,
 		permissions = conversation and conversation.permissions, omittedPermissions = conversation and conversation.omittedPermissions,
@@ -693,7 +706,7 @@ render = function(metadata_only)
 	local body_changed = not (metadata_only and rendered_transcript) and not vim.deep_equal(inputs, rendered_transcript)
 	local metadata_changed = not vim.deep_equal(metadata, rendered_metadata)
 	if body_changed then
-		local visible, unplaced = feedback_ui.timeline_messages(feedback, session_id, snapshot)
+		local visible, unplaced = feedback_ui.timeline_messages(previewing and {} or feedback, session_id, display_snapshot)
 		if #unplaced > 0 and state.unplaced_submissions ~= #unplaced then
 			notify(tostring(#unplaced) .. " unpositioned submissions (:PiLogs)", vim.log.levels.WARN)
 		end
@@ -713,7 +726,7 @@ render = function(metadata_only)
 		transcript.update_metadata(ctx)
 	end
 	rendered_metadata = metadata
-	local side_raw = conversation and conversation.statuses["pi-side"]
+	local side_raw = conversation and conversation.statuses and conversation.statuses["pi-side"]
 	if valid(side_buf) and (side_buf ~= rendered_side_buf or side_raw ~= rendered_side) then
 		rendered_side_buf, rendered_side = side_buf, side_raw
 		local side = status_data("pi-side")
@@ -830,9 +843,16 @@ local function apply_snapshot(value)
 	for _, item in ipairs(snapshot.acceptedQueue.items or {}) do record_queue(item) end
 	feedback_ui.reconcile(feedback, snapshot)
 	-- History received while hidden is aligned only when it is first drawn.
-	if snapshot.conversation.hydrated and (not previous or not previous.conversation.hydrated) then initial_scroll_pending = true end
+	if (snapshot.conversation.hydrated or snapshot.preview) and (not previous or not previous.conversation.hydrated and not previous.preview) then
+		initial_scroll_pending = true
+	end
 	local render_started = vim.uv.hrtime() / 1e6
 	render()
+	if snapshot.preview and not snapshot.conversation.hydrated and state.frontend_visible then
+		-- Flush the readable preview now, before a queued hydrated snapshot can replace it.
+		vim.cmd("redraw")
+		if load_metrics and not load_metrics.previewMs then load_metrics.previewMs = vim.uv.hrtime() / 1e6 - load_metrics.started end
+	end
 	if load_metrics then
 		load_metrics.renderMs = (load_metrics.renderMs or 0) + vim.uv.hrtime() / 1e6 - render_started
 		if snapshot.phase == "ready" and snapshot.conversation.hydrated then
@@ -851,11 +871,12 @@ local function apply_snapshot(value)
 			auto_control_selection = nil
 		elseif not explicit and current_controller() then
 			auto_control_selection = nil
-		elseif (not explicit or snapshot.phase == "ready" and snapshot.runtimeRevision == current_revision()) and runtime and runtime.active
+		elseif (snapshot.phase == "initializing" or snapshot.phase == "ready") and snapshot.runtimeRevision == current_revision() and runtime and runtime.active
 			and snapshot.piState and snapshot.piState.sessionId == runtime.sessionId
 			and snapshot.piState.sessionFile == runtime.sessionFile then
-			-- Explicit reopen waits for readiness and retains takeover confirmation.
-			-- Both paths consume their intent once, never retrying after control loss.
+			-- Fresh runtime control also answers initialization dialogs. Prompt input
+			-- stays disabled until hydration/readiness; preview supplies no authority.
+			-- Explicit reopen retains takeover confirmation and consumes its intent once.
 			auto_control_selection = nil
 			if explicit then ctx.ui.take_control() else acquire_control(false, stamp()) end
 		end
@@ -1126,7 +1147,14 @@ local function recover_host(allow_restore, passive)
 	session_status, session_error = "checking", nil
 	render()
 	request("host.status", { serviceEpoch = envelope.serviceEpoch, commandId = envelope.id }, function(ok, receipt)
-		if pending_host ~= envelope then return end
+		if pending_host ~= envelope then
+			-- The original delivery callback can resolve A while this lookup is
+			-- checking the user's newer selection B. Continue B's read-only recovery.
+			if not pending_host and same_selection(captured) and not attachment and session_id then
+				recover_selection(false, passive)
+			end
+			return
+		end
 		if ok then record_command(receipt, envelope) end
 		local select_result = pending_host_select == true
 		if ok and receipt.result then
@@ -1232,7 +1260,7 @@ connect = function(automatic)
 			if value.success and pending and pending.method == "command.status" then record_command(value.result) end
 			if pending then pending.callback(value.success, value.success and value.result or value.error) end
 		elseif value.type == "update" then
-			if value.update.sessionId ~= session_id then return end
+			if not attachment or value.update.sessionId ~= session_id then return end
 			local close = value.update.closeFrontend
 			if close and close.attachmentId == attachment and hello and value.update.serviceEpoch == hello.serviceEpoch then
 				if backup() and can_close_frontend() then
@@ -1362,6 +1390,25 @@ function M.host_disabled(identity, target, reason)
 		M.detach(job and reason or nil)
 	end
 end
+do
+local function detach_selection()
+	-- Keep delivery callbacks alive; only their original selection may act.
+	cancel_new_session()
+	action_connection.cancel()
+	fail_start("Startup cancelled; submitted text remains in :PiDrafts.")
+	request("detach", {})
+	close_approval()
+	tree.close(tree_ctx)
+	offers, outcomes = {}, {}
+	resources.invalidate()
+	attachment, grant, authority, auto_control_selection = nil, nil, nil, nil
+	ctx.ui.window_id, ctx.ui.window_submission, ctx.ui.reopen = nil, nil, nil
+	pending_context, pending_seen, pending_replies, queue_editor = nil, {}, {}, nil
+	startup_options, startup_status, startup_options_context, startup_options_pending = nil, nil, nil, nil
+	stats_pending, workspace_stats_key, state.workspace_diff, kill_pending, resume_check = nil, nil, nil, nil, nil
+	session_status, session_error = nil, nil
+	reset_refresh(false)
+end
 function M.select_owner(target, id, resume, cwd)
 	assert(M.config.role == "conversation", "Only conversation frontends can select a host")
 	local host_changed = target.expected_host ~= M.config.expected_host or target.service_root ~= M.config.service_root
@@ -1379,14 +1426,16 @@ function M.select_owner(target, id, resume, cwd)
 		recovery_id = nil
 		owner_states[owner_key()] = { unresolved = unresolved, feedback = feedback,
 			pending_host = pending_host, pending_host_select = false }
-		M.detach()
+		if host_changed or not job then M.detach() else detach_selection() end
 		M.config.service_root, M.config.service_remote = target.service_root, target.service_remote
 		M.config.expected_host = target.expected_host
 		local saved = owner_states[owner_key()] or {}
 		unresolved, feedback = saved.unresolved or {}, saved.feedback or {}
 		pending_host, pending_host_select = saved.pending_host, false
 		session_id, resume_requested, selected_cwd, recovery_requested = id, resume, cwd, false
-		snapshot, hello, pending_settings = nil, nil, settings
+		snapshot, pending_settings = nil, settings
+		if host_changed then hello = nil end
+		load_metrics = { started = vim.uv.hrtime() / 1e6, reusedBridge = not host_changed and job ~= nil }
 		state.control_loss_reason = nil
 		selection = selection + 1
 		if id and valid(state.input_buf) then layout.set_buffer_lines(ctx, state.input_buf, { "" }, true) end
@@ -1403,8 +1452,14 @@ function M.select_owner(target, id, resume, cwd)
 		end
 	end
 	if not job then connect()
-	elseif id and not attachment then attach(id)
+	elseif hello and not attachment then
+		if recover_host(false, false) then return end
+		if id then
+			if resume_requested then resume_requested = false; host_operation("host.resume", { sessionId = id })
+			else recover_selection(false, false) end
+		else ctx.ui.open_window() end
 	end
+end
 end
 -- The overview already authorized host.resume; this only reattaches the UI.
 function M.reopen_selected(expected_pid, expected_host, expected_session)
@@ -1585,6 +1640,10 @@ function M.submit_prompt(original)
 	local trimmed = vim.trim(original)
 	if trimmed == "" then return end
 	if ctx.ui.window_id and hello and job then ctx.ui.submit_window(original); return end
+	if session_id and (not snapshot or snapshot.phase ~= "ready" or not snapshot.conversation.hydrated
+		or snapshot.runtimeRevision ~= current_revision()) then
+		notify("Session is not ready; input remains local."); return
+	end
 	if starting then notify("Session startup is already pending; input remains local."); return end
 	if not session_id then
 		if not hello or not job then notify("Connect to a host before submitting."); return end
@@ -2673,7 +2732,10 @@ function M.open(restore)
 		else M.config.service_root = restore.service_root or M.config.service_root end
 		M.config.expected_host = restore.expected_host
 		owner_states = restore.owner_states or {}
-	else session_id, resume_requested = vim.env.PI_CONSOLE_SERVICE_SESSION, vim.env.PI_CONSOLE_SERVICE_RESUME == "1" end
+	else
+		session_id, resume_requested = vim.env.PI_CONSOLE_SERVICE_SESSION, vim.env.PI_CONSOLE_SERVICE_RESUME == "1"
+		if vim.env.PI_CONSOLE_SERVICE_REOPEN == "1" then ctx.ui.reopen = {} end
+	end
 	ctx.session.setup_keymaps = function()
 		local actions = setmetatable({ open_transcript_item = M.open_transcript_item }, { __index = M })
 		require("pi-integration.keymaps").setup({ state = state, actions = actions, buffer = ctx.buffer,
