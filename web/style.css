@@ -34,6 +34,10 @@
 * { box-sizing: border-box; }
 html { height: 100%; overflow: hidden; }
 body { margin: 0; background: var(--bg); position: fixed; top: var(--viewport-top, 0px); width: 100%; height: var(--viewport-height, 100dvh); overflow: hidden; display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+/* Keep Home Screen app controls below the iOS top-edge blur. */
+@media (display-mode: standalone) {
+  body { padding-top: calc(env(safe-area-inset-top) + 16px); }
+}
 button, input, textarea, select { font: inherit; color: inherit; }
 button, summary, a { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 button { min-width: 32px; min-height: 46px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 10px; font-size: 12px; line-height: 1.5; cursor: pointer; }
