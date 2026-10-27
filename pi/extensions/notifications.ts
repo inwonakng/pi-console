@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { registerServiceOperation } from "./shared/service-operation";
 import {
 	notificationsEnabled,
+	notifyPiError,
 	notifyPiFinished,
 	notifyPiNeedsInput,
 	promptDisablesNotification,
@@ -79,7 +80,11 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 		questionNotification = undefined;
 		const stopReason = finalStopReason;
 		finalStopReason = undefined;
-		if (!stopReason || stopReason === "error" || getPendingWorkspaceId()) {
+		if (stopReason === "error") {
+			notifyPiError(ctx);
+			return;
+		}
+		if (!stopReason || getPendingWorkspaceId()) {
 			return;
 		}
 		notifyPiFinished(ctx);
@@ -94,7 +99,7 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("pi-notify", {
-		description: "Toggle desktop notifications for Pi completion and requests for user input: /pi-notify [on|off|toggle|test]",
+		description: "Toggle desktop notifications for Pi completion, errors and requests for user input: /pi-notify [on|off|toggle|test]",
 		handler: async (args, ctx) => {
 			if (args.trim().toLowerCase() === "test") {
 				if (notifyPiFinished(ctx, true)) {

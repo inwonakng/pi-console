@@ -117,6 +117,14 @@ export function notifyPiWorkspaceIntegration(ctx: ExtensionContext): boolean {
 }
 
 export function notifyPiFinished(ctx: ExtensionContext, force = false): boolean {
+	return notifyPiOutcome(ctx, "Pi finished", force);
+}
+
+export function notifyPiError(ctx: ExtensionContext): boolean {
+	return notifyPiOutcome(ctx, "Pi error");
+}
+
+function notifyPiOutcome(ctx: ExtensionContext, title: string, force = false): boolean {
 	if (process.env.PI_SPAWN_AGENT === "1") {
 		return false;
 	}
@@ -125,7 +133,7 @@ export function notifyPiFinished(ctx: ExtensionContext, force = false): boolean 
 	}
 
 	return sendDesktopNotification(ctx, {
-		title: "Pi finished",
+		title,
 		kind: "completion",
 		onError: (error) => {
 			ctx.ui.notify(`Could not send Pi notification: ${error.message}`, "warning");
