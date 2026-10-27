@@ -15,6 +15,7 @@
 </head>
 <body>
   <div id="notice" class="notice" role="alert" hidden></div>
+  <div id="stop-notices" aria-label="Scheduled session stops"></div>
   <main id="panels">
     <section id="overview" aria-label="Session overview" tabindex="-1">
       <div class="overview-heading"><h1><button id="refresh-app" class="brand" type="button" aria-label="pi-console: refresh app" title="Refresh app"><img src="./logo.svg" alt="" width="40" height="40">pi-console</button></h1><div class="actions"><button id="history">History</button><button id="new-session" disabled>New session</button></div></div>
@@ -33,7 +34,7 @@
           <p data-id="diagnostics-status" role="status"></p>
         </section>
       </details>
-      <p id="reorder-help" class="sr-only">Drag a session row to reorder it. On touchscreens, press and hold first; swipe normally to scroll. You can also focus the session row and use the up and down arrow keys.</p>
+      <p id="reorder-help" class="sr-only">Drag a session row to reorder it. On touchscreens, press and hold first; swipe vertically to scroll. Swipe left to reveal Stop; swipe farther and release to stop. Active work will be interrupted; history is kept. Undo is available for five seconds before stopping. You can also focus the session row and use up and down arrow keys to reorder, or left to reveal Stop. Escape closes it.</p>
       <p id="reorder-status" class="sr-only" role="status"></p>
       <nav id="session-list" aria-label="Open sessions"><p class="empty">Connect to see sessions across registered hosts.</p></nav>
     </section>

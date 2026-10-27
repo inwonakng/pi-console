@@ -90,12 +90,21 @@ label { font-size: 12px; color: var(--muted); }
 #session-list { border-top: 1px solid var(--border); }
 .empty { padding: 24px; font-size: 12px; }
 .session-entry { border-bottom: 1px solid var(--border); }
-.session-entry-heading { display: flex; align-items: center; cursor: grab; touch-action: pan-y pinch-zoom; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.session-swipe { position: relative; overflow: hidden; background: var(--danger-surface); }
+.session-entry-heading { position: relative; z-index: 1; display: flex; align-items: center; background: var(--bg); transform: translateX(var(--swipe-x, 0px)); transition: transform .18s ease; cursor: grab; touch-action: pan-y pinch-zoom; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.session-swipe.swiping .session-entry-heading { transition: none; }
+.session-stop { position: absolute; inset: 0 0 0 auto; width: max(88px, calc(-1 * var(--swipe-x, 0px))); border: 0; border-radius: 0; color: var(--danger); background: var(--danger-surface); }
+.session-swipe.stop-ready .session-stop { background: var(--danger); color: var(--bg); }
+#stop-notices { position: fixed; z-index: 1100; bottom: max(16px, env(safe-area-inset-bottom)); left: 16px; right: 16px; display: grid; gap: 8px; pointer-events: none; }
+.stop-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 640px; width: 100%; margin: 0 auto; padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 4px 20px #0008; pointer-events: auto; font-size: 12px; }
+.stop-message { min-width: 0; overflow-wrap: anywhere; }
+.stop-notice button { min-height: 44px; flex-shrink: 0; }
 .session-entry.reordering { background: var(--surface); box-shadow: inset 0 0 0 1px var(--accent); cursor: grabbing; }
 .session-entry.reordering > * { visibility: hidden; }
 .session-drag-preview { position: fixed; z-index: 1000; pointer-events: none; background: var(--hover); border-radius: 8px; box-shadow: 0 12px 28px #0008, inset 3px 0 var(--accent); transform: translate(var(--drag-x, 0px), calc(var(--drag-y, 0px) - 4px)); }
 @media (prefers-reduced-motion: reduce) {
   .session-drag-preview { transform: translate(var(--drag-x, 0px), var(--drag-y, 0px)); }
+  .session-entry-heading { transition: none; }
 }
 .session-row { flex: 1; min-width: 0; display: grid; gap: 6px; padding: 18px 24px; border-left: 3px solid transparent; text-decoration: none; color: inherit; cursor: inherit; }
 .session-row:focus-visible { background: var(--hover); border-left-color: var(--accent); }

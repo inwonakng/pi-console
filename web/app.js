@@ -100,7 +100,57 @@ try {
   const saved = JSON.parse(localStorage.getItem(sessionOrderStorage));
   if (Array.isArray(saved)) sessionOrder = [...new Set(saved.filter(key => typeof key === "string"))];
 } catch { /* Storage may be unavailable; retain order for this page. */ }
-let sessionDrag;
+let sessionDrag, revealedSession;
+const pendingStops = new Map();
+function queueSessionStop(host, row) {
+  const key = sessionKey(host.hello.hostId, row.id);
+  if (pendingStops.has(key) || !host.connected || navigator.onLine === false || !row.live) return;
+  const connection = host.client;
+  const envelope = { version: 1, id: requestId(), sessionId: row.id, serviceEpoch: host.hello.serviceEpoch,
+    runtimeRevision: row.live.runtimeRevision, operation: "session.kill", payload: { confirmed: true } };
+  const message = text("div", "", "stop-notice");
+  const status = text("span", `Stop in 5 seconds: "${sessionName(row)}". Active work will stop; history is kept.`, "stop-message");
+  status.setAttribute("role", "status");
+  const pending = { message };
+  const undo = button("Undo", () => {
+    clearTimeout(pending.timer);
+    pendingStops.delete(key);
+    message.remove();
+    renderOverview();
+    ([...$("session-list").children].find(entry => entry.dataset.key === key)?.querySelector(".session-row") || $("overview"))
+      .focus({ preventScroll: true });
+    $("reorder-status").textContent = `Stop cancelled for ${sessionName(row)}.`;
+  });
+  undo.setAttribute("aria-label", `Undo stop for ${sessionName(row)}`);
+  message.append(status, undo);
+  $("stop-notices").append(message);
+  pendingStops.set(key, pending);
+  revealedSession = null;
+  pending.timer = setTimeout(async () => {
+    undo.remove();
+    status.textContent = `Stopping "${sessionName(row)}"...`;
+    try {
+      if (pageLeaving || !registered(host) || !host.connected || navigator.onLine === false
+        || host.client !== connection || host.hello.serviceEpoch !== envelope.serviceEpoch) {
+        throw new Error("Host connection changed. Stop was cancelled; it was not replayed.");
+      }
+      const receipt = receiptResult(await connection.request("session.manage", envelope));
+      await terminalReceipt(connection, "session.manage.status", {
+        serviceEpoch: envelope.serviceEpoch, commandId: envelope.id, sessionId: row.id,
+      }, receipt);
+      setSummaries(host, await connection.request("sessions.subscribe"));
+      message.remove();
+    } catch (error) {
+      message.remove();
+      notice(`Could not confirm stop for "${sessionName(row)}": ${error.message}`);
+    } finally {
+      pendingStops.delete(key);
+      renderOverview();
+    }
+  }, 5000);
+  renderOverview();
+  undo.focus({ preventScroll: true });
+}
 function saveSessionOrder() {
   try { localStorage.setItem(sessionOrderStorage, JSON.stringify(sessionOrder)); } catch { /* Keep the in-page order. */ }
 }
@@ -118,7 +168,7 @@ function moveSession(key, target, after) {
 }
 function bindSessionReorder(link, key, name) {
   link.setAttribute("aria-describedby", "reorder-help");
-  link.title = "Drag the session row (press and hold on touch), or use up and down arrow keys";
+  link.title = "Swipe left to stop; drag to reorder (press and hold on touch). Arrow keys: left for Stop, up/down to reorder.";
   link.addEventListener("keydown", event => {
     if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
@@ -131,16 +181,52 @@ function bindSessionReorder(link, key, name) {
     $("reorder-status").textContent = `${name} moved ${event.key === "ArrowUp" ? "up" : "down"}.`;
   });
 }
-function bindSessionDrag(heading, key) {
-  const list = $("session-list");
+function bindSessionDrag(heading, key, stop, onStop) {
+  const list = $("session-list"), swipe = heading.parentElement;
+  const revealWidth = 88;
   let holdTimer;
+  const reveal = open => {
+    if (open) {
+      for (const entry of list.querySelectorAll(".session-swipe.open")) {
+        if (entry !== swipe) {
+          entry.classList.remove("open");
+          entry.style.removeProperty("--swipe-x");
+        }
+      }
+    }
+    revealedSession = open ? key : revealedSession === key ? null : revealedSession;
+    swipe.classList.toggle("open", open);
+    swipe.style.setProperty("--swipe-x", `${open ? -revealWidth : 0}px`);
+  };
+  reveal(revealedSession === key);
+  stop.addEventListener("focus", () => reveal(true));
+  heading.addEventListener("keydown", event => {
+    if (!["ArrowLeft", "ArrowRight", "Escape"].includes(event.key)) return;
+    event.preventDefault();
+    reveal(event.key === "ArrowLeft");
+    if (event.key === "ArrowLeft") stop.focus();
+  });
+  stop.addEventListener("keydown", event => {
+    if (!["Escape", "ArrowRight"].includes(event.key)) return;
+    event.preventDefault();
+    heading.querySelector("a").focus();
+    reveal(false);
+  });
+  heading.addEventListener("click", event => {
+    if (revealedSession !== key) return;
+    event.preventDefault();
+    event.stopPropagation();
+    reveal(false);
+  }, true);
   const start = (point, touch) => {
     sessionDrag = { key, entry: heading.closest(".session-entry"), pointerId: point.pointerId,
-      startX: point.clientX, startY: point.clientY, touch, active: !touch, initial: [...sessionOrder], moved: false };
+      startX: point.clientX, startY: point.clientY, touch, active: false, initial: [...sessionOrder], moved: false,
+      revealed: revealedSession === key, swiping: false, offset: revealedSession === key ? revealWidth : 0 };
     window.addEventListener("blur", cancel);
   };
   const lift = () => {
     const drag = sessionDrag;
+    reveal(false);
     const rect = drag.entry.getBoundingClientRect();
     // Keep the real entry in the list as the drop gap and touch-event target.
     drag.preview = drag.entry.cloneNode(true);
@@ -156,11 +242,27 @@ function bindSessionDrag(heading, key) {
   };
   const move = point => {
     const drag = sessionDrag;
-    const distance = Math.hypot(point.clientX - drag.startX, point.clientY - drag.startY);
-    if (!drag.active) {
-      if (distance > 8) finish(true);
+    const dx = point.clientX - drag.startX, dy = point.clientY - drag.startY;
+    const distance = Math.hypot(dx, dy);
+    if (!drag.active && !drag.swiping && distance > 8) {
+      clearTimeout(holdTimer);
+      if (!stop.disabled && Math.abs(dx) > Math.abs(dy) * 1.3 && (dx < 0 || drag.revealed)) {
+        drag.swiping = true;
+        swipe.classList.add("swiping");
+        if (!drag.touch) list.setPointerCapture(drag.pointerId);
+      } else if (!drag.touch) drag.active = true;
+      else { finish(true); return; }
+    }
+    if (drag.swiping) {
+      drag.moved = true;
+      drag.offset = Math.max(0, Math.min(swipe.clientWidth, (drag.revealed ? revealWidth : 0) - dx));
+      swipe.style.setProperty("--swipe-x", `${-drag.offset}px`);
+      drag.commit = drag.offset >= Math.max(140, swipe.clientWidth * .65);
+      swipe.classList.toggle("stop-ready", drag.commit);
+      stop.textContent = drag.commit ? "Release to stop" : "Stop";
       return;
     }
+    if (!drag.active) return;
     if (!drag.moved && distance < 5) return;
     if (!drag.moved && !drag.touch) list.setPointerCapture(drag.pointerId);
     if (!drag.preview) lift();
@@ -192,7 +294,10 @@ function bindSessionDrag(heading, key) {
     document.removeEventListener("touchcancel", touchFinish);
     if (!drag.touch && list.hasPointerCapture(drag.pointerId)) list.releasePointerCapture(drag.pointerId);
     if (cancelled) sessionOrder = [...drag.initial, ...sessionOrder.filter(key => !drag.initial.includes(key))];
-    if (drag.moved) saveSessionOrder();
+    if (drag.moved && !drag.swiping) saveSessionOrder();
+    swipe.classList.remove("swiping", "stop-ready");
+    stop.textContent = "Stop";
+    if (drag.swiping) reveal(cancelled ? drag.revealed : drag.offset >= revealWidth / 2);
     drag.entry.classList.remove("reordering");
     drag.preview?.remove();
     // Leave ordinary taps intact, including their original link target.
@@ -200,19 +305,20 @@ function bindSessionDrag(heading, key) {
     const suppressClick = event => { event.preventDefault(); event.stopImmediatePropagation(); };
     list.addEventListener("click", suppressClick, true);
     setTimeout(() => list.removeEventListener("click", suppressClick, true), 0);
+    if (drag.swiping && drag.commit && !cancelled) onStop();
     renderOverview();
-    [...list.children].find(node => node.dataset.key === key)?.querySelector(".session-row").focus({ preventScroll: true });
+    if (!pendingStops.has(key)) [...list.children].find(node => node.dataset.key === key)?.querySelector(".session-row").focus({ preventScroll: true });
   };
   const cancel = () => finish(true);
   const pointerMove = event => { if (event.pointerId === sessionDrag?.pointerId) move(event); };
   const pointerFinish = event => { if (event.pointerId === sessionDrag?.pointerId) finish(event.type !== "pointerup"); };
   const touchMove = event => {
     if (event.touches.length !== 1) { finish(true); return; }
-    if (sessionDrag.active) event.preventDefault();
     move(event.touches[0]);
+    if (sessionDrag?.active || sessionDrag?.swiping) event.preventDefault();
   };
   const touchFinish = event => {
-    if (sessionDrag.active) event.preventDefault();
+    if (sessionDrag?.active || sessionDrag?.swiping) event.preventDefault();
     finish(event.type === "touchcancel" || event.touches.length > 0);
   };
   heading.addEventListener("pointerdown", event => {
@@ -508,6 +614,7 @@ function renderOverview() {
   $("connect").textContent = hosts.length ? "Refresh hosts" : "Connect";
   $("new-session").disabled = !connected;
   const focusedRow = document.activeElement.closest("#session-list a")?.dataset.key;
+  const focusedStop = document.activeElement.closest(".session-stop")?.closest(".session-entry")?.dataset.key;
   $("hosts").replaceChildren(...visible.map(host => {
     const node = text("div", "", "host-state");
     const state = host.enabled === false ? "Disabled" : navigator.onLine === false ? "Offline"
@@ -524,7 +631,8 @@ function renderOverview() {
   }));
   if (sessionDrag) return;
   const ranks = new Map(sessionOrder.map((key, index) => [key, index]));
-  const rows = filteredRows().sort((a, b) => ranks.get(sessionKey(a.host.hello.hostId, a.row.id)) - ranks.get(sessionKey(b.host.hello.hostId, b.row.id)));
+  const rows = filteredRows().filter(({ host, row }) => !pendingStops.has(sessionKey(host.hello.hostId, row.id)))
+    .sort((a, b) => ranks.get(sessionKey(a.host.hello.hostId, a.row.id)) - ranks.get(sessionKey(b.host.hello.hostId, b.row.id)));
   $("session-list").replaceChildren(...rows.map(({ host, row }) => {
     const key = sessionKey(host.hello.hostId, row.id);
     const link = text("a", "", "session-row");
@@ -547,8 +655,14 @@ function renderOverview() {
     const headingRow = text("div", "", "session-entry-heading");
     bindSessionReorder(link, key, sessionName(row));
     headingRow.append(link);
-    group.append(headingRow);
-    bindSessionDrag(headingRow, key);
+    const swipe = text("div", "", "session-swipe");
+    const stop = button("Stop", () => queueSessionStop(host, row), !host.connected || navigator.onLine === false
+      || !host.hello.capabilities.includes("session.manage") || row.live?.status === "Stopping");
+    stop.className = "session-stop";
+    stop.setAttribute("aria-label", `Stop ${sessionName(row)}; history is kept`);
+    swipe.append(stop, headingRow);
+    group.append(swipe);
+    bindSessionDrag(headingRow, key, stop, () => queueSessionStop(host, row));
     const runs = host.connected ? (row.live?.subagentRuns || []).filter(run => run.status === "running") : [];
     if (!runs.length) return group;
     const details = text("details", "", "subagent-runs");
@@ -567,6 +681,7 @@ function renderOverview() {
   }));
   if (!rows.length) $("session-list").append(text("p", "No open sessions match. Start a new session or open History to resume a stopped one.", "empty"));
   if (focusedRow) [...$("session-list").querySelectorAll("a")].find(link => link.dataset.key === focusedRow)?.focus({ preventScroll: true });
+  if (focusedStop) [...$("session-list").children].find(entry => entry.dataset.key === focusedStop)?.querySelector(".session-stop").focus({ preventScroll: true });
 }
 function renderHistory() {
   $("history-list").replaceChildren(...filteredRows(true).map(({ host, row }) => {
@@ -919,6 +1034,11 @@ window.addEventListener("hashchange", route);
 window.addEventListener("popstate", route);
 window.addEventListener("pagehide", event => {
   pageLeaving = true;
+  for (const pending of pendingStops.values()) {
+    clearTimeout(pending.timer);
+    pending.message.remove();
+  }
+  pendingStops.clear();
   scheduleRecovery();
   for (const host of hosts) {
     host.attempt = (host.attempt || 0) + 1;
