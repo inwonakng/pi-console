@@ -1927,7 +1927,10 @@ end
 function M.quit()
 	if not session_id then return M.detach_frontend() end
 	local captured = stamp()
-	vim.ui.select({ "Detach", "Stop", "Cancel" }, { prompt = "Close frontend (Stop ends the session):" }, function(choice)
+	local can_stop = can_kill_session()
+	local choices = can_stop and { "Detach", "Stop", "Cancel" } or { "Detach", "Cancel" }
+	local prompt = can_stop and "Close frontend (Stop ends the session):" or "Close frontend:"
+	vim.ui.select(choices, { prompt = prompt }, function(choice)
 		if choice == "Stop" then
 			action_connection.run(function()
 				if not same_selection(captured) then notify("Session changed; choose the action again."); return end
