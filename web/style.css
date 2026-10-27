@@ -71,19 +71,20 @@ label { font-size: 12px; color: var(--muted); }
 .filters label { flex: 1; min-width: 0; }
 .filters label:last-child { max-width: 280px; }
 .filters input, .filters select { display: block; margin-top: 6px; }
-.hosts-panel { margin: 0 24px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
-.hosts-panel > summary { padding: 10px 12px; color: var(--muted); }
-.hosts-panel:not([open]) > summary { min-height: 32px; padding: 6px 12px; }
 #connection-state { float: right; margin-left: 8px; color: var(--muted); }
 #connection-state.connected { color: var(--status-done); }
-.connection-form { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 0 12px 12px; font-size: 12px; }
+.connection-form { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 12px 0; font-size: 12px; }
 #channel { color: var(--accent); }
-#hosts { display: grid; padding: 0 12px; color: var(--muted); font-size: 12px; }
+#hosts { display: grid; color: var(--muted); font-size: 12px; }
 .host-state { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 0; border-top: 1px solid var(--border); }
 .host-state span { overflow-wrap: anywhere; min-width: 0; }
 .host-message, .host-error { flex-basis: 100%; overflow-wrap: anywhere; }
 .host-error { color: var(--danger); }
-#overview-diagnostics { margin: 0 12px; padding: 12px 0; border-top: 1px solid var(--border); }
+#settings-dialog .app-setting { padding: 18px 0; border-top: 1px solid var(--border); }
+#settings-dialog .app-setting:last-child { padding-bottom: 0; }
+.notification-control { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; font-size: 12px; }
+#notification-toggle { min-width: 64px; flex-shrink: 0; }
+#notification-toggle[aria-checked="true"] { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 .connection-diagnostics h3, .connection-diagnostics .session-actions { margin-bottom: 10px; }
 .connection-diagnostics p { font-size: 12px; }
 [data-id="diagnostics-status"]:not(:empty) { margin-top: 10px; }
@@ -237,10 +238,9 @@ dialog p { font-size: 12px; margin-top: 10px; }
 .history-description { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 700px) {
   .overview-heading { padding: 16px 12px 12px; flex-wrap: wrap; }
-  .overview-heading .actions { gap: 6px; }
+  .overview-heading .actions { gap: 6px; flex-wrap: wrap; }
   .filters { gap: 12px; padding: 0 12px 12px; flex-direction: column; }
   .filters label:last-child { max-width: none; }
-  .hosts-panel { margin: 0 12px 12px; }
   .session-row { gap: 4px; padding: 16px 12px; }
   .screen-header { padding: 4px 8px; gap: 8px; }
   .session-heading h2 { font-size: 14px; }

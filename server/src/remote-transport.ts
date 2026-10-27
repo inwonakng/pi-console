@@ -8,6 +8,7 @@ import { WebSocketServer, createWebSocketStream } from "ws";
 import { MAX_REQUEST } from "./local-protocol.js";
 import { readHostRegistry, type RegisteredHost } from "../../pi/extensions/shared/read-host-registry.mjs";
 import { webRelay } from "./web-relay.js";
+import type { WebPushNotifications } from "./web-push.js";
 import type { Channel } from "./session-catalog.js";
 import { defaultRoot } from "./service-paths.js";
 import { ConnectionDiagnostics, diagnosticCode, serviceDiagnostic } from "./connection-diagnostics.js";
@@ -38,13 +39,17 @@ export class RemoteListener {
   constructor(private readonly port: number,
     connection: (stream: Duplex, onDetach: (detach: (error?: Error) => void) => void, connectionId: string,
       diagnostics: ConnectionDiagnostics) => Promise<void>,
-    web?: { root: string; serviceRoot: string; channel: Channel; hostId: string; allowedOrigins?: readonly string[] }) {
+    web?: { root: string; serviceRoot: string; channel: Channel; hostId: string; allowedOrigins?: readonly string[];
+      push?: WebPushNotifications }) {
     // Load the fixed asset set at startup; never resolve request paths on disk.
     const assets = new Map<string, { body: Buffer; type: string }>();
     if (web) {
       for (const [path, file, type] of [
         ["/", "index.html", "text/html; charset=utf-8"],
         ["/app.js", "app.js", "text/javascript; charset=utf-8"],
+        ["/notifications.js", "notifications.js", "text/javascript; charset=utf-8"],
+        ["/sw.js", "sw.js", "text/javascript; charset=utf-8"],
+        ["/manifest.webmanifest", "manifest.webmanifest", "application/manifest+json"],
         ["/client.js", "client.js", "text/javascript; charset=utf-8"],
         ["/diagnostics.js", "diagnostics.js", "text/javascript; charset=utf-8"],
         ["/snapshot.js", "snapshot.js", "text/javascript; charset=utf-8"],
@@ -59,8 +64,18 @@ export class RemoteListener {
         assets.set(path, { body, type });
       }
     }
+    const allowedOrigin = (origin: string | undefined, host: string | undefined) => origin !== undefined
+      && (origin === `http://${host}` || web?.allowedOrigins?.includes(origin) === true);
     this.server = createServer({ maxHeaderSize: 8192, requestTimeout: 10000,
       headersTimeout: 10000, connectionsCheckingInterval: 1000 }, (request, response) => {
+      if (web?.push && ["/v1/push", "/v1/push/status", "/v1/push/subscription"].includes(request.url ?? "")) {
+        const origin = allowedOrigin(request.headers.origin, request.headers.host) ? request.headers.origin : undefined;
+        void web.push.handle(request, response, origin).catch(() => {
+          if (!response.headersSent) response.writeHead(503, { "Cache-Control": "no-store", Connection: "close" });
+          response.end();
+        });
+        return;
+      }
       if (web && request.url === "/v1/hosts") {
         if (request.method !== "GET") {
           response.writeHead(405, { Allow: "GET", Connection: "close" }); response.end(); return;
@@ -89,7 +104,7 @@ export class RemoteListener {
       response.writeHead(200, {
         "Content-Type": asset.type, "Content-Length": asset.body.length,
         "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
       });
       response.end(request.method === "HEAD" ? undefined : asset.body);
     });
@@ -117,7 +132,7 @@ export class RemoteListener {
         try { target = readHostRegistry(web.channel).find((host) => host.key === relayKey && host.enabled); }
         catch { /* Invalid or inaccessible configuration fails closed. */ }
       }
-      if (origin !== undefined && (!web || origin !== `http://${request.headers.host}` && !web.allowedOrigins?.includes(origin))
+      if (origin !== undefined && (!web || !allowedOrigin(origin, request.headers.host))
         || request.url !== "/v1/stream" && !target || this.peers.size + this.upgrading >= 32) {
         socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"); return;
       }

@@ -12,28 +12,18 @@
   <link rel="icon" type="image/svg+xml" href="./logo.svg">
   <link rel="apple-touch-icon" href="./apple-touch-icon.png" sizes="180x180">
   <link rel="stylesheet" href="./style.css">
+  <link rel="manifest" href="./manifest.webmanifest">
 </head>
 <body>
   <div id="notice" class="notice" role="alert" hidden></div>
   <div id="stop-notices" aria-label="Scheduled session stops"></div>
   <main id="panels">
     <section id="overview" aria-label="Session overview" tabindex="-1">
-      <div class="overview-heading"><h1><button id="refresh-app" class="brand" type="button" aria-label="pi-console: refresh app" title="Refresh app"><img src="./logo.svg" alt="" width="40" height="40">pi-console</button></h1><div class="actions"><button id="history">History</button><button id="new-session" disabled>New session</button></div></div>
+      <div class="overview-heading"><h1><button id="refresh-app" class="brand" type="button" aria-label="pi-console: refresh app" title="Refresh app"><img src="./logo.svg" alt="" width="40" height="40">pi-console</button></h1><div class="actions"><button id="settings" type="button" aria-haspopup="dialog">Settings</button><button id="history">History</button><button id="new-session" disabled>New session</button></div></div>
       <div class="filters">
         <label for="search">Filter sessions<input id="search" type="search" placeholder="Title, directory or host" autocomplete="off"></label>
         <label for="host-filter">Host<select id="host-filter"><option value="">All hosts</option></select></label>
       </div>
-      <details class="hosts-panel">
-        <summary>Hosts <span id="connection-state" role="status">Disconnected</span></summary>
-        <form id="connection-form" class="connection-form"><span id="channel" aria-label="Server channel"></span><button id="connect" type="submit">Connect</button></form>
-        <div id="hosts" aria-label="Registered hosts"></div>
-        <section id="overview-diagnostics" class="connection-diagnostics" aria-label="Connection diagnostics">
-          <h3>Diagnostics</h3>
-          <div class="session-actions"><button data-id="export-diagnostics" type="button">Export diagnostics</button><button data-id="clear-diagnostics" type="button">Clear diagnostics</button></div>
-          <p class="muted">Last 300 connection and page events, kept in this tab across reloads until cleared or the tab closes when browser storage is available; otherwise memory only. No messages, names, URLs or credentials. Export saves or shares a local JSON file; nothing is uploaded automatically.</p>
-          <p data-id="diagnostics-status" role="status"></p>
-        </section>
-      </details>
       <p id="reorder-help" class="sr-only">Drag a session row to reorder it. On touchscreens, press and hold first; swipe vertically to scroll. Swipe left to reveal Stop; swipe farther and release to stop. Active work will be interrupted; history is kept. Undo is available for five seconds before stopping. You can also focus the session row and use up and down arrow keys to reorder, or left to reveal Stop. Escape closes it.</p>
       <p id="reorder-status" class="sr-only" role="status"></p>
       <nav id="session-list" aria-label="Open sessions"><p class="empty">Connect to see sessions across registered hosts.</p></nav>
@@ -99,6 +89,26 @@
       </section>
     </section>
   </template>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <header class="dialog-heading"><h2 id="settings-title">Settings</h2><button id="settings-close" type="button">Close</button></header>
+    <section class="app-setting" aria-labelledby="notifications-title">
+      <h3 id="notifications-title">Notifications</h3>
+      <div class="notification-control"><span id="notification-label">Notifications on this device</span><button id="notification-toggle" type="button" role="switch" aria-checked="false" aria-labelledby="notification-label" aria-describedby="notification-status" disabled>Off</button></div>
+      <p id="notification-status" class="muted" role="status"></p>
+      <p class="muted">Alerts may show session names and directories on your Lock Screen. Delivery depends on connectivity and iOS notification settings.</p>
+    </section>
+    <section class="app-setting" aria-labelledby="hosts-title">
+      <h3 id="hosts-title">Hosts <span id="connection-state" role="status">Disconnected</span></h3>
+      <form id="connection-form" class="connection-form"><span id="channel" aria-label="Server channel"></span><button id="connect" type="submit">Connect</button></form>
+      <div id="hosts" aria-label="Registered hosts"></div>
+    </section>
+    <section id="overview-diagnostics" class="app-setting connection-diagnostics" aria-label="Connection diagnostics">
+      <h3>Diagnostics</h3>
+      <div class="session-actions"><button data-id="export-diagnostics" type="button">Export diagnostics</button><button data-id="clear-diagnostics" type="button">Clear diagnostics</button></div>
+      <p class="muted">Last 300 connection and page events, kept in this tab across reloads until cleared or the tab closes when browser storage is available; otherwise memory only. No messages, names, URLs or credentials. Export saves or shares a local JSON file; nothing is uploaded automatically.</p>
+      <p data-id="diagnostics-status" role="status"></p>
+    </section>
+  </dialog>
   <dialog id="session-actions-dialog" aria-labelledby="session-actions-title">
     <header class="dialog-heading"><h2 id="session-actions-title">Session actions</h2><button id="session-actions-close" type="button">Close</button></header>
     <p id="session-actions-name"></p>

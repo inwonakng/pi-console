@@ -1,7 +1,8 @@
 # Web frontend
 
-Dependency-free browser assets for the pi-console host. No build step, external
-fonts, service worker, or separate production process.
+Browser assets for the pi-console host. No build step, external fonts, or separate
+production process. A push-only service worker supports notifications; it does not
+cache pages or session data for offline use.
 
 ## Enable and connect
 
@@ -68,7 +69,8 @@ Session operations use the existing service protocol. Session links use
 
 ## Behavior
 
-The Hosts panel offers Restart server and Last restart for capable servers.
+The Settings popup contains Hosts, device notifications, and diagnostics. Hosts
+offers Restart server and Last restart for capable servers.
 Restart applies the build already installed on the selected host/channel; it does
 not install updates or reload this browser page. Active work refuses normally. A
 separate force confirmation authorizes interrupting owned work, preserving history
@@ -100,7 +102,7 @@ prompt patches and hidden custom messages are omitted from the transcript.
 All actions use on-screen controls, with no custom keyboard shortcuts. Use Send
 to submit a prompt, and the conversation's Actions menu to rename, stop, or create
 a new session in the same workspace. Standard browser keyboard navigation remains
-available. Hosts expands to show connection status and reconnection
+available. Settings opens a modal with host connection status and reconnection
 controls; registrations for the same host share a single display entry.
 
 The UI supports creation, attachment, control acquisition/takeover/release,
@@ -108,5 +110,41 @@ prompts, abort, rename, questions, approvals, and queue inspection. Conversation
 content is rendered as text with expandable thinking/tool content. Structured
 approval titles expose their scope and preview before answering.
 Live editor effects, workspace editing, full history navigation, Markdown
-formatting, image display, and offline/installable PWA behavior are outside this
-draft.
+formatting, image display, and offline session access are outside this draft.
+
+## iPhone notifications
+
+Serve the app over HTTPS through a trusted-network reverse proxy and add that
+exact HTTPS origin to `server.webui.allowed-origins` as above. Do not expose this
+unauthenticated service to the public internet. On iOS 16.4 or later, add the app
+to the Home Screen, open it from that icon, then turn on **Settings > Notifications
+on this device** and allow the system permission prompt. A browser bookmark alone
+is not enough. No Apple Developer account or native app is required.
+
+The switch is off by default and applies only to this device/browser installation.
+It persists across page and server restarts. Turning it off unregisters this
+subscription without changing desktop delivery or other devices. The existing
+per-session **Host notifications** option still controls which events Pi emits;
+it must also be on. Needs-input alerts (including approvals/integration), finished,
+and error alerts use the same live events as desktop, including enabled registered
+remote hosts. The backend sends them even when the phone app is closed. Clicking
+an alert opens the corresponding session, preserving drafts in an already-open
+app. Stopped sessions still require an explicit resume in History.
+
+The service stores signing keys and subscriptions in its private `web-push.json`
+(mode 0600). Keep this file across upgrades; losing it requires enabling
+notifications again. Up to 32 device subscriptions are supported. The server
+requires outbound HTTPS access to the browser push provider (Apple's
+`*.push.apple.com` for iPhone); no public inbound push endpoint is needed. Browser
+subscriptions are limited to Apple, Google, and Mozilla push providers to prevent
+arbitrary server-side requests. Both subscription updates and status checks require
+an allowed browser Origin and JSON, with no cross-origin CORS access.
+
+Notifications can show session names, directories, and remote host aliases on the
+Lock Screen. Notification payloads are encrypted in transit to the push provider.
+Delivery is best-effort, with a one-hour provider TTL, a bounded in-memory delivery
+queue, and no durable retry/replay of missed events. The backend must be running
+and online when the event occurs. Invalid/expired subscriptions are removed after
+404/410 responses. Reopen Settings to check the subscription and enable it again
+if needed. Connectivity and iOS notification/Focus settings can delay or silence
+alerts; actual iPhone background delivery needs device verification.

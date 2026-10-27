@@ -4,6 +4,7 @@ import { LocalClient } from "./local-client.js";
 import { identifier } from "./host-commands.js";
 import { object } from "./pi-records.js";
 import type { Channel } from "./session-catalog.js";
+import type { OriginNotification } from "./host-owner.js";
 
 type Follower = {
   target: RegisteredHost;
@@ -22,7 +23,8 @@ export class RemoteNotifications {
   private timer?: NodeJS.Timeout;
   private registryError?: string;
 
-  constructor(private readonly channel: Channel, private readonly hostId: string) {}
+  constructor(private readonly channel: Channel, private readonly hostId: string,
+    private readonly onNotification?: (event: OriginNotification) => void) {}
 
   start(): void {
     if (this.timer) return;
@@ -101,8 +103,9 @@ export class RemoteNotifications {
         if (record.type === "disconnected") { fail(new Error(String(record.message))); return; }
         if (record.type !== "desktop_notification") return;
         const event = record.notification;
+        const sessionId = object(event) ? event.sessionId : undefined;
         if (!identity || !object(event) || event.hostId !== identity.hostId || event.serviceEpoch !== identity.serviceEpoch
-          || !identifier(event.sessionId) || !validDesktopNotification(event)) {
+          || !identifier(sessionId) || !validDesktopNotification(event)) {
           fail(new Error("Invalid origin notification"));
           return;
         }
@@ -110,7 +113,10 @@ export class RemoteNotifications {
         if (this.seen.has(key)) return;
         this.seen.add(key);
         if (this.seen.size > 2048) this.seen.delete(this.seen.values().next().value!);
-        // Display only; received events never enter the local owner's origin feed.
+        // Separate consumers only; never republish into the owner's origin feed.
+        this.onNotification?.({ id: event.id, kind: event.kind, title: event.title,
+          body: `${follower.target.alias}\n${event.body}`, hostId: identity.hostId,
+          serviceEpoch: identity.serviceEpoch, sessionId });
         const sent = deliverDesktopNotification({ kind: event.kind, title: event.title,
           body: `${follower.target.alias}\n${event.body}`,
           onError: (error) => this.report(follower.target.alias, error.message) });

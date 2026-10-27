@@ -2,6 +2,7 @@ import { ServiceClient, requestId } from "./client.js";
 import { renderMarkdown } from "./markdown.js";
 import { snapshotQuery, mergeSnapshot } from "./snapshot.js";
 import { exportDiagnostics, clearDiagnostics, recordDiagnostic } from "./diagnostics.js";
+import { setupNotifications } from "./notifications.js";
 
 const $ = id => document.getElementById(id);
 const channel = document.documentElement.dataset.piChannel;
@@ -36,6 +37,7 @@ function bindDiagnostics(panel) {
   panel.querySelector('[data-id="clear-diagnostics"]').addEventListener("click", () => { status.textContent = clearDiagnostics(); });
 }
 bindDiagnostics($("overview-diagnostics"));
+const notifications = setupNotifications($("notification-toggle"), $("notification-status"));
 const sessionName = row => row?.name || row?.cwd?.split("/").filter(Boolean).pop() || "Untitled session";
 const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
@@ -970,6 +972,20 @@ function toggleViewportDiagnostics() {
 }
 
 $("refresh-app").addEventListener("click", () => location.reload());
+$("settings").addEventListener("click", () => {
+  $("settings-dialog").showModal();
+  void notifications.refresh();
+});
+$("settings-close").addEventListener("click", () => $("settings-dialog").close());
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", event => {
+  const data = event.data;
+  if (data?.type === "pi-console-notification" && typeof data.path === "string"
+    && /^\/#sessions\/[\w-]{1,128}\/[\w-]{1,128}$/.test(data.path)) {
+    for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
+    navigate(data.path.slice(1));
+    scheduleRecovery(true);
+  }
+});
 $("connection-form").addEventListener("submit", event => { event.preventDefault(); perform(connectAll); });
 $("new-session").addEventListener("click", () => showCreate());
 $("session-actions-close").addEventListener("click", () => $("session-actions-dialog").close());
@@ -1059,6 +1075,7 @@ function refreshViewedStatus() {
   renderOverview(); renderScreens();
 }
 function returnToPage() {
+  if (!document.hidden) void notifications.refresh();
   refreshViewedStatus();
   scheduleRecovery(true);
 }

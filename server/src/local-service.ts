@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { HostOwner, type HostOwnerOptions, type HostSummaries, type OwnedSession, type OwnedSessionUpdate, type OriginNotification, type SnapshotCursor } from "./host-owner.js";
 import { CONVERSATION_SECTIONS } from "./pi-conversation.js";
 import { RemoteNotifications } from "./remote-notifications.js";
+import { WebPushNotifications } from "./web-push.js";
 import type { SessionSubscription } from "./session-subscription.js";
 import { CommandError } from "./session-commands.js";
 import { identifier, hostCommand } from "./host-commands.js";
@@ -51,7 +52,9 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
   const buildId = await serviceBuild();
   const owner = await HostOwner.open(options);
   const restarts = new ServiceRestart(options, owner.hostId, owner.serviceEpoch);
-  const remoteNotifications = new RemoteNotifications(options.channel, owner.hostId);
+  let webPush: WebPushNotifications | undefined;
+  const pushNotification = (event: OriginNotification) => webPush?.publish(event);
+  const remoteNotifications = new RemoteNotifications(options.channel, owner.hostId, pushNotification);
   const clients = new Map<Socket, ConnectionDiagnostics>();
   const summaryStops = new Set<() => void>();
   let remote: RemoteListener | undefined;
@@ -92,6 +95,8 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
       clearTimeout(cleanupTimer);
       serviceDiagnostic("shutdown_started");
       remoteNotifications.stop();
+      webPush?.close();
+      owner.notifications.off("notification", pushNotification);
       for (const stop of summaryStops) stop();
     }
     try { await task; serviceDiagnostic("shutdown_complete"); }
@@ -474,6 +479,8 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
     clearTimeout(cleanupTimer);
     serviceDiagnostic("finish");
     remoteNotifications.stop();
+    webPush?.close();
+    owner.notifications.off("notification", pushNotification);
     for (const stop of summaryStops) stop();
     remote?.close();
     server.close();
@@ -492,9 +499,13 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
       server.listen(path, () => { server.off("error", reject); resolve(); });
     });
     await chmod(path, 0o600);
+    if (webRoot) {
+      webPush = await WebPushNotifications.open(options.root, owner.hostId);
+      owner.notifications.on("notification", pushNotification);
+    }
     remote = new RemoteListener(port, (stream, onDetach, connectionId, diagnostics) => connection(stream, true, onDetach, connectionId, diagnostics),
       webRoot ? { root: webRoot, serviceRoot: options.root, channel: options.channel, hostId: owner.hostId,
-        allowedOrigins: webSettings?.["allowed-origins"] } : undefined);
+        allowedOrigins: webSettings?.["allowed-origins"], push: webPush } : undefined);
     await remote.listen();
     remoteNotifications.start();
     console.log(JSON.stringify({ network: listenerAddresses(port) }));
@@ -503,7 +514,9 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
     cleanupTimer = setTimeout(() => { void cleanup(); }, 30_000);
   } catch (error) {
     serviceDiagnostic("startup_failed", { code: diagnosticCode(error) });
-    startFailed(error); remoteNotifications.stop(); remote?.close(); server.close();
+    startFailed(error); remoteNotifications.stop(); webPush?.close();
+    owner.notifications.off("notification", pushNotification);
+    remote?.close(); server.close();
     for (const [socket, diagnostics] of clients) { diagnostics.action("destroy", "service_shutdown"); socket.destroy(); }
     await owner.close(); throw error;
   }

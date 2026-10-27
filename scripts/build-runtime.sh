@@ -7,8 +7,8 @@ for path in pi/package-lock.json server/package-lock.json; do
 done
 (cd "$root/pi" && npm ci --omit=dev)
 (cd "$root/server" && npm ci --include=dev && npm run build && npm prune --omit=dev)
-for path in pi/node_modules server/node_modules/ws server/dist/cli.js server/dist/bridge.js \
+for path in pi/node_modules server/node_modules/ws server/node_modules/web-push server/dist/cli.js server/dist/bridge.js \
     web/index.html web/app.js web/client.js web/markdown.js web/vendor/marked.js web/vendor/marked.LICENSE \
-    web/style.css web/logo.svg web/apple-touch-icon.png; do
+    web/style.css web/logo.svg web/apple-touch-icon.png web/notifications.js web/sw.js web/manifest.webmanifest; do
     [ -e "$root/$path" ] || { printf 'Incomplete runtime build: %s\n' "$path" >&2; exit 1; }
 done
