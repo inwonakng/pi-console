@@ -46,8 +46,10 @@ const CHUNK_UNITS = 16 * 1024;
 type Write = { text: string; bytes: number; offset: number; index: number; transfer?: string;
   started?: () => void; resolve: () => void; reject: (error: Error) => void };
 
+export type RecordWriteOptions = { control?: boolean; ordered?: boolean; started?: () => void };
+
 /** Bounded frames let renewal replies and ordered updates pass bulk responses.
- * Only response order may change; updates retain their original FIFO order.
+ * Ordered responses share the FIFO lane with updates instead of bulk responses.
  */
 export class RecordWriter {
   chunks = false;
@@ -60,7 +62,7 @@ export class RecordWriter {
   private failure?: Error;
   constructor(private readonly output: Writable, private readonly limit = MAX_RESPONSE + MAX_REQUEST) {}
   get queuedBytes(): number { return this.pending; }
-  send(value: unknown, options: { control?: boolean; started?: () => void } = {}): Promise<void> {
+  send(value: unknown, options: RecordWriteOptions = {}): Promise<void> {
     if (this.failure) return Promise.reject(this.failure);
     const text = JSON.stringify(value);
     const bytes = Buffer.byteLength(text) + 1;
@@ -68,7 +70,7 @@ export class RecordWriter {
     this.pending += bytes;
     return new Promise<void>((resolve, reject) => {
       const chunked = this.chunks && text.length > CHUNK_UNITS;
-      const lane = options.control ? this.control : chunked && object(value) && value.type === "response" ? this.bulk : this.normal;
+      const lane = options.control ? this.control : !options.ordered && chunked && object(value) && value.type === "response" ? this.bulk : this.normal;
       lane.push({ text, bytes, offset: 0, index: 0, ...(chunked ? { transfer: randomUUID() } : {}), started: options.started, resolve, reject });
       if (!this.running) { this.running = true; void this.pump(); }
     });

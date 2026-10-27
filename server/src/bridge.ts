@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { LocalClient } from "./local-client.js";
 import { BridgeControl } from "./bridge-control.js";
-import { MAX_REQUEST, records, RecordWriter } from "./local-protocol.js";
+import { MAX_REQUEST, records, RecordWriter, type RecordWriteOptions } from "./local-protocol.js";
 import { defaultRoot, requireNode } from "./service-paths.js";
 import { identifier } from "./host-commands.js";
 import { object } from "./pi-records.js";
@@ -47,8 +47,8 @@ async function main(): Promise<void> {
       process.exit(failure ? 1 : 0);
     }, 100);
   };
-  const output = (record: unknown): void => {
-    void writer.send(record).catch((error: Error) => shutdown(error));
+  const output = (record: unknown, options: RecordWriteOptions = {}): void => {
+    void writer.send(record, options).catch((error: Error) => shutdown(error));
   };
   const frontendPid = process.ppid;
   // EOF may be hidden by backpressure. Reparenting also detects a dead frontend
@@ -101,7 +101,7 @@ async function main(): Promise<void> {
         if (method === "attach") control!.attached(result, captured);
         else if (method === "snapshot") control!.snapshot(result, captured);
         else if (method === "grant" && !control!.holdsGrant(result, captured)) result = null;
-        output({ type: "response", id, success: true, result });
+        output({ type: "response", id, success: true, result }, { ordered: method === "attach" });
       },
       (error) => {
         if (!closed) output({ type: "response", id, success: false, error: { code: error.code ?? "disconnected", message: error.message,

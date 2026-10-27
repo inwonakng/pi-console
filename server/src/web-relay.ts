@@ -2,7 +2,7 @@ import type { Duplex } from "node:stream";
 import type { RegisteredHost } from "../../pi/extensions/shared/read-host-registry.mjs";
 import { LocalClient } from "./local-client.js";
 import { identifier } from "./host-commands.js";
-import { MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWriter } from "./local-protocol.js";
+import { MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWriter, type RecordWriteOptions } from "./local-protocol.js";
 import { object } from "./pi-records.js";
 import { defaultRoot } from "./service-paths.js";
 import type { Channel } from "./session-catalog.js";
@@ -23,7 +23,7 @@ export async function webRelay(stream: Duplex, target: RegisteredHost, channel: 
   onDetach(() => stop("relay_detach"));
   stream.once("close", () => stop("relay_stream_close"));
   const deadline = setTimeout(() => stop("relay_handshake_timeout"), 10000);
-  const send = (value: unknown, control = false) => writer.send(value, { control }).catch((error) => { stop("relay_write_failed", error); throw error; });
+  const send = (value: unknown, options: RecordWriteOptions = {}) => writer.send(value, options).catch((error) => { stop("relay_write_failed", error); throw error; });
   const reject = (id: unknown, code: string, message: string) => send({ type: "response", id, success: false,
     error: { code, message, delivery: "not_sent" } });
   const pending = new Map<string, Promise<void>>();
@@ -87,12 +87,12 @@ export async function webRelay(stream: Duplex, target: RegisteredHost, channel: 
       const upstream = control ? client!.requestControl(record.method as "heartbeat" | "grant", record.payload, record.id)
         : client!.request(record.method, record.payload, record.id);
       const request = upstream.then(
-        (result) => send({ type: "response", id: record.id, success: true, result }, control),
+        (result) => send({ type: "response", id: record.id, success: true, result }, { control, ordered: record.method === "attach" }),
         (error: unknown) => {
           const detail = object(error) ? error : {};
           diagnostics.log("relay_request_failed", { cause: "relay_request_failed", code: diagnosticCode(detail) });
           return send({ type: "response", id: record.id, success: false, error: { ...detail,
-            code: detail.code ?? "service_disconnected", message: error instanceof Error ? error.message : "Service request failed" } }, control);
+            code: detail.code ?? "service_disconnected", message: error instanceof Error ? error.message : "Service request failed" } }, { control });
         });
       pending.set(record.id, request);
       void request.then(() => pending.delete(record.id as string), (error) => stop("relay_write_failed", error));
