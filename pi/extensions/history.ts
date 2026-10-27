@@ -27,7 +27,8 @@ import { pathInside, resolveToolPath } from "./shared/paths";
 type SnapshotState =
   | { kind: "missing" }
   | { kind: "file"; blob: string; mode: number }
-  | { kind: "symlink"; target: string };
+  | { kind: "symlink"; target: string }
+  | { kind: "unsupported"; reason: string };
 
 type FileRecord = {
 	path: string;
@@ -191,7 +192,9 @@ function snapshotCurrentFile(root: string, path: string): SnapshotState {
 	if (stats.isSymbolicLink()) {
 		return { kind: "symlink", target: readlinkSync(filePath) };
 	}
-	assertOk(stats.isFile(), `Unsupported history path type: ${filePath}`);
+	if (!stats.isFile()) {
+		return { kind: "unsupported", reason: stats.isDirectory() ? "directory" : "special file" };
+	}
 	const output = runGit(["--git-dir", SNAPSHOT_GIT_DIR, "hash-object", "-w", filePath]);
 	return { kind: "file", blob: String(output).trim(), mode: stats.mode & 0o777 };
 }
@@ -203,7 +206,10 @@ function snapshotGitHead(gitRoot: string, path: string): SnapshotState {
 	}
 	const header = treeEntry.slice(0, treeEntry.indexOf("\t"));
 	const [mode, type, object] = header.split(" ");
-	assertOk(type === "blob" && object, `Unsupported Git history entry for ${path}: ${header}`);
+	if (type !== "blob") {
+		return { kind: "unsupported", reason: `Git entry ${header}` };
+	}
+	assertOk(object, `Missing Git history object for ${path}: ${header}`);
 	const content = runGit(["cat-file", "-p", object], { cwd: gitRoot, binary: true }) as Buffer;
 	if (mode === "120000") {
 		return { kind: "symlink", target: content.toString("utf8") };
@@ -215,6 +221,8 @@ function snapshotGitHead(gitRoot: string, path: string): SnapshotState {
 
 function sameState(left: SnapshotState, right: SnapshotState) {
 	if (left.kind !== right.kind) return false;
+	// Unsupported states cannot establish equality or rollback coverage.
+	if (left.kind === "unsupported") return false;
 	if (left.kind === "missing") return true;
 	if (left.kind === "symlink") return left.target === (right as { kind: "symlink"; target: string }).target;
 	const other = right as { kind: "file"; blob: string; mode: number };
@@ -350,6 +358,7 @@ function removeCurrentPath(path: string) {
 }
 
 function restoreState(root: string, path: string, state: SnapshotState) {
+	assertOk(state.kind !== "unsupported", `Cannot restore unsupported history path: ${path}`);
 	const filePath = absolutePath(root, path);
 	if (state.kind === "missing") {
 		removeCurrentPath(filePath);
@@ -372,6 +381,9 @@ function restorePlan(records: TurnRecord[]) {
 			if (isHistoryIgnoredPath(file.path)) {
 				continue;
 			}
+			// Check every record before folding, including gaps between supported states.
+			assertOk(file.before.kind !== "unsupported" && file.after.kind !== "unsupported",
+				`Revert blocked; rollback was not recorded for ${file.path} (unsupported path type). History was not changed.`);
 			const existing = planned.get(file.path);
 			planned.set(file.path, {
 				path: file.path,
@@ -674,11 +686,15 @@ export default function historyExtension(pi: ExtensionAPI) {
 		}
 		recordGitChanges();
 		const files: FileRecord[] = [];
+		const unsupportedPaths: string[] = [];
 		for (const [path, state] of turn.files) {
 			if (isHistoryIgnoredPath(path)) {
 				continue;
 			}
 			const after = state.after || snapshotCurrentFile(turn.root, path);
+			const unsupported = state.before.kind === "unsupported" ? state.before
+				: after.kind === "unsupported" ? after : undefined;
+			if (unsupported) unsupportedPaths.push(`${path} (${unsupported.reason})`);
 			if (!sameState(state.before, after)) {
 				files.push({ path, before: state.before, after });
 			}
@@ -695,6 +711,13 @@ export default function historyExtension(pi: ExtensionAPI) {
 			});
 		}
 		turn = undefined;
+		if (unsupportedPaths.length > 0) {
+			ctx.ui.notify(
+				`History: rollback unavailable for unsupported paths:\n${unsupportedPaths.join("\n")}\n`
+				+ "Agent execution can continue. Reverting across these changes will be blocked.",
+				"warning",
+			);
+		}
 	});
 
 	pi.registerCommand("pi-revert-after", {
