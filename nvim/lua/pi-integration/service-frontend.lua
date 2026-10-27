@@ -726,14 +726,11 @@ render = function(metadata_only)
 			end
 			side_id = side.id
 		end
-		local side_lines = { "# Side conversation", "", "Ctrl+Enter sends. :PiSideNew resets; :PiSideAbort stops.", "" }
+		local side_lines = {}
 		side_permission_items = {}
 		require("pi-integration.tool-output").reset(side_permission_state)
 		if side then
-			table.insert(side_lines, side.running and "Working" or "Idle")
-			if side.error then
-				table.insert(side_lines, "Side status: " .. tostring(side.error))
-			end
+			if side.error then messages.append_error(side_lines, side.error, false) end
 			local function permissions_after(key)
 				for _, permission in ipairs(side.permissions and side.permissions.items or {}) do
 					if permission.afterMessage == key then
@@ -745,26 +742,30 @@ render = function(metadata_only)
 				table.insert(side_lines, "> Older permission records are omitted from this view.")
 			end
 			permissions_after(vim.NIL)
-			for index, message in ipairs(side.messages or {}) do
-				table.insert(side_lines, "## " .. tostring(message.role))
-				if type(message.content) == "string" then vim.list_extend(side_lines, vim.split(message.content, "\n", { plain = true }))
+			local function append_side_message(message)
+				local content_lines = {}
+				if type(message.content) == "string" then content_lines = vim.split(message.content, "\n", { plain = true })
 				else for _, block in ipairs(message.content or {}) do
 					local content = block.text or block.thinking
 					if not content and block.type == "toolCall" then
 						content = "Tool: " .. tostring(block.name) .. "\n" .. vim.json.encode(block.arguments or {})
 					end
-					vim.list_extend(side_lines, vim.split(content or ("[" .. tostring(block.type or "Content") .. "]"), "\n", { plain = true }))
+					vim.list_extend(content_lines, vim.split(content or ("[" .. tostring(block.type or "Content") .. "]"), "\n", { plain = true }))
 				end end
+				if #content_lines > 0 then
+					messages.append_text_message(side_lines, message, table.concat(content_lines, "\n"), #side_lines > 0)
+				end
 				if message.errorMessage or message.stopReason == "error" or message.stopReason == "aborted" then
 					messages.append_error(side_lines,
 						message.errorMessage or (message.stopReason == "aborted" and "Response aborted." or "Model request failed."),
-						true, message.stopReason == "aborted" and "Aborted" or "Error")
+						#side_lines > 0, message.stopReason == "aborted" and "Aborted" or "Error")
 				end
+			end
+			for index, message in ipairs(side.messages or {}) do
+				append_side_message(message)
 				permissions_after(side.messageKeys and side.messageKeys[index])
 			end
-			if side.partialMessage then
-				for _, block in ipairs(side.partialMessage.content or {}) do vim.list_extend(side_lines, vim.split(block.text or block.thinking or "", "\n", { plain = true })) end
-			end
+			if side.partialMessage then append_side_message(side.partialMessage) end
 		end
 		side_view.render(side_buf, side_lines)
 		side_permission_state.transcript_items = side_permission_items

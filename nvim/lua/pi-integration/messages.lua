@@ -165,7 +165,7 @@ local function append_skill_load_summaries(ctx, lines, items, loads, has_body, p
 	return true
 end
 
-local function append_text_message(lines, message, text, has_body, state)
+function M.append_text_message(lines, message, text, has_body, state)
 	local context = message.role == "custom" and message_utils.agent_context(text) or nil
 	if context then text = message_utils.agent_payload_text(context.payload) or text end
 	local text_lines = vim.split(text, "\n", { plain = true })
@@ -178,7 +178,7 @@ local function append_text_message(lines, message, text, has_body, state)
 end
 
 function M.append_error(lines, text, has_body, title)
-	append_text_message(lines, { role = title or "Error" }, tostring(text or ""), has_body)
+	M.append_text_message(lines, { role = title or "Error" }, tostring(text or ""), has_body)
 end
 
 local function append_assistant_blocks(ctx, lines, items, message, has_body, options)
@@ -627,7 +627,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 				local text = message_utils.extract_text(message)
 				if text and text ~= "" then
 					close_assistant_block()
-					append_text_message(lines, message, text, has_body, ctx.state)
+					M.append_text_message(lines, message, text, has_body, ctx.state)
 					appended = true
 					rendered_kind = "message"
 				end
@@ -636,7 +636,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 			local text = message_utils.extract_text(message)
 			if text and text ~= "" then
 				close_assistant_block()
-				append_text_message(lines, message, text, has_body, ctx.state)
+				M.append_text_message(lines, message, text, has_body, ctx.state)
 				appended = true
 				rendered_kind = "message"
 			end

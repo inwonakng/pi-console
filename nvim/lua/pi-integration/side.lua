@@ -5,6 +5,7 @@ local markdown = require("pi-integration.markdown-render")
 local M = {}
 local transcript_win, input_win, return_win, focus
 local input_cursor, transcript_view, hiding, displayed_buf
+local help_state = {}
 local window_group = vim.api.nvim_create_augroup("PiSideWindows", { clear = true })
 
 local function valid(win) return win and vim.api.nvim_win_is_valid(win) end
@@ -48,12 +49,12 @@ function M.open(transcript_buf, input_buf)
 	local width, th, ih, row, col = geometry()
 	transcript_win = vim.api.nvim_open_win(transcript_buf, false, {
 		relative = "editor", width = width, height = th, row = row, col = col,
-		style = "minimal", border = "rounded", title = " Side conversation | ask ",
+		style = "minimal", border = "rounded", title = " Side conversation | ask | ? keys ",
 	})
 	input_win = vim.api.nvim_open_win(input_buf, true, {
 		relative = "editor", width = width, height = ih, row = row + th + 2, col = col,
 		style = "minimal", border = "rounded", title = " Side input ",
-		footer = " Ctrl+Enter send · <leader>pb / :q hide · <leader>n new chat ",
+		footer = " ? keys ",
 	})
 	vim.api.nvim_clear_autocmds({ group = window_group, event = "WinClosed" })
 	for _, win in ipairs({ transcript_win, input_win }) do
@@ -64,6 +65,24 @@ function M.open(transcript_buf, input_buf)
 		})
 	end
 	for _, buf in ipairs({ transcript_buf, input_buf }) do
+		vim.keymap.set("n", "?", function()
+			require("pi-integration.help").toggle_window(help_state, {
+				name = "pi://side-help", title = "Side conversation keys", parent = vim.api.nvim_get_current_win(),
+				lines = {
+					"# Side conversation keys", "",
+					"- `<C-CR>` sends from the input (normal or insert mode).",
+					"- `<C-k>` / `<C-w>k` focuses the transcript (normal mode).",
+					"- `<C-j>` / `<C-w>j` focuses the input (normal mode).",
+					"- `<CR>` in the transcript follows a link or inspects a permission.",
+					"- `<leader>pb` / `:q` hides both windows, preserving the draft and conversation.",
+					"- `<leader>n` / `:PiSideNew` starts a new side conversation (normal mode).",
+					"- `:PiSideAbort` stops only side work.",
+					"- `<leader>pa` restores a pending action (normal mode).",
+					"- `q` / `<Esc>` closes this help; both keep native behavior in the side windows.",
+				},
+			})
+			if focus and help_state.help_win then focus:add(help_state.help_win) end
+		end, { buffer = buf, desc = "Side conversation help" })
 		vim.keymap.set("n", "<leader>pb", M.hide, { buffer = buf, desc = "Hide side conversation" })
 		for _, lhs in ipairs({ "<C-k>", "<C-w>k", "<C-w><C-k>" }) do
 			vim.keymap.set("n", lhs, function() if valid(transcript_win) then vim.api.nvim_set_current_win(transcript_win) end end, { buffer = buf })
