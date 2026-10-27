@@ -869,6 +869,11 @@ $("create-form").addEventListener("submit", event => {
       setSummaries(host, await host.client.request("sessions.subscribe"));
       $("create-dialog").close();
       navigate(sessionRoute(host, { id }));
+      const conversation = conversations.get(sessionKey(host.hello.hostId, id));
+      if (conversation) {
+        await conversation.reconnect();
+        if (conversation.connected()) await conversation.acquireControl();
+      }
     } finally { submit.disabled = false; }
   });
 });
@@ -1705,15 +1710,9 @@ function createConversation(host, row) {
     }));
   }
 
-  $("control").addEventListener("click", () => run(async () => {
+  async function acquireControl(takeover = false) {
+    if (controlsCurrent()) return;
     const captured = context();
-    if (controlsCurrent()) {
-      await command("control.release");
-      if (sameContext(captured)) grant = null;
-      return;
-    }
-    const takeover = Boolean(owner?.controller);
-    if (takeover && !confirm(`Take control from ${owner.controller.label}?`)) return;
     await command(takeover ? "control.takeover" : "control.acquire", takeover ? { confirmed: true } : {});
     if (!sameContext(captured)) return;
     const value = await captured.client.request("grant");
@@ -1722,6 +1721,17 @@ function createConversation(host, row) {
       if (!controlsCurrent()) scheduleRefresh();
       else scheduleViewedResponse();
     }
+  }
+  $("control").addEventListener("click", () => run(async () => {
+    if (controlsCurrent()) {
+      const captured = context();
+      await command("control.release");
+      if (sameContext(captured)) grant = null;
+      return;
+    }
+    const takeover = Boolean(owner?.controller);
+    if (takeover && !confirm(`Take control from ${owner.controller.label}?`)) return;
+    await acquireControl(takeover);
   }));
   bindDiagnostics($("connection-diagnostics"));
   $("layout-diagnostics").addEventListener("click", toggleViewportDiagnostics);
@@ -1899,6 +1909,7 @@ function createConversation(host, row) {
   return {
     get host() { return host; },
     identity, id: selectedId, element, reconnect, recover,
+    acquireControl: () => run(acquireControl),
     draft: () => $("prompt").value,
     viewed() { if (snapshot) renderSession(); },
     connected: () => connected,
