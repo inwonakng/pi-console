@@ -188,6 +188,48 @@ local function now()
 	return vim.uv.hrtime() / 1000000
 end
 
+local function cache_path(user_id, kind)
+	return vim.fs.joinpath(vim.fn.stdpath("cache"), "pi-console", "zotero", user_id, kind .. ".json")
+end
+
+local function read_cache(user_id, kind)
+	local ok, cached = pcall(function()
+		local value = vim.json.decode(table.concat(vim.fn.readfile(cache_path(user_id, kind)), "\n"))
+		if type(value) ~= "table" or value.schema ~= 1 or value.user_id ~= user_id or value.kind ~= kind
+			or type(value.entries) ~= "table" or not vim.islist(value.entries)
+			or (value.version ~= nil and (type(value.version) ~= "string" or not value.version:match("^%d+$"))) then
+			return nil
+		end
+		for _, entry in ipairs(value.entries) do
+			if type(entry) ~= "table" or type(entry.value) ~= "string" or type(entry.label) ~= "string"
+				or type(entry.description) ~= "string" or type(entry.search) ~= "string" then
+				return nil
+			end
+		end
+		return value
+	end)
+	if ok and cached then return cached.entries, cached.version end
+end
+
+local function write_cache(user_id, kind, entries, version)
+	local path = cache_path(user_id, kind)
+	vim.fn.mkdir(vim.fs.dirname(path), "p", 448)
+	-- Persist only completion metadata and its version, never the API key.
+	local encoded = vim.json.encode({ schema = 1, user_id = user_id, kind = kind, entries = entries, version = version })
+	local file, temporary = vim.uv.fs_mkstemp(path .. ".XXXXXX")
+	assert(file, temporary)
+	local ok, err = pcall(function()
+		assert(vim.uv.fs_write(file, encoded, 0) == #encoded, "Incomplete Zotero cache write")
+		assert(vim.uv.fs_fsync(file))
+	end)
+	vim.uv.fs_close(file)
+	if ok then ok, err = vim.uv.fs_rename(temporary, path) end
+	if not ok then
+		vim.uv.fs_unlink(temporary)
+		error(err, 0)
+	end
+end
+
 local source = {}
 
 function source.new()
@@ -231,7 +273,9 @@ function source:load(kind, callback)
 	self.account = auth
 	local state = self.caches[kind]
 	if not state then
-		state = { loaded = 0, retry = 0, waiters = {} }
+		-- Restored suggestions are immediately usable, but always revalidate them.
+		state = { loaded = -math.huge, retry = 0, waiters = {} }
+		state.entries, state.version = read_cache(auth.user_id, kind)
 		self.caches[kind] = state
 	end
 	if now() < state.retry or (state.entries and now() - state.loaded < 60000) then
@@ -301,7 +345,9 @@ function source:load(kind, callback)
 				local built, suggestions = pcall(entries_from, rows, kind, auth.user_id)
 				if not built then finish("Invalid Zotero metadata."); return end
 				state.entries, state.version = suggestions, version
+				local saved = pcall(write_cache, auth.user_id, kind, suggestions, version)
 				finish()
+				if not saved then self:warn("Cannot save Zotero completion cache; suggestions will only be kept for this Neovim session.") end
 			end)
 		end)
 		if started then state.process = process else finish("Cannot start curl for Zotero web completion.") end
