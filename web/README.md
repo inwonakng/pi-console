@@ -15,8 +15,9 @@ server:
 ```
 
 Restart the matching service with `pi-console server restart` (`pi-console-dev
-server restart` for dev), then open `http://HOST:8443/` in a browser. Use the configured
-port if different; `server status` reports candidate URLs. The page automatically
+server restart` for dev), then open `http://HOST:8444/` for stable or
+`http://HOST:8443/` for dev in a browser. Use the configured port if different;
+`server status` reports candidate URLs. The page automatically
 connects using the serving host's stable/dev channel and displays it as a read-only
 label. The frontend is disabled by default; configuration and asset changes require
 a service restart.

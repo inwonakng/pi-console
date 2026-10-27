@@ -74,8 +74,8 @@ bin/pi-console --resume SERVICE_SESSION_ID
 
 Use `--root /short/private/path` on both service and frontend for an isolated profile;
 Unix socket paths over 100 bytes refuse. Each running profile needs a separate network
-port; use `server start/run/enable --port PORT` (default `8443`), or `server restart
---port PORT` to change it. Stable and dev instances also need distinct ports. Service CLI also accepts `--channel stable|dev`;
+port; use `server start/run/enable --port PORT` (default `8444` for stable, `8443`
+for dev), or `server restart --port PORT` to change it. Stable and dev instances also need distinct ports. Service CLI also accepts `--channel stable|dev`;
 the launcher selects its existing channel. The frontend displays the target channel,
 host/build and controller separately from Pi tool permissions. Another dev checkout
 or stable installation cannot administer the same profile. Explicit compatible
@@ -212,7 +212,8 @@ quiescent complete profile before any separately authorized manual removal.
 
 ### Remote attachment
 
-Every service listens on all IPv4 interfaces (`0.0.0.0`), port `8443` by default.
+Every service listens on all IPv4 interfaces (`0.0.0.0`), port `8444` for stable
+or `8443` for dev by default.
 No opt-in, device credential, TLS configuration or certificate is required.
 **Anyone who can reach this port can view and control sessions as the execution
 host's user. Traffic is unencrypted.** Use a trusted network/VPN and firewall rules;
@@ -246,7 +247,8 @@ remain in effect; these detect accidental replacements, not impersonation.
 The bridge and browser frontend use WS `/v1/stream`. The optional web UI is disabled
 by default. Set `server.webui.enabled: true` in
 `${XDG_CONFIG_HOME:-~/.config}/pi-console/config.yaml` (`config-dev.yaml` for dev),
-restart the matching service, then open `http://HOST:8443/` (or its configured port).
+restart the matching service, then open `http://HOST:8444/` (`8443` for dev, or its
+configured port).
 The page uses the serving host's channel automatically. The UI uses the same
 trusted-network access policy without authentication. Browser WebSockets require
 an enabled web UI and either its direct HTTP origin or an exact origin listed in

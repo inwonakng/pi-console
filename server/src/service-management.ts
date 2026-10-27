@@ -19,7 +19,7 @@ export async function manageService(action: ManagementAction, options: HostOwner
   const { root, channel, binary } = options;
   const { force, supervisorDirectory, path, expectedEpoch } = config;
   const explicitPort = config.port !== undefined;
-  const port = listenerPort(config.port);
+  const port = listenerPort(config.port, channel);
   const extraArgs: string[] = [];
   if (explicitPort) extraArgs.push("--port", String(port));
   if (options.provider) extraArgs.push("--provider", options.provider);

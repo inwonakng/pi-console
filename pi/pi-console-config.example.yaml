@@ -9,7 +9,8 @@
 # Disabled by default; anyone who can reach the port has access (no authentication).
 server:
   # Shared HTTP/WS port for host connections and the web frontend (1-65535).
-  port: 8443
+  # Default: 8444 for stable, 8443 for dev.
+  port: 8444
   webui:
     enabled: false
     # Additional dashboard origins for reverse proxies; restart after changes.

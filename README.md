@@ -66,15 +66,16 @@ A local launch ensures the independent service and starts a conversation worker 
 the invocation directory while you compose. The server accepts the first message
 even during startup. Closing an unused window stops and deletes its empty session;
 after work is accepted, closing Neovim leaves the conversation running.
-Every service also listens on all IPv4 interfaces, port `8443` by default.
+Every service also listens on all IPv4 interfaces, port `8444` for stable or `8443`
+for dev by default.
 **Anyone who can reach that port can view and control sessions. There is no
 authentication or encryption; restrict access with your VPN/network and firewall.**
-Connect with `pi-console --remote http://HOST:8443`; `pi-console server status`
+Connect with `pi-console --remote http://HOST:8444`; `pi-console server status`
 reports candidate URLs. Use `server start/restart/enable --port PORT` for another port.
 
 For browser access, set `server.webui.enabled: true` in the channel
 [configuration file](web/README.md#enable-and-connect), restart the service, and open
-`http://HOST:8443/`. The web UI is disabled by default and uses the same
+`http://HOST:8444/` (`8443` for dev). The web UI is disabled by default and uses the same
 trusted-network access policy without authentication.
 
 `pi-console --overview` and `--sidebar` create no conversation. Use `--attach ID`

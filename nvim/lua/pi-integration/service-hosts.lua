@@ -914,7 +914,7 @@ local function edit(previous)
 		target.alias = vim.trim(alias)
 		vim.ui.select({ "HTTP service", "Local service profile" }, { prompt = "Transport" }, function(kind)
 			if not kind then return end
-			vim.ui.input({ prompt = kind == "HTTP service" and "HTTP origin (http://hostname:8443): " or "Absolute local service root: ", default = target.remote or target.root or "" }, function(endpoint)
+			vim.ui.input({ prompt = kind == "HTTP service" and "HTTP origin (http://hostname:port): " or "Absolute local service root: ", default = target.remote or target.root or "" }, function(endpoint)
 				if not endpoint or endpoint == "" then return end
 				if target.alias == "" then target.alias = endpoint end
 				if kind == "Local service profile" then

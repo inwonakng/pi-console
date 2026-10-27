@@ -45,7 +45,7 @@ export async function runService(options: HostOwnerOptions & { root: string; por
 async function serve(options: HostOwnerOptions & { root: string; port?: number }): Promise<void> {
   const path = endpoint(options.root);
   if (Buffer.byteLength(path) > 100) throw new Error("Unix endpoint path is too long; select a shorter private --root");
-  const port = listenerPort(options.port);
+  const port = listenerPort(options.port, options.channel);
   const webSettings = readExtensionSettings(options.channel).server?.webui;
   const webRoot = webSettings?.enabled ? join(options.appRoot, "web") : undefined;
   const buildId = await serviceBuild();

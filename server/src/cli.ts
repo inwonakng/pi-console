@@ -134,7 +134,7 @@ async function main(): Promise<void> {
       throw error;
     }
   };
-  const port = listenerPort(flags.get("--port"));
+  const port = listenerPort(flags.get("--port"), channel);
   if (action === "reconcile") {
     const claim = await privateJson(join(root, "owner.lock"), 16384);
     if (!object(claim)) throw new Error("Invalid recovery claim");

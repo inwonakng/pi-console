@@ -12,8 +12,8 @@ import type { Channel } from "./session-catalog.js";
 import { defaultRoot } from "./service-paths.js";
 import { ConnectionDiagnostics, diagnosticCode, serviceDiagnostic } from "./connection-diagnostics.js";
 
-export const DEFAULT_PORT = 8443;
-export function listenerPort(value: string | number = DEFAULT_PORT): number {
+export function listenerPort(value?: string | number, channel: Channel = "stable"): number {
+  value ??= channel === "stable" ? 8444 : 8443;
   if (!/^\d+$/.test(String(value)) || !Number.isInteger(Number(value)) || Number(value) < 1 || Number(value) > 65535) {
     throw new Error("Port must be an integer between 1 and 65535");
   }
