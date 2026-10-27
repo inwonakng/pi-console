@@ -2014,7 +2014,7 @@ export class OwnedSession {
     }
     const work = this.conversation.dispatch(command);
     if (work) { this.retain({ type: "work", work }); this.changed(); }
-    if (command.type === "get_session_stats" && this.worker && this.conversation.idle) {
+    if (this.worker && (command.type === "get_state" || command.type === "get_session_stats" && this.conversation.idle)) {
       this.captures.set(command.id, { worker: this.worker, revision: this.runtimeRevision, version: this.conversation.historyVersion });
     }
   }
@@ -2044,12 +2044,18 @@ export class OwnedSession {
       && (response.data.disposition === "started" || response.data.disposition === "handled")) {
       flight.outcome = { disposition: response.data.disposition };
     }
-    if (response.success && response.command === "get_state") {
-      if (response.data.sessionId === this.record.piSessionId && response.data.sessionFile === this.catalog.sessionFile(this.id)) {
+    if (command.type === "get_state") {
+      const capture = this.captures.get(command.id);
+      this.captures.delete(command.id);
+      if (response.success && response.command === "get_state" && capture && capture.worker === this.worker
+        && capture.revision === this.runtimeRevision && this.worker?.interactionRuntime()?.active) {
+        if (response.data.sessionId !== this.record.piSessionId || response.data.sessionFile !== this.catalog.sessionFile(this.id)) {
+          throw new Error("Pi state changed managed conversation identity");
+        }
         this.trackCommand(this.catalog.updateTitle(this.id, response.data.sessionName));
+        this.retain({ type: "pi_state", state: response.data });
+        this.changed();
       }
-      this.retain({ type: "pi_state", state: response.data });
-      this.changed();
     }
     if (command.type === "get_session_stats") {
       const capture = this.captures.get(command.id);
@@ -2151,25 +2157,29 @@ export class OwnedSession {
     guard();
   }
 
-  /** Reconcile only at idle boundaries. Capture fences apply at dispatch and
-   * terminal stdout positions, not in the later awaiting continuation.
+  /** Refresh live state even during workspace continuation; history needs idle.
+   * Capture fences apply at dispatch and terminal stdout positions.
    */
   private refreshConversation(checkRuntime?: () => void): Promise<void> {
     if (this.refresh) return this.refresh;
     const worker = this.worker;
-    if (!worker || !this.historyIdle() || this.stopRequested || this.exit) return Promise.resolve();
+    if (!worker?.interactionRuntime()?.active || this.stopRequested || this.exit) return Promise.resolve();
     this.refresh = (async () => {
       do {
         this.refreshAgain = false;
         const revision = this.runtimeRevision;
-        const guard = () => {
+        const stateGuard = () => {
           checkRuntime?.();
-          if (worker !== this.worker || revision !== this.runtimeRevision || !this.historyIdle()) {
-            throw new CommandError("stale_runtime", "History capture context changed");
+          if (worker !== this.worker || revision !== this.runtimeRevision || !worker.interactionRuntime()?.active || this.stopRequested || this.exit) {
+            throw new CommandError("stale_runtime", "State capture context changed");
           }
         };
+        const guard = () => {
+          stateGuard();
+          if (!this.historyIdle()) throw new CommandError("stale_runtime", "History capture context changed");
+        };
         try {
-          await worker.request({ type: "get_state" }, guard);
+          await worker.request({ type: "get_state" }, stateGuard);
           if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
           if (checkRuntime) {
             checkRuntime();
@@ -2194,7 +2204,7 @@ export class OwnedSession {
       this.refresh = undefined;
       // A settlement/runtime signal can arrive while get_state is pending or in
       // the same stdout batch as its response. Do not lose that coalesced read.
-      if (this.refreshAgain && this.historyIdle() && !this.stopRequested && !this.exit) this.scheduleRefresh();
+      if (this.refreshAgain && this.worker?.interactionRuntime()?.active && !this.stopRequested && !this.exit) this.scheduleRefresh();
     });
     return this.refresh;
   }
@@ -2275,8 +2285,10 @@ export class OwnedSession {
     const runtime = this.worker?.interactionRuntime();
     const state = this.conversation.sessionState;
     const sessionFile = runtime?.active && runtime.sessionId === this.record.piSessionId ? this.catalog.sessionFile(this.id) : undefined;
+    // Runtime lifecycle identity remains authoritative while a handoff's cached
+    // get_state snapshot is absent. Never block cancellation on that cache.
     if (!runtime?.active || runtime.sessionId !== this.record.piSessionId || runtime.sessionFile !== sessionFile
-      || state?.sessionId !== this.record.piSessionId || state.sessionFile !== sessionFile) {
+      || state && (state.sessionId !== this.record.piSessionId || state.sessionFile !== sessionFile)) {
       throw new Error("Pi runtime changed managed conversation identity or became unavailable");
     }
   }
