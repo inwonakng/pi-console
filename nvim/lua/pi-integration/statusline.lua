@@ -55,15 +55,23 @@ local function format_session_stats(state)
 
 	stats = stats or {}
 	local tokens = stats.tokens or {}
+	-- Session stats contain finalized entries only. Add provider-reported usage
+	-- for the current response without modifying the authoritative totals.
+	local streaming = state.streaming_usage or {}
+	local function total(kind)
+		return (tonumber(tokens[kind]) or 0) + (tonumber(streaming[kind]) or 0)
+	end
 	local primary_parts = {
-		{ text = "↑" .. format_count(tokens.input), highlight = "PiUsageInput" },
-		{ text = "↓" .. format_count(tokens.output), highlight = "PiUsageOutput" },
+		{ text = "↑" .. format_count(total("input")), highlight = "PiUsageInput" },
+		{ text = "↓" .. format_count(total("output")), highlight = "PiUsageOutput" },
 	}
 	local secondary_parts = {}
 
 	local context = stats.contextUsage
 	if context then
-		local context_tokens = non_null(context.tokens) and format_count(context.tokens) or "?"
+		local reported_input = (tonumber(streaming.input) or 0) + (tonumber(streaming.cacheRead) or 0) + (tonumber(streaming.cacheWrite) or 0)
+		local context_tokens = reported_input > 0 and format_count(reported_input + (tonumber(streaming.output) or 0))
+			or non_null(context.tokens) and format_count(context.tokens) or "?"
 		local context_window = non_null(context.contextWindow) and format_count(context.contextWindow) or "?"
 		table.insert(primary_parts, { text = "ctx " .. context_tokens .. "/" .. context_window, highlight = "PiUsageContext" })
 	end
@@ -78,16 +86,15 @@ local function format_session_stats(state)
 		})
 	end
 
-	-- Use the same cumulative session totals as input/output and cost.
-	local cache_read = tonumber(tokens.cacheRead) or 0
-	local cache_write = tonumber(tokens.cacheWrite) or 0
+	local cache_read = total("cacheRead")
+	local cache_write = total("cacheWrite")
 	if cache_read > 0 or cache_write > 0 then
 		table.insert(secondary_parts, { text = "R" .. format_count(cache_read), highlight = "PiUsageStats" })
 		table.insert(secondary_parts, { text = "W" .. format_count(cache_write), highlight = "PiUsageStats" })
 	end
 
 	if non_null(stats.cost) then
-		table.insert(secondary_parts, { text = string.format("$%.2f", stats.cost), highlight = "PiUsageCost" })
+		table.insert(secondary_parts, { text = string.format("$%.2f", stats.cost + (streaming.cost and tonumber(streaming.cost.total) or 0)), highlight = "PiUsageCost" })
 	end
 
 	local primary_text, primary_statusline = format_stat_parts(primary_parts)

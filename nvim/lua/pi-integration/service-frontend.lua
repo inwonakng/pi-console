@@ -624,6 +624,8 @@ local function update_status_state()
 	end
 	if pending_settings["thinking.set"] then state.thinking_level = pending_settings["thinking.set"].level end
 	state.session_stats = conversation and conversation.stats or initial and initial.sessionStats
+	local partial = conversation and conversation.partialAssistant
+	state.streaming_usage = partial and not partial.interrupted and partial.message.usage or nil
 	if not session_id then
 		state.session_stats = { tokens = { input = 0, output = 0 }, cost = 0,
 			contextUsage = { tokens = 0, contextWindow = context_window or vim.NIL } }

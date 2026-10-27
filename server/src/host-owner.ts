@@ -620,7 +620,7 @@ export class OwnedSession {
   private refreshAgain = false;
   private readonly historyReads = new Map<string, HistoryFlight>();
   private historyCapability?: { worker: PiProcess; runtimeId: string; revision: number; validation: Promise<void> };
-  private readonly captures = new Map<string, { worker: PiProcess; revision: number; version: number }>();
+  private readonly captures = new Map<string, { worker: PiProcess; revision: number }>();
   private runtimeRevision: number;
   private workerRevision = 0;
   private worker?: PiProcess;
@@ -2163,6 +2163,8 @@ export class OwnedSession {
         && (event.statusKey === "pi-history-changed" || event.statusKey === "pi-workspace" && workspaceChanged))) {
       this.retain({ type: "invalidate_history" });
       this.scheduleRefresh();
+    } else if (event.type === "message_end" || event.type === "entry_appended") {
+      this.scheduleRefresh();
     }
     if (event.type === "agent_settled" || event.type === "compaction_end" || event.type === "auto_retry_end"
       || event.type === "summarization_retry_finished" || event.type === "queue_update"
@@ -2201,8 +2203,8 @@ export class OwnedSession {
     }
     const work = this.conversation.dispatch(command);
     if (work) { this.retain({ type: "work", work }); this.changed(); }
-    if (this.worker && (command.type === "get_state" || command.type === "get_session_stats" && this.conversation.idle)) {
-      this.captures.set(command.id, { worker: this.worker, revision: this.runtimeRevision, version: this.conversation.historyVersion });
+    if (this.worker && (command.type === "get_state" || command.type === "get_session_stats")) {
+      this.captures.set(command.id, { worker: this.worker, revision: this.runtimeRevision });
     }
   }
 
@@ -2247,9 +2249,14 @@ export class OwnedSession {
     if (command.type === "get_session_stats") {
       const capture = this.captures.get(command.id);
       this.captures.delete(command.id);
-      if (response.success && capture && capture.worker === this.worker
-        && capture.revision === this.runtimeRevision && capture.version === this.conversation.historyVersion && this.conversation.idle) {
-        if (response.command === "get_session_stats") this.retain({ type: "session_stats", stats: response.data });
+      // Stats are a synchronous snapshot at this stdout position. Streaming
+      // changes historyVersion, but does not invalidate a same-runtime count.
+      if (response.success && response.command === "get_session_stats" && capture && capture.worker === this.worker
+        && capture.revision === this.runtimeRevision && this.worker?.interactionRuntime()?.active) {
+        if (response.data.sessionId !== this.record.piSessionId || response.data.sessionFile !== this.catalog.sessionFile(this.id)) {
+          throw new Error("Pi stats changed managed conversation identity");
+        }
+        this.retain({ type: "session_stats", stats: response.data });
       } else this.refreshAgain = true;
     }
     this.scheduleQueue();
@@ -2372,8 +2379,7 @@ export class OwnedSession {
             checkRuntime();
             this.checkIdentity();
           }
-          if (!this.historyIdle()) return;
-          await worker.request({ type: "get_session_stats" }, guard);
+          await worker.request({ type: "get_session_stats" }, stateGuard);
           if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
           if (!this.historyIdle()) return;
           if (checkRuntime || !this.conversation.hydrated) await this.readHistory(worker, "projected-tail", guard);
@@ -2403,8 +2409,8 @@ export class OwnedSession {
     // rejected refresh fences the owner; it never retries an execution command.
     void Promise.resolve().then(() => {
       // Navigation owns its completion refresh, including runtime-change/history signals.
+      if (this.refresh) { this.refreshAgain = true; return; }
       if (!this.navigationRefreshPending()) return this.refreshConversation();
-      if (this.refresh) this.refreshAgain = true;
     }).catch((error: unknown) => {
       if (this.stopRequested || this.exit) return;
       if (error instanceof CommandError && ["resource_limit", "resource_unavailable", "session_busy", "stale_runtime"].includes(error.code)) {

@@ -329,8 +329,12 @@ export class PiConversation {
         this.state.widgets = {};
         this.state.title = undefined;
         this.state.piState = undefined;
-        this.state.stats = undefined;
-        this.reserve("session_stats", undefined);
+        // A cwd-bound runtime replacement keeps the managed session's totals
+        // visible until the incoming runtime supplies a fresh snapshot.
+        if (!change.preserveContinuation) {
+          this.state.stats = undefined;
+          this.reserve("session_stats", undefined);
+        }
         for (const key of this.liveSizes.keys()) {
           if (key.startsWith("status:") || key.startsWith("widget:") || key === "title" || key === "pi_state" || key === "queue" || key.startsWith("execution:")) this.reserve(key, undefined);
         }
