@@ -1763,6 +1763,19 @@ function createConversation(host, row) {
     if (following) $("transcript").scrollTop = $("transcript").scrollHeight;
   }
   $("prompt").addEventListener("input", () => { resizePrompt(); renderControls(); });
+  $("prompt").addEventListener("paste", event => {
+    const prompt = event.currentTarget;
+    if (prompt.disabled || prompt.readOnly) return;
+    // iOS can prefer a URL-encoded clipboard representation over the original text.
+    const value = event.clipboardData?.getData("text/plain");
+    if (!value) return;
+    event.preventDefault();
+    // insertText preserves native undo; setRangeText is the fallback.
+    if (!document.execCommand("insertText", false, value)) {
+      prompt.setRangeText(value, prompt.selectionStart, prompt.selectionEnd, "end");
+      prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
   $("new-workspace").addEventListener("click", () => showCreate(true));
   $("choose-directory").addEventListener("click", () => showCreate());
   $("back").addEventListener("click", () => backTo(""));
