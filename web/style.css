@@ -80,6 +80,7 @@ label { font-size: 12px; color: var(--muted); }
 .host-state span { overflow-wrap: anywhere; min-width: 0; }
 .host-message, .host-error { flex-basis: 100%; overflow-wrap: anywhere; }
 .host-error { color: var(--danger); }
+#settings-dialog { max-height: min(560px, 70dvh); }
 #settings-dialog .app-setting { padding: 18px 0; border-top: 1px solid var(--border); }
 #settings-dialog .app-setting:last-child { padding-bottom: 0; }
 .notification-control { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; font-size: 12px; }
