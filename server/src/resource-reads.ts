@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants, type BigIntStats, type Dirent } from "node:fs";
-import { lstat, open, opendir, realpath, type FileHandle } from "node:fs/promises";
+import { lstat, open, opendir, realpath, stat, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { setImmediate as yieldTurn } from "node:timers/promises";
@@ -31,7 +31,7 @@ type ReadInput = {
 };
 type TextChunk = { text: string; path: string; offset: number; nextOffset: number | null; version: string; size: number };
 type FileEntry = { path: string; kind: "file" | "directory" };
-type Target = { root: string; path: string; owned?: boolean };
+type Target = { root: string; path: string; owned?: boolean; followSymlinks?: boolean };
 type Opened = Target & { file: FileHandle; stamp: BigIntStats; canonical: string };
 
 const CHUNK_BYTES = 64 * 1024;
@@ -108,8 +108,8 @@ function inside(root: string, path: string): boolean {
   return suffix === "" || (!isAbsolute(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep}`));
 }
 
-/** Trusted roots may themselves have OS aliases (for example /var on macOS).
- * Below that root, reject every symlink component, including in-root links. */
+/** The requested path must belong to the trusted root. Project reads and
+ * completion may follow links outside it; managed resources reject links below it. */
 export async function canonical(target: Target, check: () => void): Promise<string> {
   check();
   if (!pathString(target.root) || !isAbsolute(target.root) || !pathString(target.path) || !isAbsolute(target.path)) {
@@ -121,9 +121,14 @@ export async function canonical(target: Target, check: () => void): Promise<stri
   // Accept either the configured trusted root or its canonical spelling.
   const base = inside(lexicalRoot, requested) ? lexicalRoot : root;
   if (!inside(base, requested)) refuse("resource_denied", "Path is outside its allowed root");
-  let current = root;
   const parts = relative(base, requested).split(sep).filter(Boolean);
   if (parts.length > 128) refuse("resource_oversize", "Path exceeds component limit");
+  if (target.followSymlinks) {
+    const result = await realpath(join(root, ...parts));
+    check();
+    return result;
+  }
+  let current = root;
   for (const part of parts) {
     check();
     current = join(current, part);
@@ -212,7 +217,8 @@ async function chunk(target: Target, input: ReadInput, check: () => void): Promi
     }
     const text = decode(bytes.subarray(0, length));
     await unchanged(opened, check);
-    return { text, path: opened.canonical, offset: start, nextOffset: start + length < size ? start + length : null, version, size };
+    return { text, path: target.followSymlinks ? resolve(target.path) : opened.canonical,
+      offset: start, nextOffset: start + length < size ? start + length : null, version, size };
   } finally { await opened.file.close(); }
 }
 // Match spawn-transcript.read_messages: streaming message snapshots and protocol
@@ -504,7 +510,7 @@ export async function readResource(context: ResourceContext, input: unknown): Pr
         target = { root: dirname(context.sessionFile), path: context.sessionFile, owned: true };
         break;
       case "file":
-        target = { root: context.workspaceRoot, path: resolve(context.cwd, request.path!) };
+        target = { root: context.workspaceRoot, path: resolve(context.cwd, request.path!), followSymlinks: true };
         break;
       case "skill":
         if (!context.skillPaths.includes(request.path!)) refuse("resource_denied", "Skill is not in the discovered skill allowlist");
@@ -523,6 +529,25 @@ export async function readResource(context: ResourceContext, input: unknown): Pr
   });
 }
 
+/** Completion follows links but preserves the requested spelling for suggestions.
+ * Broken, looping or inaccessible links must not hide other directory entries. */
+async function completionEntries(path: string, check: () => void): Promise<{ path: string; canonical: string; entries: { name: string; kind: FileEntry["kind"] }[] }> {
+  const listed = await directoryEntries({ root: sep, path, followSymlinks: true }, check);
+  const entries: { name: string; kind: FileEntry["kind"] }[] = [];
+  for (const entry of listed.entries) {
+    check();
+    try {
+      const info = entry.isSymbolicLink() ? await stat(join(listed.path, entry.name)) : entry;
+      if (info.isDirectory() || info.isFile()) entries.push({ name: entry.name, kind: info.isDirectory() ? "directory" : "file" });
+    } catch (error) {
+      if (error instanceof Error && "code" in error && ["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(String(error.code))) continue;
+      throw error;
+    }
+  }
+  check();
+  return { path: resolve(path), canonical: listed.path, entries };
+}
+
 /** Resolve home paths on this owner, never against the frontend's filesystem.
  * Entries are absolute child directory paths; no file names or contents escape. */
 export async function completeDirectory(input: unknown, check: () => void): Promise<{ path: string; entries: string[]; nextOffset: number | null }> {
@@ -533,8 +558,8 @@ export async function completeDirectory(input: unknown, check: () => void): Prom
     const expanded = input.path === "~" ? homedir()
       : input.path.startsWith("~/") ? join(homedir(), input.path.slice(2)) : input.path;
     if (!isAbsolute(expanded)) refuse("resource_payload", "Directory must be absolute or start with ~/");
-    const { path, entries } = await directoryEntries({ root: sep, path: expanded }, check);
-    const directories = entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink());
+    const { path, entries } = await completionEntries(expanded, check);
+    const directories = entries.filter((entry) => entry.kind === "directory");
     const start = (input.offset as number | undefined) ?? 0;
     if (start > directories.length) refuse("resource_offset", "Completion offset is beyond the directory page");
     const page = directories.slice(start, start + PAGE_SIZE).map((entry) => join(path, entry.name));
@@ -553,14 +578,15 @@ type FileIndex = { path: string; entries: FileEntry[]; truncated: boolean };
 const fileIndexes = new Map<string, { time: number; result: Promise<FileIndex> }>();
 
 async function scanCompletionFiles(context: ResourceContext): Promise<FileIndex> {
-  const root = await canonical({ root: context.workspaceRoot, path: context.cwd }, context.check);
+  await canonical({ root: context.workspaceRoot, path: context.cwd, followSymlinks: true }, context.check);
+  const root = resolve(context.cwd);
   const entries: FileEntry[] = [];
-  const directories = [{ path: root, relative: "" }];
+  const directories = [{ path: root, relative: "", ancestors: new Set<string>() }];
   let visited = 0, bytes = 0, truncated = false;
   for (const directory of directories) {
     context.check();
-    let children: Awaited<ReturnType<typeof directoryEntries>>;
-    try { children = await directoryEntries({ root, path: directory.path }, context.check); }
+    let children: Awaited<ReturnType<typeof completionEntries>>;
+    try { children = await completionEntries(directory.path, context.check); }
     catch (error) {
       // A missing or inaccessible subtree must not hide the rest of the project.
       if (directory.path === root) throw error;
@@ -571,17 +597,21 @@ async function scanCompletionFiles(context: ResourceContext): Promise<FileIndex>
       if (error instanceof Error && "code" in error && ["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(String(error.code))) continue;
       throw error;
     }
+    // Track ancestors per path: two aliases of one directory should both be
+    // searchable, while a link back to a parent must not recurse forever.
+    if (directory.ancestors.has(children.canonical)) continue;
+    const ancestors = new Set(directory.ancestors).add(children.canonical);
     for (const child of children.entries) {
       context.check();
       if (++visited > COMPLETION_FILES) return { path: root, entries, truncated: true };
-      if (child.isSymbolicLink() || !(child.isDirectory() || child.isFile())
-        || child.isDirectory() && IGNORED_COMPLETION_DIRS.has(child.name)) continue;
-      const path = directory.relative + child.name + (child.isDirectory() ? sep : "");
+      const isDirectory = child.kind === "directory";
+      if (isDirectory && IGNORED_COMPLETION_DIRS.has(child.name)) continue;
+      const path = directory.relative + child.name + (isDirectory ? sep : "");
       if (!pathString(path)) continue;
       bytes += Buffer.byteLength(path);
       if (bytes > COMPLETION_BYTES) return { path: root, entries, truncated: true };
-      entries.push({ path, kind: child.isDirectory() ? "directory" : "file" });
-      if (child.isDirectory()) directories.push({ path: join(directory.path, child.name), relative: path });
+      entries.push({ path, kind: child.kind });
+      if (isDirectory) directories.push({ path: join(directory.path, child.name), relative: path, ancestors });
     }
   }
   return { path: root, entries, truncated };
@@ -609,7 +639,8 @@ async function completionIndex(context: ResourceContext): Promise<FileIndex> {
 
 /** Empty prefix supplies the recursive project index for frontend fuzzy matching.
  * Explicit paths list one owner directory, including outside the workspace.
- * This grants filename discovery only; readResource keeps its existing roots. */
+ * This grants filename discovery only; project reads still require a path in
+ * the workspace, which may lead through a symlink to an external target. */
 export async function completeFiles(context: ResourceContext, input: unknown): Promise<{ path: string; entries: FileEntry[]; nextOffset: number | null; truncated: boolean }> {
   return limited(context.check, async () => {
     if (!exact(input, ["prefix", "offset"]) || typeof input.prefix !== "string"
@@ -622,11 +653,10 @@ export async function completeFiles(context: ResourceContext, input: unknown): P
       const home = input.prefix === "~" || input.prefix.startsWith(`~${sep}`);
       const expanded = home ? join(homedir(), input.prefix.slice(1)) : resolve(context.cwd, input.prefix);
       const directory = input.prefix === "~" || input.prefix.endsWith(sep) ? expanded : dirname(expanded);
-      const listed = await directoryEntries({ root: sep, path: directory }, context.check);
+      const listed = await completionEntries(directory, context.check);
       const parent = input.prefix === "~" ? `~${sep}` : input.prefix.slice(0, input.prefix.lastIndexOf(sep) + 1);
       result = { path: listed.path, truncated: false, entries: listed.entries
-        .filter((entry) => (entry.isDirectory() || entry.isFile()) && !entry.isSymbolicLink())
-        .map((entry) => ({ path: parent + entry.name + (entry.isDirectory() ? sep : ""), kind: entry.isDirectory() ? "directory" : "file" })) };
+        .map((entry) => ({ path: parent + entry.name + (entry.kind === "directory" ? sep : ""), kind: entry.kind })) };
     }
     const start = (input.offset as number | undefined) ?? 0;
     if (start > result.entries.length) refuse("resource_offset", "Completion offset is beyond the file page");

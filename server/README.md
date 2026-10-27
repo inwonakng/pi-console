@@ -370,17 +370,22 @@ work and revalidates before returning data.
 | Read | Allowed owner scope |
 | --- | --- |
 | `history` | Exact catalog-managed Pi JSONL, after header/identity/ownership validation. No arbitrary session-file input. |
-| `file`, file completion | Active published workspace/repository root, resolving relative paths against execution cwd. Original/retained checkouts outside that root are not implicitly readable. |
+| `file` | Paths in the active published workspace/repository root, resolving relative paths against execution cwd. Symlinks may point outside that root. Other outside paths are not implicitly readable. |
+| File completion | Recursive project index or an explicit owner directory, including outside the workspace. Symlink files/directories are included under their requested paths; recursive scans stop at directory cycles. This grants filename discovery, not arbitrary host file reads. |
 | `skill` | Exact currently discovered skill files, including configured paths outside the workspace. This does not grant their supporting directories. Recorded content remains inspectable. |
 | `output` | Exact `fullOutputPath` metadata observed in managed history/live results or validated child transcripts. The file must be inside the owner's temporary root, single-linked, regular and service-user-owned. Arbitrary path mentions are not authorization. Missing retained output refuses. |
 | `spawn` | Fixed brief/result/transcript/status/subagent-prompt files for a run whose persisted parent belongs to the managed conversation; bounded validated child ancestry is supported. Patches additionally require the matching child-workspace/recovery relation and fixed artifact path. |
 | Host directories | Directory names on the owner before attachment, including explicit absolute project selection. This grants neither arbitrary host file reads nor frontend cwd changes. |
 
-Paths containing traversal/control characters refuse. Below trusted canonical roots,
-all symlink components (including in-root links) refuse. File descriptors are opened
-nonblocking with `O_NOFOLLOW`; type/ownership and path/stat identity are checked before
-and after reads. Continuations carry a stat-based version; changed files return
-`resource_conflict`, never mixed-version content. UTF-8 chunks are at most 64 KiB;
+Paths containing traversal/control characters refuse. Project-file reads follow
+symlinks after checking that the requested path belongs to the workspace;
+history/output/spawn and skill resources retain their no-symlink checks below
+trusted roots.
+Completion follows symlinks and skips broken, looping or inaccessible links.
+File descriptors are opened on resolved paths nonblocking with `O_NOFOLLOW`;
+type/ownership and path/stat identity are checked before and after reads.
+Continuations carry a stat-based version; changed files return `resource_conflict`,
+never mixed-version content. UTF-8 chunks are at most 64 KiB;
 binary/invalid UTF-8 content refuses. These checks are not isolation from hostile
 same-user filesystem mutation.
 
