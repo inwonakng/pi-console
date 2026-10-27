@@ -107,6 +107,7 @@ label { font-size: 12px; color: var(--muted); }
   .session-entry-heading { transition: none; }
 }
 .session-row { flex: 1; min-width: 0; display: grid; gap: 6px; padding: 18px 24px; border-left: 3px solid transparent; text-decoration: none; color: inherit; cursor: inherit; }
+.session-menu { flex-shrink: 0; min-width: 44px; margin-right: 12px; font-size: 18px; }
 .session-row:focus-visible { background: var(--hover); border-left-color: var(--accent); }
 .session-row[aria-disabled="true"] { opacity: .55; }
 .row-heading { display: flex; align-items: baseline; gap: 16px; justify-content: space-between; min-width: 0; }
@@ -228,6 +229,8 @@ dialog p { font-size: 12px; margin-top: 10px; }
 .directory-option { padding: 10px 12px; min-height: 44px; overflow-wrap: anywhere; cursor: pointer; font-size: 12px; }
 .directory-option[aria-selected="true"] { background: var(--hover); outline: 1px solid var(--accent); outline-offset: -1px; }
 @media (hover: hover) { .directory-option:hover { background: var(--hover); } }
+#session-actions-dialog p { overflow-wrap: anywhere; }
+#session-actions-dialog .session-actions { margin-top: 20px; }
 #history-dialog { width: min(900px, calc(100% - 32px)); }
 #history-dialog .filters { padding: 0; }
 .history-row { display: flex; align-items: center; gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--border); }

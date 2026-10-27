@@ -78,7 +78,7 @@ export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevi
   sequence: number;
   piState?: Pick<RpcSessionState, "isStreaming" | "isCompacting" | "pendingMessageCount">;
   pendingInteractions: number;
-  accessMode?: string; integrationMode?: string; notificationsEnabled: boolean; cwd: string;
+  accessMode?: string; integrationMode?: string; notificationsEnabled: boolean; cwd: string; project?: string;
 };
 export type HostSummaries = {
   sessions: (Pick<CatalogSession, "id" | "cwd" | "name"> & { live?: OwnedSessionSummary })[];
@@ -720,6 +720,7 @@ export class OwnedSession {
       accessMode: this.conversation.status("pi-access-mode")?.match(/^Mode: (\w+)$/)?.[1],
       integrationMode: this.conversation.status("pi-integration-mode")?.match(/^Integration: (\w+)$/)?.[1],
       notificationsEnabled: this.conversation.status("pi-notifications") === "notify on", cwd: this.workspace?.cwd ?? this.record.cwd,
+      project: typeof this.workspace?.project === "string" ? this.workspace.project : undefined,
       ...(state ? { piState: { isStreaming: state.isStreaming, isCompacting: state.isCompacting, pendingMessageCount: state.pendingMessageCount } } : {}) };
   }
 

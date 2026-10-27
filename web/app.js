@@ -97,7 +97,20 @@ try {
   const saved = JSON.parse(localStorage.getItem(sessionOrderStorage));
   if (Array.isArray(saved)) sessionOrder = [...new Set(saved.filter(key => typeof key === "string"))];
 } catch { /* Storage may be unavailable; retain order for this page. */ }
-let sessionDrag, revealedSession;
+let sessionDrag, revealedSession, sessionActionsTarget;
+function renderSessionActions() {
+  if (!sessionActionsTarget) return;
+  const { host, id } = sessionActionsTarget;
+  const row = host.sessions.find(row => row.id === id);
+  $("session-actions-name").textContent = row ? sessionName(row) : "Session unavailable";
+  $("session-actions-project").textContent = row?.live?.project || "Project directory unavailable.";
+  $("session-actions-create").disabled = !registered(host) || !host.connected || navigator.onLine === false || !row?.live?.project;
+}
+function showSessionActions(host, row) {
+  sessionActionsTarget = { host, id: row.id };
+  renderSessionActions();
+  $("session-actions-dialog").showModal();
+}
 const pendingStops = new Map();
 function queueSessionStop(host, row) {
   const key = sessionKey(host.hello.hostId, row.id);
@@ -198,7 +211,7 @@ function bindSessionDrag(heading, key, stop, onStop) {
   reveal(revealedSession === key);
   stop.addEventListener("focus", () => reveal(true));
   heading.addEventListener("keydown", event => {
-    if (!["ArrowLeft", "ArrowRight", "Escape"].includes(event.key)) return;
+    if (event.target.closest("button") || !["ArrowLeft", "ArrowRight", "Escape"].includes(event.key)) return;
     event.preventDefault();
     reveal(event.key === "ArrowLeft");
     if (event.key === "ArrowLeft") stop.focus();
@@ -210,7 +223,7 @@ function bindSessionDrag(heading, key, stop, onStop) {
     reveal(false);
   });
   heading.addEventListener("click", event => {
-    if (revealedSession !== key) return;
+    if (event.target.closest("button") || revealedSession !== key) return;
     event.preventDefault();
     event.stopPropagation();
     reveal(false);
@@ -319,7 +332,7 @@ function bindSessionDrag(heading, key, stop, onStop) {
     finish(event.type === "touchcancel" || event.touches.length > 0);
   };
   heading.addEventListener("pointerdown", event => {
-    if (event.pointerType === "touch" || event.button !== 0 || sessionDrag) return;
+    if (event.target.closest("button") || event.pointerType === "touch" || event.button !== 0 || sessionDrag) return;
     start(event, false);
     document.addEventListener("pointermove", pointerMove);
     document.addEventListener("pointerup", pointerFinish);
@@ -327,7 +340,7 @@ function bindSessionDrag(heading, key, stop, onStop) {
     list.addEventListener("lostpointercapture", pointerFinish);
   });
   heading.addEventListener("touchstart", event => {
-    if (sessionDrag || event.touches.length !== 1) return;
+    if (event.target.closest("button") || sessionDrag || event.touches.length !== 1) return;
     start(event.touches[0], true);
     // Keep native scrolling until a stationary press activates reordering.
     holdTimer = setTimeout(() => {
@@ -612,6 +625,8 @@ function renderOverview() {
   $("new-session").disabled = !connected;
   const focusedRow = document.activeElement.closest("#session-list a")?.dataset.key;
   const focusedStop = document.activeElement.closest(".session-stop")?.closest(".session-entry")?.dataset.key;
+  const focusedActions = document.activeElement.closest(".session-menu")?.closest(".session-entry")?.dataset.key;
+  renderSessionActions();
   $("hosts").replaceChildren(...visible.map(host => {
     const node = text("div", "", "host-state");
     const state = host.enabled === false ? "Disabled" : navigator.onLine === false ? "Offline"
@@ -651,7 +666,12 @@ function renderOverview() {
     group.dataset.key = key;
     const headingRow = text("div", "", "session-entry-heading");
     bindSessionReorder(link, key, sessionName(row));
-    headingRow.append(link);
+    const actions = button("...", () => showSessionActions(host, row));
+    actions.className = "session-menu";
+    actions.setAttribute("aria-label", `Actions for ${sessionName(row)}`);
+    actions.setAttribute("aria-haspopup", "dialog");
+    actions.setAttribute("aria-controls", "session-actions-dialog");
+    headingRow.append(link, actions);
     const swipe = text("div", "", "session-swipe");
     const stop = button("Stop", () => queueSessionStop(host, row), !host.connected || navigator.onLine === false
       || !host.hello.capabilities.includes("session.manage") || row.live?.status === "Stopping");
@@ -679,6 +699,7 @@ function renderOverview() {
   if (!rows.length) $("session-list").append(text("p", "No open sessions match. Start a new session or open History to resume a stopped one.", "empty"));
   if (focusedRow) [...$("session-list").querySelectorAll("a")].find(link => link.dataset.key === focusedRow)?.focus({ preventScroll: true });
   if (focusedStop) [...$("session-list").children].find(entry => entry.dataset.key === focusedStop)?.querySelector(".session-stop").focus({ preventScroll: true });
+  if (focusedActions) [...$("session-list").children].find(entry => entry.dataset.key === focusedActions)?.querySelector(".session-menu").focus({ preventScroll: true });
 }
 function renderHistory() {
   $("history-list").replaceChildren(...filteredRows(true).map(({ host, row }) => {
@@ -719,14 +740,14 @@ function showHistory() {
     renderHistory();
   });
 }
-function showCreate(inWorkspace = false) {
+function showCreate(sourceHost = null, directory = "") {
   renderHostOptions();
   const conversation = conversations.get(activeKey);
-  const host = conversation ? uniqueHosts().find(host => host.connected && hostIdentity(host) === conversation.identity)
-    : uniqueHosts().find(host => host.connected);
-  if (!host) { notice("Connect to an execution host first."); return; }
+  const host = sourceHost || (conversation ? uniqueHosts().find(host => host.connected && hostIdentity(host) === conversation.identity)
+    : uniqueHosts().find(host => host.connected));
+  if (!host?.connected || !registered(host) || navigator.onLine === false) { notice("Connect to an execution host first."); return; }
   $("create-host").value = host.key;
-  $("cwd").value = inWorkspace ? conversation?.cwd() || "" : "";
+  $("cwd").value = directory;
   $("cwd").setCustomValidity("");
   $("create-dialog").showModal();
   refreshDirectories();
@@ -951,6 +972,24 @@ function toggleViewportDiagnostics() {
 $("refresh-app").addEventListener("click", () => location.reload());
 $("connection-form").addEventListener("submit", event => { event.preventDefault(); perform(connectAll); });
 $("new-session").addEventListener("click", () => showCreate());
+$("session-actions-close").addEventListener("click", () => $("session-actions-dialog").close());
+$("session-actions-dialog").addEventListener("close", () => {
+  if (!sessionActionsTarget) return;
+  const key = sessionKey(sessionActionsTarget.host.hello.hostId, sessionActionsTarget.id);
+  sessionActionsTarget = null;
+  if (!$("create-dialog").open) {
+    ([...$("session-list").children].find(entry => entry.dataset.key === key)?.querySelector(".session-menu") || $("overview"))
+      .focus({ preventScroll: true });
+  }
+});
+$("session-actions-create").addEventListener("click", () => {
+  if (!sessionActionsTarget) return;
+  const { host, id } = sessionActionsTarget;
+  const project = host.sessions.find(row => row.id === id)?.live?.project;
+  if (!project || !registered(host) || !host.connected || navigator.onLine === false) return;
+  $("session-actions-dialog").close();
+  showCreate(host, project);
+});
 $("cancel-create").addEventListener("click", () => $("create-dialog").close());
 $("create-host").addEventListener("change", () => {
   $("cwd").value = "";
@@ -1290,7 +1329,7 @@ function createConversation(host, row) {
     $("abort").hidden = !active;
     $("abort").disabled = !controlled || busy || !active;
     $("choose-directory").disabled = !host.connected || navigator.onLine === false;
-    $("new-workspace").disabled = !host.connected || navigator.onLine === false;
+    $("new-project").disabled = !host.connected || navigator.onLine === false || !projectDirectory();
     $("rename").disabled = !controlled || busy;
     const ready = owner?.phase === "ready";
     $("prompt").disabled = !controlled || !ready;
@@ -1976,7 +2015,11 @@ function createConversation(host, row) {
       prompt.dispatchEvent(new Event("input", { bubbles: true }));
     }
   });
-  $("new-workspace").addEventListener("click", () => showCreate(true));
+  function projectDirectory() { return row.live?.project || owner?.workspace?.project; }
+  $("new-project").addEventListener("click", () => {
+    const project = projectDirectory();
+    if (project) showCreate(host, project);
+  });
   $("choose-directory").addEventListener("click", () => showCreate());
   $("back").addEventListener("click", () => backTo(""));
   $("options").addEventListener("click", () => navigate(`${sessionRoute(host, row)}/options`));
@@ -2179,7 +2222,6 @@ function createConversation(host, row) {
       if (snapshot) renderSession();
       else { setStatus($("session-status"), displayStatus()); renderControls(); }
     },
-    cwd: () => owner?.interactions.runtime?.cwd || row.cwd,
     setScreen(visible, options) {
       const chat = $("chat-screen"), settings = $("options-screen");
       const wasChat = !element.hidden && !chat.hidden;

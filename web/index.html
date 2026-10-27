@@ -87,7 +87,7 @@
           </section>
           <details data-id="queue-panel" class="queue-panel" hidden><summary data-id="queue-summary">Queued prompts</summary><div data-id="queue"></div></details>
           <section data-id="workers-section" class="option-section" hidden><h3>Subagents</h3><div data-id="workers"></div></section>
-          <section class="option-section"><h3>Session actions</h3><div class="session-actions"><button data-id="new-workspace">New in this workspace</button><button data-id="rename" disabled>Rename session</button><button data-id="detach">Disconnect from session</button><button data-id="stop" class="danger" disabled>Stop session</button></div></section>
+          <section class="option-section"><h3>Session actions</h3><div class="session-actions"><button data-id="new-project">New session in this project</button><button data-id="rename" disabled>Rename session</button><button data-id="detach">Disconnect from session</button><button data-id="stop" class="danger" disabled>Stop session</button></div></section>
           <section data-id="connection-diagnostics" class="option-section connection-diagnostics">
             <h3>Diagnostics</h3>
             <div class="session-actions"><button data-id="export-diagnostics" type="button">Export diagnostics</button><button data-id="clear-diagnostics" type="button">Clear diagnostics</button><button data-id="layout-diagnostics" type="button">Toggle layout diagnostics</button></div>
@@ -99,6 +99,12 @@
       </section>
     </section>
   </template>
+  <dialog id="session-actions-dialog" aria-labelledby="session-actions-title">
+    <header class="dialog-heading"><h2 id="session-actions-title">Session actions</h2><button id="session-actions-close" type="button">Close</button></header>
+    <p id="session-actions-name"></p>
+    <p id="session-actions-project" class="muted"></p>
+    <div class="session-actions"><button id="session-actions-create" type="button">New session in this project</button></div>
+  </dialog>
   <dialog id="create-dialog">
     <form id="create-form">
       <h2>New session</h2>
