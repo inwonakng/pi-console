@@ -269,6 +269,7 @@ local function request(method, payload, callback)
 	if not job then notify("Disconnected. Use :PiReconnect; no mutation was retried.", vim.log.levels.WARN); return end
 	local id = uid()
 	callbacks[id] = { callback = callback or function() end, quiet = method == "heartbeat" or method == "response.viewed", method = method,
+		background = method == "resource.read" and payload and payload.kind == "workspaceStats",
 		operation = payload and payload.operation, started = vim.uv.hrtime() / 1e6 }
 	local ok, sent = pcall(vim.fn.chansend, job, vim.json.encode({ id = id, method = method, payload = object_payload(payload) }) .. "\n")
 	if not ok or sent == 0 then
@@ -771,13 +772,24 @@ render = function(metadata_only)
 	vim.schedule(acknowledge_viewed_response)
 end
 local function refresh_workspace_stats()
-	if not state.frontend_visible or not job or not attachment or not snapshot or not state.workspace or not state.workspace.id then return end
+	local function ready()
+		if not state.frontend_visible or not job or not attachment or not snapshot or snapshot.error
+			or snapshot.phase ~= "ready" or snapshot.runtimeRevision ~= current_revision()
+			or authority and snapshot.serviceEpoch ~= authority.epoch then return false end
+		local runtime, workspace, trust = snapshot.interactions.runtime, snapshot.workspace, snapshot.trust
+		local pi_state = snapshot.piState
+		return runtime and runtime.active and pi_state and pi_state.sessionId == runtime.sessionId and pi_state.sessionFile == runtime.sessionFile
+			and workspace and workspace.id and workspace.transitionPending == false
+			and workspace.cwd == runtime.cwd and workspace.sessionFile == runtime.sessionFile
+			and trust and trust.state == "ready" and trust.cwd == runtime.cwd and trust.sessionFile == runtime.sessionFile
+	end
+	if not ready() then return end
 	if stats_pending then return end
 	local captured = stamp()
 	stats_pending = captured
 	request("resource.read", { kind = "workspaceStats", runtimeRevision = captured.revision }, function(ok, result)
 		if stats_pending == captured then stats_pending = nil end
-		if not job or not attachment or not same_context(captured) then return end
+		if not same_context(captured) or not ready() then return end
 		state.workspace_diff = ok and result.data ~= vim.NIL and result.data or nil
 		statusline.update(ctx)
 	end)
@@ -1183,7 +1195,10 @@ connect = function(automatic)
 				load_metrics.decodeMs = (load_metrics.decodeMs or 0) + frame.decodeMs
 			end
 			if value.success == false and not (pending and (pending.method == "command" or pending.method == "host.command")) then
-				local report = pending and pending.quiet and log or notify
+				-- Reads admitted just before a handoff can still race the transition.
+				local transition = pending and pending.background
+					and (value.error.code == "session_unavailable" or value.error.code == "stale_runtime")
+				local report = pending and (pending.quiet or transition) and log or notify
 				local message = value.error.code .. ": " .. value.error.message
 				if value.error.code == "stale_runtime" then message = "Action " .. action_name(pending and pending.method or "Session request") .. " not completed. Reason: " .. failure_reason(value.error) end
 				report(message, vim.log.levels.WARN)
