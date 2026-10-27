@@ -478,7 +478,7 @@ local function saved_actions(host, rows, operation, archived, done)
 		require("pi-integration.logs").notify(verb .. ": " .. succeeded .. " completed, " .. #failures .. " skipped/failed"
 			.. (#failures > 0 and ("\n" .. table.concat(failures, "\n")) or ""),
 			#failures > 0 and vim.log.levels.WARN or vim.log.levels.INFO, { title = "Pi sessions" })
-		if done and current() then done() end
+		if done then done() end
 	end
 	local function confirm()
 		if not current() then
@@ -503,7 +503,7 @@ local function saved_actions(host, rows, operation, archived, done)
 			end
 		end
 		vim.ui.select({ verb, "Cancel" }, { prompt = table.concat(lines, "\n") }, function(choice)
-			if choice ~= verb then if done and current() then done() end; return end
+			if choice ~= verb then if done then done() end; return end
 			local function send(index)
 				local item = allowed[index]
 				if not item then finish(); return end
@@ -543,41 +543,62 @@ end
 function M.history_picker(identity, opts)
 	M.start()
 	opts = opts or {}
-	local function pick(host)
-		if not host or not host.connected then return end
-		local connection, epoch = host.connection, host.hello.serviceEpoch
-		local function current() return host.connected and host.connection == connection and host.hello.serviceEpoch == epoch end
-		connection.request("sessions", {}, function(ok, result)
-			if not current() then return end
-			if not ok then notify(result.message); return end
-			local rows = {}
-			for _, row in ipairs(result.sessions) do
-				if not row.deleted and (row.archived == true) == (opts.archived == true) and (not opts.session_ids or opts.session_ids[row.id]) then
-					table.insert(rows, row)
+	local function pick(targets, all)
+		if #targets == 0 then notify("No connected hosts; connect/retry in Hosts."); return end
+		local rows, owners, pending = {}, {}, #targets
+		local label = all and "all connected hosts" or host_label(targets[1])
+		local function reopen(overrides)
+			local next_opts = vim.tbl_extend("force", opts, overrides or {}, { all_hosts = all })
+			M.history_picker(not all and targets[1].host_id or nil, next_opts)
+		end
+		local function show()
+			table.sort(rows, function(a, b)
+				local left, right = a.lastActivityAt or a.createdAt or "", b.lastActivityAt or b.createdAt or ""
+				if left ~= right then return left > right end
+				if owners[a].host.host_id ~= owners[b].host.host_id then return owners[a].host.host_id < owners[b].host.host_id end
+				return a.id < b.id
+			end)
+			local function mutate(chosen, operation)
+				local groups, ordered = {}, {}
+				for _, row in ipairs(chosen) do
+					local owner = owners[row]
+					if not groups[owner] then groups[owner] = {}; table.insert(ordered, owner) end
+					table.insert(groups[owner], row)
 				end
+				local function next_host(index)
+					local owner = ordered[index]
+					if not owner then reopen(); return end
+					if not owner.current() then
+						notify(host_label(owner.host) .. ": host connection changed; selected sessions were skipped")
+						next_host(index + 1); return
+					end
+					saved_actions(owner.host, groups[owner], operation, not opts.archived, function() next_host(index + 1) end)
+				end
+				if #ordered > 0 then next_host(1) end
 			end
-			local function reopen() M.history_picker(host.host_id, opts) end
-			local function mutate(chosen, operation) saved_actions(host, chosen, operation, not opts.archived, reopen) end
-			require("pi-integration.history-picker").pick(host, rows, function(row)
+			require("pi-integration.history-picker").pick(label, rows, owners, function(row)
 				local timestamp = tostring(row.lastActivityAt or row.createdAt or "Unknown time"):gsub("T", " "):gsub("%.%d+Z$", " UTC")
-				return timestamp .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " | " .. row.id .. " (" .. (row.live and row.live.status or "Stopped") .. ")"
+				return timestamp .. " | " .. (all and (host_label(owners[row].host) .. " | ") or "")
+					.. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " | " .. row.id .. " (" .. (row.live and row.live.status or "Stopped") .. ")"
 			end, function(chosen, preview_opts)
-				if not current() or #chosen == 0 then return end
+				if #chosen == 0 then return end
 				if not opts.archived then
 					local function open()
 						local in_place
 						if #chosen > 1 then in_place = false end
 						for _, row in ipairs(chosen) do
-							if not current() then notify("Host connection changed; remaining sessions were not opened"); return end
-							local ok, err = M.open({ host_id = host.host_id, session_id = row.id,
-								status = row.live and "Idle" or "Stopped" }, in_place)
-							if not ok then notify(err) end
+							local owner = owners[row]
+							if owner.current() then
+								local ok, err = M.open({ host_id = owner.host.host_id, session_id = row.id,
+									status = row.live and "Idle" or "Stopped" }, in_place)
+								if not ok then notify(err) end
+							else notify(host_label(owner.host) .. ": host connection changed; session was not opened") end
 						end
 					end
 					if #chosen == 1 then open(); return end
-					local lines = { "Resume/open " .. #chosen .. " conversations on " .. host_label(host) .. "? No work is replayed." }
+					local lines = { "Resume/open " .. #chosen .. " conversations on " .. label .. "? No work is replayed." }
 					for _, row in ipairs(chosen) do
-						table.insert(lines, session_title(row) .. (row.cwd and (" | " .. row.cwd) or ""))
+						table.insert(lines, host_label(owners[row].host) .. " | " .. session_title(row) .. (row.cwd and (" | " .. row.cwd) or ""))
 					end
 					vim.ui.select({ "Resume", "Cancel" }, { prompt = table.concat(lines, "\n") }, function(choice)
 						if choice == "Resume" then open() end
@@ -585,23 +606,66 @@ function M.history_picker(identity, opts)
 					return
 				end
 				local select_opts = vim.tbl_extend("force", preview_opts, {
-					prompt = "Archived conversations on " .. host_label(host) .. ": " .. #chosen .. " selected",
+					prompt = "Archived conversations on " .. label .. ": " .. #chosen .. " selected",
 				})
 				vim.ui.select({ "Unarchive", "Delete" }, select_opts, function(action)
-					if not action or not current() then return end
-					mutate(chosen, action == "Delete" and "host.delete" or "host.archive")
+					if action then mutate(chosen, action == "Delete" and "host.delete" or "host.archive") end
 				end)
 			end, { archived = opts.archived, select_all = opts.select_all,
 				on_archive = function(chosen) mutate(chosen, "host.archive") end,
 				on_delete = function(chosen) mutate(chosen, "host.delete") end,
-				on_toggle_view = function() M.history_picker(host.host_id, { archived = not opts.archived }) end })
-		end)
+				on_toggle_view = function() reopen({ archived = not opts.archived, session_ids = false, select_all = false }) end })
+		end
+		local requests = {}
+		for _, host in ipairs(targets) do
+			local connection, epoch = host.connection, host.hello.serviceEpoch
+			local function current() return host.connected and host.connection == connection and host.hello.serviceEpoch == epoch end
+			local owner = { host = host, connection = connection, epoch = epoch, current = current }
+			local completed = false
+			local function complete(ok, result)
+				if completed then return end
+				completed = true
+				if not current() then notify(host_label(host) .. ": host connection changed; search results were skipped")
+				elseif not ok then notify(host_label(host) .. ": " .. result.message)
+				else
+					for _, row in ipairs(result.sessions) do
+						if not row.deleted and (row.archived == true) == (opts.archived == true) and (not opts.session_ids or opts.session_ids[row.id]) then
+							table.insert(rows, row); owners[row] = owner
+						end
+					end
+				end
+				pending = pending - 1
+				if pending == 0 then show() end
+			end
+			table.insert(requests, function() if not current() then complete(false) end end)
+			connection.request("sessions", {}, complete)
+		end
+		-- Deliberate disconnects discard transport callbacks; do not hold up other hosts.
+		local function check_connections()
+			if pending == 0 then return end
+			for _, check in ipairs(requests) do check() end
+			if pending > 0 then vim.defer_fn(check_connections, 100) end
+		end
+		if pending > 0 then vim.defer_fn(check_connections, 100) end
 	end
-	if identity then
+	if opts.all_hosts then
+		local connected, seen = {}, {}
+		for _, host in pairs(hosts) do
+			if host.connected and not seen[host.host_id] then
+				seen[host.host_id] = true; table.insert(connected, host)
+			end
+		end
+		table.sort(connected, function(a, b) return a.host_id < b.host_id end)
+		pick(connected, true)
+	elseif identity then
 		local host = M.find(identity)
 		if not host or not host.connected then notify("Current host unavailable; connect/retry in Hosts."); return end
-		pick(host)
-	else M.select_host(pick) end
+		pick({ host }, false)
+	else
+		M.select_host(function(host) pick({ host }, false) end, function()
+			M.history_picker(nil, vim.tbl_extend("force", opts, { all_hosts = true }))
+		end)
+	end
 end
 function M.maybe_prompt_archive(identity)
 	local host = M.find(identity)
@@ -820,20 +884,22 @@ local function edit(previous)
 		end)
 	end)
 end
-local function pick_host(callback)
+local function pick_host(callback, on_all)
 	M.start()
 	local choices = sorted_hosts()
+	if on_all then table.insert(choices, 1, { alias = "All hosts (connected)", all = true }) end
 	table.insert(choices, { alias = "+ Add host", add = true })
 	vim.ui.select(choices, { prompt = "Hosts", format_item = function(host)
 		return host.alias
 	end }, function(host)
 		if not host then return end
+		if host.all then on_all(); return end
 		if host.add then edit(); return end
 		callback(host)
 	end)
 end
-function M.select_host(callback)
-	pick_host(function(host) with_connected_host(host, callback) end)
+function M.select_host(callback, on_all)
+	pick_host(function(host) with_connected_host(host, callback) end, on_all)
 end
 local function restart_supported(host)
 	return host.connected and vim.tbl_contains(host.hello.capabilities or {}, "service.restart")

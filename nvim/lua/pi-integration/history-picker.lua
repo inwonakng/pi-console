@@ -55,9 +55,8 @@ local function render(row, contents, more, limited)
 	return { cache_key = row.id, content = lines, filetype = "markdown", pi_state = state }
 end
 
-function M.pick(host, rows, format_item, on_choice, opts)
+function M.pick(label, rows, owners, format_item, on_choice, opts)
 	opts = opts or {}
-	local connection, epoch = host.connection, host.hello.serviceEpoch
 	local entries, labels, by_id = {}, {}, {}
 	local closed = false
 	local cache, cache_order = {}, {}
@@ -67,10 +66,9 @@ function M.pick(host, rows, format_item, on_choice, opts)
 		labels[index] = format_item(row):gsub("[\r\n]", " ")
 		table.insert(entries, id .. "\t" .. labels[index])
 	end
-	local function connected()
-		return host.connected and host.connection == connection and host.hello.serviceEpoch == epoch
-	end
-	local function current() return not closed and connected() end
+	local function connected(row) return owners[row] and owners[row].current() end
+	local function current(row) return not closed and connected(row) end
+	local function row_key(row) return vim.json.encode({ owners[row].host.host_id, row.id }) end
 	local function selected(entry)
 		return by_id[entry and entry:match("^(%d+)\t")]
 	end
@@ -91,16 +89,19 @@ function M.pick(host, rows, format_item, on_choice, opts)
 		function base:parse_entry(entry)
 			local row = get_row(entry)
 			if not row then active_entry, sequence = nil, sequence + 1; return {} end
-			if not is_open() then return { content = { "Host disconnected; reopen session history." } } end
+			if not is_open(row) then return { content = { "Host disconnected; reopen session history." } } end
+			local owner = owners[row]
+			local host, connection, epoch = owner.host, owner.connection, owner.epoch
+			local key = row_key(row)
 			if not vim.tbl_contains(host.hello.capabilities or {}, "host.history") then
 				return { content = { "Transcript preview requires an updated host service." } }
 			end
 			if active_entry == entry then return result end
 			active_entry, sequence = entry, sequence + 1
-			local ticket, data = sequence, cache[row.id]
+			local ticket, data = sequence, cache[key]
 			result = data and data.result or { content = { "Loading conversation transcript..." } }
 			local function active()
-				local valid = is_open() and ticket == sequence and self.last_entry == entry
+				local valid = is_open(row) and ticket == sequence and self.last_entry == entry
 					and self.win and self.win:validate_preview()
 				-- Focus can move before the debounced parse_entry runs. Allow a
 				-- return to this entry to restart a download stopped in that gap.
@@ -122,7 +123,7 @@ function M.pick(host, rows, format_item, on_choice, opts)
 						-- Show the cached transcript immediately, then validate its file version.
 						-- Partial downloads can continue when entering the action menu.
 						if data and data.version == page.version then
-							remember(row.id, data)
+							remember(key, data)
 							if data.done then return end
 							fetch(data.next_offset, data.version)
 							return
@@ -138,12 +139,13 @@ function M.pick(host, rows, format_item, on_choice, opts)
 					-- the entire transcript for every 64 KiB page.
 					if not data.result or data.done or data.bytes >= data.rendered_bytes * 2 then
 						data.result = render(row, table.concat(data.parts), more, data.done)
+						data.result.cache_key = key
 						data.result.pi_version = page.version
 						data.result.tick = page.version .. ":" .. data.bytes
 						data.rendered_bytes = data.bytes
 						redraw(data.result)
 					end
-					remember(row.id, data)
+					remember(key, data)
 					if not data.done then
 						vim.schedule(function() fetch(data.next_offset, data.version) end)
 					end
@@ -170,11 +172,10 @@ function M.pick(host, rows, format_item, on_choice, opts)
 	local function action(callback)
 		return function(items)
 			-- on_close runs before fzf dispatches actions.
-			if not host.connected or host.connection ~= connection or host.hello.serviceEpoch ~= epoch then return end
 			local chosen, seen = {}, {}
 			for _, item in ipairs(items) do
 				local row = selected(item)
-				if row and not seen[row.id] then table.insert(chosen, row); seen[row.id] = true end
+				if row and connected(row) and not seen[row] then table.insert(chosen, row); seen[row] = true end
 			end
 			callback(chosen)
 		end
@@ -195,7 +196,7 @@ function M.pick(host, rows, format_item, on_choice, opts)
 		end
 		return matches
 	end, {
-		prompt = (opts.archived and "Archived" or "Sessions") .. " on " .. host.alias .. " (regex) > ",
+		prompt = (opts.archived and "Archived" or "Sessions") .. " on " .. label .. " (regex) > ",
 		previewer = { _ctor = function() return previewer() end },
 		winopts = { height = 1.0, width = 1.0, preview = { layout = "vertical", vertical = "up:60%", hidden = false, wrap = true },
 			on_close = function() closed = true end },
@@ -209,7 +210,7 @@ function M.pick(host, rows, format_item, on_choice, opts)
 				local action_closed = false
 				on_choice(chosen, {
 					previewer = { _ctor = function()
-						return previewer(function() return row end, function() return not action_closed and connected() end)
+						return previewer(function() return row end, function() return not action_closed and connected(row) end)
 					end },
 					on_close = function() action_closed = true end,
 				})

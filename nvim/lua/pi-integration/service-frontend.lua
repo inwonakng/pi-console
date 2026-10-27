@@ -1846,8 +1846,7 @@ function M.show_offers()
 	end)
 end
 function M.pick_session()
-	if M.config.role == "conversation" and not M.config.expected_host then notify("Connect to a host before choosing its sessions."); return end
-	require("pi-integration.service-hosts").history_picker(M.config.role == "conversation" and M.config.expected_host or nil)
+	require("pi-integration.service-hosts").history_picker()
 end
 local function new_session_cwd()
 	local cwd
