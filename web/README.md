@@ -90,8 +90,10 @@ Archived entries are read-only in this picker.
 Opening a conversation creates a tab, or focuses its existing tab. Each tab retains
 its attachment, control grant, prompt/answer drafts, expanded output and scroll
 position when switching views. Closing a tab detaches without stopping the session;
-Stop session is a separate confirmed action. Tabs and drafts are not restored after
-page reload. The UI has no fixed tab limit; service connection budgets still apply.
+Stop session in Session options terminates immediately when the WebUI has control.
+Otherwise it asks for confirmation to take control and stop. History is preserved.
+Tabs and drafts are not restored after page reload. The UI has no fixed tab limit;
+service connection budgets still apply.
 
 Each open conversation subscribes to updates and coalesces snapshot reads rather
 than implementing a second conversation reducer. Stream gaps and disconnects

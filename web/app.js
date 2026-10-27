@@ -1335,9 +1335,10 @@ function createConversation(host, row) {
     const controlled = Boolean(controlsCurrent());
     $("reconnect").hidden = connected;
     $("reconnect").disabled = busy || Boolean(reconnectPromise) || !host.connected || !row.live || navigator.onLine === false;
-    $("stop").disabled = !controlled || busy;
+    const available = navigator.onLine !== false && host.connected && row.live && connected && snapshot;
+    $("stop").disabled = !available || busy;
     $("control").textContent = controlled ? "Detach" : "Take control";
-    $("control").disabled = navigator.onLine === false || !host.connected || !row.live || !connected || !snapshot || busy;
+    $("control").disabled = !available || busy;
     $("controller").textContent = !host.connected || navigator.onLine === false ? "Unknown / read only" : !row.live ? "Stopped / read only"
       : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
@@ -2042,11 +2043,18 @@ function createConversation(host, row) {
   $("options").addEventListener("click", () => navigate(`${sessionRoute(host, row)}/options`));
   $("options-back").addEventListener("click", () => backTo(sessionRoute(host, row)));
   $("detach").addEventListener("click", () => detachConversation(key));
-  $("stop").addEventListener("click", () => {
-    if (confirm('Stop "' + sessionName(row) + '" on ' + host.alias + '? Active work will be interrupted; history is preserved.')) {
-      run(() => command("session.kill", { confirmed: true }));
+  $("stop").addEventListener("click", () => run(async () => {
+    const captured = context();
+    if (!controlsCurrent()) {
+      if (!confirm(`The WebUI needs control to terminate "${sessionName(row)}" on ${host.alias}. Take control and stop? Active work will be interrupted; history is preserved.`)) return;
+      await acquireControl(Boolean(owner?.controller));
+      if (!sameContext(captured)) return;
+      const value = await captured.client.request("snapshot", snapshotQuery(snapshot, hello));
+      if (!sameContext(captured)) return;
+      applySnapshot(value);
     }
-  });
+    if (sameContext(captured)) await command("session.kill", { confirmed: true });
+  }));
   $("reconnect").addEventListener("click", () => { void reconnect(); });
   $("latest").addEventListener("click", () => {
     following = true;
