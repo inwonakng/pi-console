@@ -87,7 +87,7 @@ export type FrontendEffect =
 // Internal owner updates, NOT a client protocol or a raw RPC dispatch API.
 export type ConversationChange =
   | { type: "event"; event: JsonAgentSessionEvent }
-  | { type: "history"; messages: PiMessage[]; omittedMessages?: number }
+  | { type: "history"; messages: PiMessage[]; omittedMessages?: number; messageBytes?: number[] }
   | { type: "permission_history"; permissions: PermissionHistoryItem[]; omitted: number }
   | { type: "diagnostic"; message: string }
   | { type: "pi_state"; state: RpcSessionState }
@@ -258,7 +258,7 @@ export class PiConversation {
         this.messageBytes.length = 0;
         this.historyBytes = 0;
         this.state.omittedMessages = change.omittedMessages ?? 0;
-        for (const message of change.messages) this.append(message);
+        for (const [index, message] of change.messages.entries()) this.append(message, change.messageBytes?.[index]);
         this.state.historyRevision++;
         this.state.hydrated = true;
         if (this.state.partialAssistant?.interrupted) {
@@ -356,7 +356,7 @@ export class PiConversation {
     this.liveBytes = total;
   }
 
-  private append(message: PiMessage): void {
+  private append(message: PiMessage, bytes = size(message)): void {
     if (message.role === "assistant") {
       for (const diagnostic of this.state.diagnostics) {
         if (diagnostic.assistantTimestamp !== undefined && diagnostic.assistantTimestamp === message.timestamp) {
@@ -366,7 +366,6 @@ export class PiConversation {
         }
       }
     }
-    const bytes = size(message);
     if (bytes > HISTORY_BYTES) throw new Error("Pi conversation message exceeds 16 MiB");
     this.state.messages.push(message);
     this.state.messageKeys.push(messageKey(message));

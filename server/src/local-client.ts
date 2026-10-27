@@ -6,12 +6,19 @@ import { WebSocket, createWebSocketStream } from "ws";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { endpoint } from "./service-paths.js";
-import { MAX_RESPONSE, PROTOCOL, records, RecordWriter } from "./local-protocol.js";
+import { MAX_RESPONSE, PROTOCOL, records, RecordWriter, TransportChunks } from "./local-protocol.js";
+import { performance } from "node:perf_hooks";
 import type { Channel } from "./session-catalog.js";
 import { object } from "./pi-records.js";
 
+export type ControlTiming = { queuedAt: number; writeStartedAt?: number; writtenAt?: number; acknowledgedAt?: number; handlingMs?: number; serverQueuedBytes?: number };
 export class LocalClient {
-  private readonly pending = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void }>();
+  private readonly pending = new Map<string, { resolve: (result: unknown) => void; reject: (error: Error) => void; timing?: ControlTiming }>();
+  controlTiming?: ControlTiming;
+  connectionId?: string;
+  queueDiagnostics(): { queuedBytes: number; writableBytes: number; readableBytes: number } {
+    return { queuedBytes: this.writer.queuedBytes, writableBytes: this.socket.writableLength, readableBytes: this.socket.readableLength };
+  }
   private readonly writer: RecordWriter;
   private disconnected = false;
   private constructor(private readonly socket: Duplex, private readonly event: (record: Record<string, unknown>) => void) {
@@ -34,8 +41,9 @@ export class LocalClient {
       await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
       const client = new LocalClient(socket, event);
       try {
-        const hello = await client.request("hello", { version: PROTOCOL, channel });
+        const hello = await client.request("hello", { version: PROTOCOL, channel, responseChunks: true });
         if (!object(hello) || hello.version !== PROTOCOL || hello.channel !== channel || !Array.isArray(hello.capabilities)) throw new Error("Incompatible service handshake");
+        client.connectionId = typeof hello.connectionId === "string" ? hello.connectionId : undefined;
         return { client, hello };
       } catch (error) { client.close(); throw error; }
     } catch (error) { socket.destroy(); throw error; }
@@ -82,10 +90,11 @@ export class LocalClient {
     const deadline = setTimeout(() => client.failed(Object.assign(new Error("Service handshake timed out after 10 seconds"),
       { code: "handshake_timeout" })), 10000);
     try {
-      const hello = await client.request("hello", { version: PROTOCOL, channel });
+      const hello = await client.request("hello", { version: PROTOCOL, channel, responseChunks: true });
       if (!object(hello) || hello.version !== PROTOCOL || hello.channel !== channel || typeof hello.hostId !== "string"
         || hello.transport !== "ws" || !Array.isArray(hello.capabilities)
         || !["snapshot", "updates", "control.acquire", "command.status"].every((c) => (hello.capabilities as unknown[]).includes(c))) throw new Error("Incompatible remote service identity/protocol/channel/capabilities; no fallback");
+      client.connectionId = typeof hello.connectionId === "string" ? hello.connectionId : undefined;
       return { client, hello: { ...hello, remoteEndpoint: origin } };
     } catch (error) { client.close(); throw error; }
     finally { clearTimeout(deadline); }
@@ -94,20 +103,28 @@ export class LocalClient {
     return this.send(method, payload, id, 30);
   }
   /** Keep two of the service's 32 request slots available for lease maintenance. */
-  requestControl(method: "grant" | "heartbeat", payload: unknown = {}): Promise<unknown> {
-    return this.send(method, payload, randomUUID(), 32);
+  requestControl(method: "grant" | "heartbeat", payload: unknown = {}, id: string = randomUUID()): Promise<unknown> {
+    const timing: ControlTiming = { queuedAt: performance.now() };
+    this.controlTiming = timing;
+    return this.send(method, payload, id, 32, timing);
   }
-  private send(method: string, payload: unknown, id: string, limit: number): Promise<unknown> {
+  private send(method: string, payload: unknown, id: string, limit: number, timing?: ControlTiming): Promise<unknown> {
     if (this.socket.destroyed || this.pending.size >= limit || this.pending.has(id)) return Promise.reject(Object.assign(
       new Error("Connection closed or request limit/conflict"), { code: "request_not_sent", delivery: "not_sent" }));
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      void this.writer.send({ id, method, payload }).catch((error) => this.failed(error));
+      this.pending.set(id, { resolve, reject, timing });
+      void this.writer.send({ id, method, payload }, { control: !!timing,
+        started: () => { if (timing) timing.writeStartedAt = performance.now(); } }).then(() => {
+        if (timing) timing.writtenAt = performance.now();
+      }, (error) => this.failed(error));
     });
   }
   close(): void { this.disconnected = true; this.socket.destroy(); }
   private async read(): Promise<void> {
-    for await (const record of records(this.socket, MAX_RESPONSE)) {
+    const chunks = new TransportChunks();
+    for await (const frame of records(this.socket, MAX_RESPONSE)) {
+      const record = chunks.consume(frame);
+      if (!record) continue;
       if (record.type === "disconnected") {
         this.failed(Object.assign(new Error(typeof record.message === "string" ? record.message : "Service disconnected"), {
           code: typeof record.code === "string" ? record.code : "service_disconnected",
@@ -119,10 +136,18 @@ export class LocalClient {
       const request = typeof record.id === "string" && this.pending.get(record.id);
       if (!request) throw new Error("Uncorrelated service response");
       this.pending.delete(record.id as string);
+      if (request.timing) {
+        request.timing.acknowledgedAt = performance.now();
+        if (object(record.renewal) && typeof record.renewal.handlingMs === "number" && typeof record.renewal.queuedBytes === "number") {
+          request.timing.handlingMs = record.renewal.handlingMs;
+          request.timing.serverQueuedBytes = record.renewal.queuedBytes;
+        }
+      }
       if (record.success === true) request.resolve(record.result);
       else request.reject(Object.assign(new Error(object(record.error) ? String(record.error.message) : "Service request failed"),
         object(record.error) ? record.error : { code: "service_error" }));
     }
+    chunks.finish();
   }
   private failed(error: Error & { code?: string; connectionId?: string }): void {
     for (const request of this.pending.values()) request.reject(error);

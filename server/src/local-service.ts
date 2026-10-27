@@ -1,5 +1,6 @@
 import { createServer, type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { Duplex } from "node:stream";
 import { RemoteListener, listenerPort, listenerAddresses } from "./remote-transport.js";
 import { chmod, lstat, unlink } from "node:fs/promises";
@@ -15,7 +16,7 @@ import { CAPABILITIES, MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWri
 import { endpoint, serviceBuild } from "./service-paths.js";
 import { ServiceRestart } from "./service-restart.js";
 import { readExtensionSettings } from "../../pi/extensions/shared/read-extension-settings.mjs";
-import { ConnectionDiagnostics, diagnosticCode, serviceDiagnostic } from "./connection-diagnostics.js";
+import { ConnectionDiagnostics, diagnosticCode, serviceDiagnostic, renewalDiagnostic } from "./connection-diagnostics.js";
 
 function exact(value: Record<string, unknown>, keys: string[]): void {
   if (Object.keys(value).some((key) => !keys.includes(key))) throw new CommandError("invalid_command", "Unknown IPC field");
@@ -148,7 +149,7 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
       socket.once("close", () => { diagnostics.observed("stream_close"); diagnostics.log("close", { cause: "stream_close" }); });
     }
     socket.once("close", closeViews);
-    const send = (value: unknown) => writer.send(value).catch((error: Error) => { disconnect(error, "output_error"); throw error; });
+    const send = (value: unknown, options: { control?: boolean; started?: () => void } = {}) => writer.send(value, options).catch((error: Error) => { disconnect(error, "output_error"); throw error; });
     async function pumpSummaries(feed: NonNullable<typeof summaryFeed>, initial?: HostSummaries): Promise<void> {
       if (summaryFeed !== feed) return;
       if (socket.destroyed || owner.shutdownStarted) { stopSummaries(); return; }
@@ -176,6 +177,8 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
       }
     }
     async function request(record: Record<string, unknown>): Promise<void> {
+      const receivedAt = performance.now();
+      const control = record.method === "heartbeat" || record.method === "grant";
       let stopAfterReply = false;
       if (closing) return;
       try {
@@ -190,9 +193,11 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
         if (!handshaken && record.method !== "hello") throw new CommandError("unsupported_command", "Handshake is required");
         switch (record.method) {
           case "hello":
-            exact(p, ["version", "channel"]);
+            exact(p, ["version", "channel", "responseChunks"]);
+            if (p.responseChunks !== undefined && typeof p.responseChunks !== "boolean") throw new CommandError("invalid_command", "Invalid transport negotiation");
             if (handshaken || p.version !== PROTOCOL || p.channel !== options.channel) throw new CommandError("unsupported_command", "Incompatible protocol/channel; select a compatible endpoint explicitly (no fallback)");
             handshaken = true;
+            writer.chunks = p.responseChunks === true;
             clearTimeout(handshakeDeadline);
             result = { version: PROTOCOL, capabilities: isRemote ? CAPABILITIES.filter((c) => c !== "service.stop") : CAPABILITIES,
               transport: isRemote ? "ws" : "local", connectionId, hostId: owner.hostId, channel: options.channel,
@@ -372,10 +377,23 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
             }
           }
         }
-        await send({ type: "response", id: record.id, success: true, result });
+        const handledAt = performance.now();
+        const queuedBytes = writer.queuedBytes;
+        let writeStartedAt: number | undefined;
+        const diagnostic = (event: "delayed" | "confirmed") => renewalDiagnostic("server", event, {
+          connectionId, handlingMs: handledAt - receivedAt, writeDelayMs: (writeStartedAt ?? performance.now()) - handledAt,
+          responseQueueMs: performance.now() - handledAt, queuedBytes: writer.queuedBytes,
+          writableBytes: socket.writableLength, readableBytes: socket.readableLength });
+        const warning = control ? setTimeout(() => diagnostic("delayed"), 1000) : undefined;
+        try {
+          await send({ type: "response", id: record.id, success: true, result,
+            ...(control ? { renewal: { handlingMs: handledAt - receivedAt, queuedBytes } } : {}) },
+            { control, started: () => { writeStartedAt = performance.now(); } });
+          if (control && performance.now() - receivedAt >= 1000) diagnostic("confirmed");
+        } finally { clearTimeout(warning); }
       } catch (error) {
         await send({ type: "response", id: record.id, success: false, error: {
-          code: error instanceof CommandError ? error.code : "service_error", message: error instanceof Error ? error.message : "Service request failed" } });
+          code: error instanceof CommandError ? error.code : "service_error", message: error instanceof Error ? error.message : "Service request failed" } }, { control });
       } finally {
         if (stopAfterReply || shutdownFailure) finish();
       }

@@ -554,6 +554,7 @@ export class OwnedSession {
   private refresh?: Promise<void>;
   private refreshAgain = false;
   private readonly historyReads = new Map<string, HistoryFlight>();
+  private historyCapability?: { worker: PiProcess; runtimeId: string; revision: number; validation: Promise<void> };
   private readonly captures = new Map<string, { worker: PiProcess; revision: number; version: number }>();
   private runtimeRevision: number;
   private workerRevision = 0;
@@ -891,7 +892,7 @@ export class OwnedSession {
     const pending = new Set(snapshot.items.filter(item => item.status !== "failed"
       && item.runtimeRevision === this.runtimeRevision && item.serviceEpoch === this.catalog.epoch).map(item => item.id));
     for (const id of this.queueRecipients.keys()) if (!pending.has(id)) this.queueRecipients.delete(id);
-    this.publish({ acceptedQueue: snapshot });
+    this.publish({ acceptedQueue: snapshot, owner: this.ownerState() });
     this.scheduleQueue();
   }
 
@@ -1782,12 +1783,20 @@ export class OwnedSession {
     // Repeat initialization against that fresh context, never against a view.
     for (let pass = 0; pass < 8; pass++) {
       await worker.ready();
-      await this.refreshConversation();
       this.checkIdentity();
       this.checkRunning();
       const revision = this.runtimeRevision;
       const commands = await worker.request({ type: "get_commands" });
       if (commands.command !== "get_commands") throw new Error("Unexpected Pi command discovery response");
+      try {
+        await this.ensureHistoryCapability(worker, () => {
+          this.checkRunning();
+          if (worker !== this.worker || revision !== this.runtimeRevision) throw new CommandError("stale_runtime", "Startup runtime changed");
+        }, commands);
+      } catch (error) {
+        if (error instanceof CommandError && error.code === "stale_runtime") continue;
+        throw error;
+      }
       for (const name of ["pi-trust-setup", "pi-workspace-publish"]) {
         if (!commands.data.commands.some((command) => command.name === name && command.source === "extension")) {
           throw new Error(`Required pi-console extension command is missing: ${name}`);
@@ -1816,7 +1825,7 @@ export class OwnedSession {
       }
       this.checkRunning();
       // Restoration replaces the cwd-bound runtime and clears its Pi state.
-      // Hydrate that new context on the next pass before validating identity.
+      // Check that new context on the next pass before the final hydration.
       if (revision !== this.runtimeRevision) continue;
       this.checkIdentity();
       if (!this.usableWorkspace()) throw new Error("Pi trust/workspace state does not match its active runtime");
@@ -1833,6 +1842,7 @@ export class OwnedSession {
       return; // Never retain or replay desktop intents as conversation statuses/effects.
     }
     const previousRevision = this.runtimeRevision;
+    let workspaceChanged = false;
     this.syncRevision();
     if (event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === HISTORY_STATUS) {
       if (Buffer.byteLength(event.statusText ?? "") > 1024 * 1024) throw new Error("History record limit exceeded");
@@ -1892,6 +1902,7 @@ export class OwnedSession {
           this.trustWorkerRevision = statusRevision;
         } else {
           if (typeof value.transitionPending !== "boolean") throw new Error("Invalid Pi workspace transition status");
+          workspaceChanged = this.workspaceWorkerRevision !== statusRevision || JSON.stringify(this.workspace) !== JSON.stringify(value);
           this.workspace = value as WorkspaceStatus;
           this.workspaceWorkerRevision = statusRevision;
         }
@@ -1956,11 +1967,13 @@ export class OwnedSession {
       }));
     }
     if (dialogRequest(event) || event.type === "extension_error"
+      || ["agent_start", "agent_settled", "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end",
+        "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished"].includes(event.type)
       || (event.type === "extension_ui_request" && event.method === "setStatus"
         && ["pi-console-runtime", "pi-console-dialog", "pi-project-trust", "pi-workspace", "pi-workspace-continuation"].includes(event.statusKey))) this.changed();
     if (event.type === "agent_settled" || event.type === "compaction_end"
       || (event.type === "extension_ui_request" && event.method === "setStatus"
-        && ["pi-history-changed", "pi-workspace"].includes(event.statusKey))) {
+        && (event.statusKey === "pi-history-changed" || event.statusKey === "pi-workspace" && workspaceChanged))) {
       this.retain({ type: "invalidate_history" });
       this.scheduleRefresh();
     }
@@ -2000,7 +2013,7 @@ export class OwnedSession {
       this.mainEffectsAmbiguous = true;
     }
     const work = this.conversation.dispatch(command);
-    if (work) this.retain({ type: "work", work });
+    if (work) { this.retain({ type: "work", work }); this.changed(); }
     if (command.type === "get_session_stats" && this.worker && this.conversation.idle) {
       this.captures.set(command.id, { worker: this.worker, revision: this.runtimeRevision, version: this.conversation.historyVersion });
     }
@@ -2090,14 +2103,7 @@ export class OwnedSession {
     };
     this.historyReads.set(identity.invocationId, flight);
     try {
-      // Never let an absent/overridden slash capability fall through to a model.
-      const discovery = await worker.request({ type: "get_commands" }, guard);
-      guard();
-      const capabilities = discovery.command === "get_commands" ? discovery.data.commands.filter(command => command.name === HISTORY_COMMAND) : [];
-      if (capabilities.length !== 1 || capabilities[0]!.source !== "extension"
-        || capabilities[0]!.sourceInfo?.path !== join(this.options.appRoot, "pi", "extensions", "service.ts")) {
-        throw new CommandError("unsupported_command", "Bundled history capability is missing or ambiguous");
-      }
+      await this.ensureHistoryCapability(worker, guard);
       await worker.request({ type: "prompt", message: flight.message }, () => {
         guard();
         if (kind === "projected-tail" && !this.historyIdle()) {
@@ -2112,11 +2118,44 @@ export class OwnedSession {
     } finally { this.historyReads.delete(identity.invocationId); }
   }
 
+  private async ensureHistoryCapability(worker: PiProcess, guard: () => void, discovery?: RpcResponse): Promise<void> {
+    guard();
+    const runtimeId = worker.interactionRuntime()?.id;
+    if (!runtimeId) throw new CommandError("stale_runtime", "History runtime changed");
+    let cached = this.historyCapability;
+    if (!cached || cached.worker !== worker || cached.runtimeId !== runtimeId || cached.revision !== this.runtimeRevision) {
+      const revision = this.runtimeRevision;
+      // Discovery belongs to the runtime, not the lifetime of its first viewer.
+      const context = () => {
+        this.catalog.assertExecutionAllowed();
+        const runtime = worker.interactionRuntime();
+        if (worker !== this.worker || revision !== this.runtimeRevision || !runtime?.active || runtime.id !== runtimeId
+          || runtime.sessionId !== this.record.piSessionId || runtime.sessionFile !== this.catalog.sessionFile(this.id)
+          || this.stopRequested || this.exit) throw new CommandError("stale_runtime", "History capability context changed");
+      };
+      const validation = (async () => {
+        // Never let a missing/overridden private command fall through to a model.
+        const response = discovery ?? await worker.request({ type: "get_commands" }, context);
+        context();
+        const capabilities = response.success && response.command === "get_commands"
+          ? response.data.commands.filter(command => command.name === HISTORY_COMMAND) : [];
+        if (capabilities.length !== 1 || capabilities[0]!.source !== "extension"
+          || capabilities[0]!.sourceInfo?.path !== join(this.options.appRoot, "pi", "extensions", "service.ts")) {
+          throw new CommandError("unsupported_command", "Bundled history capability is missing or ambiguous");
+        }
+      })();
+      this.historyCapability = cached = { worker, runtimeId, revision, validation };
+    }
+    try { await cached.validation; }
+    catch (error) { if (this.historyCapability === cached) this.historyCapability = undefined; throw error; }
+    guard();
+  }
+
   /** Reconcile only at idle boundaries. Capture fences apply at dispatch and
    * terminal stdout positions, not in the later awaiting continuation.
    */
   private refreshConversation(checkRuntime?: () => void): Promise<void> {
-    if (this.refresh) { this.refreshAgain = true; return this.refresh; }
+    if (this.refresh) return this.refresh;
     const worker = this.worker;
     if (!worker || !this.historyIdle() || this.stopRequested || this.exit) return Promise.resolve();
     this.refresh = (async () => {
@@ -2140,7 +2179,7 @@ export class OwnedSession {
           await worker.request({ type: "get_session_stats" }, guard);
           if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
           if (!this.historyIdle()) return;
-          await this.readHistory(worker, "projected-tail", guard);
+          if (checkRuntime || !this.conversation.hydrated) await this.readHistory(worker, "projected-tail", guard);
         } catch (error) {
           if (!(error instanceof CommandError) || !["stale_runtime", "session_busy"].includes(error.code)) throw error;
           // A handoff can invalidate queued reads before dispatch or capture.
@@ -2161,6 +2200,8 @@ export class OwnedSession {
   }
 
   private scheduleRefresh(): void {
+    // Startup owns its final baseline after trust and workspace restoration.
+    if (this.phase === "initializing") return;
     // Defer dispatch until the current stdout batch has finished reducing. A
     // rejected refresh fences the owner; it never retries an execution command.
     void Promise.resolve().then(() => {
@@ -2169,6 +2210,10 @@ export class OwnedSession {
       if (this.refresh) this.refreshAgain = true;
     }).catch((error: unknown) => {
       if (this.stopRequested || this.exit) return;
+      if (error instanceof CommandError && ["resource_limit", "resource_unavailable", "session_busy", "stale_runtime"].includes(error.code)) {
+        console.error(JSON.stringify({ type: "history_refresh_refused", code: error.code }));
+        return;
+      }
       this.error ??= asError(error);
       if (this.worker) void this.worker.stop();
       this.changed();
@@ -2181,6 +2226,7 @@ export class OwnedSession {
 
   private retain(change: ConversationChange): void {
     this.conversation.apply(structuredClone(change));
+    if (change.type === "invalidate_history" && this.refresh) this.refreshAgain = true;
     // History baselines can exceed the subscription's 8-MiB backlog budget.
     // Both frontends refresh revisioned snapshot sections on every checkpoint.
     this.publish(change.type === "history" ? {} : { conversation: change });
@@ -2192,7 +2238,15 @@ export class OwnedSession {
       sequence: ++this.sequence, ...change,
     };
     if (!this.viewers.size) return;
-    this.publications.push(JSON.stringify(update));
+    let line = JSON.stringify(update);
+    if (Buffer.byteLength(line) > 256 * 1024 && (update.conversation || update.acceptedQueue)) {
+      // Large live payloads are already retained by the owner. Both consumers
+      // read revisioned snapshots on a checkpoint; no healthy viewer must queue
+      // a duplicate multi-MiB event just to learn that its baseline changed.
+      delete update.conversation; delete update.acceptedQueue;
+      line = JSON.stringify(update);
+    }
+    this.publications.push(line);
     if (this.publishing) return;
     this.publishing = true;
     try {

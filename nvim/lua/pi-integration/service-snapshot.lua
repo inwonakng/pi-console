@@ -6,6 +6,16 @@ local fields = {
 	activity = { "partialAssistant", "diagnostics", "permissions", "omittedPermissions", "work", "queue", "execution" },
 	status = { "statuses", "widgets", "title", "piState", "stats" },
 }
+-- Owner/queue replacements can arrive while an older history snapshot is in flight.
+-- Keep their watermarks separate from the conversation section baseline.
+function M.observe(previous, value, data)
+	local identity = previous and previous.sessionId == value.sessionId and previous.serviceEpoch == value.serviceEpoch
+	if identity and value.sequence < previous.sequence then return previous end
+	local same = identity and previous.runtimeRevision == value.runtimeRevision
+	if not data then return same and previous or nil end
+	return { sessionId = value.sessionId, serviceEpoch = value.serviceEpoch, runtimeRevision = value.runtimeRevision,
+		sequence = value.sequence, data = data }
+end
 function M.query(snapshot, hello)
 	if not snapshot or not snapshot.conversationRevisions or not hello
 		or not vim.tbl_contains(hello.capabilities, "snapshot.sections") then return {} end

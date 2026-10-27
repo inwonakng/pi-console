@@ -23,7 +23,7 @@ export async function webRelay(stream: Duplex, target: RegisteredHost, channel: 
   onDetach(() => stop("relay_detach"));
   stream.once("close", () => stop("relay_stream_close"));
   const deadline = setTimeout(() => stop("relay_handshake_timeout"), 10000);
-  const send = (value: unknown) => writer.send(value).catch((error) => { stop("relay_write_failed", error); throw error; });
+  const send = (value: unknown, control = false) => writer.send(value, { control }).catch((error) => { stop("relay_write_failed", error); throw error; });
   const reject = (id: unknown, code: string, message: string) => send({ type: "response", id, success: false,
     error: { code, message, delivery: "not_sent" } });
   const pending = new Map<string, Promise<void>>();
@@ -33,10 +33,12 @@ export async function webRelay(stream: Duplex, target: RegisteredHost, channel: 
         || Object.keys(record).some((key) => !["id", "method", "payload"].includes(key))) throw new Error("Invalid relay request");
       if (!handshaken) {
         if (record.method !== "hello" || record.payload.version !== PROTOCOL || record.payload.channel !== channel
-          || Object.keys(record.payload).some((key) => !["version", "channel"].includes(key))) {
+          || (record.payload.responseChunks !== undefined && typeof record.payload.responseChunks !== "boolean")
+          || Object.keys(record.payload).some((key) => !["version", "channel", "responseChunks"].includes(key))) {
           await reject(record.id, "unsupported_command", "Compatible protocol/channel handshake is required"); return;
         }
         try {
+          writer.chunks = record.payload.responseChunks === true;
           const event = (event: Record<string, unknown>) => {
             if (event.type === "disconnected") {
               diagnostics.observed("relay_upstream_disconnected");
@@ -81,13 +83,16 @@ export async function webRelay(stream: Duplex, target: RegisteredHost, channel: 
       if (pending.size >= 32 || pending.has(record.id)) {
         await reject(record.id, "request_not_sent", "Relay request limit/conflict"); continue;
       }
-      const request = client!.request(record.method, record.payload, record.id).then(
-        (result) => send({ type: "response", id: record.id, success: true, result }),
+      const control = record.method === "heartbeat" || record.method === "grant";
+      const upstream = control ? client!.requestControl(record.method as "heartbeat" | "grant", record.payload, record.id)
+        : client!.request(record.method, record.payload, record.id);
+      const request = upstream.then(
+        (result) => send({ type: "response", id: record.id, success: true, result }, control),
         (error: unknown) => {
           const detail = object(error) ? error : {};
           diagnostics.log("relay_request_failed", { cause: "relay_request_failed", code: diagnosticCode(detail) });
           return send({ type: "response", id: record.id, success: false, error: { ...detail,
-            code: detail.code ?? "service_disconnected", message: error instanceof Error ? error.message : "Service request failed" } });
+            code: detail.code ?? "service_disconnected", message: error instanceof Error ? error.message : "Service request failed" } }, control);
         });
       pending.set(record.id, request);
       void request.then(() => pending.delete(record.id as string), (error) => stop("relay_write_failed", error));

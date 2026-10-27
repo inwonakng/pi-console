@@ -28,6 +28,19 @@ export function serviceDiagnostic(event: "start" | "ready" | "failure" | "startu
     ...(fields.code ? { code: diagnosticCode({ code: fields.code }) } : {}), ...(fields.signal ? { signal: fields.signal } : {}) })); }
   catch { /* Logging must not affect service lifetime. */ }
 }
+// Fixed numeric fields only. Renewal diagnostics never include grants or payloads.
+export function renewalDiagnostic(side: "bridge" | "server", event: "delayed" | "lost" | "confirmed", fields: {
+  connectionId?: string; timerDelayMs?: number; lastConfirmedAgeMs?: number; deadlineInMs?: number; pendingAgeMs?: number;
+  writeDelayMs?: number; acknowledgementMs?: number; handlingMs?: number; responseQueueMs?: number;
+  queuedBytes?: number; serverQueuedBytes?: number; writableBytes?: number; readableBytes?: number; frontendQueuedBytes?: number;
+}): void {
+  try {
+    console.error(JSON.stringify({ type: "renewal_diagnostic", timestamp: new Date().toISOString(), pid: process.pid, side, event,
+      ...(diagnosticUUID(fields.connectionId) ? { connectionId: fields.connectionId } : {}),
+      ...Object.fromEntries(Object.entries(fields).flatMap(([key, value]) =>
+        typeof value === "number" && Number.isFinite(value) ? [[key, Math.round(value)]] : [])) }));
+  } catch { /* Diagnostics cannot affect authority. */ }
+}
 export class ConnectionDiagnostics {
   private firstCause: DiagnosticCause | null = null;
   private firstSource: "observed" | "server" | null = null;

@@ -214,7 +214,12 @@ local function current_controller()
 end
 local function current_revision() return authority and authority.revision or snapshot and snapshot.runtimeRevision end
 local function observe_authority(value, full)
-	if authority and value.serviceEpoch == authority.epoch and value.sequence < authority.sequence then return false end
+	local owner_view = snapshots.observe(authority and authority.owner_view, value, full and value or value.owner)
+	local queue_view = snapshots.observe(authority and authority.queue_view, value, value.acceptedQueue)
+	if authority and value.serviceEpoch == authority.epoch and value.sequence < authority.sequence then
+		authority.owner_view, authority.queue_view = owner_view, queue_view
+		return false
+	end
 	local owner = full and value or value.owner
 	local controller = current_controller()
 	if owner then controller = owner.controller end
@@ -225,7 +230,8 @@ local function observe_authority(value, full)
 	elseif (authority.controller and authority.controller.grantId) ~= (controller and controller.grantId) then
 		tree.close(tree_ctx)
 	end
-	authority = { epoch = value.serviceEpoch, sequence = value.sequence, revision = value.runtimeRevision, controller = controller }
+	authority = { epoch = value.serviceEpoch, sequence = value.sequence, revision = value.runtimeRevision, controller = controller,
+		owner_view = owner_view, queue_view = queue_view }
 	return true
 end
 local function control_current()
@@ -559,20 +565,22 @@ ctx.transcript.refresh_ui = function()
 	if sync_pending then vim.schedule(sync_pending) end
 end
 local function update_status_state()
+	local owner = authority and authority.owner_view and authority.owner_view.data or snapshot
+	local queue = authority and authority.queue_view and authority.queue_view.data or snapshot and snapshot.acceptedQueue
 	local initial = session_id and startup_status and startup_status.session_id == session_id and startup_status or nil
 	local defaults = initial or not session_id and startup_options and startup_options.defaults or {}
 	local conversation = snapshot and snapshot.conversation
 	local statuses = conversation and conversation.statuses or {}
-	local pi_state = snapshot and snapshot.piState or {}
+	local pi_state = owner and owner.piState or {}
 	state.session_name = pi_state.sessionName ~= "" and pi_state.sessionName or nil
 	state.session_id = session_id
-	state.session_cwd = snapshot and snapshot.interactions.runtime and snapshot.interactions.runtime.cwd or selected_cwd
+	state.session_cwd = owner and owner.interactions.runtime and owner.interactions.runtime.cwd or selected_cwd
 	state.host_name = current_owner_label()
 	state.connection_status = job and (hello and "connected" or "connecting") or "disconnected"
-	local status_error = snapshot and snapshot.error or not attachment and session_error or nil
+	local status_error = owner and owner.error or not attachment and session_error or nil
 	if status_error and state.status_error ~= status_error then notify(status_error, vim.log.levels.ERROR) end
 	state.status_error = status_error
-	local terminal = snapshot and (snapshot.phase == "stopped" or snapshot.phase == "failed") and snapshot.phase
+	local terminal = owner and (owner.phase == "stopped" or owner.phase == "failed") and owner.phase
 	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active" or "view only")
 		or (session_id and ("session " .. (session_status or "unattached")) or starting and "starting" or "unstarted")
 	if action_connection and action_connection.status then state.client_status = action_connection.status end
@@ -586,7 +594,7 @@ local function update_status_state()
 	if not state.notification_status and defaults.notificationsEnabled ~= nil then
 		state.notification_status = defaults.notificationsEnabled and "notify on" or "notify off"
 	end
-	state.workspace = snapshot and snapshot.workspace or (not session_id and { localCheckout = true, cwd = selected_cwd } or nil)
+	state.workspace = owner and owner.workspace or (not session_id and { localCheckout = true, cwd = selected_cwd } or nil)
 	local stats_key = state.workspace and state.workspace.id and table.concat({ tostring(session_id), tostring(current_revision()), state.workspace.id }, "/")
 	if stats_key ~= workspace_stats_key then state.workspace_diff, workspace_stats_key = nil, stats_key end
 	local model = pi_state.model or defaults.model
@@ -631,24 +639,25 @@ local function update_status_state()
 	end
 	state.codex_usage = status_data("pi-codex-usage")
 	state.spawn_running_count = 0
-	for _, run in ipairs(snapshot and snapshot.subagentRuns or {}) do
+	for _, run in ipairs(owner and owner.subagentRuns or {}) do
 		if run.status == "running" then state.spawn_running_count = state.spawn_running_count + 1 end
 	end
-	state.session_activity = attachment and snapshot and snapshot.status or nil
+	state.session_activity = attachment and owner and owner.status or nil
 	state.is_loading = job ~= nil and (not hello or session_status == "checking" or session_status == "attaching"
-		or session_status == "restoring" or attachment ~= nil and snapshot and snapshot.phase == "initializing")
+		or session_status == "restoring" or attachment ~= nil and owner and owner.phase == "initializing")
 	local stages = { checking = "checking session", attaching = "receiving session", restoring = "starting worker" }
 	state.loading_stage = state.is_loading and (not hello and "connecting" or stages[session_status]
-		or snapshot and snapshot.trust and snapshot.trust.state == "pending" and "waiting for trust" or "initializing worker") or nil
+		or owner and owner.trust and owner.trust.state == "pending" and "waiting for trust" or "initializing worker") or nil
 	state.is_agent_running = state.session_activity == "Working" or state.session_activity == "Compacting"
 	state.is_streaming = attachment ~= nil and pi_state.isStreaming == true
 	state.is_retrying = state.session_activity == "Retrying"
 	state.activity_label = state.session_activity == "Compacting" and "compacting" or "work"
-	state.pending_user_messages = snapshot and snapshot.acceptedQueue.items or {}
-	state.queue_edit_item = snapshot and snapshot.acceptedQueue.reservation and snapshot.acceptedQueue.reservation.itemId
+	state.pending_user_messages = queue and queue.items or {}
+	state.submission_sending = feedback_ui.sending(feedback, session_id)
+	state.queue_edit_item = queue and queue.reservation and queue.reservation.itemId
 	local previous = state.pending_ui_requests
 	state.pending_ui_requests, state.active_ui_request_id = {}, nil
-	for _, item in ipairs(snapshot and snapshot.interactions.pending or {}) do
+	for _, item in ipairs(owner and owner.interactions.pending or {}) do
 		if not item.submitted and not pending_replies[item.request.id] then
 			local id = item.request.id
 			state.pending_ui_requests[id] = previous[id] or { label = item.request.method, hidden = true }
@@ -1236,6 +1245,10 @@ connect = function(automatic)
 					update_status_state()
 					statusline.update(ctx)
 				end
+			end
+			if value.update.owner or value.update.acceptedQueue then
+				update_status_state()
+				statusline.update(ctx)
 			end
 			if value.update.effect then
 				local update, captured = value.update, stamp()

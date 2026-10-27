@@ -9,7 +9,7 @@ export const HISTORY_STATUS = "pi-console-history-result";
 export const HISTORY_RESULT_BYTES = 80 * 1024 * 1024 - 64 * 1024;
 export type HistoryKind = "projected-tail" | "entries" | "tree";
 export type HistoryIdentity = { version: 1; invocationId: string; runtimeId: string; sessionId: string; sessionFile: string; kind: HistoryKind };
-export type ProjectedTail = { messages: PiMessage[]; omittedMessages: number };
+export type ProjectedTail = { messages: PiMessage[]; omittedMessages: number; messageBytes: number[] };
 type Entries = Extract<RpcResponse, { command: "get_entries"; success: true }>["data"];
 type Tree = Extract<RpcResponse, { command: "get_tree"; success: true }>["data"];
 export type HistoryData = ProjectedTail | Entries | Tree;
@@ -54,17 +54,22 @@ export class HistoryRead {
       this.chunks.length = 0;
       if (value.status !== "completed" || value.bytes !== Buffer.byteLength(text) || Number(value.bytes) > this.limit
         || Object.keys(value).some(key => !keys.includes(key))) throw new Error("Invalid history completion");
-      const data: unknown = JSON.parse(text);
+      let data: unknown;
+      try { data = JSON.parse(text); } catch { throw new Error("Invalid history JSON"); }
       if (!object(data)) throw new Error("Invalid history data");
       if (this.identity.kind === "projected-tail") {
         if (Object.keys(data).length !== 2 || !Array.isArray(data.messages) || data.messages.length > 512
           || !Number.isSafeInteger(data.omittedMessages) || Number(data.omittedMessages) < 0) throw new Error("Invalid projected tail");
         let bytes = 0;
+        const messageBytes: number[] = [];
         for (const message of data.messages) {
           if (!object(message) || typeof message.role !== "string") throw new Error("Invalid projected message");
-          bytes += Buffer.byteLength(JSON.stringify(message));
+          const size = Buffer.byteLength(JSON.stringify(message));
+          messageBytes.push(size); bytes += size;
         }
         if (bytes > 16 * 1024 * 1024) throw new Error("Projected tail limit exceeded");
+        // Owner-internal accounting, never accepted from the wire or published.
+        data.messageBytes = messageBytes;
       } else if (Object.keys(data).length !== 2 || !Array.isArray(data[this.identity.kind])
         || (data.leafId !== null && typeof data.leafId !== "string")) throw new Error("Invalid history data");
       this.data = data as HistoryData;

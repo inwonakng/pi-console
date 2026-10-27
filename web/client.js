@@ -12,6 +12,8 @@ export class ServiceClient {
     this.onEvent = onEvent;
     this.diagnostics = diagnosticConnection(diagnostics.role, diagnostics.hostGroup);
     this.pending = new Map();
+    this.transfers = new Map();
+    this.transferBytes = 0;
     this.socket = null;
     this.closed = false;
     this.recoveryBlocked = false;
@@ -42,9 +44,11 @@ export class ServiceClient {
         if (buffer.length > 80 * 1024 * 1024) throw new Error("Service response is too large");
         let newline;
         while ((newline = buffer.indexOf("\n")) >= 0) {
-          const record = JSON.parse(buffer.slice(0, newline));
+          let record = JSON.parse(buffer.slice(0, newline));
           buffer = buffer.slice(newline + 1);
           if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("Invalid service record");
+          record = this.consumeTransport(record);
+          if (!record) continue;
           if (record.type === "response") {
             const pending = this.pending.get(record.id);
             if (!pending) throw new Error("Uncorrelated service response");
@@ -67,7 +71,7 @@ export class ServiceClient {
         }
       } catch (error) {
         this.recoveryBlocked = true;
-        this.close(error.message, "invalid_record");
+        this.close("Invalid service record or transport chunks", "invalid_record");
       }
     });
     socket.addEventListener("close", event => {
@@ -90,7 +94,7 @@ export class ServiceClient {
           resolve();
         }, { once: true });
       });
-      const hello = await this.request("hello", { version: 1, channel });
+      const hello = await this.request("hello", { version: 1, channel, responseChunks: true });
       if (!hello || hello.version !== 1 || hello.channel !== channel || !Array.isArray(hello.capabilities)
         || !["snapshot", "updates", "sessions.subscribe", "control.acquire"].every(value => hello.capabilities.includes(value))) {
         this.recoveryBlocked = true;
@@ -111,8 +115,36 @@ export class ServiceClient {
     } finally { clearTimeout(deadline); this.rejectOpening = null; }
   }
 
+  consumeTransport(record) {
+    if (record.type !== "transport_chunk") return record;
+    if (typeof record.transfer !== "string" || !/^[0-9a-f-]{36}$/.test(record.transfer)
+      || !Number.isSafeInteger(record.index) || typeof record.text !== "string" || !record.text.length || record.text.length > 16 * 1024
+      || Object.keys(record).some(key => !["type", "transfer", "index", "text", "bytes"].includes(key))) throw new Error("Invalid transport chunk");
+    let transfer = this.transfers.get(record.transfer);
+    if (!transfer) {
+      if (record.index !== 0 || this.transfers.size >= 32) throw new Error("Invalid transport transfer");
+      transfer = { parts: [], bytes: 0 }; this.transfers.set(record.transfer, transfer);
+    }
+    if (record.index !== transfer.parts.length) throw new Error("Out-of-order transport chunk");
+    const bytes = new TextEncoder().encode(record.text).length;
+    transfer.bytes += bytes; this.transferBytes += bytes;
+    if (transfer.bytes > 80 * 1024 * 1024 + 32768 || this.transferBytes > 82 * 1024 * 1024 + 32768
+      || transfer.parts.length >= 5120) throw new Error("Transport aggregate limit exceeded");
+    transfer.parts.push(record.text);
+    if (record.bytes === undefined) return;
+    const text = transfer.parts.join("");
+    if (!Number.isSafeInteger(record.bytes) || record.bytes < 1 || record.bytes + 1 > 80 * 1024 * 1024
+      || record.bytes !== new TextEncoder().encode(text).length) throw new Error("Invalid transport completion");
+    this.transfers.delete(record.transfer); this.transferBytes -= transfer.bytes;
+    let value;
+    try { value = JSON.parse(text); } catch { throw new Error("Invalid transport JSON"); }
+    if (!value || typeof value !== "object" || Array.isArray(value) || value.type === "transport_chunk") throw new Error("Invalid transport record");
+    return value;
+  }
+
   request(method, payload = {}, timeout = 30000) {
-    if (this.closed || this.socket?.readyState !== WebSocket.OPEN || this.pending.size >= 32) {
+    const limit = method === "heartbeat" || method === "grant" ? 32 : 30;
+    if (this.closed || this.socket?.readyState !== WebSocket.OPEN || this.pending.size >= limit) {
       return Promise.reject(Object.assign(new Error("Not connected or too many pending requests"), { delivery: "not_sent" }));
     }
     const id = requestId();
@@ -163,6 +195,7 @@ export class ServiceClient {
       pending.reject(Object.assign(new Error(message), { delivery: "uncertain" }));
     }
     this.pending.clear();
+    this.transfers.clear(); this.transferBytes = 0;
     this.onEvent({ type: "disconnected", message });
   }
 }

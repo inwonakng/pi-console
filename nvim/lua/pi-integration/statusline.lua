@@ -218,12 +218,12 @@ local function current_thinking_level_label(state)
 end
 
 local function activity_statusline_label(state)
-	local queued, next_pending = 0, nil
+	local queued, next_pending, sending = 0, nil, state.submission_sending
 	for _, pending in ipairs(state.pending_user_messages or {}) do
-		if pending.status == "queued" or pending.status == "sending" then
+		if pending.status == "queued" then
 			queued = queued + 1
 			next_pending = next_pending or pending
-		end
+		elseif pending.status == "sending" then sending = true end
 	end
 	local suffix = queued > 0 and ("·" .. tostring(queued) .. " queued") or ""
 	if state.session_activity == "Error" then return " error" .. suffix end
@@ -236,7 +236,7 @@ local function activity_statusline_label(state)
 		if next_pending and (next_pending.edit_buf or next_pending.id == state.queue_edit_item) then
 			return " waiting·editing queued message" .. suffix
 		end
-		return suffix
+		return (sending and " sending" or "") .. suffix
 	end
 	local label
 	if state.is_loading then

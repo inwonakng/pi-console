@@ -33,6 +33,12 @@ function M.receipt(entries, id, ok, receipt, synced)
 		end
 	end
 end
+function M.sending(entries, session)
+	for _, entry in ipairs(entries) do
+		if entry.sessionId == session and entry.operation == "prompt.submit" and entry.status == "Sending" then return true end
+	end
+	return false
+end
 function M.bind(entries, host_request, session)
 	for _, entry in ipairs(entries) do
 		if entry.hostRequest == host_request then entry.sessionId = session end

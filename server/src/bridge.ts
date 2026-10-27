@@ -25,6 +25,7 @@ async function main(): Promise<void> {
   if (channel !== "stable" && channel !== "dev") throw new Error("Invalid channel");
   if (remote && root) throw new Error("Remote attachment cannot use --root");
   const writer = new RecordWriter(process.stdout);
+  writer.chunks = true;
   const abort = new AbortController();
   let failure: Error | undefined, client: LocalClient | undefined, control: BridgeControl | undefined;
   let closed = false, diagnosticSent = false;
@@ -122,7 +123,7 @@ async function main(): Promise<void> {
       : await LocalClient.open(root ?? defaultRoot(channel), channel, event, abort.signal);
     client = opened.client;
     if (closed) { client.close(); return; }
-    control = new BridgeControl(client, output);
+    control = new BridgeControl(client, output, () => writer.queuedBytes);
     if (expectedHost && opened.hello.hostId !== expectedHost) {
       throw new Error("Endpoint service identity changed; confirm the replacement in Hosts before attaching. No mutation was sent.");
     }

@@ -950,7 +950,10 @@ function createConversation(host, row) {
       }
       // Read a coalesced owner snapshot instead of duplicating its conversation reducer.
       // Live frontend effects are deliberately not executed by this first draft.
-      if (controlsChanged || update.command) renderControls();
+      if (controlsChanged || update.command) {
+        setStatus($("session-status"), displayStatus());
+        renderControls();
+      }
       scheduleRefresh();
     }
   }
@@ -995,7 +998,8 @@ function createConversation(host, row) {
     $("controller").textContent = !host.connected || navigator.onLine === false ? "Unknown / read only" : !row.live ? "Stopped / read only"
       : !connected ? "Unknown / read only" : controlled ? "You control this session"
       : owner?.controller ? `Controlled by ${owner.controller.label}` : "Read only / no controller";
-    const active = snapshot?.conversation.execution.running || owner?.subagentRuns?.some(run => !run.quiescent);
+    const active = owner?.piState?.isStreaming || ["Working", "Compacting", "Retrying"].includes(owner?.status)
+      || owner?.subagentRuns?.some(run => !run.quiescent);
     $("abort").hidden = !active;
     $("abort").disabled = !controlled || busy || !active;
     $("choose-directory").disabled = !host.connected || navigator.onLine === false;
@@ -1010,7 +1014,7 @@ function createConversation(host, row) {
         ? "Disconnected. Review the host registration or reconnect explicitly."
         : "Disconnected. Recovering while online and visible; commands are not replayed."
       : !controlled ? "Take control in Options to send a prompt."
-      : !ready ? "Waiting for session setup." : snapshot?.conversation.execution.running ? "Prompts sent while working are queued." : "";
+      : !ready ? "Waiting for session setup." : owner?.status === "Working" || owner?.piState?.isStreaming ? "Prompts sent while working are queued." : "";
     renderSettings();
     renderWorkers();
     if (snapshot) renderInteractions();

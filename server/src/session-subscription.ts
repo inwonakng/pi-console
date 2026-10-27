@@ -29,16 +29,16 @@ export class SessionSubscription {
   /** Called synchronously by the owner; no viewer callback runs in its reducer. */
   push(line: string): void {
     if (this.failure) return;
-    const bytes = Buffer.byteLength(line);
-    if (this.queue.length >= 256 || this.bytes + bytes > 8 * 1024 * 1024) {
-      this.drop(Object.assign(new Error("Session viewer fell behind; resubscribe with a fresh snapshot"), { code: "slow_viewer" }));
-      return;
-    }
     const waiting = this.waiting;
     if (waiting) {
       this.waiting = undefined;
       waiting.resolve(this.filter(JSON.parse(line) as OwnedSessionUpdate));
     } else {
+      const bytes = Buffer.byteLength(line);
+      if (this.queue.length >= 256 || this.bytes + bytes > 8 * 1024 * 1024) {
+        this.drop(Object.assign(new Error("Session viewer fell behind; resubscribe with a fresh snapshot"), { code: "slow_viewer" }));
+        return;
+      }
       this.queue.push(line);
       this.bytes += bytes;
     }

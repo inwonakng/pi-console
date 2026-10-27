@@ -13,22 +13,22 @@ class ReadRefusal extends Error {
   constructor(readonly code: "session_busy" | "resource_limit" | "resource_unavailable" | "stale_runtime", message: string) { super(message); }
 }
 
-function capture(ctx: ExtensionCommandContext, kind: Kind, since?: string): unknown {
+function capture(ctx: ExtensionCommandContext, kind: Kind, since?: string): string {
   const manager = ctx.sessionManager;
   if (kind === "projected-tail") {
     if (!ctx.isIdle()) throw new ReadRefusal("session_busy", "Projected history requires an idle session");
     const messages = manager.buildSessionProjection().messages;
     // Match the conversation reducer, including rejecting oversized older messages.
-    const sizes = messages.map(message => {
-      const bytes = Buffer.byteLength(JSON.stringify(message));
-      if (bytes > HISTORY_BYTES) throw new ReadRefusal("resource_limit", "Pi conversation message exceeds 16 MiB");
-      return bytes;
-    });
-    let start = messages.length, bytes = 0;
-    while (start > 0 && messages.length - start < 512 && bytes + sizes[start - 1]! <= HISTORY_BYTES) {
-      bytes += sizes[--start]!;
+    const tail: { text: string; bytes: number }[] = [];
+    let bytes = 0, omitted = 0;
+    for (const message of messages) {
+      const text = JSON.stringify(message);
+      const size = Buffer.byteLength(text);
+      if (size > HISTORY_BYTES) throw new ReadRefusal("resource_limit", "Pi conversation message exceeds 16 MiB");
+      tail.push({ text, bytes: size }); bytes += size;
+      while (tail.length > 512 || bytes > HISTORY_BYTES) { bytes -= tail.shift()!.bytes; omitted++; }
     }
-    return { messages: messages.slice(start), omittedMessages: start };
+    return `{"messages":[${tail.map(item => item.text).join(",")}],"omittedMessages":${omitted}}`;
   }
   if (kind === "entries") {
     let entries = manager.getEntries();
@@ -37,9 +37,36 @@ function capture(ctx: ExtensionCommandContext, kind: Kind, since?: string): unkn
       if (index === -1) throw new ReadRefusal("resource_unavailable", `Entry not found: ${since}`);
       entries = entries.slice(index + 1);
     }
-    return { entries, leafId: manager.getLeafId() };
+    return encode({ entries, leafId: manager.getLeafId() });
   }
-  return { tree: manager.getTree(), leafId: manager.getLeafId() };
+  return encode({ tree: manager.getTree(), leafId: manager.getLeafId() });
+}
+
+const escapes = /["\\\u0000-\u001f\ud800-\udfff]/g;
+function stringBytes(value: string): number {
+  let bytes = Buffer.byteLength(value) + 2;
+  escapes.lastIndex = 0;
+  for (let match; (match = escapes.exec(value));) {
+    const code = value.charCodeAt(match.index);
+    if (code >= 0xd800 && code <= 0xdbff && value.charCodeAt(match.index + 1) >= 0xdc00 && value.charCodeAt(match.index + 1) <= 0xdfff) {
+      escapes.lastIndex++; // A valid surrogate pair is encoded as UTF-8, not escaped.
+    } else bytes += code >= 0xd800 ? 3 : code < 32 && ![8, 9, 10, 12, 13].includes(code) ? 5 : 1;
+  }
+  return bytes;
+}
+
+function encode(value: unknown): string {
+  // Match the conservative traversal budget without serializing every key and
+  // scalar again. Charge escaped bytes before constructing the result string.
+  let charged = 0;
+  return JSON.stringify(value, (key, part: unknown) => {
+    charged += stringBytes(key) + 1;
+    charged += typeof part === "string" ? stringBytes(part)
+      : part === null || typeof part === "undefined" ? 4
+      : typeof part === "object" ? 2 : typeof part === "number" && !Number.isFinite(part) ? 4 : String(part).length;
+    if (charged > RESULT_BYTES) throw new ReadRefusal("resource_limit", "History read exceeds public response budget");
+    return part;
+  });
 }
 
 /** Fixed observational command: no messages, entries, model calls or async capture. */
@@ -59,25 +86,18 @@ export function registerServiceHistory(pi: ExtensionAPI): void {
     const reply = (data: Record<string, unknown>) => {
       const statusText = JSON.stringify({ ...identity, ...data });
       // Account for JSON nested in the actual RPC record, not only raw data.
-      if (Buffer.byteLength(JSON.stringify({ type: "extension_ui_request", id: "x".repeat(36),
-        method: "setStatus", statusKey: STATUS, statusText })) > 1024 * 1024) throw new Error("History record limit exceeded");
+      // JSON text has no literal control characters. Each byte can at most
+      // double when escaped in the outer RPC string, plus its fixed envelope.
+      if (Buffer.byteLength(statusText) * 2 + 256 > 1024 * 1024) throw new Error("History record limit exceeded");
       ctx.ui.setStatus(STATUS, statusText);
     };
     let text: string;
     try {
       if (serviceRuntimeId(ctx) !== v.runtimeId || ctx.sessionManager.getSessionId() !== v.sessionId
         || ctx.sessionManager.getSessionFile() !== v.sessionFile) throw new ReadRefusal("stale_runtime", "History context changed");
-      // Capture and serialize synchronously, before emitting any part of the result.
-      // Conservative charging aborts large containers before constructing an
-      // unlimited result string. Check exact serialized bytes afterward.
-      let charged = 0;
-      text = JSON.stringify(capture(ctx, v.kind as Kind, v.since as string | undefined), (key, value: unknown) => {
-        charged += Buffer.byteLength(JSON.stringify(key)) + 1;
-        if (value === null || typeof value !== "object") charged += Buffer.byteLength(JSON.stringify(value) ?? "null");
-        else charged += 2;
-        if (charged > RESULT_BYTES) throw new ReadRefusal("resource_limit", "History read exceeds public response budget");
-        return value;
-      });
+      // Capture and encode in one synchronous interval. Never yield while the
+      // session projection/entries/tree can still change underneath this read.
+      text = capture(ctx, v.kind as Kind, v.since as string | undefined);
       const limit = v.kind === "projected-tail" ? HISTORY_BYTES + 64 * 1024 : RESULT_BYTES;
       if (Buffer.byteLength(text) > limit) throw new ReadRefusal("resource_limit", "History read exceeds public response budget");
     } catch (error) {
