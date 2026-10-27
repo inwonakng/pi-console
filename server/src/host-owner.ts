@@ -9,7 +9,7 @@ import { fingerprint, readResource, completeFiles, completeDirectory, type Resou
 import { hostCommand, hostFingerprint, type HostReceipt } from "./host-commands.js";
 import { inspectEpoch } from "../../pi/scripts/managed-process.mjs";
 import { createHash, randomUUID } from "node:crypto";
-import { SavedHelperUnresolved, savedSessionHelper, type SavedPreview, type SavedResult } from "./saved-sessions.js";
+import { SavedHelperUnresolved, savedSessionHelper, withSavedSessionHelper, type SavedPreview, type SavedSessionRequest } from "./saved-sessions.js";
 import { isAbsolute, join } from "node:path";
 import type { RpcCommand, RpcExtensionUIResponse, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
 import { PiCommandError, PiProcess, type PiExit, type PiProcessOptions } from "./pi-process.js";
@@ -259,12 +259,12 @@ export class HostOwner {
     return record;
   }
 
-  private async savedHelper(sessionId: string, payload: { action: "preview" | "delete"; expectedVersion?: string; mode?: string; confirmed?: true }): Promise<SavedResult> {
+  private async withSavedHelper<T>(run: (request: SavedSessionRequest) => Promise<T>): Promise<T> {
     this.catalog.assertLaunchAllowed();
     try {
-      return await savedSessionHelper({ binary: this.options.binary, appRoot: this.options.appRoot,
+      return await withSavedSessionHelper({ binary: this.options.binary, appRoot: this.options.appRoot,
         sessionDirectory: join(this.catalog.root, "sessions"), workspaceRoot: join(this.catalog.root, "workspaces"),
-        environment: this.options.environment, assertExecutionAllowed: () => this.catalog.assertExecutionAllowed() }, { ...payload, sessionId });
+        environment: this.options.environment, assertExecutionAllowed: () => this.catalog.assertExecutionAllowed() }, run);
     } catch (error) {
       if (error instanceof SavedHelperUnresolved) {
         this.helperUnresolved = error;
@@ -274,12 +274,16 @@ export class HostOwner {
     }
   }
 
-  private async savedPreview(id: string): Promise<SavedPreview & { helperVersion: string; archived: boolean }> {
+  private async savedPreview(id: string, request: SavedSessionRequest): Promise<SavedPreview & { helperVersion: string; archived: boolean }> {
     const record = this.savedRecord(id);
-    const result = await this.savedHelper(id, { action: "preview" });
+    const result = await request({ action: "preview", sessionId: id });
     if (!result.success) throw new CommandError("resource_conflict", result.error);
     if (!("version" in result)) throw new Error("Missing saved session preview");
-    if (JSON.stringify(record) !== JSON.stringify(this.savedRecord(id))) throw new CommandError("resource_conflict", "Saved session changed during preview");
+    return this.validateSavedPreview(record, result);
+  }
+
+  private validateSavedPreview(record: CatalogSession, result: SavedPreview): SavedPreview & { helperVersion: string; archived: boolean } {
+    if (JSON.stringify(record) !== JSON.stringify(this.savedRecord(record.id))) throw new CommandError("resource_conflict", "Saved session changed during preview");
     const ids = result.workspaces.map(workspace => workspace.id);
     for (const session of this.sessions.values()) {
       if (session.finished) continue;
@@ -323,17 +327,39 @@ export class HostOwner {
   }
 
   /** Read preview shares the lifecycle admission lane; no runtime is resumed. */
-  saved(id: string, check: () => void): Promise<unknown> {
+  saved(ids: string | string[], check: () => void): Promise<unknown> {
     if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");
     this.hostAdmitting++;
     const task = this.hostAdmission.then(async () => {
       this.assertOpen(); check();
-      this.savedMutations.add(id);
+      const selected = typeof ids === "string" ? [ids] : ids;
+      const records = new Map<string, CatalogSession>();
+      const sessions: { sessionId: string; preview?: SavedPreview & { archived: boolean }; error?: { code: CommandError["code"]; message: string } }[] = [];
+      const failure = (sessionId: string, error: unknown) => ({ sessionId, error: {
+        code: error instanceof CommandError ? error.code : "resource_conflict" as const, message: asError(error).message } });
+      for (const id of selected) {
+        try { records.set(id, this.savedRecord(id)); }
+        catch (error) { sessions.push(failure(id, error)); }
+        this.savedMutations.add(id);
+      }
       try {
-        const { helperVersion: _helperVersion, ...preview } = await this.savedPreview(id);
+        if (records.size) {
+          const result = await this.withSavedHelper(request => request({ action: "previews", sessionIds: [...records.keys()] }));
+          if (!result.success) throw new CommandError("resource_conflict", result.error);
+          for (const entry of result.sessions) {
+            try {
+              if (!entry.result.success) throw new CommandError("resource_conflict", entry.result.error);
+              const { helperVersion: _helperVersion, ...preview } = this.validateSavedPreview(records.get(entry.sessionId)!, entry.result);
+              sessions.push({ sessionId: entry.sessionId, preview });
+            } catch (error) { sessions.push(failure(entry.sessionId, error)); }
+          }
+        }
         check(); this.assertOpen();
-        return preview;
-      } finally { this.savedMutations.delete(id); }
+        if (typeof ids !== "string") return { sessions };
+        const entry = sessions[0];
+        if (entry.error) throw new CommandError(entry.error.code, entry.error.message);
+        return entry.preview;
+      } finally { for (const id of selected) this.savedMutations.delete(id); }
     });
     this.hostAdmission = task.then(() => undefined, () => undefined);
     return task.finally(() => { this.hostAdmitting--; });
@@ -439,18 +465,25 @@ export class HostOwner {
         const id = command.payload.sessionId;
         this.savedMutations.add(id);
         try {
-          const preview = await this.savedPreview(id);
-          if (preview.version !== command.payload.expectedVersion) throw new CommandError("resource_conflict", "Saved session or linked workspaces changed while confirming; select it again");
-          if (command.operation === "host.archive" && preview.archiveBlocked) throw new CommandError("session_busy", "Retained source/child workspace protects this session from archival; finish its workspace lifecycle first");
-          if (command.operation === "host.delete" && preview.mode !== command.payload.mode) throw new CommandError("resource_conflict", "Host trash availability changed; confirm the new deletion mode");
-          await this.catalog.reserveHost(fingerprint, receipt, admission);
           if (command.operation === "host.archive") {
+            const preview = await this.withSavedHelper(request => this.savedPreview(id, request));
+            if (preview.version !== command.payload.expectedVersion) throw new CommandError("resource_conflict", "Saved session or linked workspaces changed while confirming; select it again");
+            if (preview.archiveBlocked) throw new CommandError("session_busy", "Retained source/child workspace protects this session from archival; finish its workspace lifecycle first");
+            await this.catalog.reserveHost(fingerprint, receipt, admission);
             receipt.status = "completed";
             receipt.result = { sessionId: id, archived: command.payload.archived };
             await this.catalog.finishHost(receipt, { sessionId: id, archived: command.payload.archived });
           } else {
+            let reserved = false;
             try {
-              const result = await this.savedHelper(id, { action: "delete", expectedVersion: preview.helperVersion, mode: command.payload.mode, confirmed: true });
+              const result = await this.withSavedHelper(async request => {
+                const preview = await this.savedPreview(id, request);
+                if (preview.version !== command.payload.expectedVersion) throw new CommandError("resource_conflict", "Saved session or linked workspaces changed while confirming; select it again");
+                if (preview.mode !== command.payload.mode) throw new CommandError("resource_conflict", "Host trash availability changed; confirm the new deletion mode");
+                await this.catalog.reserveHost(fingerprint, receipt, admission);
+                reserved = true;
+                return request({ action: "delete", sessionId: id, expectedVersion: preview.helperVersion, mode: command.payload.mode, confirmed: true });
+              });
               if (!result.success) {
                 receipt.status = result.mutated ? "uncertain" : "failed";
                 // Host outcomes retain their existing 4-KiB reservation. Bound
@@ -459,6 +492,7 @@ export class HostOwner {
               } else if (!("deleted" in result) || !result.deleted) throw new Error("Missing deletion outcome");
               else { receipt.status = "completed"; receipt.result = { sessionId: id, deleted: true, mode: result.mode }; }
             } catch (error) {
+              if (!reserved) throw error;
               receipt.status = "uncertain";
               receipt.error = { code: "outcome_uncertain", message: asError(error).message.slice(0, 512) };
             }

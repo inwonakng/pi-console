@@ -5,6 +5,7 @@ local hosts, started, timer = {}, false, nil
 local forgotten_explicit = {}
 local reminder_checked = {}
 local saved_request
+local pending_deletions = {}
 local opening = {}
 local initial = { version = 1, hosts = {} }
 local channel = vim.env.PI_CONSOLE_CHANNEL or "stable"
@@ -513,17 +514,36 @@ function M.saved_operations()
 	end)
 end
 local function saved_actions(host, rows, operation, archived, done)
-	if #rows == 0 then return end
+	if #rows == 0 then if done then done() end; return end
 	local connection, epoch = host.connection, host.hello.serviceEpoch
-	local function current() return host.connected and host.connection == connection and host.hello.serviceEpoch == epoch end
+	local function current() return not connection.closed and host.connected and host.connection == connection and host.hello.serviceEpoch == epoch end
 	local allowed, failures, succeeded = {}, {}, 0
+	local background = false
+	local function pending_key(row) return host.host_id .. "/" .. row.id end
+	-- Deliberate disconnects discard transport callbacks. Settle locally without replay.
+	local function watch(callback)
+		local waiting = true
+		local function complete(ok, result)
+			if not waiting then return end
+			waiting = false
+			callback(ok, result)
+		end
+		local function check_connection()
+			if not waiting then return end
+			if not current() then complete(false, { message = "Host connection changed; inspect :PiSavedOperations for any sent request" })
+			else vim.defer_fn(check_connection, 100) end
+		end
+		vim.defer_fn(check_connection, 100)
+		return complete
+	end
 	local verb = operation == "host.archive" and (archived and "Archive" or "Unarchive") or "Delete"
 	local function failed(row, message) table.insert(failures, session_title(row) .. ": " .. tostring(message)) end
 	local function finish()
 		require("pi-integration.logs").notify(verb .. ": " .. succeeded .. " completed, " .. #failures .. " skipped/failed"
-			.. (#failures > 0 and ("\n" .. table.concat(failures, "\n")) or ""),
+			.. (#failures > 0 and ("\n" .. table.concat(failures, "\n")) or "")
+			.. (background and #failures > 0 and "\nReopen the picker to refresh failed/skipped sessions; inspect :PiSavedOperations for uncertain outcomes." or ""),
 			#failures > 0 and vim.log.levels.WARN or vim.log.levels.INFO, { title = "Pi sessions" })
-		if done then done() end
+		if not background and done then done() end
 	end
 	local function confirm()
 		if not current() then
@@ -549,39 +569,75 @@ local function saved_actions(host, rows, operation, archived, done)
 		end
 		vim.ui.select({ verb, "Cancel" }, { prompt = table.concat(lines, "\n") }, function(choice)
 			if choice ~= verb then if done then done() end; return end
+			local ready = {}
+			for _, item in ipairs(allowed) do
+				if pending_deletions[pending_key(item.row)] then failed(item.row, "Deletion already pending")
+				else table.insert(ready, item) end
+			end
+			allowed = ready
+			if #allowed == 0 then finish(); return end
+			background = operation == "host.delete"
+			if background then
+				for _, item in ipairs(allowed) do pending_deletions[pending_key(item.row)] = true end
+			end
 			local function send(index)
 				local item = allowed[index]
 				if not item then finish(); return end
 				if not current() then
-					for remaining = index, #allowed do failed(allowed[remaining].row, "Host connection changed; not sent") end
+					for remaining = index, #allowed do
+						pending_deletions[pending_key(allowed[remaining].row)] = nil
+						failed(allowed[remaining].row, "Host connection changed; not sent")
+					end
 					finish(); return
 				end
 				local payload = { sessionId = item.row.id, expectedVersion = item.preview.version, confirmed = true }
 				if operation == "host.archive" then payload.archived = archived else payload.mode = item.preview.mode end
-				saved_request(host, { id = uid(), serviceEpoch = epoch, operation = operation, payload = payload }, function(receipt)
-					if receipt.status == "completed" then succeeded = succeeded + 1
-					else failed(item.row, receipt.status .. (receipt.error and (": " .. receipt.error.message) or "")) end
+				local complete = watch(function(ok, receipt)
+					pending_deletions[pending_key(item.row)] = nil
+					if ok and receipt.status == "completed" then succeeded = succeeded + 1
+					else failed(item.row, ok and (receipt.status .. (receipt.error and (": " .. receipt.error.message) or "")) or receipt.message) end
 					send(index + 1)
+				end)
+				saved_request(host, { id = uid(), serviceEpoch = epoch, operation = operation, payload = payload }, function(receipt)
+					complete(true, receipt)
 				end)
 			end
 			send(1)
+			if background and done then done() end
 		end)
 	end
 	local function preview(index)
-		local row = rows[index]
-		if not row then confirm(); return end
+		if not rows[index] then confirm(); return end
 		if not current() then
 			for _, item in ipairs(allowed) do failed(item.row, "Host connection changed; not sent") end
 			for remaining = index, #rows do failed(rows[remaining], "Host connection changed; not sent") end
 			finish(); return
 		end
-		connection.request("host.saved", { serviceEpoch = epoch, sessionId = row.id }, function(ok, result)
-			if not ok then failed(row, result.message)
-			elseif operation == "host.archive" and result.archiveBlocked then failed(row, "Linked workspace protects this session from archival")
-			elseif operation == "host.archive" and result.archived == archived then failed(row, "Archive state already changed; select it again")
-			else table.insert(allowed, { row = row, preview = result }) end
-			preview(index + 1)
+		local batch, ids = {}, {}
+		local next_index = math.min(index + 128, #rows + 1)
+		for position = index, next_index - 1 do
+			local row = rows[position]
+			if pending_deletions[pending_key(row)] then failed(row, "Deletion already pending")
+			else table.insert(batch, row); table.insert(ids, row.id) end
+		end
+		if #batch == 0 then preview(next_index); return end
+		local complete = watch(function(ok, result)
+			local by_id = {}
+			if ok and current() then
+				for _, entry in ipairs(result.sessions or {}) do by_id[entry.sessionId] = entry end
+			end
+			for _, row in ipairs(batch) do
+				local entry = by_id[row.id]
+				local data = entry and entry.preview
+				if not ok then failed(row, result.message)
+				elseif not data then failed(row, entry and entry.error and entry.error.message or "Saved-session preview unavailable; select it again")
+				elseif operation == "host.archive" and data.archiveBlocked then failed(row, "Linked workspace protects this session from archival")
+				elseif operation == "host.archive" and data.archived == archived then failed(row, "Archive state already changed; select it again")
+				else table.insert(allowed, { row = row, preview = data }) end
+			end
+			preview(next_index)
 		end)
+		connection.request("host.saved", { serviceEpoch = epoch, sessionIds = ids }, complete)
 	end
 	preview(1)
 end
@@ -597,6 +653,15 @@ function M.history_picker(identity, opts)
 			M.history_picker(not all and targets[1].host_id or nil, next_opts)
 		end
 		local function show()
+			local protected = vim.deepcopy(pending_deletions)
+			-- Completed receipts also override discovery snapshots captured before deletion.
+			for _, item in pairs(store.load("saved-requests", vim.empty_dict())) do
+				if item.envelope.operation == "host.delete" and (item.receipt and item.receipt.status == "completed"
+					or not item.reviewed and (not item.receipt or item.receipt.status == "accepted" or item.receipt.status == "unknown" or item.receipt.status == "uncertain")) then
+					protected[item.host_id .. "/" .. item.envelope.payload.sessionId] = true
+				end
+			end
+			rows = vim.tbl_filter(function(row) return not protected[owners[row].host.host_id .. "/" .. row.id] end, rows)
 			table.sort(rows, function(a, b)
 				local left, right = a.lastActivityAt or a.createdAt or "", b.lastActivityAt or b.createdAt or ""
 				if left ~= right then return left > right end
@@ -664,7 +729,7 @@ function M.history_picker(identity, opts)
 		local requests = {}
 		for _, host in ipairs(targets) do
 			local connection, epoch = host.connection, host.hello.serviceEpoch
-			local function current() return host.connected and host.connection == connection and host.hello.serviceEpoch == epoch end
+			local function current() return not connection.closed and host.connected and host.connection == connection and host.hello.serviceEpoch == epoch end
 			local owner = { host = host, connection = connection, epoch = epoch, current = current }
 			local completed = false
 			local function complete(ok, result)

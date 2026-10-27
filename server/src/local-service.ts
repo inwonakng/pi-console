@@ -282,15 +282,18 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
             });
             break;
           }
-          case "host.saved":
-            exact(p, ["serviceEpoch", "sessionId"]);
+          case "host.saved": {
+            exact(p, ["serviceEpoch", "sessionId", "sessionIds"]);
             if (p.serviceEpoch !== owner.serviceEpoch) throw new CommandError("stale_epoch", "Host service changed; select the saved session again");
-            if (!identifier(p.sessionId)) throw new CommandError("invalid_command", "Invalid saved session identity");
-            result = await owner.saved(p.sessionId, () => {
+            const ids = p.sessionIds === undefined ? p.sessionId : p.sessionIds;
+            if (Array.isArray(ids) ? p.sessionId !== undefined || ids.length < 1 || ids.length > 128 || !ids.every(identifier) || new Set(ids).size !== ids.length
+              : p.sessionIds !== undefined || !identifier(ids)) throw new CommandError("invalid_command", "Invalid saved session identities (maximum 128 per batch)");
+            result = await owner.saved(ids as string | string[], () => {
               if (socket.destroyed) throw new CommandError("attachment_closed", "Saved-session reader disconnected");
               remoteAdmission?.();
             });
             break;
+          }
           case "window.open": {
             const command = hostCommand(p);
             if (command.operation !== "host.create" || command.payload.provisional !== true) throw new CommandError("invalid_command", "Window open requires a provisional allocation");

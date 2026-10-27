@@ -566,9 +566,8 @@ export function retainedChildWorkspaces(parentId: string): WorkspaceRecord[] {
 }
 
 /** A deletion may remove a parent only when every retained child is selected. */
-export function orderWorkspaceDeletion(records: WorkspaceRecord[]): WorkspaceRecord[] {
+export function orderWorkspaceDeletion(records: WorkspaceRecord[], all = listWorkspaces()): WorkspaceRecord[] {
   const selected = new Map(records.map((record) => [record.id, record]));
-  const all = listWorkspaces();
   const ordered: WorkspaceRecord[] = [];
   const visiting = new Set<string>();
   const visited = new Set<string>();
@@ -591,9 +590,9 @@ export function orderWorkspaceDeletion(records: WorkspaceRecord[]): WorkspaceRec
   return ordered;
 }
 
-export function sessionWorkspacesForDeletion(sessionFiles: string[]): WorkspaceRecord[] {
-  return orderWorkspaceDeletion(listWorkspaces().filter((record) => (record.retained || record.lifecycle === "cleanup_failed")
-    && sessionFiles.some((path) => sameSessionFile(record.sourceSessionFile, path) || sameSessionFile(record.targetSessionFile, path))));
+export function sessionWorkspacesForDeletion(sessionFiles: string[], all = listWorkspaces()): WorkspaceRecord[] {
+  return orderWorkspaceDeletion(all.filter((record) => (record.retained || record.lifecycle === "cleanup_failed")
+    && sessionFiles.some((path) => sameSessionFile(record.sourceSessionFile, path) || sameSessionFile(record.targetSessionFile, path))), all);
 }
 
 export function taskWorkspacesForSession(sessionFile: string | undefined): WorkspaceRecord[] {

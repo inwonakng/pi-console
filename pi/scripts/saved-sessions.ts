@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { constants, accessSync, lstatSync, openSync, closeSync, fstatSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { delimiter, join, resolve } from "node:path";
-import { cleanupWorkspaces, removeWorkspace, sameSessionFile, sessionWorkspacesForDeletion } from "../extensions/shared/workspace";
+import { cleanupWorkspaces, listWorkspaces, removeWorkspace, sameSessionFile, sessionWorkspacesForDeletion } from "../extensions/shared/workspace";
 
 function trashCommand(): string[] | undefined {
   for (const [binary, args] of [["trash", []], ["gio", ["trash"]]] as const) {
@@ -23,11 +23,11 @@ function stamp(path: string): string {
   if (!info.isFile() || info.nlink !== 1n || info.uid !== BigInt(process.getuid!()) || (info.mode & 0o077n) !== 0n) throw new Error("Invalid managed session file");
   return [info.dev, info.ino, info.mode, info.size, info.mtimeNs, info.ctimeNs].join(":");
 }
-function preview(path: string) {
+function preview(path: string, snapshot = { all: listWorkspaces(), command: trashCommand() }) {
   const fileVersion = stamp(path);
-  const records = linked(path);
+  const records = sessionWorkspacesForDeletion([path], snapshot.all);
+  const command = snapshot.command;
   if (records.length > 128) throw new Error("Too many linked workspaces");
-  const command = trashCommand();
   const mode = command ? "trash" : "permanent";
   const version = createHash("sha256").update(JSON.stringify([fileVersion, records, command])).digest("hex");
   return { version, fileVersion, mode, command, archiveBlocked: records.some(record => record.retained && (sameSessionFile(record.sourceSessionFile, path) || record.kind === "child")), workspaces: records.map(record => ({ id: record.id, label: record.label,
@@ -51,6 +51,23 @@ export default function savedSessions(pi: ExtensionAPI) {
             || Object.keys(p).some(key => !["action", "cutoff", "protectedSessions", "protectedCwds"].includes(key))) throw new Error("Invalid workspace cleanup request");
           const result = await cleanupWorkspaces(p.cutoff, p.protectedSessions, p.protectedCwds);
           ctx.ui.setStatus("pi-saved-session-result", JSON.stringify({ success: true, ...result }));
+          return;
+        }
+        if (p.action === "previews") {
+          if (!directory || !Array.isArray(p.sessionIds) || p.sessionIds.length < 1 || p.sessionIds.length > 128
+            || !p.sessionIds.every(id => typeof id === "string" && /^[\w-]{1,128}$/.test(id))
+            || new Set(p.sessionIds).size !== p.sessionIds.length
+            || Object.keys(p).some(key => !["action", "sessionIds"].includes(key))) throw new Error("Invalid saved-session preview batch");
+          const snapshot = { all: listWorkspaces(), command: trashCommand() };
+          const sessions = p.sessionIds.map(sessionId => {
+            try {
+              const { command: _command, fileVersion: _fileVersion, ...data } = preview(join(resolve(directory), sessionId + ".jsonl"), snapshot);
+              return { sessionId, result: { success: true, ...data } };
+            } catch (error) {
+              return { sessionId, result: { success: false, mutated: false, error: error instanceof Error ? error.message : String(error) } };
+            }
+          });
+          ctx.ui.setStatus("pi-saved-session-result", JSON.stringify({ success: true, sessions }));
           return;
         }
         if (!directory || typeof p.sessionId !== "string" || !/^[\w-]{1,128}$/.test(p.sessionId)
