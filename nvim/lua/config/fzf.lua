@@ -126,12 +126,13 @@ local function set_preview_text(buf, text, padding, header, filetype, title, hig
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 	vim.bo[buf].modifiable = false
 	vim.api.nvim_buf_clear_namespace(buf, preview_ns, 0, -1)
+	local title_lines = title and vim.split(title, "\n", { plain = true }) or {}
 	if header then
-		highlight_approval_preview(buf, header, padding + (title and 2 or 0), filetype)
+		highlight_approval_preview(buf, header, padding + (title and #title_lines + 1 or 0), filetype)
 	end
-	if title then
-		vim.api.nvim_buf_set_extmark(buf, preview_ns, padding, 0, {
-			end_col = #title,
+	for i, line in ipairs(title_lines) do
+		vim.api.nvim_buf_set_extmark(buf, preview_ns, padding + i - 1, 0, {
+			end_col = #line,
 			hl_group = "PiSelectTitle",
 		})
 	end
