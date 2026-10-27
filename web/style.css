@@ -36,7 +36,7 @@ html { height: 100%; overflow: hidden; }
 body { margin: 0; background: var(--bg); position: fixed; top: var(--viewport-top, 0px); width: 100%; height: var(--viewport-height, 100dvh); overflow: hidden; display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
 button, input, textarea, select { font: inherit; color: inherit; }
 button, summary, a { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
-button { min-width: 32px; min-height: 32px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 4px 10px; font-size: 12px; line-height: 1.5; cursor: pointer; }
+button { min-width: 32px; min-height: 46px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 10px; font-size: 12px; line-height: 1.5; cursor: pointer; }
 @media (hover: hover) {
   button:hover:not(:disabled), a.session-row:hover { background: var(--hover); }
 }
