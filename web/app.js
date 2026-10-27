@@ -1039,7 +1039,7 @@ $("create-form").addEventListener("submit", event => {
       const conversation = conversations.get(sessionKey(host.hello.hostId, id));
       if (conversation) {
         await conversation.reconnect();
-        if (conversation.connected()) await conversation.acquireControl();
+        if (conversation.connected()) await conversation.acquireInitialControl();
       }
     } finally { submit.disabled = false; }
   });
@@ -1183,6 +1183,15 @@ function createConversation(host, row) {
     // Detaching also cancels an automatic acquire already delivered to the service.
     if (acquiring && sameContext(acquiring.context)) acquiring.context.client.close(undefined, "session_reconnect");
   }
+  function setControlRuntime(revision) {
+    if (runtimeRevision === revision) return;
+    // Only a newly created session may carry its initial request across startup.
+    // Once ready and controlled, normal runtime changes still discard authority.
+    if (controlIntent?.startup) controlIntent.runtimeRevision = revision;
+    else clearControlIntent();
+    grant = null;
+    runtimeRevision = revision;
+  }
   function intentMatches() {
     return controlIntent && controlIntent.host === host && registered(host) && row.live
       && !host.recovery.blocked && !host.client?.recoveryBlocked
@@ -1199,7 +1208,10 @@ function createConversation(host, row) {
     if (!intentMatches()) { clearControlIntent(); return; }
     const controller = owner?.controller;
     if (!controller) return;
-    if (controller.attachmentId === controlIntent.controller.attachmentId && controller.grantId === controlIntent.controller.grantId) return;
+    if (controller.attachmentId === controlIntent.controller?.attachmentId && controller.grantId === controlIntent.controller?.grantId) {
+      if (grantCurrent() && owner.phase === "ready") controlIntent.startup = false;
+      return;
+    }
     if (controlAcquiring?.generation === controlGeneration && controller.attachmentId === attachment) {
       controlIntent.controller = { ...controller };
     } else clearControlIntent();
@@ -1276,8 +1288,7 @@ function createConversation(host, row) {
       if (update.sequence > authoritySequence) {
         authoritySequence = update.sequence;
         controlsChanged = runtimeRevision !== update.runtimeRevision || Boolean(update.owner);
-        if (runtimeRevision !== update.runtimeRevision) { clearControlIntent(); grant = null; }
-        runtimeRevision = update.runtimeRevision;
+        setControlRuntime(update.runtimeRevision);
         if (update.owner) owner = { ...update.owner, sequence: update.sequence };
         if (grant && !grantCurrent()) { grant = null; controlsChanged = true; }
         observeControlOwner();
@@ -1322,8 +1333,7 @@ function createConversation(host, row) {
     snapshot = value;
     if (value.sequence >= authoritySequence) {
       authoritySequence = value.sequence;
-      if (runtimeRevision !== value.runtimeRevision) { clearControlIntent(); grant = null; }
-      runtimeRevision = value.runtimeRevision;
+      setControlRuntime(value.runtimeRevision);
       owner = value;
     }
     if (grant && !grantCurrent()) grant = null;
@@ -1918,6 +1928,12 @@ function createConversation(host, row) {
     }));
   }
 
+  function acquireInitialControl() {
+    clearControlIntent();
+    controlIntent = { host, hostId: hello.hostId, serviceEpoch: hello.serviceEpoch, runtimeRevision,
+      controller: null, startup: true };
+    return restoreControl();
+  }
   async function acquireControl(takeover = false) {
     if (controlsCurrent()) return;
     clearControlIntent();
@@ -1945,7 +1961,7 @@ function createConversation(host, row) {
         // Never infer authority from the display label or a cached disconnected owner.
         const value = await captured.client.request("snapshot", snapshotQuery(snapshot, hello));
         if (!current()) return;
-        if (value.sessionId !== selectedId || value.serviceEpoch !== intent.serviceEpoch || value.runtimeRevision !== intent.runtimeRevision) {
+        if (value.sessionId !== selectedId || value.serviceEpoch !== intent.serviceEpoch) {
           clearControlIntent();
           return;
         }
@@ -1963,11 +1979,20 @@ function createConversation(host, row) {
         if (!current() || recovered?.attachmentId !== attachment) return;
         grant = recovered;
         intent.controller = { attachmentId: recovered.attachmentId, grantId: recovered.grantId };
+        observeControlOwner();
         scheduleRefresh();
         scheduleViewedResponse();
         renderControls();
       } catch (error) {
         if (current()) {
+          // Startup can reject control before Pi binds, or replace its runtime
+          // for trust/workspace setup. Fresh snapshots and the heartbeat retry it.
+          if (intent.startup && error.code !== "control_claimed") {
+            if (["stale_runtime", "session_unavailable"].includes(error.code)) return;
+            clearControlIntent();
+            notice(error.message);
+            return;
+          }
           if (["stale_epoch", "stale_runtime", "session_unavailable", "attachment_closed"].includes(error.code)) clearControlIntent();
           else if (error.code === "control_claimed") scheduleRefresh();
         }
@@ -2151,8 +2176,7 @@ function createConversation(host, row) {
         attachment = value.attachmentId;
         streamSequence = value.snapshot.sequence;
         authoritySequence = 0;
-        if (controlIntent && controlIntent.runtimeRevision !== value.snapshot.runtimeRevision) clearControlIntent();
-        runtimeRevision = value.snapshot.runtimeRevision;
+        setControlRuntime(value.snapshot.runtimeRevision);
         owner = null;
         transcriptKey = interactionKey = optionsKey = "";
         optionsLoad = null;
@@ -2202,7 +2226,7 @@ function createConversation(host, row) {
   return {
     get host() { return host; },
     identity, id: selectedId, element, reconnect, recover,
-    acquireControl: () => run(acquireControl),
+    acquireInitialControl,
     draft: () => $("prompt").value,
     viewed() { if (snapshot) renderSession(); },
     connected: () => connected,
