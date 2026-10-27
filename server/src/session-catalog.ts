@@ -411,11 +411,11 @@ export class SessionCatalog {
       return this.transaction(() => {
         admission?.();
         if (items) this.setQueue(copy.receipt.sessionId, items);
-        // Configuration and startup dialogs do not constitute conversation work.
+        // Configuration, startup dialogs and worker lifecycle actions are not conversation work.
         // Once any work is accepted, even removed/failed queue items must never
         // make a session eligible for automatic deletion again.
         if (!copy.receipt.operation.startsWith("control.") && !["access.set", "integration.set", "notifications.set",
-          "model.set", "thinking.set", "interaction.respond", "interaction.cancel"].includes(copy.receipt.operation)) {
+          "model.set", "thinking.set", "interaction.respond", "interaction.cancel", "session.kill", "session.restart", "turn.abort"].includes(copy.receipt.operation)) {
           const session = this.get(copy.receipt.sessionId);
           if (session.provisional) { delete session.provisional; this.updateSession(session); }
         }

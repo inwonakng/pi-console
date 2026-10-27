@@ -60,6 +60,7 @@ export type OwnedSessionState = SessionActivity & {
   serviceEpoch: string;
   runtimeRevision: number;
   phase: "initializing" | "ready" | "stopping" | "stopped" | "failed";
+  provisional: boolean;
   trust?: TrustStatus;
   workspace?: WorkspaceStatus;
   piState?: RpcSessionState;
@@ -1635,7 +1636,8 @@ export class OwnedSession {
     const interactions = this.worker?.interactionSnapshot() ?? { revision: 0, pending: [] };
     return { ...structuredClone({
       ...this.activity(interactions.pending.some((item) => !item.submitted)), sessionId: this.id, serviceEpoch: this.catalog.epoch, runtimeRevision: this.runtimeRevision,
-      phase: this.phase, trust: this.trust, workspace: this.workspace, piState: this.conversation.sessionState,
+      phase: this.phase, provisional: this.catalog.get(this.id).provisional === true,
+      trust: this.trust, workspace: this.workspace, piState: this.conversation.sessionState,
       controller: this.control.snapshot(), error: this.error?.message, exit: this.exit, startupTimings: this.startupTimings,
     }), interactions };
   }

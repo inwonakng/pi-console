@@ -240,8 +240,9 @@ local function control_current()
 		and controller.attachmentId == attachment and controller.grantId == grant.grantId
 end
 local function can_kill_session()
-	return control_current() and snapshot and snapshot.phase ~= "stopped" and snapshot.phase ~= "failed"
-		and snapshot.phase ~= "stopping" and hello and vim.tbl_contains(hello.capabilities or {}, "session.kill")
+	local owner = authority and authority.owner_view and authority.owner_view.data or snapshot
+	return control_current() and owner and not owner.provisional and owner.phase ~= "stopped" and owner.phase ~= "failed"
+		and owner.phase ~= "stopping" and hello and vim.tbl_contains(hello.capabilities or {}, "session.kill")
 end
 local function stamp()
 	return { generation = generation, attachment = attachment, token = grant and grant.token, epoch = snapshot and snapshot.serviceEpoch,
@@ -1939,7 +1940,7 @@ function M.close_unstarted(expected_pid)
 end
 local function kill_session(confirmed)
 	if kill_pending then notify("Stop already pending; no duplicate request sent."); return end
-	if not can_kill_session() then notify("Stop requires control of a live session (:PiControl)."); return end
+	if not can_kill_session() then notify("Stop requires control of a started, live session (:PiControl). Use Detach for a new frontend."); return end
 	if not can_close_frontend() then return end
 	local captured, label = stamp(), "Stop session"
 	kill_pending = captured
