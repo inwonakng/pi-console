@@ -52,6 +52,8 @@ require("catppuccin").setup({
 			PiDiffStats = { fg = colors.peach, bg = M.status_bg },
 			PiUserHeader = { fg = colors.blue, bg = "#102033", bold = true },
 			PiAssistantHeader = { fg = colors.mauve, bg = "#1b1424", bold = true },
+			PiInstructionHeader = { fg = colors.teal, bg = "#102421", bold = true },
+			PiErrorHeader = { fg = colors.red, bg = "#2a1014", bold = true },
 			PiTreeUser = { fg = colors.blue, bg = M.ui_bg, bold = true },
 			PiTreeAssistant = { fg = colors.mauve, bg = M.ui_bg, bold = true },
 			PiTreeTool = { fg = colors.peach, bg = M.ui_bg, bold = true },

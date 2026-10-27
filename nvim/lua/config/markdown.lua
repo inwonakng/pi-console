@@ -54,6 +54,57 @@ require("render-markdown").setup({
 				background = "PiUserHeader",
 				foreground = "PiUserHeader",
 			},
+			pi_task = {
+				pattern = "Task%s*$",
+				icon = "󰭹 ",
+				background = "PiUserHeader",
+				foreground = "PiUserHeader",
+			},
+			pi_prompt = {
+				pattern = "Prompt%s*$",
+				icon = "󰭹 ",
+				background = "PiUserHeader",
+				foreground = "PiUserHeader",
+			},
+			pi_assignment = {
+				pattern = "Assignment%s*$",
+				icon = "󰭹 ",
+				background = "PiUserHeader",
+				foreground = "PiUserHeader",
+			},
+			pi_subagent = {
+				pattern = "Subagent%s*$",
+				icon = "󰇥 ",
+				background = "PiSubagentQuote",
+				foreground = "PiSubagentQuote",
+			},
+			pi_subagent_role = {
+				pattern = "Subagent%s*%b()%s*$",
+				icon = "󰇥 ",
+				background = "PiSubagentQuote",
+				foreground = "PiSubagentQuote",
+			},
+			pi_orchestrator = {
+				pattern = "Orchestrator%s*$",
+				icon = "󰚩 ",
+				background = "PiAssistantHeader",
+				foreground = "PiAssistantHeader",
+			},
+			pi_instructions = {
+				pattern = "Instructions%s*$",
+				background = "PiInstructionHeader",
+				foreground = "PiInstructionHeader",
+			},
+			pi_error = {
+				pattern = "Error%s*$",
+				background = "PiErrorHeader",
+				foreground = "PiErrorHeader",
+			},
+			pi_aborted = {
+				pattern = "Aborted%s*$",
+				background = "PiErrorHeader",
+				foreground = "PiErrorHeader",
+			},
 			pi_assistant = {
 				pattern = "Assistant%s*$",
 				icon = "󰚩 ",
