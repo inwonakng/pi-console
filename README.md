@@ -62,9 +62,10 @@ Make sure `~/.local/bin` is on your `PATH`, then run from your project directory
 pi-console
 ```
 
-A local launch ensures the independent service and opens an unstarted frontend in
-the invocation directory. The first prompt creates a conversation.
-Closing Neovim leaves started conversations running.
+A local launch ensures the independent service and starts a conversation worker in
+the invocation directory while you compose. The server accepts the first message
+even during startup. Closing an unused window stops and deletes its empty session;
+after work is accepted, closing Neovim leaves the conversation running.
 Every service also listens on all IPv4 interfaces, port `8443` by default.
 **Anyone who can reach that port can view and control sessions. There is no
 authentication or encryption; restrict access with your VPN/network and firewall.**

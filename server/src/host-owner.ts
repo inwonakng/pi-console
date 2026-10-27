@@ -18,10 +18,10 @@ import { dialogRequest, object, type PiEvent } from "./pi-records.js";
 import { PiConversation, messageKey, type ConversationChange, type ConversationSnapshot, type ConversationRevisions, type ConversationSections, type FrontendEffect } from "./pi-conversation.js";
 import { SessionSubscription } from "./session-subscription.js";
 import { CommandError, SessionControl, commandFingerprint, sessionCommand, type CommandReceipt, type Controller,
-  type ControlGrant, type SessionCommand } from "./session-commands.js";
+  type ControlGrant, type SessionCommand, validPromptText } from "./session-commands.js";
 import { managementCommand, managementFingerprint, type ManagementCommand } from "./session-management.js";
 import { SessionCatalog, type CatalogSession, type Channel } from "./session-catalog.js";
-import { QueueReservations, editableItem, type AcceptedQueueItem, type AcceptedQueueSnapshot } from "./session-queue.js";
+import { QueueReservations, editableItem, STARTUP_OPERATIONS, validStartupSettings, type StartupSetting, type AcceptedQueueItem, type AcceptedQueueSnapshot } from "./session-queue.js";
 import { RENAME_COMMAND, RENAME_RESULT, renameResult, type RenameResult } from "./session-rename.js";
 import { prepareHostResources, type HostResources } from "./host-resources.js";
 import { readHostOptions, OptionsHelperUnresolved, type HostOptions } from "./host-options.js";
@@ -397,8 +397,11 @@ export class HostOwner {
 
   /** Host IDs are disk identities, not connection IDs. Duplicate lookups never
    * resume a now-stopped worker or repeat initialization. */
-  command(input: unknown, admission?: () => void): Promise<HostReceipt> {
+  command(input: unknown, admission?: () => void, opened?: (session: OwnedSession) => void): Promise<HostReceipt> {
     const command = hostCommand(input);
+    if (command.operation === "host.create" && command.payload.provisional && !opened) {
+      throw new CommandError("invalid_command", "Provisional sessions require a window attachment");
+    }
     if (command.serviceEpoch !== this.serviceEpoch) throw new CommandError("stale_epoch", "Host command belongs to another service epoch");
     this.assertOpen();
     if (this.hostAdmitting >= 128) throw new CommandError("command_limit", "Host admission limit exceeded");
@@ -411,16 +414,23 @@ export class HostOwner {
       const previous = this.catalog.hostRecord(command.serviceEpoch, command.id);
       if (previous) {
         if (previous.fingerprint !== fingerprint) throw new CommandError("command_conflict", "Command ID was used for another mutation");
+        if (opened && previous.receipt.result) {
+          const session = this.lookup(previous.receipt.result.sessionId);
+          if (!session) throw new CommandError("session_unavailable", "Allocated window is no longer live; inspect its original outcome");
+          opened(session);
+        }
         return previous.receipt;
       }
       const receipt: HostReceipt = { id: command.id, serviceEpoch: this.serviceEpoch, operation: command.operation, status: "accepted" };
       let sessionId: string;
       if (command.operation === "host.create") {
         this.catalog.assertLaunchAllowed();
-        const record = await this.catalog.create(command.payload.cwd, { fingerprint, receipt }, admission);
+        const record = await this.catalog.create(command.payload.cwd, { fingerprint, receipt, provisional: command.payload.provisional }, command.payload.provisional ? undefined : admission);
         sessionId = record.id;
-        // The allocation receipt is already committed before any worker launch.
-        this.resume(sessionId);
+        // Subscribe in this turn, before startup or a close can run. The caller
+        // immediately closes the subscription if allocation outlived its window.
+        const session = this.resume(sessionId);
+        opened?.(session);
         return this.catalog.hostRecord(command.serviceEpoch, command.id)!.receipt;
       }
       if (command.operation === "host.archive" || command.operation === "host.delete") {
@@ -578,6 +588,8 @@ export class OwnedSession {
   private queueScheduled = false;
   private queueAgain = false;
   private queueRunPending = false;
+  private startupPending = false;
+  private discarding = false;
   private rename?: RenameFlight;
   private nativePending = 0;
   private nativeQueueCommands = new Set<Promise<void>>();
@@ -675,12 +687,14 @@ export class OwnedSession {
    * No cursor replay: effects before this watermark are deliberately absent.
    */
   subscribe(label = "Interface"): SessionSubscription {
+    if (this.discarding) throw new CommandError("session_unavailable", "Unused window is closing");
     if (this.viewers.size >= 32) throw new Error("Session viewer limit exceeded");
     if (typeof label !== "string" || !label.trim() || Buffer.byteLength(label) > 256) throw new CommandError("invalid_command", "Invalid attachment label");
     const id = randomUUID();
     const subscription = new SessionSubscription(id, this.snapshot(), () => {
       this.viewers.delete(subscription);
       this.control.detach(id);
+      this.discardIfUnused();
     }, (update) => {
       if (update.effect && !this.validOffer(id, update)) delete update.effect;
       if (update.closeFrontend?.attachmentId !== id) delete update.closeFrontend;
@@ -689,6 +703,28 @@ export class OwnedSession {
     this.viewers.add(subscription);
     this.control.attach(id, label);
     return subscription;
+  }
+
+  private discardIfUnused(): void {
+    if (this.serviceStopping || this.viewers.size || this.discarding || !this.catalog.get(this.id).provisional) return;
+    const decision = this.admission.then(() => {
+      if (this.serviceStopping || this.viewers.size || this.discarding || !this.catalog.get(this.id).provisional) return false;
+      // The same admission lane owns acceptance and this irreversible fence.
+      this.discarding = true;
+      this.requestStop();
+      return true;
+    });
+    this.admission = decision.then(() => undefined, () => undefined);
+    const cleanup = decision.then(async (discard) => {
+      if (!discard) return;
+      this.lifecyclePending = true;
+      this.lifecycle = cleanup;
+      try {
+        await this.running;
+        if (this.cleanupError || this.exit?.descendantsUnresolved) throw this.cleanupError ?? new Error("Unused worker cleanup is unresolved");
+        await this.catalog.discardUnused(this.id);
+      } finally { this.lifecyclePending = false; }
+    }).catch((error: unknown) => this.commandFailure(error));
   }
 
   /** Recheck after any async delay. Returns live recipient-bound data, never
@@ -792,6 +828,44 @@ export class OwnedSession {
     return receipt?.sessionId === this.id ? receipt : { status: "unknown" };
   }
 
+  /** Only the connection that allocated this window may submit before startup.
+   * Acceptance owns the text/settings even if that connection immediately leaves. */
+  submitWindow(input: Record<string, unknown>, attachmentId: string): Promise<CommandReceipt> {
+    if (input.serviceEpoch !== this.catalog.epoch) throw new CommandError("stale_epoch", "Window service changed");
+    if (!validPromptText(input.text) || !validStartupSettings(input.settings)) throw new CommandError("invalid_command", "Invalid window submission");
+    if (this.admitting >= 128) throw new CommandError("command_limit", "Service command admission limit exceeded");
+    const text = input.text.trim(), settings = structuredClone(input.settings);
+    const fingerprint = createHash("sha256").update(JSON.stringify([this.id, this.catalog.epoch, "window.submit", text,
+      STARTUP_OPERATIONS.map((operation) => settings[operation] ?? null)])).digest("hex");
+    this.admitting++;
+    const task = this.admission.then(async () => {
+      const existing = this.catalog.commandRecord(this.catalog.epoch, String(input.id));
+      if (existing) {
+        if (existing.fingerprint !== fingerprint) throw new CommandError("command_conflict", "Command ID was used for another mutation");
+        return existing.receipt;
+      }
+      this.control.attached(attachmentId);
+      const controller = this.control.current();
+      if (controller && controller.attachmentId !== attachmentId) throw new CommandError("control_claimed", "Another attachment controls this window");
+      this.checkRunning();
+      if (!this.catalog.get(this.id).provisional) throw new CommandError("session_busy", "Window already accepted work; review before submitting again");
+      const item: AcceptedQueueItem = { id: randomUUID(), revision: 1, serviceEpoch: this.catalog.epoch,
+        runtimeRevision: this.runtimeRevision, text, status: "queued", startup: settings, timeline: { afterMessage: null } };
+      const receipt: CommandReceipt = { id: String(input.id), sessionId: this.id, serviceEpoch: this.catalog.epoch,
+        runtimeRevision: this.runtimeRevision, operation: "prompt.submit", status: "completed",
+        result: { queueItemId: item.id, queueItemRevision: 1, queueItemText: text } };
+      // No liveness recheck after commitment: a close ordered behind acceptance
+      // must retain the session, not retract already accepted text.
+      await this.catalog.reserveCommand({ fingerprint, receipt }, [...this.catalog.queue(this.id), item]);
+      if (controller) this.queueRecipients.set(item.id, controller);
+      this.publish({ command: receipt });
+      this.queueChanged();
+      return structuredClone(receipt);
+    });
+    this.admission = task.then(() => undefined, () => undefined);
+    return task.finally(() => { this.admitting--; });
+  }
+
   /** Resolve acceptance independently from eventual outcome. The short admission
    * lane serializes authorization/reservation, not a blocking abort or dialog.
    */
@@ -813,6 +887,9 @@ export class OwnedSession {
       this.control.authorize(command);
       const recipient = this.control.snapshot();
       const worker = this.commandRuntime(command.runtimeRevision);
+      if ((this.startupPending || this.catalog.queue(this.id).some((item) => item.status === "queued" && item.startup !== undefined))
+        && !command.operation.startsWith("control.") && !command.operation.startsWith("interaction.")
+        && !["turn.abort", "session.kill"].includes(command.operation)) throw new CommandError("session_busy", "First prompt settings are being applied; retry after startup");
       const rename = command.operation === "session.rename" ? this.prepareRename(command, worker) : undefined;
       if (this.bundled && contextOperation(this.bundled.operation) && ["prompt.submit", "queue.edit"].includes(command.operation)) throw new CommandError("session_busy", "History transition pending; retain text and review after arrival");
       if (isNative(command)) this.assertNativeReady(command);
@@ -908,6 +985,8 @@ export class OwnedSession {
         return existing.receipt;
       }
       const worker = this.commandRuntime(command.runtimeRevision);
+      if ((this.startupPending || this.catalog.queue(this.id).some((item) => item.status === "queued" && item.startup !== undefined))
+        && command.operation !== "session.kill" && command.operation !== "turn.abort") throw new CommandError("session_busy", "First prompt settings are being applied; retry after startup");
       if (this.lifecyclePending) throw new CommandError("session_busy", "Session lifecycle operation pending");
       const bundled = command.operation !== "session.kill" && command.operation !== "turn.abort" ? this.prepareBundled(command, worker) : undefined;
       const receipt: CommandReceipt = { id: command.id, sessionId: this.id, serviceEpoch: this.catalog.epoch,
@@ -973,6 +1052,7 @@ export class OwnedSession {
           item.timeline = this.conversation.timelineAnchor;
         }
         item.status = "queued";
+        delete item.startup; // Explicit editing binds to the reviewed current context.
         item.error = undefined;
         item.serviceEpoch = this.catalog.epoch;
         item.runtimeRevision = command.runtimeRevision;
@@ -1001,7 +1081,7 @@ export class OwnedSession {
 
   private queueCanDispatch(): boolean {
     return !this.stopRequested && !this.error && !this.exit && this.phase === "ready" && this.usableWorkspace()
-      && !this.aborting && !this.rename && !this.nativePending && !this.bundled && !this.bundledInterrupt && !this.queueRunPending
+      && !this.startupPending && !this.aborting && !this.rename && !this.nativePending && !this.bundled && !this.bundledInterrupt && !this.queueRunPending
       && !this.conversation.continuationPending && this.conversation.executionSettled;
   }
 
@@ -1042,7 +1122,7 @@ export class OwnedSession {
     // navigation, clean resume or owner epoch changes. Failed items keep order.
     let changed = false;
     for (const item of items) {
-      if (item.status !== "queued" || item.serviceEpoch === this.catalog.epoch && item.runtimeRevision === this.runtimeRevision) continue;
+      if (item.status !== "queued" || item.serviceEpoch === this.catalog.epoch && (item.startup !== undefined || item.runtimeRevision === this.runtimeRevision)) continue;
       item.status = "failed"; item.revision++;
       item.error = { code: "stale_runtime", message: "Accepted prompt targets a replaced context; review before editing/resubmitting" };
       this.reservations.releaseItem(item.id);
@@ -1052,6 +1132,11 @@ export class OwnedSession {
     if (!this.queueCanDispatch() || items.some((item) => item.status === "sending")) return;
     const item = items.find((item) => item.status === "queued");
     if (!item || this.reservations.blocks(item.id)) return;
+    if (item.startup !== undefined) {
+      this.startupPending = true;
+      this.trackCommand(this.prepareWindowPrompt(item).finally(() => { this.startupPending = false; this.scheduleQueue(); }));
+      return;
+    }
     const worker = this.commandRuntime(item.runtimeRevision);
     item.status = "sending"; item.revision++;
     await this.catalog.replaceQueue(this.id, items);
@@ -1079,6 +1164,55 @@ export class OwnedSession {
       }
       this.scheduleQueue();
     })());
+  }
+
+  private async prepareWindowPrompt(item: AcceptedQueueItem): Promise<void> {
+    let error: unknown;
+    try {
+      // Settings were authorized with the accepted prompt. They must complete
+      // without depending on the creator keeping its control grant or window.
+      for (const operation of STARTUP_OPERATIONS) {
+        const payload = item.startup![operation];
+        if (!payload) continue;
+        const setting = { operation, payload } as StartupSetting;
+        const revision = this.runtimeRevision, worker = this.commandRuntime(revision);
+        const receipt: CommandReceipt = { id: randomUUID(), sessionId: this.id, serviceEpoch: this.catalog.epoch,
+          runtimeRevision: revision, operation, status: "accepted" };
+        const setup = this.admission.then(async () => {
+          this.assertReady(revision);
+          const bundled = isBundled(setting) ? this.prepareBundled({ ...setting, runtimeRevision: revision }, worker) : undefined;
+          const fingerprint = createHash("sha256").update(JSON.stringify([item.id, revision, operation, payload])).digest("hex");
+          await this.catalog.reserveCommand({ fingerprint, receipt });
+          if (bundled) this.bundled = bundled;
+          return bundled;
+        });
+        this.admission = setup.then(() => undefined, () => undefined);
+        const bundled = await setup;
+        if (bundled) await this.executeBundled(receipt, bundled);
+        else if (isNative(setting)) {
+          this.nativePending++;
+          await this.executeNative({ ...setting, runtimeRevision: revision }, receipt);
+        }
+        const outcome = this.catalog.commandStatus(this.catalog.epoch, receipt.id);
+        if (outcome?.status !== "completed") throw new CommandError("session_unavailable", "Startup setting did not complete; inspect its receipt before resubmitting");
+      }
+      if (this.conversation.status("pi-console-model-readiness") === "unavailable" && !item.text.startsWith("/")) {
+        throw new CommandError("session_unavailable", "Model unavailable; select the intended model before resubmitting");
+      }
+    } catch (failure) { error = failure; }
+    const completion = this.admission.then(async () => {
+      const items = this.catalog.queue(this.id), accepted = items.find((entry) => entry.id === item.id);
+      if (!accepted || accepted.revision !== item.revision) return;
+      delete accepted.startup;
+      accepted.revision++;
+      accepted.runtimeRevision = this.runtimeRevision;
+      accepted.timeline = this.conversation.timelineAnchor;
+      if (error) { accepted.status = "failed"; accepted.error = queueError(error); }
+      await this.catalog.replaceQueue(this.id, items);
+      this.queueChanged();
+    });
+    this.admission = completion.then(() => undefined, () => undefined);
+    await completion;
   }
 
   private assertRenameReady(): void {
@@ -1399,7 +1533,7 @@ export class OwnedSession {
     }
   }
 
-  private async executeNative(command: SessionCommand & NativeOperation, receipt: CommandReceipt): Promise<void> {
+  private async executeNative(command: { runtimeRevision: number } & NativeOperation, receipt: CommandReceipt): Promise<void> {
     let error: unknown;
     try {
       const worker = this.commandRuntime(command.runtimeRevision);
@@ -1709,9 +1843,9 @@ export class OwnedSession {
 
   /** Explicit owner shutdown, not frontend detach or a guarded service-stop API. */
   async stop(): Promise<void> {
+    this.serviceStopping = true;
     if (!this.done) {
       // Administrative shutdown supersedes a pending session restart.
-      this.serviceStopping = true;
       this.restartRequested = false;
       this.requestStop();
     }

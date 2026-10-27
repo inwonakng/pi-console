@@ -283,7 +283,7 @@ local function request(method, payload, callback)
 		close_bridge()
 		return
 	end
-	if method == "command" or method == "host.command" then action_connection.monitor() end
+	if method == "command" or method == "host.command" or method == "window.open" or method == "window.submit" then action_connection.monitor() end
 	return id
 end
 local function acknowledge_viewed_response()
@@ -547,7 +547,7 @@ ctx = { state = state, config = M.config,
 		logs.add(level, message, details, { session = session_id })
 		logs.display(message, level)
 	end },
-	notices = { empty_session = "Send a message to begin. This session will be saved after the first response." },
+	notices = { empty_session = "Send a message to begin." },
 	buffer = { valid = valid, set_modifiable = function(buf, value) vim.bo[buf].modifiable = value end },
 	session = { setup_keymaps = function() end }, transcript = {} }
 ctx.transcript.win_valid = function()
@@ -581,7 +581,8 @@ local function update_status_state()
 	if status_error and state.status_error ~= status_error then notify(status_error, vim.log.levels.ERROR) end
 	state.status_error = status_error
 	local terminal = owner and (owner.phase == "stopped" or owner.phase == "failed") and owner.phase
-	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active" or "view only")
+	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active"
+		or owner and owner.phase == "initializing" and "starting" or "view only")
 		or (session_id and ("session " .. (session_status or "unattached")) or starting and "starting" or "unstarted")
 	if action_connection and action_connection.status then state.client_status = action_connection.status end
 	if kill_pending and kill_pending.status == "stopping" then state.client_status = "Stopping session..."
@@ -940,6 +941,7 @@ local function disconnected(reason, details, intentional)
 	session_status, session_error = "unattached", nil
 	feedback_ui.interrupt(feedback)
 	callbacks, outcomes, auto_control_selection, starting, resume_check = {}, {}, nil, waiting_start, nil
+	ctx.ui.window_id, ctx.ui.window_submission = nil, nil
 	ctx.ui.reopen = nil
 	if waiting_start then waiting_start.entry.status = "Waiting for connection" end
 	kill_pending = nil
@@ -957,8 +959,9 @@ local function disconnected(reason, details, intentional)
 	end
 	return entry
 end
-attach = function(id, acquire)
+attach = function(id, acquire, initial)
 	if not job then return end
+	if not initial then ctx.ui.window_id = nil end
 	if pending_new_session and pending_new_session.session ~= id then cancel_new_session() end
 	auto_control_selection = nil
 	tree.close(tree_ctx)
@@ -972,7 +975,7 @@ attach = function(id, acquire)
 	local gen, selected = generation, selection
 	session_status, session_error, state.control_loss_reason = "attaching", nil, nil
 	render(true)
-	request("attach", { sessionId = id, label = "neovim@" .. vim.fn.hostname() }, function(ok, value)
+	local function attached(ok, value)
 		if gen ~= generation or selected ~= selection then return end
 		if not ok then
 			ctx.ui.reopen = nil
@@ -1026,7 +1029,9 @@ attach = function(id, acquire)
 		-- Stay well below the 32-request bridge/IPC limit, reserving room for
 		-- snapshots, ordinary UI requests and controller heartbeats.
 		for _ = 1, 4 do lookup_next() end
-	end)
+	end
+	if initial then attached(true, initial)
+	else request("attach", { sessionId = id, label = "neovim@" .. vim.fn.hostname() }, attached) end
 end
 local function host_operation(operation, payload)
 	if not hello or not job then notify("Connect to the service first; no host request was sent."); return end
@@ -1046,7 +1051,9 @@ local function host_operation(operation, payload)
 		return
 	end
 	record_command({ id = envelope.id, status = "sending" }, envelope)
-	request("host.command", envelope, function(ok, receipt)
+	local method = operation == "host.create" and payload.provisional and "window.open" or "host.command"
+	if method == "window.open" then ctx.ui.window_id = envelope.id end
+	request(method, envelope, function(ok, receipt)
 		record_command(ok and receipt or { id = envelope.id, status = receipt.delivery == "not_sent" and "failed" or "unknown", error = receipt }, envelope, true)
 		if not ok and pending_host == envelope then
 			fail_start("Startup did not complete; submitted text remains in :PiDrafts. Inspect :PiHostRequest before retrying.")
@@ -1067,7 +1074,7 @@ local function host_operation(operation, payload)
 					if operation == "host.create" and startup_status then startup_status.session_id = session_id end
 					feedback_ui.bind(feedback, envelope.id, session_id)
 					backup()
-					attach(session_id)
+					attach(session_id, nil, receipt.attachmentId and receipt or nil)
 				else notify("Host request completed; select the session in :PiSessions. Current view was not changed.") end
 			elseif receipt.error then
 				fail_start("Startup failed; submitted text remains in :PiDrafts.")
@@ -1078,6 +1085,13 @@ local function host_operation(operation, payload)
 			end
 		end
 	end)
+end
+ctx.ui.open_window = function()
+	if session_id or pending_host or not selected_cwd or not hello or not job then return end
+	if not vim.tbl_contains(hello.capabilities or {}, "window.open") or not vim.tbl_contains(hello.capabilities or {}, "window.submit") then
+		notify("This server needs an upgrade to start conversation windows eagerly.", vim.log.levels.WARN); return
+	end
+	host_operation("host.create", { cwd = selected_cwd, provisional = true })
 end
 recover_selection = function(allow_restore, passive)
 	local captured = stamp()
@@ -1189,14 +1203,13 @@ connect = function(automatic)
 			reconnect_attempts = 0
 			if load_metrics then load_metrics.connectionMs = vim.uv.hrtime() / 1e6 - load_metrics.started end
 			M.config.expected_host = result.hostId
-			if not session_id and not automatic then host_options() end
 			render()
 			local restore = recovery_requested; recovery_requested = false
 			if recover_host(restore, automatic) then return end
 			if session_id then
 				if resume_requested then resume_requested = false; host_operation("host.resume", { sessionId = session_id })
 				else recover_selection(restore, automatic) end
-			end
+			elseif not automatic then ctx.ui.open_window() end
 		elseif value.type == "response" then
 			local pending = callbacks[value.id]; callbacks[value.id] = nil
 			if load_metrics and pending and (pending.method == "attach" or pending.method == "snapshot") then
@@ -1204,7 +1217,7 @@ connect = function(automatic)
 				load_metrics.bytes = (load_metrics.bytes or 0) + frame.bytes
 				load_metrics.decodeMs = (load_metrics.decodeMs or 0) + frame.decodeMs
 			end
-			if value.success == false and not (pending and (pending.method == "command" or pending.method == "host.command")) then
+			if value.success == false and not (pending and (pending.method == "command" or pending.method == "host.command" or pending.method == "window.open" or pending.method == "window.submit")) then
 				-- Reads admitted just before a handoff can still race the transition.
 				local transition = pending and pending.background
 					and (value.error.code == "session_unavailable" or value.error.code == "stale_runtime")
@@ -1350,7 +1363,7 @@ function M.select_owner(target, id, resume, cwd)
 	assert(M.config.role == "conversation", "Only conversation frontends can select a host")
 	local host_changed = target.expected_host ~= M.config.expected_host or target.service_root ~= M.config.service_root
 		or target.service_remote ~= M.config.service_remote
-	local settings = not host_changed and not session_id and not id and pending_settings or {}
+	local settings = not host_changed and (not session_id or ctx.ui.window_id) and not id and pending_settings or {}
 	local switching = host_changed or id ~= session_id or cwd ~= nil or resume
 		or target.service_root ~= M.config.service_root or target.service_remote ~= M.config.service_remote
 	if switching then
@@ -1526,10 +1539,49 @@ advance_start = function()
 	submit_input(start.input, start.entry)
 	render()
 end
+ctx.ui.submit_window = function(original)
+	if ctx.ui.window_submission then notify("First message delivery is pending; input remains local. Inspect :PiLogs before resubmitting."); return end
+	local id, create_id = uid(), ctx.ui.window_id
+	local envelope = { id = id, operation = "prompt.submit", payload = { text = original }, sessionId = session_id,
+		serviceEpoch = hello.serviceEpoch, runtimeRevision = current_revision() }
+	local entry = feedback_ui.add(feedback, id, "prompt.submit", envelope.payload, session_id, hello.serviceEpoch, current_revision(), snapshot)
+	entry.hostRequest, entry.status, entry.sent = create_id, "Sending", true
+	ctx.ui.window_submission, unresolved[id] = entry, envelope
+	if text(state.input_buf) == original then
+		layout.set_buffer_lines(ctx, state.input_buf, { "" }, true)
+		vim.bo[state.input_buf].modified = false
+	end
+	render()
+	transcript.scroll_to_bottom_unless_focused(ctx)
+	if not backup() then
+		entry.status, entry.error, entry.sent = "Not sent", "Local recovery could not be saved. No message was sent.", false
+		ctx.ui.window_submission, unresolved[id] = nil, nil
+		render(); return
+	end
+	local settings = vim.deepcopy(pending_settings)
+	request("window.submit", { id = id, serviceEpoch = hello.serviceEpoch, createId = create_id,
+		text = original, settings = object_payload(settings) }, function(ok, receipt)
+		if ok then envelope.sessionId = receipt.sessionId; entry.sessionId = receipt.sessionId end
+		record_command(ok and receipt or { id = id, status = receipt.delivery == "not_sent" and "failed" or "unknown", error = receipt }, envelope, true)
+		feedback_ui.receipt(feedback, id, ok, receipt)
+		if ok and ctx.ui.window_id == create_id and ctx.ui.window_submission == entry then
+			ctx.ui.window_id, ctx.ui.window_submission = nil, nil
+			for operation, payload in pairs(settings) do
+				if vim.deep_equal(pending_settings[operation], payload) then pending_settings[operation] = nil end
+			end
+		elseif not ok and receipt.delivery == "not_sent" then
+			if ctx.ui.window_submission == entry then ctx.ui.window_submission = nil end
+			unresolved[id] = nil
+		end
+		backup()
+		render(); refresh(true)
+	end)
+end
 function M.submit_prompt(original)
 	original = original or text(state.input_buf)
 	local trimmed = vim.trim(original)
 	if trimmed == "" then return end
+	if ctx.ui.window_id and hello and job then ctx.ui.submit_window(original); return end
 	if starting then notify("Session startup is already pending; input remains local."); return end
 	if not session_id then
 		if not hello or not job then notify("Connect to a host before submitting."); return end
@@ -1955,7 +2007,8 @@ local function owner_read(kind, callback, captured)
 end
 local function setting(operation, payload, captured)
 	if starting then notify("Wait for session startup before changing settings."); return end
-	if not session_id or next(pending_settings) then
+	if ctx.ui.window_submission then notify("Wait for first message acceptance before changing settings."); return end
+	if ctx.ui.window_id or not session_id or next(pending_settings) then
 		if captured and not same_selection(captured) then return end
 		pending_settings[operation] = payload
 		if operation == "model.set" then pending_settings["thinking.set"] = nil end
@@ -1966,12 +2019,12 @@ local function setting(operation, payload, captured)
 end
 local function pick_setting(operation, values, label)
 	local captured = stamp()
-	vim.ui.select(values, { prompt = label .. (session_id and "" or " (pending)") }, function(value)
+	vim.ui.select(values, { prompt = label .. (session_id and not ctx.ui.window_id and "" or " (pending)") }, function(value)
 		if value then setting(operation, { mode = value }, captured) end
 	end)
 end
 local function cycle_setting(operation, values, value)
-	if session_id and not next(pending_settings) then
+	if session_id and not ctx.ui.window_id and not next(pending_settings) then
 		command(operation:gsub("%.set$", ".cycle"), { modes = values }); return
 	end
 	local index = 0
@@ -2032,11 +2085,11 @@ host_options = function(callback, force)
 	end)
 end
 function M.refresh_options()
-	if session_id then notify("Options refresh is for unstarted sessions; live sessions read their own runtime."); return end
+	if session_id and not ctx.ui.window_id then notify("Options refresh is for new windows; existing conversations read their own runtime."); return end
 	host_options(function(data) if data then notify("Host options refreshed.") end end, true)
 end
 function M.pick_model()
-	local read = not session_id and host_options or function(callback) owner_read("models", callback) end
+	local read = (not session_id or ctx.ui.window_id and snapshot and snapshot.phase ~= "ready") and host_options or function(callback) owner_read("models", callback) end
 	read(function(data, captured)
 		if not data then return end
 		if #data.models == 0 then notify("Pi found no available models on this host.", vim.log.levels.WARN); return end
@@ -2046,7 +2099,7 @@ function M.pick_model()
 	end)
 end
 function M.pick_thinking()
-	if not session_id then
+	if not session_id or ctx.ui.window_id then
 		host_options(function(data, captured)
 			if not data then return end
 			local pending = pending_settings["model.set"]
@@ -2485,7 +2538,7 @@ function M.refresh_messages() refresh(true) end
 function M.show_input() layout.show_input(ctx) end
 function M.show_transcript() layout.show_transcript(ctx) end
 function M.show_help()
-	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; Ctrl+Enter saves; editing pauses dispatch while connected)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / <leader>pd / :PiWorkspaceReviews (workspace diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects saved file content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle (generate session title)\n:PiLogs / <leader>pl (notifications, action outcomes and recovery text; Enter inspects details)\n:PiHostRequest (unresolved session creation/resume)\n:PiSessions (archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (choose Detach, Stop or Cancel)\n:PiKill / <leader>pk (confirm stop session and close frontend; preserves history and local drafts)\n:PiConsoleRestart / <leader>pr: restart the frontend (installed dev uses the latest selected build).\n:PiRestart / <leader>pR: restart this conversation worker using the running server build; interrupts active work.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history apply to the attached session.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; Restart server applies the installed build on a chosen host/channel. Confirm separately to force interrupted work; saved sessions stay stopped. Last server restart inspects the latest outcome.\n:PiManagement: inspect overview management outcomes.\n:PiNew: unstarted frontend in the original directory. First prompt creates the session.\n:PiRefreshOptions: refresh cached pre-start models, defaults, and commands (otherwise expire after 60 seconds).\n:PiTranscript: session history (all branches, read-only).\nTranscript Enter inspects thinking/tools/skills/artifacts and file links; @ completion uses the session directory.\nPaged text: n next / p first / r reload. Skill f reads the current skill file.\nSlash commands run on the session host through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService restart is also available in Hosts; installation and frontend restart remain separate. Service stop stays CLI-only: pi-console server stop [--force].")
+	draft_buffer(scratch_name("service-help"), "# Local service attachment\n\n:PiControl / <leader>pc (acquire control; confirm before replacing another controller)\n:PiCd / <leader>pC (select a directory on the current host)\n:PiPending (restore picker; Esc hides, Ctrl-q cancels; viewers inspect only)\n:PiQueue (edit/remove accepted prompts; inspect steering/follow-up; Ctrl+Enter saves; editing pauses dispatch while connected)\n:PiFollowUp / steering shortcut (separate native queues)\n:PiWorkspace (enter/integrate/discard, with existing confirmations)\n:PiWorkspaceReview / <leader>pd / :PiWorkspaceReviews (workspace diffs; summary S/U stage/unstage all; file s/u index actions, X confirmed baseline restore; all mutations require control; gO inspects saved file content, gS original command)\n:PiSidePrompt / :PiSideNew / :PiSideAbort\n:PiRetitle (generate session title)\n:PiLogs / <leader>pl (notifications, action outcomes and recovery text; Enter inspects details)\n:PiHostRequest (unresolved session creation/resume)\n:PiSessions (archive/unarchive/delete, with workspace warnings)\n:PiSavedOperations (original saved-session outcomes; status only)\n:PiOffers / :PiDrafts (inspect-only)\n:PiDetach / :PiReconnect\n<leader>qq (choose Detach, Stop or Cancel)\n:PiKill / <leader>pk (confirm stop session and close frontend; preserves history and local drafts)\n:PiConsoleRestart / <leader>pr: restart the frontend (installed dev uses the latest selected build).\n:PiRestart / <leader>pR: restart this conversation worker using the running server build; interrupts active work.\n\n<C-CR> submits text; <Esc><Esc> aborts.\nSettings/model/thinking/history apply to the attached session.\n:PiCommand / <leader>/ and / completion discover commands from the attached runtime.\n:PiHosts / <leader>ph: attach current frontend, connect/retry/disconnect/edit/forget hosts; Restart server applies the installed build on a chosen host/channel. Confirm separately to force interrupted work; saved sessions stay stopped. Last server restart inspects the latest outcome.\n:PiManagement: inspect overview management outcomes.\n:PiNew: new conversation in the original directory. Its worker starts immediately; unused windows are cleaned up on close.\n:PiRefreshOptions: refresh cached pre-start models, defaults, and commands (otherwise expire after 60 seconds).\n:PiTranscript: session history (all branches, read-only).\nTranscript Enter inspects thinking/tools/skills/artifacts and file links; @ completion uses the session directory.\nPaged text: n next / p first / r reload. Skill f reads the current skill file.\nSlash commands run on the session host through the shared prompt queue. TUI-only built-ins are not exposed by Pi RPC.\nExcluded resource actions never use a local or raw RPC fallback.\nService restart is also available in Hosts; installation and frontend restart remain separate. Service stop stays CLI-only: pi-console server stop [--force].")
 end
 function M.open_transcript_item()
 	local resource = owner_resources()
@@ -2533,6 +2586,11 @@ function M.restart_console()
 	if not path or path == "" then notify("Launch through pi-console to relaunch the frontend."); return end
 	if not can_close_frontend() then return end
 	local value = local_snapshot()
+	if ctx.ui.window_id and not ctx.ui.window_submission then
+		-- The old unused worker is released on exit; restart the window with a
+		-- fresh allocation while retaining its input and selected settings.
+		value.service_session, value.pending_host, value.pending_host_select = nil, nil, nil
+	end
 	local ok, err = pcall(function()
 		assert(vim.fn.writefile({ vim.json.encode(value) }, path) == 0, "Could not write restart handoff")
 		restarting_frontend = true
@@ -2741,6 +2799,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 	ready = function()
 		if not job then return false, "bridge not running" end
 		if not hello then return false, "service handshake pending" end
+		if ctx.ui.window_id then return true end -- The owner accepts the first prompt during allocation/startup.
 		if session_status == "checking" or session_status == "attaching" or session_status == "restoring" then return false, session_status end
 		if not attachment then return true end -- Unstarted or unavailable; the action reports its own prerequisites.
 		if not snapshot then return false, "initial snapshot pending" end
@@ -2758,7 +2817,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 	end,
 	pending = function()
 		for _, pending in pairs(callbacks) do
-			if pending.method == "command" or pending.method == "host.command" then return true end
+			if pending.method == "command" or pending.method == "host.command" or pending.method == "window.open" or pending.method == "window.submit" then return true end
 		end
 		return false
 	end,
@@ -2774,7 +2833,7 @@ for _, name in ipairs({ "submit_prompt", "take_control", "change_cwd", "restart"
 	local fn = M[name]
 	M[name] = function(...)
 		if M.config.role ~= "conversation" then return fn(...) end
-		if not session_id and (name:find("access_mode", 1, true) or name:find("integration_mode", 1, true) or name == "toggle_notifications") then
+		if (not session_id or ctx.ui.window_id) and (name:find("access_mode", 1, true) or name:find("integration_mode", 1, true) or name == "toggle_notifications") then
 			return fn(...)
 		end
 		local args = { ... }

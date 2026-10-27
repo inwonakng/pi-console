@@ -18,6 +18,8 @@ export type CatalogSession = {
   name?: string;
   archived?: boolean;
   deleted?: boolean;
+  /** Eager window allocation; cleared atomically when work is accepted. */
+  provisional?: true;
   lifecycleRevision?: number;
   stopReason?: "user" | "service_shutdown" | "error";
   ownerEpoch?: string;

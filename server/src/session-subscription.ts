@@ -1,6 +1,7 @@
 import type { OwnedSessionSnapshot, OwnedSessionUpdate } from "./host-owner.js";
 
-/** Owner-internal pull stream. Closing/dropping a view never touches Pi. */
+/** Owner-internal pull stream. The owner decides whether a detached view
+ * leaves accepted work running or releases an unused provisional worker. */
 export class SessionSubscription {
   private queue: string[] = [];
   private bytes = 0;

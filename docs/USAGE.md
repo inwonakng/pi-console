@@ -291,8 +291,9 @@ sessions, but their overview lists can show conversations from both and from any
 other session on the same tmux server.
 
 For independent terminal windows, create a separate tmux session in each and run
-`pi-console` or `pi-console-dev` there. `<leader>pN` opens an unstarted frontend tab
-in that same tmux session, inheriting the current host and workspace directory. `<prefix>G` always
+`pi-console` or `pi-console-dev` there. `<leader>pN` opens a new conversation tab
+in that same tmux session, inheriting the current host and workspace directory.
+Its worker starts immediately; closing it before any work is accepted removes the unused session. `<prefix>G` always
 creates in the channel's central agents session and opens its popup when invoked
 from another session; `<prefix>g` toggles access to that popup.
 The overview stays global: selecting a running conversation visits its existing

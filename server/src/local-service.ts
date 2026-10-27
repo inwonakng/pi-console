@@ -10,7 +10,7 @@ import { CONVERSATION_SECTIONS } from "./pi-conversation.js";
 import { RemoteNotifications } from "./remote-notifications.js";
 import type { SessionSubscription } from "./session-subscription.js";
 import { CommandError } from "./session-commands.js";
-import { identifier } from "./host-commands.js";
+import { identifier, hostCommand } from "./host-commands.js";
 import { object } from "./pi-records.js";
 import { CAPABILITIES, MAX_REQUEST, PROTOCOL, REMOTE_METHODS, records, RecordWriter } from "./local-protocol.js";
 import { endpoint, serviceBuild } from "./service-paths.js";
@@ -111,8 +111,10 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
     let handshaken = false;
     let subscription: SessionSubscription | undefined;
     let session: OwnedSession | undefined;
-    let pending = 0;
-    const detach = () => { subscription?.close(); subscription = undefined; session = undefined; };
+    let pending = 0, viewGeneration = 0;
+    type WindowView = { target: OwnedSession; view: SessionSubscription };
+    let opening: { id: string; task: Promise<WindowView> } | undefined;
+    const detach = () => { viewGeneration++; subscription?.close(); subscription = undefined; session = undefined; };
     let summaryFeed: { previous: string; timer?: NodeJS.Timeout } | undefined;
     const stopSummaries = () => {
       if (summaryFeed?.timer) clearTimeout(summaryFeed.timer);
@@ -289,6 +291,41 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
               remoteAdmission?.();
             });
             break;
+          case "window.open": {
+            const command = hostCommand(p);
+            if (command.operation !== "host.create" || command.payload.provisional !== true) throw new CommandError("invalid_command", "Window open requires a provisional allocation");
+            detach();
+            const generation = viewGeneration;
+            let opened: WindowView | undefined;
+            const allocation = owner.command(command, remoteAdmission, (target) => {
+              const view = target.subscribe("neovim window");
+              opened = { target, view };
+              if (socket.destroyed || closing || generation !== viewGeneration) { view.close(); return; }
+              session = target; subscription = view;
+              void view.closed.then((reason) => { if (subscription === view) disconnect(reason, "subscription_closed"); });
+            });
+            const task = allocation.then(() => {
+              if (!opened) throw new CommandError("session_unavailable", "Window allocation did not produce a session");
+              return opened;
+            });
+            // Capture allocation synchronously, so a following send can wait for
+            // this exact window without waiting for its acknowledgment or Pi.
+            opening = { id: command.id, task };
+            void task.catch(() => undefined);
+            const receipt = await allocation;
+            const { target, view } = await task;
+            await send({ type: "response", id: record.id, success: true,
+              result: { ...receipt, attachmentId: view.attachmentId, snapshot: target.snapshot() } });
+            if (subscription === view) void pump(view);
+            return;
+          }
+          case "window.submit": {
+            exact(p, ["id", "serviceEpoch", "createId", "text", "settings"]);
+            if (!identifier(p.id) || !identifier(p.createId) || !opening || opening.id !== p.createId) throw new CommandError("invalid_command", "Submission does not target this window's allocation");
+            const { target, view } = await opening.task;
+            result = await target.submitWindow(p, view.attachmentId);
+            break;
+          }
           case "host.command": result = await owner.command(p, remoteAdmission); break;
           case "session.manage": result = await owner.manage(p, () => {
             if (socket.destroyed) throw new CommandError("attachment_closed", "Management client disconnected");

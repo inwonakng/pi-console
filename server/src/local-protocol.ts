@@ -6,11 +6,11 @@ import { NATIVE_OPERATIONS } from "./session-operations.js";
 import { BUNDLED_SOURCES } from "./session-bundled.js";
 
 export const PROTOCOL = 1;
-export const CAPABILITIES = ["snapshot", "snapshot.sections", "transport.chunks", "updates", "sessions.subscribe", "notifications.subscribe", "host.create", "host.resume", "host.recover", "host.saved", "host.history", "host.archive", "host.delete", "control.acquire", "control.takeover", "control.release",
+export const CAPABILITIES = ["snapshot", "snapshot.sections", "transport.chunks", "updates", "sessions.subscribe", "notifications.subscribe", "host.create", "window.open", "window.submit", "host.resume", "host.recover", "host.saved", "host.history", "host.archive", "host.delete", "control.acquire", "control.takeover", "control.release",
   "interaction.respond", "interaction.cancel", "prompt.submit", "turn.abort", "queue.edit", "queue.remove", "queue.reserve", "queue.release",
   "session.manage", "session.manage.status", "session.rename", "workspace.review.save", "workspace.review.stage", "workspace.review.unstage", "workspace.review.restore", "session.read", "resource.read", "resource.complete", "host.directories", "host.options", "host.complete", "session.restart", "session.kill", ...Object.keys(BUNDLED_SOURCES), ...NATIVE_OPERATIONS, "response.viewed", "command.status", "effect.inspect", "service.stop", "service.restart", "service.restart.status"] as const;
 // Shared by the public listener and registered local-profile relays.
-export const REMOTE_METHODS = new Set(["hello", "health", "sessions", "sessions.subscribe", "notifications.subscribe", "host.command", "host.status", "session.manage", "session.manage.status", "attach", "detach", "snapshot", "session.read", "resource.read", "resource.complete", "host.directories", "host.options", "host.complete", "host.saved", "host.history", "command", "grant", "heartbeat", "response.viewed", "command.status", "effect.inspect", "service.restart", "service.restart.status"]);
+export const REMOTE_METHODS = new Set(["hello", "health", "sessions", "sessions.subscribe", "notifications.subscribe", "host.command", "host.status", "window.open", "window.submit", "session.manage", "session.manage.status", "attach", "detach", "snapshot", "session.read", "resource.read", "resource.complete", "host.directories", "host.options", "host.complete", "host.saved", "host.history", "command", "grant", "heartbeat", "response.viewed", "command.status", "effect.inspect", "service.restart", "service.restart.status"]);
 export const MAX_RESPONSE = 80 * 1024 * 1024;
 export const MAX_REQUEST = 2 * 1024 * 1024;
 

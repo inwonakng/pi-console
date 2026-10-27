@@ -4,7 +4,7 @@ import { CommandError } from "./session-commands.js";
 import { object } from "./pi-records.js";
 
 export type HostCommand = { id: string; serviceEpoch: string } & (
-  | { operation: "host.create"; payload: { cwd: string } }
+  | { operation: "host.create"; payload: { cwd: string; provisional?: true } }
   | { operation: "host.resume"; payload: { sessionId: string } }
   | { operation: "host.recover"; payload: { sessionId: string } }
   | { operation: "host.archive"; payload: { sessionId: string; expectedVersion: string; archived: boolean; confirmed: true } }
@@ -22,7 +22,7 @@ export function hostCommand(value: unknown): HostCommand {
     throw new CommandError("invalid_command", "Invalid host command");
   }
   const p = value.payload;
-  if (value.operation === "host.create" ? Object.keys(p).length !== 1 || typeof p.cwd !== "string" || !isAbsolute(p.cwd) || Buffer.byteLength(p.cwd) > 4096
+  if (value.operation === "host.create" ? Object.keys(p).some((key) => !["cwd", "provisional"].includes(key)) || typeof p.cwd !== "string" || !isAbsolute(p.cwd) || Buffer.byteLength(p.cwd) > 4096 || p.provisional !== undefined && p.provisional !== true
     : value.operation === "host.resume" || value.operation === "host.recover" ? Object.keys(p).length !== 1 || !identifier(p.sessionId)
     : value.operation === "host.archive" || value.operation === "host.delete"
       ? Object.keys(p).length !== 4 || !identifier(p.sessionId) || typeof p.expectedVersion !== "string" || !/^[a-f0-9]{64}$/.test(p.expectedVersion)
@@ -35,7 +35,7 @@ export function hostCommand(value: unknown): HostCommand {
 }
 export function hostFingerprint(command: HostCommand): string {
   return createHash("sha256").update(JSON.stringify([command.serviceEpoch, command.operation,
-    command.operation === "host.create" ? [command.payload.cwd] : command.operation === "host.resume" || command.operation === "host.recover" ? [command.payload.sessionId]
+    command.operation === "host.create" ? [command.payload.cwd, ...(command.payload.provisional ? [true] : [])] : command.operation === "host.resume" || command.operation === "host.recover" ? [command.payload.sessionId]
       : command.operation === "host.archive" ? [command.payload.sessionId, command.payload.expectedVersion, command.payload.archived, command.payload.confirmed]
       : [command.payload.sessionId, command.payload.expectedVersion, command.payload.mode, command.payload.confirmed]])).digest("hex");
 }

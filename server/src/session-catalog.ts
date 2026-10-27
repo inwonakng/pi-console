@@ -235,14 +235,15 @@ export class SessionCatalog {
     });
   }
 
-  async create(cwd: string, host?: { fingerprint: string; receipt: HostReceipt }, admission?: () => void): Promise<CatalogSession> {
+  async create(cwd: string, host?: { fingerprint: string; receipt: HostReceipt; provisional?: true }, admission?: () => void): Promise<CatalogSession> {
     if (!isAbsolute(cwd)) throw new Error("Session cwd must be an absolute host directory");
     return this.serial(async () => {
       await this.storageCapacity(4096, false);
       const directory = await realpath(cwd);
       if (!(await lstat(directory)).isDirectory()) throw new Error("Session cwd must be a host directory");
       const id = randomUUID();
-      const session: CatalogSession = { id, piSessionId: id, cwd: directory, createdAt: new Date().toISOString() };
+      const session: CatalogSession = { id, piSessionId: id, cwd: directory, createdAt: new Date().toISOString(),
+        ...(host?.provisional ? { provisional: true } : {}) };
       const file = await open(join(this.root, "sessions", `${id}.jsonl`), "wx", 0o600);
       try {
         await file.writeFile(JSON.stringify({ type: "session", version: 3, id, timestamp: session.createdAt, cwd: directory }) + "\n");
@@ -257,6 +258,18 @@ export class SessionCatalog {
         return session;
       });
     });
+  }
+
+  /** Called only after the unused worker and all its managed work have stopped. */
+  async discardUnused(id: string): Promise<void> {
+    await this.change(() => {
+      const session = this.get(id);
+      if (!session.provisional || session.ownerEpoch || this.queue(id).length) throw new Error("Unused-session cleanup lost its fence");
+      session.deleted = true;
+      this.updateSession(session);
+    });
+    await unlink(this.sessionFile(id));
+    await syncDirectory(join(this.root, "sessions"));
   }
 
   async validateSessionFile(id: string): Promise<{ piSessionId: string; cwd: string }> {
@@ -398,6 +411,14 @@ export class SessionCatalog {
       return this.transaction(() => {
         admission?.();
         if (items) this.setQueue(copy.receipt.sessionId, items);
+        // Configuration and startup dialogs do not constitute conversation work.
+        // Once any work is accepted, even removed/failed queue items must never
+        // make a session eligible for automatic deletion again.
+        if (!copy.receipt.operation.startsWith("control.") && !["access.set", "integration.set", "notifications.set",
+          "model.set", "thinking.set", "interaction.respond", "interaction.cancel"].includes(copy.receipt.operation)) {
+          const session = this.get(copy.receipt.sessionId);
+          if (session.provisional) { delete session.provisional; this.updateSession(session); }
+        }
         if (copy.receipt.operation === "session.kill") {
           const session = this.get(copy.receipt.sessionId);
           if (session.ownerEpoch !== this.epoch || session.stopReason === "user") throw new CommandError("session_unavailable", "Session is no longer live");

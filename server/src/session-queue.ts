@@ -2,6 +2,17 @@ import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { CommandError, validPromptText, type Controller } from "./session-commands.js";
 import { object } from "./pi-records.js";
+import { validNative, type NativeOperation } from "./session-operations.js";
+import { validBundled, type BundledOperation } from "./session-bundled.js";
+
+export const STARTUP_OPERATIONS = ["access.set", "integration.set", "notifications.set", "model.set", "thinking.set"] as const;
+export type StartupSetting = Extract<NativeOperation | BundledOperation, { operation: typeof STARTUP_OPERATIONS[number] }>;
+export type StartupSettings = { [K in StartupSetting["operation"]]?: Extract<StartupSetting, { operation: K }>["payload"] };
+export function validStartupSettings(value: unknown): value is StartupSettings {
+  return object(value) && Object.entries(value).every(([operation, payload]) =>
+    (STARTUP_OPERATIONS as readonly string[]).includes(operation) && object(payload)
+      && (validNative(operation, payload) || validBundled(operation, payload)));
+}
 
 export type AcceptedQueueItem = {
   id: string;
@@ -9,6 +20,8 @@ export type AcceptedQueueItem = {
   serviceEpoch: string;
   runtimeRevision: number;
   text: string;
+  /** Accepted for this newly allocated session; bound once startup stabilizes. */
+  startup?: StartupSettings;
   status: "queued" | "sending" | "failed";
   error?: { code: string; message: string };
   /** Display-only references. Never authorize delivery or automatic replay. */
@@ -26,6 +39,7 @@ export function validQueueItem(value: unknown): value is AcceptedQueueItem {
     && Number.isSafeInteger(value.revision) && (value.revision as number) >= 1
     && typeof value.serviceEpoch === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.serviceEpoch)
     && Number.isSafeInteger(value.runtimeRevision) && (value.runtimeRevision as number) >= 0
+    && (value.startup === undefined || validStartupSettings(value.startup))
     && validPromptText(value.text) && typeof value.status === "string" && ["queued", "sending", "failed"].includes(value.status)
     && (value.error === undefined || object(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string")
     && (value.timeline === undefined || object(value.timeline)

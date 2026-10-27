@@ -93,12 +93,12 @@ async function main(): Promise<void> {
       return;
     }
     const { id, method, payload } = record;
-    if (method === "attach" || method === "detach") generation = control!.reset();
+    if (method === "attach" || method === "window.open" || method === "detach") generation = control!.reset();
     const captured = generation;
     const request = client!.request(method, payload, id).then(
       (result) => {
         if (closed) return;
-        if (method === "attach") control!.attached(result, captured);
+        if (method === "attach" || method === "window.open") control!.attached(result, captured);
         else if (method === "snapshot") control!.snapshot(result, captured);
         else if (method === "grant" && !control!.holdsGrant(result, captured)) result = null;
         output({ type: "response", id, success: true, result }, { ordered: method === "attach" });
