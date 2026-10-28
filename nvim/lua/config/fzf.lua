@@ -26,8 +26,16 @@ local fzf_keymap = {
 	},
 }
 
+local function disable_picker_clicks(event)
+	-- Keep clicks from leaving terminal-input mode; leave wheel scrolling alone.
+	for _, key in ipairs({ "<LeftMouse>", "<LeftDrag>", "<LeftRelease>", "<2-LeftMouse>", "<3-LeftMouse>", "<4-LeftMouse>" }) do
+		vim.keymap.set("t", key, "<Nop>", { buffer = event.bufnr, nowait = true })
+	end
+end
+
 local fzf_winopts = {
 	default = {
+		on_create = disable_picker_clicks,
 		border = "none",
 		title = false,
 		height = 1.0,
@@ -322,6 +330,7 @@ fzf.register_ui_select(function(select_opts, items)
 	end
 	size_select_picker(select_opts, items, winopts)
 	winopts.on_create = function(event)
+		disable_picker_clicks(event)
 		-- Reused fzf windows inherit the previous picker's preview visibility.
 		-- Restore this select's layout before fzf-lua renders its preview.
 		local win = fzf.win.__SELF()
