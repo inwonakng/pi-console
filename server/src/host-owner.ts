@@ -1,4 +1,4 @@
-import { HISTORY_COMMAND, HISTORY_STATUS, HistoryRead, savedHistoryPreview, type TranscriptPreview, type HistoryKind, type HistoryData, type ProjectedTail } from "./session-history.js";
+import { HISTORY_COMMAND, HISTORY_STATUS, HistoryRead, savedHistoryPreview, type TranscriptPreview, type HistoryKind, type HistoryData, type ProjectedHistory } from "./session-history.js";
 import { lstat, open } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { DESKTOP_NOTIFICATION_STATUS, validDesktopNotification, type DesktopNotification } from "../../pi/extensions/shared/desktop-notification.mjs";
@@ -2312,10 +2312,10 @@ export class OwnedSession {
         if (!(error instanceof CommandError)) throw error;
         history.error = error; // Resource/cursor refusals must not stop the worker.
       }
-      if (history.read.identity.kind === "projected-tail" && !history.error) {
+      if (history.read.identity.kind === "projection" && !history.error) {
         if (history.terminalCurrent && this.currentHistory(history)) {
-          const tail = history.data as ProjectedTail;
-          this.retain({ type: "history", ...tail });
+          const projection = history.data as ProjectedHistory;
+          this.retain({ type: "history", ...projection });
         } else this.refreshAgain = true;
       }
       return;
@@ -2382,7 +2382,7 @@ export class OwnedSession {
   private async readHistory(worker: PiProcess, kind: HistoryKind, check: () => void, since?: string): Promise<HistoryData> {
     // Reserve a slot for internal hydration; observational read pressure must
     // not turn a scheduled refresh into a worker failure.
-    if (this.historyReads.size >= (kind === "projected-tail" ? 4 : 3)) throw new CommandError("resource_limit", "Too many session history readers");
+    if (this.historyReads.size >= (kind === "projection" ? 4 : 3)) throw new CommandError("resource_limit", "Too many session history readers");
     const runtime = worker.interactionRuntime();
     if (!runtime?.active) throw new CommandError("session_unavailable", "History runtime is unavailable");
     const identity = { version: 1 as const, invocationId: randomUUID(), runtimeId: runtime.id,
@@ -2400,11 +2400,11 @@ export class OwnedSession {
     this.historyReads.set(identity.invocationId, flight);
     try {
       // Capture around the worker's authoritative projection, never at stop time.
-      const before = kind === "projected-tail" ? await this.historyFingerprint() : undefined;
+      const before = kind === "projection" ? await this.historyFingerprint() : undefined;
       await this.ensureHistoryCapability(worker, guard);
       await worker.request({ type: "prompt", message: flight.message }, () => {
         guard();
-        if (kind === "projected-tail" && !this.historyIdle()) {
+        if (kind === "projection" && !this.historyIdle()) {
           throw new CommandError("session_busy", "History capture requires an idle session");
         }
         flight.version = this.conversation.historyVersion;
@@ -2412,7 +2412,7 @@ export class OwnedSession {
       guard();
       if (flight.error) throw flight.error;
       if (!flight.data) throw new Error("Missing history result");
-      if (kind === "projected-tail" && before) {
+      if (kind === "projection" && before) {
         const history = this.conversation.sectionRevisions().history;
         const after = await this.historyFingerprint();
         guard();
@@ -2494,7 +2494,7 @@ export class OwnedSession {
           await worker.request({ type: "get_session_stats" }, stateGuard);
           if (worker !== this.worker || revision !== this.runtimeRevision) { this.refreshAgain = true; return; }
           if (!this.historyIdle()) return;
-          if (checkRuntime || !this.conversation.hydrated) await this.readHistory(worker, "projected-tail", guard);
+          if (checkRuntime || !this.conversation.hydrated) await this.readHistory(worker, "projection", guard);
         } catch (error) {
           if (!(error instanceof CommandError) || !["stale_runtime", "session_busy"].includes(error.code)) throw error;
           // A handoff can invalidate queued reads before dispatch or capture.

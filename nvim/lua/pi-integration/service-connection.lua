@@ -26,7 +26,11 @@ function M.open(target, event)
 		if connection.closed then if callback then callback(false, { message = "Disconnected" }) end; return end
 		connection.sequence = connection.sequence + 1
 		local id = "discovery-" .. connection.sequence
-		connection.pending[id] = callback or function() end
+		local done = callback or function() end
+		connection.pending[id] = function(ok, result)
+			if ok then require("pi-integration.service-snapshot").load(result, connection.request, done)
+			else done(false, result) end
+		end
 		local ok, sent = pcall(vim.fn.chansend, connection.job, vim.json.encode({ id = id, method = method, payload = payload and next(payload) ~= nil and payload or vim.empty_dict() }) .. "\n")
 		if not ok or sent == 0 then fail("Bridge write failed") end
 	end

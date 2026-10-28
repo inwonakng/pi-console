@@ -7,6 +7,7 @@ import { chmod, lstat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { HostOwner, type HostOwnerOptions, type HostSummaries, type OwnedSession, type OwnedSessionUpdate, type OriginNotification, type SnapshotCursor } from "./host-owner.js";
 import { CONVERSATION_SECTIONS } from "./pi-conversation.js";
+import { SnapshotPages } from "./snapshot-pages.js";
 import { RemoteNotifications } from "./remote-notifications.js";
 import { WebPushNotifications } from "./web-push.js";
 import type { SessionSubscription } from "./session-subscription.js";
@@ -113,13 +114,14 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
   async function connection(socket: Duplex, isRemote = false, onDetach?: (detach: (error?: Error) => void) => void,
     connectionId: string = randomUUID(), diagnostics = new ConnectionDiagnostics(connectionId, isRemote ? "ws" : "local")): Promise<void> {
     const writer = new RecordWriter(socket);
+    const pages = new SnapshotPages();
     let handshaken = false;
     let subscription: SessionSubscription | undefined;
     let session: OwnedSession | undefined;
     let pending = 0, viewGeneration = 0;
     type WindowView = { target: OwnedSession; view: SessionSubscription };
     let opening: { id: string; task: Promise<WindowView> } | undefined;
-    const detach = () => { viewGeneration++; subscription?.close(); subscription = undefined; session = undefined; };
+    const detach = () => { viewGeneration++; pages.clear(); subscription?.close(); subscription = undefined; session = undefined; };
     let summaryFeed: { previous: string; timer?: NodeJS.Timeout } | undefined;
     const stopSummaries = () => {
       if (summaryFeed?.timer) clearTimeout(summaryFeed.timer);
@@ -166,7 +168,10 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
       socket.once("close", () => { diagnostics.observed("stream_close"); diagnostics.log("close", { cause: "stream_close" }); });
     }
     socket.once("close", closeViews);
-    const send = (value: unknown, options: { control?: boolean; started?: () => void } = {}) => writer.send(value, options).catch((error: Error) => { disconnect(error, "output_error"); throw error; });
+    const send = (value: unknown, options: { control?: boolean; ordered?: boolean; started?: () => void } = {}) => {
+      const completed = pages.prepare(value);
+      return writer.send(value, options).then(() => completed).catch((error: Error) => { disconnect(error, "output_error"); throw error; });
+    };
     async function pumpSummaries(feed: NonNullable<typeof summaryFeed>, initial?: HostSummaries): Promise<void> {
       if (summaryFeed !== feed) return;
       if (socket.destroyed || owner.shutdownStarted) { stopSummaries(); return; }
@@ -388,6 +393,7 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
             if (!target || !view) throw new CommandError("attachment_closed", "Attach before using session operations");
             switch (record.method) {
               case "snapshot": exact(p, ["known"]); result = target.snapshotSince(snapshotCursor(p.known)); break;
+              case "snapshot.history": result = pages.read(p); break;
               case "session.read":
                 result = await target.read(p, () => {
                   if (socket.destroyed || subscription !== view || session !== target) throw new CommandError("attachment_closed", "Read attachment changed");
@@ -443,7 +449,7 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
         try {
           await send({ type: "response", id: record.id, success: true, result,
             ...(control ? { renewal: { handlingMs: handledAt - receivedAt, queuedBytes } } : {}) },
-            { control, started: () => { writeStartedAt = performance.now(); } });
+            { control, ordered: record.method === "snapshot.history", started: () => { writeStartedAt = performance.now(); } });
           if (control && performance.now() - receivedAt >= 1000) diagnostic("confirmed");
         } finally { clearTimeout(warning); }
       } catch (error) {

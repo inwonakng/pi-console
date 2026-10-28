@@ -38,7 +38,7 @@ export type ConversationDiagnostic = {
   assistantTimestamp?: number;
 };
 export type ConversationSnapshot = {
-  /** Current Pi projection, not the full session tree. Older messages are separate history. */
+  /** Complete current Pi projection, not the full session tree. */
   messages: PiMessage[];
   messageKeys: string[];
   omittedMessages: number;
@@ -87,7 +87,7 @@ export type FrontendEffect =
 // Internal owner updates, NOT a client protocol or a raw RPC dispatch API.
 export type ConversationChange =
   | { type: "event"; event: JsonAgentSessionEvent }
-  | { type: "history"; messages: PiMessage[]; omittedMessages?: number; messageBytes?: number[] }
+  | { type: "history"; messages: PiMessage[]; omittedMessages?: number }
   | { type: "permission_history"; permissions: PermissionHistoryItem[]; omitted: number }
   | { type: "diagnostic"; message: string }
   | { type: "pi_state"; state: RpcSessionState }
@@ -113,8 +113,6 @@ export class PiConversation {
     execution: { running: false, interrupted: false }, statuses: {}, widgets: {},
   };
   private readonly revisions: ConversationRevisions = { history: 0, tools: 0, activity: 0, status: 0 };
-  private historyBytes = 0;
-  private readonly messageBytes: number[] = [];
   private version = 0;
   private unsettled = false;
   private pendingOutcome?: ConversationSnapshot["execution"]["outcome"];
@@ -255,10 +253,8 @@ export class PiConversation {
       case "history":
         this.state.messages = [];
         this.state.messageKeys = [];
-        this.messageBytes.length = 0;
-        this.historyBytes = 0;
         this.state.omittedMessages = change.omittedMessages ?? 0;
-        for (const [index, message] of change.messages.entries()) this.append(message, change.messageBytes?.[index]);
+        for (const message of change.messages) this.append(message);
         this.state.historyRevision++;
         this.state.hydrated = true;
         if (this.state.partialAssistant?.interrupted) {
@@ -373,14 +369,6 @@ export class PiConversation {
     if (bytes > HISTORY_BYTES) throw new Error("Pi conversation message exceeds 16 MiB");
     this.state.messages.push(message);
     this.state.messageKeys.push(messageKey(message));
-    this.messageBytes.push(bytes);
-    this.historyBytes += bytes;
-    while (this.state.messages.length > 512 || this.historyBytes > HISTORY_BYTES) {
-      this.state.messages.shift();
-      this.state.messageKeys.shift();
-      this.historyBytes -= this.messageBytes.shift()!;
-      this.state.omittedMessages++;
-    }
   }
 
   private setPermissions(items: PermissionHistoryItem[]): void {

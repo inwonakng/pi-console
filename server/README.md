@@ -801,8 +801,9 @@ responses finish retained output even though Pi emits no final bash message even
 Initial history and idle reconciliation use `get_state`, session stats and the
 bundled private `pi-console-history-read` command. Its source is discovered before
 dispatch; correlated, ordered JSON-text status chunks stay below the existing
-16-MiB RPC record limit. The command captures Pi's session projection synchronously
-and returns the newest 512 messages / 16 MiB with the exact omitted count. History is
+16-MiB RPC record limit. The command captures Pi's complete session projection
+synchronously and streams each message independently, with no message-count or
+aggregate-history byte limit. Individual messages retain the 16-MiB record limit. History is
 applied synchronously after its terminal result and handled acknowledgment, fenced
 at dispatch and stdout reduction by worker/runtime, idle state and event version.
 History replacement publishes a lightweight sequence checkpoint; attachments fetch
@@ -831,11 +832,21 @@ not retained as a frontend effect. Other status/widget/title values are **data**
 a frontend must not run its legacy event handlers over snapshot values. Side and
 spawn payloads remain opaque retained snapshots, not actionable child approvals.
 
-`conversation.messages` is a bounded tail of Pi's current projected context, not
-all branches or pre-compaction history. `omittedMessages`, `historyRevision` (baseline
-replacement counter) and `hydrated` disclose truncation/reconciliation. Full history
-pagination belongs to the later resource/protocol slice. Native queue snapshots
-and recent dispatch/acceptance/rejection/uncertain work metadata are diagnostic;
+`conversation.messages` retains Pi's complete current projected context, not
+all branches or pre-compaction history. `omittedMessages` is zero; `historyRevision`
+(baseline replacement counter) and `hydrated` disclose reconciliation.
+Large snapshot histories (including saved previews and changed history sections)
+are transferred automatically through `snapshot.history` pages. A wire history with
+`historyPage: { id, offset, count }` has empty `messages`/`messageKeys`; read
+`snapshot.history` with `{ id, offset }`, append each page's `messages`/`messageKeys`,
+and follow its optional `historyPage` until absent. Page boundaries target 1 MiB,
+allowing a single larger message. Cursors belong to the captured immutable snapshot
+and current attachment, not the changing live history. Up to 32 unfinished histories
+are retained per connection; detaching releases them. Initial attachment updates
+start only after its history has been fetched. Both frontends assemble all pages
+before replacing their transcript baseline. Total transcript length has no cap;
+existing per-response and live-state budgets remain in force.
+Native queue snapshots and recent dispatch/acceptance/rejection/uncertain work metadata are diagnostic;
 these transport IDs are **not** frontend command receipts, deduplication or the
 editable accepted queue. Application receipts are separately exposed by
 `commands` in the snapshot and `command` updates. The editable queue is separately
@@ -1058,7 +1069,9 @@ workspace replacements still fence old-context accepted text for explicit review
 - Outstanding commands and queued stdin records: 128 each; queued stdin data:
   32 MiB.
 - Pending dialogs: 256 and 32 MiB total; retained stderr tail: 8,192 characters.
-- Conversation tail: 512 messages / 16 MiB, with an explicit omitted count.
+- Conversation history: complete current projection, without an aggregate count/byte
+  cap. Individual messages: 16 MiB. Snapshot history pages target 1 MiB, with one
+  larger message allowed; all pages load automatically.
 - Live conversation accounting: 32 MiB / 2,048 retained slots; assistant delta
   accounting is conservative. Oversize live state fails the worker explicitly
   before retaining the offending value. Completed/interrupted tool slots: 256;
@@ -1067,7 +1080,8 @@ workspace replacements still fence old-context accepted text for explicit review
   count; the final Pi result separately retains truncation/full-output metadata.
 - Viewers: 32 per handle; each queue: 256 updates / 8 MiB. Overflow rejects its
   pending/future reads and frees queued data without stopping Pi or another view.
-  Snapshot data is separately bounded above; it does not count as queued updates.
+  Snapshot responses are bounded above; history is paged without a total-size cap.
+  Snapshot data does not count as queued updates.
 - Stop closes stdin and requests supervisor cleanup under the B2 policy above.
   Final output is drained; pipes retained after supervisor exit are abandoned after
   a further 5-second grace. `descendantsUnresolved` now means known managed cleanup

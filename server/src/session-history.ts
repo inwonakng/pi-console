@@ -10,7 +10,6 @@ export type TranscriptPreview = { messages: PiMessage[]; messageKeys: string[]; 
 /** Best-effort saved-history fallback. Complex projections remain worker-owned. */
 export async function savedHistoryPreview(context: ResourceContext): Promise<TranscriptPreview | undefined> {
   let page = await readResource(context, { kind: "history" });
-  if (page.size > 16 * 1024 * 1024) return;
   const version = page.version;
   let text = page.text;
   while (page.nextOffset !== null) {
@@ -25,6 +24,7 @@ export async function savedHistoryPreview(context: ResourceContext): Promise<Tra
   for (const line of text.split("\n")) {
     if (++records % 128 === 0) { await yieldTurn(); context.check(); }
     if (!line) continue;
+    if (Buffer.byteLength(line) > 16 * 1024 * 1024) return;
     const entry: unknown = JSON.parse(line);
     if (!object(entry)) return;
     if (entry.type === "session") continue;
@@ -51,56 +51,75 @@ export async function savedHistoryPreview(context: ResourceContext): Promise<Tra
     leaf = entry.parentId as string | undefined;
   }
   messages.reverse();
-  const omittedMessages = Math.max(0, messages.length - 512);
-  const tail = messages.slice(omittedMessages);
-  return { messages: tail, messageKeys: tail.map(messageKey), omittedMessages };
+  return { messages, messageKeys: messages.map(messageKey), omittedMessages: 0 };
 }
 
-// Keep in step with pi/extensions/shared/service-history.ts. No public pagination.
+// Private worker wire contract; public snapshot paging is handled separately.
 export const HISTORY_COMMAND = "pi-console-history-read";
 export const HISTORY_STATUS = "pi-console-history-result";
 export const HISTORY_RESULT_BYTES = 80 * 1024 * 1024 - 64 * 1024;
-export type HistoryKind = "projected-tail" | "entries" | "tree";
+export type HistoryKind = "projection" | "entries" | "tree";
 export type HistoryIdentity = { version: 1; invocationId: string; runtimeId: string; sessionId: string; sessionFile: string; kind: HistoryKind };
-export type ProjectedTail = { messages: PiMessage[]; omittedMessages: number; messageBytes: number[] };
+export type ProjectedHistory = { messages: PiMessage[]; omittedMessages: number };
 type Entries = Extract<RpcResponse, { command: "get_entries"; success: true }>["data"];
 type Tree = Extract<RpcResponse, { command: "get_tree"; success: true }>["data"];
-export type HistoryData = ProjectedTail | Entries | Tree;
+export type HistoryData = ProjectedHistory | Entries | Tree;
 
-/** One bounded, correlated result. Malformed transport fails closed like native RPC. */
+/** Correlated history stream with bounded messages. Malformed transport fails closed. */
 export class HistoryRead {
   private readonly chunks: string[] = [];
   private bytes = 0;
+  private index = 0;
+  private readonly messages: PiMessage[] = [];
   private terminal = false;
   private failure?: CommandError;
   private data?: HistoryData;
   readonly limit: number;
 
   constructor(readonly identity: HistoryIdentity) {
-    this.limit = identity.kind === "projected-tail" ? 16 * 1024 * 1024 + 64 * 1024 : HISTORY_RESULT_BYTES;
+    this.limit = identity.kind === "projection" ? 16 * 1024 * 1024 : HISTORY_RESULT_BYTES;
   }
 
   consume(value: Record<string, unknown>): boolean {
     if (this.terminal || Object.entries(this.identity).some(([key, expected]) => value[key] !== expected)
-      || value.index !== this.chunks.length) throw new Error("Unmatched or out-of-order history result");
+      || value.index !== this.index) throw new Error("Unmatched or out-of-order history result");
     const keys = [...Object.keys(this.identity), "index"];
     if (typeof value.text === "string") {
       keys.push("text");
-      if (Object.keys(value).some(key => !keys.includes(key)) || !value.text.length || value.text.length > 64 * 1024) throw new Error("Invalid history chunk");
+      if (this.identity.kind === "projection") keys.push("messageEnd");
+      if (Object.keys(value).some(key => !keys.includes(key)) || !value.text.length || value.text.length > 64 * 1024
+        || value.messageEnd !== undefined && value.messageEnd !== true) throw new Error("Invalid history chunk");
+      this.index++;
       this.bytes += Buffer.byteLength(value.text);
       // A slice may bisect a surrogate pair, costing a few extra encoded bytes.
       if (this.bytes > this.limit + 8192 || this.chunks.length >= 1280) throw new Error("History aggregate limit exceeded");
       this.chunks.push(value.text);
+      if (value.messageEnd === true) {
+        const text = this.chunks.join("");
+        if (Buffer.byteLength(text) > this.limit) throw new Error("Projected message limit exceeded");
+        const message: unknown = JSON.parse(text);
+        if (!object(message) || typeof message.role !== "string") throw new Error("Invalid projected message");
+        this.messages.push(message as PiMessage);
+        this.chunks.length = 0;
+        this.bytes = 0;
+      }
       return false;
     }
     this.terminal = true;
     if (value.status === "failed") {
       keys.push("status", "code", "error");
-      if (this.chunks.length || (value.code !== "resource_limit" && value.code !== "resource_unavailable"
+      if ((this.identity.kind !== "projection" && this.chunks.length) || (value.code !== "resource_limit" && value.code !== "resource_unavailable"
         && value.code !== "session_busy" && value.code !== "stale_runtime")
         || typeof value.error !== "string" || Buffer.byteLength(value.error) > 8192
         || Object.keys(value).some(key => !keys.includes(key))) throw new Error("Invalid history refusal");
+      this.chunks.length = 0;
+      this.messages.length = 0;
       this.failure = new CommandError(value.code, value.error);
+    } else if (this.identity.kind === "projection") {
+      keys.push("status", "messages");
+      if (value.status !== "completed" || value.messages !== this.messages.length || this.chunks.length
+        || Object.keys(value).some(key => !keys.includes(key))) throw new Error("Invalid projection completion");
+      this.data = { messages: this.messages, omittedMessages: 0 };
     } else {
       keys.push("status", "bytes");
       const text = this.chunks.join("");
@@ -110,20 +129,7 @@ export class HistoryRead {
       let data: unknown;
       try { data = JSON.parse(text); } catch { throw new Error("Invalid history JSON"); }
       if (!object(data)) throw new Error("Invalid history data");
-      if (this.identity.kind === "projected-tail") {
-        if (Object.keys(data).length !== 2 || !Array.isArray(data.messages) || data.messages.length > 512
-          || !Number.isSafeInteger(data.omittedMessages) || Number(data.omittedMessages) < 0) throw new Error("Invalid projected tail");
-        let bytes = 0;
-        const messageBytes: number[] = [];
-        for (const message of data.messages) {
-          if (!object(message) || typeof message.role !== "string") throw new Error("Invalid projected message");
-          const size = Buffer.byteLength(JSON.stringify(message));
-          messageBytes.push(size); bytes += size;
-        }
-        if (bytes > 16 * 1024 * 1024) throw new Error("Projected tail limit exceeded");
-        // Owner-internal accounting, never accepted from the wire or published.
-        data.messageBytes = messageBytes;
-      } else if (Object.keys(data).length !== 2 || !Array.isArray(data[this.identity.kind])
+      if (Object.keys(data).length !== 2 || !Array.isArray(data[this.identity.kind])
         || (data.leafId !== null && typeof data.leafId !== "string")) throw new Error("Invalid history data");
       this.data = data as HistoryData;
     }

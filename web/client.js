@@ -1,5 +1,6 @@
 // Browser adapter for the existing LF-delimited service protocol. Authentication
 // and permission to upgrade a browser connection belong to the host listener.
+import { loadSnapshotHistory } from "./snapshot.js";
 import { diagnosticConnection, diagnosticMethod, diagnosticCause, diagnosticServiceCode, recordDiagnostic } from "./diagnostics.js";
 
 export function requestId() {
@@ -61,12 +62,13 @@ export class ServiceClient {
             }));
           } else {
             if (record.type === "disconnected") recordDiagnostic("service_disconnected", { ...this.diagnostics, code: diagnosticServiceCode(record.code) });
-            // Preserve response/event ordering when several records share a frame.
-            queueMicrotask(() => {
+            // Let response promises finish assembling snapshot pages before a
+            // following update from the same frame reaches attachment consumers.
+            setTimeout(() => {
               if (this.closed || this.socket !== socket) return;
               if (record.type === "disconnected") this.close(record.message, "socket_closed");
               else this.onEvent(record);
-            });
+            }, 0);
           }
         }
       } catch (error) {
@@ -158,7 +160,7 @@ export class ServiceClient {
       this.pending.set(id, { resolve, reject, timer });
       try { this.socket.send(record); }
       catch (error) { this.close(error.message, "send_failed"); }
-    });
+    }).then(result => loadSnapshotHistory(result, cursor => this.request("snapshot.history", cursor)));
   }
 
   probe() {

@@ -1042,17 +1042,20 @@ actions. Snapshot rendering must not invoke legacy event handlers for navigation
 notifications, editor mutations or dialog answers. This is not yet a controller-
 targeted effect delivery protocol, and no frontend/client endpoint is exposed.
 
-Bounds are explicit: a 512-message / 16-MiB current-context tail with omitted count;
-32 MiB conservative live-slot accounting / 2,048 slots; 256 tool slots and 128
+The complete current-context projection is retained without a message-count or
+aggregate-history byte cap. Individual messages remain limited to 16 MiB. Snapshot
+history uses attachment-bound immutable pages targeting 1 MiB (one larger message
+is allowed), loaded automatically by both frontends before replacing the baseline.
+Other bounds remain explicit: 32 MiB conservative live-slot accounting / 2,048 slots; 256 tool slots and 128
 recent work records; 1-MiB UTF-8-aligned bash tails with omitted-byte counts, plus
 Pi's final result/truncation metadata. Live overflow fails the worker before
 retaining the offending value, leaving terminal cleanup possible. Snapshots disclose
-`hydrated` and a baseline replacement `historyRevision`; full history/artifact
-pagination remains separate unfinished protocol work. Native queue snapshots and
+`hydrated` and a baseline replacement `historyRevision`; all branches and
+pre-compaction history remain separate artifact reads. Native queue snapshots and
 recent work metadata do not implement the editable accepted queue or replay work.
 Up to 32 subscriptions each retain at most 256 updates / 8 MiB; overflow frees its
-queue, rejects pending/future reads and requires a fresh snapshot. Snapshot data is
-bounded separately rather than counted as queued updates.
+queue, rejects pending/future reads and requires a fresh snapshot. Snapshot response
+pages are bounded separately rather than counted as queued updates.
 
 Fresh macOS/Node 26.12.0 evidence used temporary `pi-materialize.*` fixtures:
 
