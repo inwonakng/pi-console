@@ -36,7 +36,7 @@ html { height: 100%; overflow: hidden; }
 body { margin: 0; background: var(--bg); position: fixed; top: var(--viewport-top, 0px); width: 100%; height: var(--viewport-height, 100dvh); overflow: hidden; display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
 /* Keep Home Screen app controls below the iOS top-edge blur. */
 @media (display-mode: standalone) {
-  body { padding-top: calc(env(safe-area-inset-top) + 8px); }
+  body { padding-top: calc(env(safe-area-inset-top) + 4px); }
 }
 button, input, textarea, select { font: inherit; color: inherit; }
 button, summary, a { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
@@ -65,7 +65,7 @@ label { font-size: 12px; color: var(--muted); }
 #panels { flex: 1; min-height: 0; min-width: 0; }
 #overview { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; padding-bottom: env(safe-area-inset-bottom); }
 #overview > * { flex-shrink: 0; }
-.overview-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 22px 24px 12px; }
+.overview-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 24px 12px; }
 .overview-heading h1 { display: flex; align-items: center; }
 .overview-heading .brand { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 0; background: transparent; font: inherit; letter-spacing: inherit; white-space: nowrap; }
 .brand img { flex-shrink: 0; }
@@ -245,7 +245,7 @@ dialog p { font-size: 12px; margin-top: 10px; }
 .history-row { display: flex; align-items: center; gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--border); }
 .history-description { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 700px) {
-  .overview-heading { padding: 16px 12px 12px; flex-wrap: wrap; }
+  .overview-heading { padding: 4px 12px 12px; flex-wrap: wrap; }
   .overview-heading .actions { gap: 6px; flex-wrap: wrap; }
   .filters { gap: 12px; padding: 0 12px 12px; flex-direction: column; }
   .filters label:last-child { max-width: none; }
@@ -265,6 +265,7 @@ dialog p { font-size: 12px; margin-top: 10px; }
   .history-row button { flex-shrink: 0; }
 }
 @media (max-height: 540px) {
+  .overview-heading { padding-top: 0; }
   .screen-header { padding-top: 0; padding-bottom: 0; }
   .composer { padding-top: 6px; padding-bottom: max(6px, env(safe-area-inset-bottom)); }
   .composer-hint { font-size: 10px; }
