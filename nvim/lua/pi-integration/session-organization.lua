@@ -202,6 +202,24 @@ function M.sections(entries)
 	end)
 end
 
+-- Read last-assigned membership without modifying the organization.
+function M.group_filter(group_id)
+	local state, err = load()
+	if not state then return nil, err end
+	if not group_keys(state, group_id) then
+		return nil, "Group no longer exists; refresh the session list"
+	end
+	local memberships, name = {}, "Ungrouped"
+	for _, group in ipairs(state.groups) do
+		if group.id == group_id then name = group.name end
+		for _, key in ipairs(group.keys) do memberships[key] = group.id end
+	end
+	return function(host_id, session_id)
+		local key = entry_key({ host_id = host_id, session_id = session_id })
+		return (memberships[key] or "") == group_id
+	end, name
+end
+
 local function tracked_entry(state, entry)
 	local key, err = resolve_entry(state, entry)
 	if not key then

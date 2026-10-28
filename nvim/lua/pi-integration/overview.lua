@@ -184,6 +184,13 @@ function M.open(config)
 			require("pi-integration.logs").notify("Could not refresh sessions: " .. text(entries or err), vim.log.levels.WARN, { key = "overview-refresh", title = "Pi overview" })
 			return
 		end
+		-- Compact empty groups at the bottom without changing their saved order.
+		local ordered_nodes, empty_groups = {}, {}
+		for _, node in ipairs(nodes) do
+			local destination = node.kind == "group" and node.id ~= "" and #node.entries == 0 and empty_groups or ordered_nodes
+			table.insert(destination, node)
+		end
+		nodes = vim.list_extend(ordered_nodes, empty_groups)
 		select_last_focused = false
 		rows = {}
 		local starts, highlights = {}, {}
@@ -201,8 +208,11 @@ function M.open(config)
 		end
 		highlight(1, 0, #lines[1], "Title")
 		local cursor, nearest_row, focused_row
+		local previous_empty = false
 		for _, node in ipairs(nodes) do
-			if node.kind == "group" and #starts > 0 then table.insert(lines, "") end
+			local empty_group = node.kind == "group" and node.id ~= "" and #node.entries == 0
+			if node.kind == "group" and #starts > 0 and not (empty_group and previous_empty) then table.insert(lines, "") end
+			previous_empty = empty_group
 			local row = #lines + 1
 			if node.kind == "group" then
 				table.insert(lines, session_list.group_label(node))
@@ -353,6 +363,14 @@ function M.open(config)
 		local node = selected()
 		return node and (node.kind == "group" and node.id or node.group_id) or nil
 	end
+	map("<leader>gs", function()
+		local group_id = selected_group()
+		if group_id == nil then
+			require("pi-integration.logs").notify("Select a group or conversation first", vim.log.levels.WARN, { title = "Pi overview" })
+			return
+		end
+		require("pi-integration.service-hosts").history_picker(nil, { all_hosts = true, group_id = group_id })
+	end, "Search group sessions (including stopped)")
 	local function new_conversation()
 		require("pi-integration.service-hosts").new_conversation(selected_group())
 	end

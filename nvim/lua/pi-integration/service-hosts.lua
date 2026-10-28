@@ -644,10 +644,16 @@ end
 function M.history_picker(identity, opts)
 	M.start()
 	opts = opts or {}
+	local matches_group, group_name
+	if opts.group_id ~= nil then
+		matches_group, group_name = require("pi-integration.session-organization").group_filter(opts.group_id)
+		if not matches_group then notify(group_name); return end
+	end
 	local function pick(targets, all)
 		if #targets == 0 then notify("No connected hosts; connect/retry in Hosts."); return end
 		local rows, owners, pending = {}, {}, #targets
 		local label = all and "all connected hosts" or host_label(targets[1])
+		if group_name then label = label .. " · group: " .. group_name end
 		local function reopen(overrides)
 			local next_opts = vim.tbl_extend("force", opts, overrides or {}, { all_hosts = all })
 			M.history_picker(not all and targets[1].host_id or nil, next_opts)
@@ -739,7 +745,8 @@ function M.history_picker(identity, opts)
 				elseif not ok then notify(host_label(host) .. ": " .. result.message)
 				else
 					for _, row in ipairs(result.sessions) do
-						if not row.deleted and (row.archived == true) == (opts.archived == true) and (not opts.session_ids or opts.session_ids[row.id]) then
+						if not row.deleted and (row.archived == true) == (opts.archived == true) and (not opts.session_ids or opts.session_ids[row.id])
+							and (not matches_group or matches_group(host.host_id, row.id)) then
 							table.insert(rows, row); owners[row] = owner
 						end
 					end
