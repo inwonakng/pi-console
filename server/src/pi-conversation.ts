@@ -159,6 +159,12 @@ export class PiConversation {
   get completedTurns(): number { return this.completionSeq; }
   get turnOutcome(): ConversationSnapshot["execution"]["outcome"] { return this.state.execution.outcome; }
   get continuationPending(): boolean { return this.workspaceContinuation !== undefined; }
+  get workspaceTransitionPending(): boolean {
+    // Tool execution includes approval and Git application, before the workspace
+    // status advertises its later cwd switch. Continuation covers the gap after it.
+    return this.continuationPending || this.state.tools.some(tool => tool.state === "running" && tool.toolName === "workspace"
+      && object(tool.args) && ["enter", "integrate", "discard", "revert", "undo"].includes(String(tool.args.action)));
+  }
   get compacting(): boolean { return this.state.piState?.isCompacting === true || this.state.execution.compaction?.type === "compaction_start"; }
   get retrying(): boolean { return this.state.execution.retry?.type === "auto_retry_start" || !!this.state.execution.summarization; }
   status(key: string): string | undefined { return this.state.statuses[key]; }

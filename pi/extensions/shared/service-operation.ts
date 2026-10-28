@@ -60,7 +60,7 @@ export type OperationData = { mode?: string; changed?: boolean; sessionFile?: st
   workspaceId?: string; lifecycle?: string; integration?: string; commit?: string; reverts?: string; disposition?: "accepted"; status?: string; title?: string; enabled?: boolean; editorText?: string };
 export type OperationResult = {
   version: 1; invocationId: string; runtimeId: string; sessionId: string; sessionFile: string;
-  status: "completed" | "failed" | "uncertain"; data?: OperationData; code?: string;
+  status: "completed" | "failed" | "uncertain"; data?: OperationData; code?: string; diagnostic?: string;
 };
 /** Each fixed command owns a typed payload and must explicitly report success.
  * Returning undefined means a pre-mutation refusal/cancellation, never `handled`
@@ -86,6 +86,9 @@ export function registerServiceOperation<O extends keyof Payloads>(pi: Extension
     try {
       const data = await run(v.payload as Payloads[O], ctx);
       reply(data ? { status: "completed", data } : { status: "failed", code: "not_applied" });
-    } catch { reply({ status: "uncertain", code: "operation_uncertain" }); }
+    } catch (error) {
+      reply({ status: "uncertain", code: "operation_uncertain",
+        diagnostic: (error instanceof Error ? error.stack ?? error.message : String(error)).slice(0, 2048) });
+    }
   } });
 }

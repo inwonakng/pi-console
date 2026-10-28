@@ -1385,9 +1385,13 @@ export class OwnedSession {
     flight.result = result;
   }
 
-  get workspaceTransitionPending(): boolean { return !!this.bundled && contextOperation(this.bundled.operation) || this.lifecyclePending; }
+  get workspaceTransitionPending(): boolean {
+    return this.conversation.workspaceTransitionPending || this.workspacePending()
+      || !!this.bundled && contextOperation(this.bundled.operation) || this.lifecyclePending;
+  }
 
   private prepareBundled(command: { runtimeRevision: number } & BundledOperation, worker: PiProcess): BundledFlight {
+    if (this.workspaceTransitionPending) throw new CommandError("session_busy", "Workspace transition pending; wait for arrival before changing session settings");
     if (contextOperation(command.operation)) this.assertSavedIdle();
     const interruptingJoin = command.operation === "spawn.stop" && this.bundled?.operation === "spawn.join" && !this.bundledInterrupt;
     if (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another session operation is pending");
@@ -1406,8 +1410,12 @@ export class OwnedSession {
     let historyRefreshed = false;
     try {
       const guard = () => {
+        if (!contextOperation(flight.operation) && this.workspaceTransitionPending) {
+          throw new CommandError("session_busy", "Workspace transition pending; operation was not dispatched");
+        }
         if (contextOperation(flight.operation)) this.assertSavedIdle();
         this.commandRuntime(flight.revision, flight.worker);
+        if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
         this.assertReady(flight.revision);
         if (flight.operation.startsWith("history.") || flight.operation.startsWith("workspace.") || flight.operation === "title.generate") this.assertRenameReady();
       };
@@ -1441,7 +1449,7 @@ export class OwnedSession {
             outcome.result = { changed: true, ...(flight.operation === "history.navigate" ? { contextRevision: flight.resultRevision } : {}),
               ...(result.data.status !== undefined ? { status: result.data.status } : {}),
               ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
-          } else if (flight.operation === "access.set" || flight.operation === "integration.set" || flight.operation === "access.cycle" || flight.operation === "integration.cycle") {
+          } else if (modeOperation(flight.operation)) {
             if (typeof result.data?.mode !== "string") throw new Error("Missing mode completion");
             outcome.result = { mode: result.data.mode };
           } else if (flight.operation === "title.generate") {
@@ -1477,14 +1485,20 @@ export class OwnedSession {
             checkRuntime();
             await this.refreshConversation(checkRuntime);
             historyRefreshed = !this.refreshAgain;
-          } else {
+          } else if (!modeOperation(flight.operation)) {
             await flight.worker.request({ type: "get_state" }, checkRuntime);
           }
-          this.checkIdentity();
+          // A correlated mode result already proves application. The agent may
+          // replace its cwd runtime immediately afterward; a refresh in that gap
+          // must not turn a completed settings change into a fatal uncertainty.
+          if (!modeOperation(flight.operation)) this.checkIdentity();
         } else outcome.error = { code: result.code ?? "operation_failed", message: result.status === "failed"
           ? "Operation was refused/cancelled before application" : "Operation may be partially applied; inspect before taking further action" };
       } catch (error) {
         outcome.status = !flight.dispatched && error instanceof CommandError ? "failed" : "uncertain";
+        console.error(JSON.stringify({ type: "operation_failure", sessionId: this.id, operation: flight.operation,
+          invocationId: flight.invocationId, runtimeId: flight.runtimeId, dispatched: flight.dispatched,
+          status: outcome.status, error: asError(error).stack ?? asError(error).message }));
         outcome.error = { code: outcome.status === "failed" && error instanceof CommandError ? error.code : "operation_uncertain",
           message: outcome.status === "failed" ? "Operation was not dispatched" : "Operation outcome is uncertain; inspect, never automatically replay" };
       }
@@ -2206,6 +2220,12 @@ export class OwnedSession {
       const flight = [this.bundled, this.bundledInterrupt].find((flight) => flight?.invocationId === result.invocationId);
       if (!flight?.dispatched || flight.result || result.invocationId !== flight.invocationId || result.runtimeId !== flight.runtimeId
         || result.sessionId !== this.record.piSessionId || result.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Unmatched managed operation result");
+      if (result.diagnostic) {
+        // Private, correlated operation diagnostics go to the service log only.
+        // Never forward arbitrary Pi/provider stderr or retain this in the transcript.
+        console.error(JSON.stringify({ type: "operation_failure", sessionId: this.id, operation: flight.operation,
+          invocationId: flight.invocationId, runtimeId: flight.runtimeId, status: result.status, error: result.diagnostic }));
+      }
       flight.result = result;
       flight.resultRevision = this.runtimeRevision;
       return;
@@ -2642,6 +2662,10 @@ export class OwnedSession {
     this.wake = undefined;
     wake?.();
   }
+}
+
+function modeOperation(operation: string): boolean {
+  return operation === "access.set" || operation === "access.cycle" || operation === "integration.set" || operation === "integration.cycle";
 }
 
 function contextOperation(operation: string): boolean {

@@ -67,13 +67,14 @@ export function validBundled(operation: unknown, p: Record<string, unknown>): bo
 export function isBundled(value: { operation: string }): value is BundledOperation { return Object.hasOwn(BUNDLED_SOURCES, value.operation); }
 export type OperationResult = { version: 1; invocationId: string; runtimeId: string; sessionId: string; sessionFile: string;
   status: "completed" | "failed" | "uncertain"; data?: { mode?: string; changed?: boolean; sessionFile?: string; cwd?: string; workspaceId?: string;
-    lifecycle?: string; integration?: string; commit?: string; reverts?: string; disposition?: "accepted"; status?: string; title?: string; enabled?: boolean; editorText?: string }; code?: string };
+    lifecycle?: string; integration?: string; commit?: string; reverts?: string; disposition?: "accepted"; status?: string; title?: string; enabled?: boolean; editorText?: string }; code?: string; diagnostic?: string };
 export function operationResult(text: string | undefined): OperationResult {
   const v: unknown = JSON.parse(text ?? "null");
-  if (!object(v) || Object.keys(v).some((key) => !["version", "invocationId", "runtimeId", "sessionId", "sessionFile", "status", "data", "code"].includes(key))
+  if (!object(v) || Object.keys(v).some((key) => !["version", "invocationId", "runtimeId", "sessionId", "sessionFile", "status", "data", "code", "diagnostic"].includes(key))
     || v.version !== 1 || ![v.invocationId, v.runtimeId, v.sessionId, v.sessionFile].every((p) => typeof p === "string" && !!p && Buffer.byteLength(p) <= 4096)
     || typeof v.status !== "string" || !["completed", "failed", "uncertain"].includes(v.status)
     || (v.status === "completed" ? !object(v.data) : typeof v.code !== "string")
+    || (v.diagnostic !== undefined && (typeof v.diagnostic !== "string" || Buffer.byteLength(v.diagnostic) > 8192))
     || (v.code !== undefined && (typeof v.code !== "string" || !/^[\w-]{1,128}$/.test(v.code)))) throw new Error("Invalid managed operation result");
   if (v.data !== undefined) {
     if (!object(v.data) || Object.keys(v.data).some((key) => !["mode", "changed", "sessionFile", "cwd", "workspaceId", "lifecycle", "integration", "commit", "reverts", "disposition", "status", "title", "enabled", "editorText"].includes(key))
