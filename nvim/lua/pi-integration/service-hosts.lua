@@ -688,7 +688,7 @@ function M.history_picker(identity, opts)
 			end
 			require("pi-integration.history-picker").pick(label, rows, owners, function(row)
 				local timestamp = tostring(row.lastActivityAt or row.createdAt or "Unknown time"):gsub("T", " "):gsub("%.%d+Z$", " UTC")
-				return timestamp .. " | " .. (all and (host_label(owners[row].host) .. " | ") or "")
+				return timestamp .. " | " .. (all and (owners[row].host.alias .. " | ") or "")
 					.. session_title(row) .. (row.cwd and (" | " .. row.cwd) or "") .. " | " .. row.id .. " (" .. (row.live and row.live.status or "Stopped") .. ")"
 			end, function(chosen, preview_opts)
 				if #chosen == 0 then return end
