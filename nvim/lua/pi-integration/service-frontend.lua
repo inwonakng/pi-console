@@ -869,12 +869,14 @@ local function apply_snapshot(value)
 	if auto_control_selection then
 		local runtime = snapshot.interactions.runtime
 		local explicit = auto_control_selection.explicit
+		-- The restart acknowledgment can arrive before the old runtime's last snapshot.
+		local restarting = auto_control_selection.restart_revision == snapshot.runtimeRevision
 		if not same_selection(auto_control_selection) or snapshot.error
 			or explicit and (snapshot.phase == "stopped" or snapshot.phase == "failed" or snapshot.phase == "stopping") then
 			auto_control_selection = nil
-		elseif not explicit and current_controller() then
+		elseif not restarting and not explicit and current_controller() then
 			auto_control_selection = nil
-		elseif (snapshot.phase == "initializing" or snapshot.phase == "ready") and snapshot.runtimeRevision == current_revision() and runtime and runtime.active
+		elseif not restarting and (snapshot.phase == "initializing" or snapshot.phase == "ready") and snapshot.runtimeRevision == current_revision() and runtime and runtime.active
 			and snapshot.piState and snapshot.piState.sessionId == runtime.sessionId
 			and snapshot.piState.sessionFile == runtime.sessionFile then
 			-- Fresh runtime control also answers initialization dialogs. Prompt input
@@ -1961,7 +1963,13 @@ function M.restart()
 	if not session_id then notify("Connection ready; no conversation worker exists yet."); return end
 	local captured, label = stamp(), "Restart conversation worker"
 	vim.ui.select({ label, "Cancel" }, { prompt = label .. " using the running server build? Active work is interrupted; history/workspaces and recovery text remain." }, function(choice)
-		if choice == label then command("session.restart", { confirmed = true }, nil, captured) end
+		if choice ~= label then return end
+		command("session.restart", { confirmed = true }, function(ok, result)
+			if not ok or (result.status ~= "accepted" and result.status ~= "completed") then return end
+			captured.restart_revision = captured.revision
+			auto_control_selection = captured
+			refresh(true)
+		end, captured)
 	end)
 end
 function M.detach_frontend()
