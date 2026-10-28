@@ -84,6 +84,9 @@ export function sendDesktopNotification(
 	ctx: ExtensionContext,
 	options: Omit<DesktopDelivery, "body">,
 ): boolean {
+	if (process.env.PI_SPAWN_AGENT === "1") {
+		return false;
+	}
 	const notification = { id: randomUUID(), title: options.title, kind: options.kind, body: notificationBody(ctx).slice(0, 8192) };
 	const published = serviceManaged(ctx);
 	if (published) {
@@ -125,9 +128,6 @@ export function notifyPiError(ctx: ExtensionContext): boolean {
 }
 
 function notifyPiOutcome(ctx: ExtensionContext, title: string, kind: "completion" | "error", force = false): boolean {
-	if (process.env.PI_SPAWN_AGENT === "1") {
-		return false;
-	}
 	if (!notificationsEnabled() && !force) {
 		return false;
 	}
