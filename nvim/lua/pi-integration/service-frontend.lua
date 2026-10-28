@@ -2411,11 +2411,11 @@ function M.pick_spawn()
 				if (tonumber(run.changedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Changed: %d more files (full list in status artifact)", run.changedFilesOmitted)) end
 				for _, path in ipairs(run.unpreservedFiles or {}) do table.insert(lines, "Not preserved: " .. path) end
 				if (tonumber(run.unpreservedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Not preserved: %d more files (full list in status artifact)", run.unpreservedFilesOmitted)) end
-				local buf = draft_buffer(scratch_name("owner-spawn"), table.concat(lines, "\n"))
+				local win = logs.detail(table.concat(lines, "\n"), "Subagent")
+				local buf = vim.api.nvim_win_get_buf(win)
 				local markdown = require("pi-integration.markdown-render")
 				markdown.prepare_buffer(buf)
-				vim.wo.wrap, vim.wo.linebreak = true, true
-				markdown.render(buf, vim.api.nvim_get_current_win())
+				markdown.render(buf, win)
 			elseif action == "Join" or action == "Stop" then command(action == "Join" and "spawn.join" or "spawn.stop", { id = run.runId }, nil, captured) end
 		end)
 	end)
