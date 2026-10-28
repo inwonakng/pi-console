@@ -53,7 +53,9 @@ Request a concise outcome (`DONE`, `BLOCKED`, or `NEEDS_CONTEXT` in the report s
 
 ### Coordinate within approved scope
 
-Use background mode when other useful work remains; foreground and `join`/`join_all` wait until a result or actionable question/permission request. Join before relying on a worker result or answering from it. Do not poll or generate agent chatter while waiting.
+Use background mode when other useful work remains; foreground and `join`/`join_all` wait until a result or actionable question/permission request. Join before relying on a worker result or answering from it. Use `status` for inspection, not waiting.
+
+When `join`, `status`, or a worker event returns a pending request, handle it before observing that worker again: use `reply` for a question, or `approve`/`deny` for permission. Read needed context or obtain missing user input first. If the full current request was already delivered, use its IDs and details without another status check. A worker awaiting your response cannot progress through `status` or `join`; respond, then join again. Explicitly stop the worker if abandoning the assignment. Do not poll or generate agent chatter while waiting.
 
 There is strictly one unresolved writer. Ownership lasts through permission/input waits, reporting, review, corrections, failure, and cleanup until acceptance or explicit discard resolves the contribution. No concurrency override exists, even if the user requests parallel writers. Parallel readonly investigation is permitted. Parent repository writes and unsandboxed Bash are blocked while a child owns a contribution; sandboxed readonly review remains available. Do not work around this using another path, worker, or tool. Schedule dependent writing assignments only after the preceding contribution is accepted into the updated parent baseline.
 
