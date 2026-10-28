@@ -107,6 +107,8 @@ function renderSessionActions() {
   $("session-actions-name").textContent = row ? sessionName(row) : "Session unavailable";
   $("session-actions-project").textContent = row?.live?.project || "Project directory unavailable.";
   $("session-actions-create").disabled = !registered(host) || !host.connected || navigator.onLine === false || !row?.live?.project;
+  $("session-actions-stop").disabled = !registered(host) || !host.connected || navigator.onLine === false
+    || !row?.live || row.live.status === "Stopping";
 }
 function showSessionActions(host, row) {
   sessionActionsTarget = { host, id: row.id };
@@ -1006,6 +1008,21 @@ $("session-actions-create").addEventListener("click", () => {
   $("session-actions-dialog").close();
   showCreate(host, project);
 });
+$("session-actions-stop").addEventListener("click", () => {
+  if (!sessionActionsTarget || $("session-actions-stop").disabled) return;
+  const { host, id } = sessionActionsTarget;
+  const row = host.sessions.find(row => row.id === id);
+  if (!row?.live || !registered(host) || !host.connected || navigator.onLine === false) return;
+  $("session-actions-dialog").close();
+  const key = sessionKey(host.hello.hostId, id);
+  let conversation = conversations.get(key);
+  if (!conversation) {
+    conversation = createConversation(host, row);
+    conversations.set(key, conversation);
+    $("panels").append(conversation.element);
+  }
+  void conversation.stop(notice);
+});
 $("cancel-create").addEventListener("click", () => $("create-dialog").close());
 $("create-host").addEventListener("change", () => {
   $("cwd").value = "";
@@ -1221,13 +1238,13 @@ function createConversation(host, row) {
     return !disposed && connected && captured.client === client && !captured.client?.closed && captured.selectedId === selectedId
       && captured.attachment === attachment && captured.runtimeRevision === runtimeRevision;
   }
-  async function run(action) {
+  async function run(action, onError = notice) {
     if (busy) return;
     busy = true;
     notice();
     renderControls();
     try { await action(); }
-    catch (error) { notice(error.message); }
+    catch (error) { onError(error.message); }
     finally { busy = false; renderControls(); }
   }
   async function command(operation, payload = {}) {
@@ -2068,18 +2085,23 @@ function createConversation(host, row) {
   $("options").addEventListener("click", () => navigate(`${sessionRoute(host, row)}/options`));
   $("options-back").addEventListener("click", () => backTo(sessionRoute(host, row)));
   $("detach").addEventListener("click", () => detachConversation(key));
-  $("stop").addEventListener("click", () => run(async () => {
-    const captured = context();
-    if (!controlsCurrent()) {
-      if (!confirm(`The WebUI needs control to terminate "${sessionName(row)}" on ${host.alias}. Take control and stop? Active work will be interrupted; history is preserved.`)) return;
-      await acquireControl(Boolean(owner?.controller));
-      if (!sameContext(captured)) return;
-      const value = await captured.client.request("snapshot", snapshotQuery(snapshot, hello));
-      if (!sameContext(captured)) return;
-      applySnapshot(value);
-    }
-    if (sameContext(captured)) await command("session.kill", { confirmed: true });
-  }));
+  async function stopSession(onError = notice) {
+    if (!connected) await reconnect();
+    return run(async () => {
+      if (!connected) throw new Error("Could not connect to this session. Reconnect before trying to stop it.");
+      const captured = context();
+      if (!controlsCurrent()) {
+        if (!confirm(`The WebUI needs control to terminate "${sessionName(row)}" on ${host.alias}. Take control and stop? Active work will be interrupted; history is preserved.`)) return;
+        await acquireControl(Boolean(owner?.controller));
+        if (!sameContext(captured)) return;
+        const value = await captured.client.request("snapshot", snapshotQuery(snapshot, hello));
+        if (!sameContext(captured)) return;
+        applySnapshot(value);
+      }
+      if (sameContext(captured)) await command("session.kill", { confirmed: true });
+    }, onError);
+  }
+  $("stop").addEventListener("click", () => stopSession());
   $("reconnect").addEventListener("click", () => { void reconnect(); });
   $("latest").addEventListener("click", () => {
     following = true;
@@ -2226,7 +2248,7 @@ function createConversation(host, row) {
   return {
     get host() { return host; },
     identity, id: selectedId, element, reconnect, recover,
-    acquireInitialControl,
+    acquireInitialControl, stop: stopSession,
     draft: () => $("prompt").value,
     viewed() { if (snapshot) renderSession(); },
     connected: () => connected,
