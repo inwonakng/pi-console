@@ -29,7 +29,7 @@ import { isNative, nativeCommand, readCommand, validRead, type NativeOperation }
 import { isBundled, BUNDLED_SOURCES, OPERATION_RESULT, operationCommand, operationResult, type BundledOperation, type OperationResult } from "./session-bundled.js";
 
 type TrustStatus = { state: "pending" | "ready" | "restart" | "error"; cwd: string; sessionFile: string; error?: string };
-type WorkspaceStatus = { cwd: string; sessionFile: string; transitionPending: boolean; [key: string]: unknown };
+type WorkspaceStatus = { cwd: string; sessionFile: string; transitionPending: boolean; transitionError?: string; [key: string]: unknown };
 type BundledFlight = {
   worker: PiProcess; revision: number; runtimeId: string; invocationId: string; operation: BundledOperation["operation"];
   message: string; dispatched: boolean; requestId?: string; result?: OperationResult; resultRevision?: number; recipient?: Controller;
@@ -2096,11 +2096,13 @@ export class OwnedSession {
       this.checkRunning();
       if (!(this.workspace as WorkspaceStatus | undefined)) throw new Error("Workspace publication returned no status");
       while (this.workspacePending()) {
+        this.checkWorkspaceTransition();
         this.checkRunning();
         await new Promise<void>((resolve) => { this.wake = resolve; });
       }
       this.checkRunning();
       this.startupTimings!.workspaceMs += performance.now() - stage;
+      this.checkWorkspaceTransition();
       // Restoration replaces the cwd-bound runtime and clears its Pi state.
       // Check that new context on the next pass before the final hydration.
       if (revision !== this.runtimeRevision) continue;
@@ -2180,7 +2182,8 @@ export class OwnedSession {
           this.trust = value as TrustStatus;
           this.trustWorkerRevision = statusRevision;
         } else {
-          if (typeof value.transitionPending !== "boolean") throw new Error("Invalid Pi workspace transition status");
+          if (typeof value.transitionPending !== "boolean"
+            || value.transitionError !== undefined && typeof value.transitionError !== "string") throw new Error("Invalid Pi workspace transition status");
           workspaceChanged = this.workspaceWorkerRevision !== statusRevision || JSON.stringify(this.workspace) !== JSON.stringify(value);
           if (value.transitionPending || this.workspace && this.workspace.cwd !== value.cwd) {
             this.preview = undefined;
@@ -2612,12 +2615,17 @@ export class OwnedSession {
 
   private workspacePending(): boolean { return this.workspace?.transitionPending === true; }
 
+  private checkWorkspaceTransition(): void {
+    if (this.workspace?.transitionError) throw new Error(this.workspace.transitionError);
+  }
+
   private usableWorkspace(): boolean {
     const runtime = this.worker?.interactionRuntime();
     return !!runtime?.active && runtime.sessionId === this.record.piSessionId && runtime.sessionFile === this.catalog.sessionFile(this.id)
       && this.trustWorkerRevision === this.workerRevision && this.workspaceWorkerRevision === this.workerRevision
       && this.trust?.state === "ready" && this.trust.cwd === runtime.cwd && this.trust.sessionFile === runtime.sessionFile
-      && this.workspace?.transitionPending === false && this.workspace.cwd === runtime.cwd && this.workspace.sessionFile === runtime.sessionFile;
+      && this.workspace?.transitionPending === false && !this.workspace.transitionError
+      && this.workspace.cwd === runtime.cwd && this.workspace.sessionFile === runtime.sessionFile;
   }
 
   private checkRunning(): void {

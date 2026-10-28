@@ -1140,14 +1140,17 @@ function restoredRun(statusPath: string, parentSessionFile: string | undefined):
     cleanupError: typeof data.cleanupError === "string" ? data.cleanupError
       : data.settled === false ? "Subagent cleanup did not finish before the runtime ended." : undefined,
     notified: data.notified === true,
-    joined: data.joined === true,
+    // Disposal resolves the collection obligation, including records written
+    // before discard persisted joined=true. Cleanup/ownership guards still apply.
+    joined: data.joined === true || record?.lifecycle === "discarded" && !record.retained,
     // No join operation survives a runtime restart.
     joinRequested: false,
     finished,
     resolveFinished,
   };
   resolveFinished(run);
-  if (data.version !== 1 || data.status === "running" || data.joinRequested === true || requests.some((request) => request.state === "cancelled")) {
+  if (data.version !== 1 || data.status === "running" || data.joinRequested === true || run.joined !== (data.joined === true)
+    || requests.some((request) => request.state === "cancelled")) {
     writeStatus(run);
   }
   return run;
@@ -2751,6 +2754,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
             const removed = await removeWorkspace(run.worktree.workspaceId, "discarded");
             if (removed.retained) throw new Error(`Contribution cleanup unresolved: ${removed.integrationReason}`);
           }
+          run.joined = true;
           writeStatus(run);
         }
         if (params.action === "accept") {

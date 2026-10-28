@@ -1,8 +1,8 @@
 import type { ExtensionCommandContext, ExtensionContext, SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { assertManagedResources } from "../../scripts/managed-process.mjs";
-import { beginWorkspaceContinuation, clearWorkspaceContinuation, getWorkspaceContinuation, getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, workspaceDisplayState, WORKSPACE_CONTINUATION_STATUS, type WorkspaceRecord } from "./workspace";
-import { hasRunningSubagents } from "./subagent-state";
+import { beginWorkspaceContinuation, clearWorkspaceContinuation, getWorkspaceContinuation, getWorkspaceTransitionError, getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, setWorkspaceTransitionError, workspaceDisplayState, WORKSPACE_CONTINUATION_STATUS, type WorkspaceRecord } from "./workspace";
+import { hasRunningSubagents, subagentHistoryBlockReason } from "./subagent-state";
 import { prepareProjectTrust, projectTrustReady } from "./project-trust";
 import { modelReady, preserveModelForSwitch } from "./model-readiness";
 
@@ -42,6 +42,7 @@ export function publishWorkspaceState(ctx: ExtensionContext): void {
   const state = {
     ...workspaceDisplayState(ctx.cwd, ctx.sessionManager.getSessionFile()),
     transitionPending: getPendingWorkspaceId() !== undefined,
+    transitionError: getWorkspaceTransitionError(ctx.sessionManager.getSessionFile()),
   };
   const branch = state.branch ? ` (${state.branch})` : "";
   ctx.ui.setStatus(
@@ -60,20 +61,8 @@ export async function moveToLocation(
   leafId: string | null,
   options: { workspaceId?: string; workspaceLabel?: string; markLocation?: boolean; navigateTo?: string; reload?: boolean; saveCursor?: boolean; continueWith?: string; beforeSwitch?: () => void | Promise<void>; onArrival?: (ctx: ExtensionCommandContext) => void | Promise<void> } = {},
 ): Promise<boolean> {
-  if (ctx.cwd !== cwd || options.reload) assertManagedResources();
-  if (leafId !== null && !options.reload && !ctx.sessionManager.getEntry(leafId)) throw new Error(`Unknown session entry: ${leafId}`);
   const file = ctx.sessionManager.getSessionFile();
   if (!file) throw new Error("Workspace switching requires a persisted session.");
-  if (!existsSync(cwd)) throw new Error(`Working directory is unavailable: ${cwd}`);
-  if ((ctx.cwd !== cwd || options.reload) && ctx.mode !== "rpc"
-    && (ctx.cwd !== cwd || ctx.sessionManager.getHeader()?.cwd !== ctx.cwd)) {
-    throw new Error("Changing the workspace cwd requires Pi RPC mode; this Pi host does not forward cwdOverride.");
-  }
-  if ((ctx.cwd !== cwd || options.reload) && hasRunningSubagents()) {
-    throw new Error("Wait for running subagents before switching workspaces; replacing Pi's runtime would abort them.");
-  }
-  if (!projectTrustReady()) throw new Error("Resolve project trust before switching workspaces");
-  if (ctx.cwd !== cwd || options.reload) await prepareProjectTrust(ctx, cwd);
   const pendingWorkspaceId = getPendingWorkspaceId();
   const ownsPending = (ctx.cwd !== cwd || options.reload === true) && !pendingWorkspaceId;
   const previousCwd = ctx.cwd;
@@ -153,6 +142,23 @@ export async function moveToLocation(
   let arrived = false;
   let releaseSelection: (() => void) | undefined;
   try {
+    setWorkspaceTransitionError(file, undefined);
+    if (ctx.cwd !== cwd || options.reload) assertManagedResources();
+    if (leafId !== null && !options.reload && !ctx.sessionManager.getEntry(leafId)) throw new Error(`Unknown session entry: ${leafId}`);
+    if (!existsSync(cwd)) throw new Error(`Working directory is unavailable: ${cwd}`);
+    if ((ctx.cwd !== cwd || options.reload) && ctx.mode !== "rpc"
+      && (ctx.cwd !== cwd || ctx.sessionManager.getHeader()?.cwd !== ctx.cwd)) {
+      throw new Error("Changing the workspace cwd requires Pi RPC mode; this Pi host does not forward cwdOverride.");
+    }
+    if ((ctx.cwd !== cwd || options.reload) && hasRunningSubagents()) {
+      throw new Error("Wait for running subagents before switching workspaces; replacing Pi's runtime would abort them.");
+    }
+    if (ctx.cwd !== cwd || options.reload || options.navigateTo) {
+      const blocked = subagentHistoryBlockReason();
+      if (blocked) throw new Error(blocked);
+    }
+    if (!projectTrustReady()) throw new Error("Resolve project trust before switching workspaces");
+    if (ctx.cwd !== cwd || options.reload) await prepareProjectTrust(ctx, cwd);
     publishWorkspaceState(ctx);
     if (ctx.cwd === cwd && !options.reload) {
       await arrival(ctx);
@@ -171,6 +177,7 @@ export async function moveToLocation(
     if (result.cancelled) {
       if (ownsPending) setPendingWorkspace(undefined);
       releaseContinuation();
+      setWorkspaceTransitionError(file, "Workspace switch was cancelled. Resolve the cause, then restart the session to retry.");
       publishWorkspaceState(ctx);
     }
     return !result.cancelled;
@@ -178,12 +185,19 @@ export async function moveToLocation(
     const pendingContinuation = getWorkspaceContinuation(file);
     if (!pendingContinuation || pendingContinuation === continuation) {
       if ((ownsPending && !arrived) || getPendingWorkspaceId() === pendingWorkspaceId) setPendingWorkspace(undefined);
+      setWorkspaceTransitionError(file, `Workspace switch failed: ${error instanceof Error ? error.message : String(error)} Resolve the cause, then restart the session to retry.`);
       try {
         releaseContinuation();
         publishWorkspaceState(currentCtx);
       } catch {
-        // Runtime creation can fail after disposing ctx, before a fresh context exists.
-        // Preserve the original switch error when there is no live context to publish from.
+        // Runtime creation can fail after disposing ctx, before a fresh context
+        // exists. Publish failure through the captured UI so startup stops waiting.
+        try {
+          rpcUi?.setStatus("pi-workspace", JSON.stringify({
+            cwd: previousCwd, sessionFile: file, transitionPending: false,
+            transitionError: getWorkspaceTransitionError(file),
+          }));
+        } catch { /* Preserve the original switch error if the transport is gone. */ }
       }
     }
     throw error;

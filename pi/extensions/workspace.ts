@@ -13,7 +13,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { workspaceToolBlock } from "./shared/workspace-policy";
 import { projectTrustReady } from "./shared/project-trust";
-import { hasRunningSubagents } from "./shared/subagent-state";
+import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import {
   getIntegrationMode,
   parseIntegrationMode,
@@ -33,6 +33,7 @@ import {
   beginWorkspaceContinuation,
   clearWorkspaceContinuation,
   getWorkspaceContinuation,
+  getWorkspaceTransitionError,
   findGitRoot,
   formatWorkspaceRecord,
   formatIntegrationSummary,
@@ -51,6 +52,7 @@ import {
   updateWorkspace,
   setExpectedWorkspaceMissing,
   setPendingWorkspace,
+  setWorkspaceTransitionError,
   workspaceDisplayState,
   workspaceForContext,
   workspaceStorageRoot,
@@ -284,7 +286,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     }
   });
   const restoreWorkspace = (event: { reason: string }, ctx: ExtensionContext) => {
-    if (!projectTrustReady()) {
+    if (!projectTrustReady() || getWorkspaceTransitionError(sessionFile(ctx))) {
       publishWorkspaceState(ctx);
       return;
     }
@@ -395,6 +397,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
   pi.registerCommand("pi-workspace-restore", {
     description: "Restore the current branch's execution workspace after resuming Pi",
     handler: async (_args, ctx) => {
+      const file = sessionFile(ctx);
       try {
         await ctx.waitForIdle();
         const location = activeLocation(ctx);
@@ -412,9 +415,13 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           publishWorkspaceState(ctx);
         }
       } catch (error) {
+        if (file && !getWorkspaceTransitionError(file)) {
+          setWorkspaceTransitionError(file, `Workspace restoration failed: ${error instanceof Error ? error.message : String(error)} Resolve the cause, then restart the session to retry.`);
+        }
         const transitionPending = getPendingWorkspaceId() !== undefined;
         setPendingWorkspace(undefined);
-        if (transitionPending) publishWorkspaceState(ctx);
+        // A failed replacement may already have invalidated this context.
+        try { if (transitionPending) publishWorkspaceState(ctx); } catch { /* Preserve the switch error. */ }
         throw error;
       }
     },
@@ -453,13 +460,16 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       } catch (error) {
         const pendingContinuation = getWorkspaceContinuation(file);
         if (!pendingContinuation || pendingContinuation === continuation) {
+          if (file && !getWorkspaceTransitionError(file)) {
+            setWorkspaceTransitionError(file, `Workspace return failed: ${error instanceof Error ? error.message : String(error)} Resolve the cause, then restart the session to retry.`);
+          }
           const transitionPending = getPendingWorkspaceId() !== undefined;
           setPendingWorkspace(undefined);
           if (pendingContinuation) clearWorkspaceContinuation(pendingContinuation);
-          if (transitionPending || pendingContinuation) publishWorkspaceState(ctx);
+          try { if (transitionPending || pendingContinuation) publishWorkspaceState(ctx); } catch { /* Preserve the switch error. */ }
         }
         const retained = loadWorkspace(id);
-        if (retained?.retained && !isWorkspaceFinalized(retained)) {
+        if (retained?.retained && returnPending(retained)) {
           await updateWorkspace(id, (current) => {
             current.integrationReason = error instanceof Error ? error.message : String(error);
           });
@@ -610,8 +620,12 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       if (params.ignoredFiles !== undefined && action !== "enter") {
         throw new Error("ignoredFiles only applies to action=enter.");
       }
-      if (TRANSITION_ACTIONS.has(action) && hasRunningSubagents()) {
-        throw new Error("Cannot change workspaces while subagents or their cleanup are active. Use spawn_control join/join_all, or stop them and wait for cleanup, then retry this workspace action.");
+      if (TRANSITION_ACTIONS.has(action)) {
+        if (hasRunningSubagents()) {
+          throw new Error("Cannot change workspaces while subagents or their cleanup are active. Use spawn_control join/join_all, or stop them and wait for cleanup, then retry this workspace action.");
+        }
+        const blocked = subagentHistoryBlockReason();
+        if (blocked) throw new Error(blocked);
       }
       if (action === "undo") {
         if (!params.id || !params.reason?.trim() || params.reason.includes("\0") || Buffer.byteLength(params.reason) > 8192) {

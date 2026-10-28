@@ -121,6 +121,7 @@ type WorkspaceGlobalState = {
   pendingWorkspaceId?: string;
   continuation?: WorkspaceContinuation;
   expectedWorkspaceMissing?: string;
+  transitionError?: { sessionFile: string; message: string };
 };
 
 const WORKSPACE_ROOT = resolve(
@@ -629,6 +630,15 @@ export function setExpectedWorkspaceMissing(id: string | undefined): void {
 
 export function getExpectedWorkspaceMissing(): string | undefined {
   return globalState.expectedWorkspaceMissing;
+}
+
+export function getWorkspaceTransitionError(sessionFile: string | undefined): string | undefined {
+  const error = globalState.transitionError;
+  return error && sameSessionFile(error.sessionFile, sessionFile) ? error.message : undefined;
+}
+
+export function setWorkspaceTransitionError(sessionFile: string, message: string | undefined): void {
+  globalState.transitionError = message ? { sessionFile, message } : undefined;
 }
 
 function snapshotWorkspaceResult(record: WorkspaceRecord): WorkspaceRecord {
