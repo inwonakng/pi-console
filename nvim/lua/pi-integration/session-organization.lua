@@ -281,6 +281,28 @@ function M.create(name, entry)
 	end)
 end
 
+function M.rename(group_id, name)
+	if group_id == "" then return nil, "Ungrouped cannot be renamed" end
+	if type(name) ~= "string" or name:find("%c") or vim.trim(name) == "" then
+		return nil, "Group name must be nonempty and contain no control characters"
+	end
+	name = vim.trim(name)
+	return with_state(function(state)
+		local target
+		if name == "Ungrouped" then return nil, "A group with that name already exists" end
+		for _, group in ipairs(state.groups) do
+			if group.id == group_id then
+				target = group
+			elseif group.name == name then
+				return nil, "A group with that name already exists"
+			end
+		end
+		if not target then return nil, "Group no longer exists; refresh the session list" end
+		target.name = name
+		return true
+	end)
+end
+
 function M.move(node, delta)
 	if type(node) ~= "table" or type(delta) ~= "number" or delta ~= delta or math.abs(delta) == math.huge or delta % 1 ~= 0 then
 		return nil, "Move requires a group or session and an integer delta"

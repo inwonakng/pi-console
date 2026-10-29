@@ -36,7 +36,7 @@ function M.group_summary(node)
 end
 
 function M.group_label(node, compact)
-	local label = " " .. (node.collapsed and "▸ " or "▾ ") .. node.name
+	local label = " " .. ((node.collapsed or #node.entries == 0) and "▸ " or "▾ ") .. node.name
 	if #node.entries == 0 then return label .. " (empty)" end
 	label = label .. " (" .. #node.entries .. ")"
 	if node.collapsed and not compact then label = label .. " · " .. table.concat(M.group_summary(node), " · ") end
@@ -154,6 +154,7 @@ function M.new()
 			local node = selected()
 			if not node then return end
 			if node.kind == "group" then
+				if #node.entries == 0 then return end
 				collapsed[node.id] = not node.collapsed
 			elseif node.kind == "session" and node.running > 0 then
 				expanded[node.key] = not node.expanded
@@ -201,7 +202,7 @@ function M.new()
 				if node then report(organization.move(node, delta * vim.v.count1)) end
 			end, delta == 1 and "Move group/session down" or "Move group/session up")
 		end
-		map("<leader>pg", function()
+		map("<leader>ga", function()
 			local entry = session()
 			local function create()
 				vim.ui.input({ prompt = "New group: " }, function(name)
@@ -222,6 +223,23 @@ function M.new()
 				if choice.create then create() else report(organization.assign(entry, choice.id)) end
 			end)
 		end, "Assign session to group / create group")
+		map("<leader>gr", function()
+			local node = selected()
+			local group_id = node and (node.kind == "group" and node.id or node.group_id)
+			if group_id == nil then return end
+			if group_id == "" then return report(nil, "Ungrouped cannot be renamed") end
+			local current, err = organization.sections({})
+			if not current then return report(nil, err) end
+			for _, group in ipairs(current) do
+				if group.id == group_id then
+					vim.ui.input({ prompt = "Rename group: ", default = group.name }, function(name)
+						if name then report(organization.rename(group_id, name)) end
+					end)
+					return
+				end
+			end
+			report(nil, "That group no longer exists")
+		end, "Rename selected group or session's group")
 		if config.role == "overview" then
 			map("<leader>pi", function()
 				local entry = session()
