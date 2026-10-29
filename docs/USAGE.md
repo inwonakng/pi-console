@@ -506,6 +506,19 @@ Preserve any existing tool choices. A trusted project's `.pi/settings.json` can
 disable these tools with `-spawn`, `-spawn_control`, and `-workspace`.
 Tool selection is separate from permissions.
 
+For ignored files, `workspace action=enter ignoredFiles=[...]` copies existing
+ignored files into the worktree or reserves paths that do not exist yet. Newly
+created ignored files can instead be selected with `ignoredFiles` on
+`action=integrate`. Paths are relative to the original working directory. Keep
+these files in the worktree: integration applies the Git patch first, then copies
+the selected ignored files separately, without committing them. It refuses to
+overwrite independently created destination files.
+
+`workspace action=status` (or `/pi-workspace status`) includes host-side Git
+status for the worktree and origin after this session's sandbox commands finish
+cleanup. Use it to check unexpected files reported by sandboxed `git status`:
+Linux sandbox protection placeholders can appear only in the command's view.
+
 The bundled `researcher`, `reviewer`, and `verifier` profiles use read-only
 access. `worker` edits in an isolated child worktree. Custom profiles go in
 `~/.pi/agent/agents/` or a trusted project's `.pi/agents/`; project profiles

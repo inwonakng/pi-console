@@ -12,6 +12,8 @@ import { existsSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { workspaceToolBlock } from "./shared/workspace-policy";
+import { withBashIdle } from "./shared/bash-sandbox";
+import { canonicalPath, requestPermission } from "./shared/permissions";
 import { projectTrustReady } from "./shared/project-trust";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import {
@@ -40,6 +42,8 @@ import {
   getExpectedWorkspaceMissing,
   getPendingWorkspaceId,
   integrateWorkspace,
+  includeNewIgnoredFiles,
+  repositoryStatus,
   isWorkspaceFinalized,
   taskWorkspacesForSession,
   listWorkspaces,
@@ -205,7 +209,7 @@ function checkRequestedIgnoredFiles(record: WorkspaceRecord, paths: string[] | u
   const included = (record.includedIgnoredFiles ?? []).map((file) => file.path).sort();
   if (paths.some((path) => !path || path.startsWith("/") || path.includes("\0"))
     || JSON.stringify(requested) !== JSON.stringify(included)) {
-    throw new Error("Ignored files are selected when the workspace is created; this workspace already exists. Resume it without ignoredFiles or discard and enter a new workspace.");
+    throw new Error("Existing ignored files must be selected on the first enter call. Resume without ignoredFiles; newly created ignored files can be selected with ignoredFiles on action=integrate.");
   }
 }
 
@@ -229,6 +233,18 @@ function formatStatus(ctx: ExtensionContext): string {
   const missing = getExpectedWorkspaceMissing();
   if (missing) lines.push(`- missing expected workspace: ${missing}`);
   return lines.join("\n");
+}
+
+async function statusWithRepositories(ctx: ExtensionContext, record?: WorkspaceRecord): Promise<string> {
+  const roots = [...new Set((record ? [record.worktreePath, record.destinationRoot] : [findGitRoot(ctx.cwd) ?? ctx.cwd]).map(canonicalPath))];
+  const authorizations = await Promise.all(roots.map((scope) => requestPermission(ctx, { kind: "read", scope }, "workspace",
+    { text: `Inspect repository status outside the command sandbox: ${scope}`, filetype: "text" }, () => {})));
+  return withBashIdle(async () => {
+    for (const authorization of authorizations) await authorization.validate();
+    return [record ? formatWorkspaceRecord(record) : formatStatus(ctx),
+      "Repository status (host view, after this session's sandbox cleanup):",
+      ...roots.map(repositoryStatus)].join("\n\n");
+  });
 }
 
 function workspaceList(offset = 0, limit = 20) {
@@ -554,7 +570,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
           return;
         }
         publishWorkspaceState(ctx);
-        ctx.ui.notify(record ? formatWorkspaceRecord(record) : formatStatus(ctx), "info");
+        ctx.ui.notify(await statusWithRepositories(ctx, record ?? workspaceForContext(ctx.cwd, sessionFile(ctx))), "info");
         return;
       }
       if (action === "list" && extra.length === 0) {
@@ -577,12 +593,13 @@ export default function workspaceExtension(pi: ExtensionAPI) {
     defaultActive: false,
     label: "Workspace",
     exposure: available ? "direct" : "hidden",
-    description: "Create/reuse a task worktree, inspect, integrate or discard. Undo removes a confirmed local integration at its branch tip, preserving working files and unrelated staging. Revert prepares a reversal commit when retaining history is explicitly requested. List returns workspace/session IDs, newest first (default 20, max 50); status shows commit metadata and paths.",
+    description: "Create/reuse a task worktree, inspect, integrate or discard. Undo removes a confirmed local integration at its branch tip, preserving working files and unrelated staging. Revert prepares a reversal commit when retaining history is explicitly requested. List returns workspace/session IDs, newest first (default 20, max 50); status shows commit metadata and host-side Git status for the worktree and origin after sandbox cleanup.",
     promptSnippet: "Manage the current task's isolated Git worktree and integration lifecycle.",
     promptGuidelines: [
       "Before making implementation changes with edit or write inside the git repository containing the current session cwd, call workspace with action=enter as the only tool call in that assistant response, unless the current session is already in an associated workspace. To edit existing ignored files, provide their paths relative to the original cwd in ignoredFiles on the first enter call; only those files are copied and later integrated. Wait for the cwd switch before using more tools.",
       "Temporary probes, scripts, and generated artifacts may be created under $TMPDIR without entering a workspace; keep them outside the repository and remove them when finished.",
-      "Call workspace with action=status when the expected workspace is missing or its lifecycle is unclear.",
+      "Call workspace with action=status when the expected workspace is missing, its lifecycle is unclear, or sandboxed git status reports unexpected files. Status inspects the host view after sandbox cleanup; sandbox protection placeholders are not evidence that real files appeared in the checkout.",
+      "To preserve newly created ignored files, provide ignoredFiles on action=integrate, with paths relative to the original cwd. They must be ignored in the worktree and absent from the origin. You may also reserve absent paths on the first enter call. Keep these files in the worktree; do not manually copy them into the origin before integration. They are copied outside the Git commit after the ignore rule is applied.",
       "Join running subagents, or stop them and wait for cleanup, before switching workspaces.",
       "When integration commits are enabled, supply commitMessage describing what changed and why. Never push automatically.",
       "If committing could expose sensitive files, secrets, or has another safety concern, use question to ask the user before integration, even when integration is pre-authorized. Describe the concern without exposing secret values. If question is unavailable, cancelled, or the user declines, retain the workspace without integrating or committing. Integration permission does not approve a questionable commit.",
@@ -596,7 +613,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       id: Type.Optional(Type.String({ description: "Workspace id for enter, status, integration, or discard; undo and revert require the original integration's workspace id. Enter creates a new task workspace unless an id is specified." })),
       offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "List only: zero-based offset (default 0). Use nextOffset from the previous page." })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "List only: number of entries per page (default 20, maximum 50)." })),
-      ignoredFiles: Type.Optional(Type.Array(Type.String(), { description: "Existing ignored file paths relative to the original cwd, copied into a new task worktree on enter and copied back on integration." })),
+      ignoredFiles: Type.Optional(Type.Array(Type.String(), { description: "Paths relative to the original cwd. Enter: copy existing ignored files or reserve absent paths. Integrate: select newly created ignored files absent from the origin. Selected files are copied separately, never committed." })),
       approved: Type.Optional(Type.Boolean({ description: "User approval when no interactive UI is available: required for undo in every mode, and for integration/discard in ask mode. Does not bypass interactive confirmation." })),
       commitMessage: Type.Optional(Type.String({ minLength: 1, maxLength: 16384, description: "Integration commit message: describe the changes and why. Required when automatic commits are enabled; reverts get a default message." })),
       reason: Type.Optional(Type.String({ minLength: 1, maxLength: 8192, description: "Undo/revert only: why the recorded integration should be undone. id identifies that integration's workspace." })),
@@ -607,7 +624,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       if (action === "status") {
         const record = params.id ? loadWorkspace(params.id) : workspaceForContext(ctx.cwd, sessionFile(ctx));
         if (params.id && !record) throw new Error(`Unknown workspace: ${params.id}`);
-        const text = record ? formatWorkspaceRecord(record) : formatStatus(ctx);
+        const text = await statusWithRepositories(ctx, record);
         publishWorkspaceState(ctx);
         return { content: [{ type: "text", text }], details: record ?? workspaceDisplayState(ctx.cwd, sessionFile(ctx)) };
       }
@@ -617,8 +634,8 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       }
       if (params.commitMessage !== undefined && action !== "integrate") throw new Error("commitMessage only applies to action=integrate.");
       if (params.reason !== undefined && action !== "revert" && action !== "undo") throw new Error("reason only applies to action=undo or action=revert.");
-      if (params.ignoredFiles !== undefined && action !== "enter") {
-        throw new Error("ignoredFiles only applies to action=enter.");
+      if (params.ignoredFiles !== undefined && action !== "enter" && action !== "integrate") {
+        throw new Error("ignoredFiles only applies to action=enter or action=integrate.");
       }
       if (TRANSITION_ACTIONS.has(action)) {
         if (hasRunningSubagents()) {
@@ -713,7 +730,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         };
       }
 
-      const selected = params.id ? loadWorkspace(params.id) : workspaceForContext(ctx.cwd, sessionFile(ctx));
+      let selected = params.id ? loadWorkspace(params.id) : workspaceForContext(ctx.cwd, sessionFile(ctx));
       if (!selected) {
         throw new Error(`No workspace available for action=${action}.`);
       }
@@ -728,6 +745,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         if (!active || active.id !== selected.id) {
           throw new Error(`Enter task workspace ${selected.id} before integrating it.`);
         }
+        if (params.ignoredFiles?.length) selected = await includeNewIgnoredFiles(selected.id, params.ignoredFiles);
         const shouldCommit = selected.integrationCommit !== undefined || selected.reverts !== undefined
           || loadExtensionSettings().workspace?.["auto-commit"] === true;
         let commitMessage = selected.integrationCommit?.message ?? (shouldCommit ? params.commitMessage : undefined);

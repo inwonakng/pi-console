@@ -36,7 +36,11 @@ const localBash = managedBash;
 let sandboxConfig: SandboxRuntimeConfig | undefined;
 let sandboxError: string | undefined;
 let macosDenialMonitor = false;
-let commandQueue: Promise<void> = Promise.resolve();
+// Extension entrypoints may evaluate shared imports independently. Status and
+// command execution must still share one queue and observe the same cleanup.
+const QUEUE_KEY = Symbol.for("pi.agent.extensions.bash-command-queue");
+const globalObject = globalThis as typeof globalThis & Record<symbol, { current: Promise<void> } | undefined>;
+const commandQueue = globalObject[QUEUE_KEY] ??= { current: Promise.resolve() };
 let commandNetworkAccess = false;
 let commandUnixSocketPaths: string[] = [];
 
@@ -284,6 +288,13 @@ async function executeRestricted(
     [...new Set(sockets)], authorizations, assertAuthority, onSessionGrant, onBlocked);
 }
 
+/** Serialize host-side repository inspection after sandbox mount-point cleanup. */
+export function withBashIdle<T>(operation: () => T | Promise<T>): Promise<T> {
+  const current = commandQueue.current.then(operation, operation);
+  commandQueue.current = current.then(() => undefined, () => undefined);
+  return current;
+}
+
 export function createAccessControlledBashOperations(
   ctx: ExtensionContext,
   request: BashAccessRequest = {},
@@ -292,10 +303,7 @@ export function createAccessControlledBashOperations(
 ): BashOperations {
   return {
     exec(command, cwd, options) {
-      const run = () => executeRestricted(command, cwd, options, ctx, request, onSessionGrant, onBlocked);
-      const current = commandQueue.then(run, run);
-      commandQueue = current.then(() => undefined, () => undefined);
-      return current;
+      return withBashIdle(() => executeRestricted(command, cwd, options, ctx, request, onSessionGrant, onBlocked));
     },
   };
 }
@@ -329,7 +337,7 @@ export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void
 }
 
 export async function shutdownBashSandbox(): Promise<void> {
-  await commandQueue;
+  await commandQueue.current;
   try {
     if (SandboxManager.isSandboxingEnabled()) await SandboxManager.reset();
   } finally {

@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdirSync,
   lstatSync,
+  linkSync,
   openSync,
   readFileSync,
   readSync,
@@ -73,7 +74,7 @@ export type WorkspaceRecord = {
   integrationIgnoredChanges?: { path: string; hash: string }[];
   reverts?: { workspaceId: string; commit: string; reason: string; prepared: boolean };
   changedFiles: string[];
-  includedIgnoredFiles?: { path: string; originalHash: string }[];
+  includedIgnoredFiles?: { path: string; originalHash: string | null }[];
   unpreservedFiles?: string[];
   resultPatchPath: string;
   applicationPatchPath: string;
@@ -236,19 +237,27 @@ function regularFileHash(root: string, path: string): string {
   }
 }
 
-function ignoredFilePaths(root: string, cwd: string, paths: string[]): string[] {
+function optionalFileHash(root: string, path: string): string | null {
+  try { return regularFileHash(root, path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function ignoredFilePaths(root: string, cwd: string, paths: string[], allowMissing = false): string[] {
   const result = new Set<string>();
   for (const path of paths) {
     if (!path || path.includes("\0") || path.startsWith("/") || resolve(cwd, path) === resolve(root)) {
       throw new Error(`Expected a relative ignored file path: ${path}`);
     }
     const absolute = resolve(cwd, path);
-    if (!pathInside(root, absolute) || !lstatSync(absolute).isFile()) {
-      throw new Error(`Expected a regular file inside the repository: ${path}`);
-    }
+    if (!pathInside(root, absolute)) throw new Error(`File would escape the repository: ${path}`);
     const relativePath = relative(root, absolute);
+    const hash = optionalFileHash(root, relativePath);
+    if (hash === null && !allowMissing) throw new Error(`Expected a regular file inside the repository: ${path}`);
     if (gitBuffer(root, ["ls-files", "--cached", "-z", "--", relativePath]).length > 0
-      || gitResult(root, ["check-ignore", "-q", "--", relativePath]).status !== 0) {
+      || (hash !== null && gitResult(root, ["check-ignore", "-q", "--", relativePath]).status !== 0)) {
       throw new Error(`File is not ignored and untracked: ${path}`);
     }
     result.add(relativePath);
@@ -297,7 +306,7 @@ function rejectUnsupportedRepositoryState(gitRoot: string): void {
   }
 }
 
-function captureSnapshot(gitRoot: string, workspaceId: string, purpose: string): Snapshot {
+function captureSnapshot(gitRoot: string, workspaceId: string, purpose: string, trackedTree?: string): Snapshot {
   ensureDirectories();
   rejectUnsupportedRepositoryState(gitRoot);
   const head = gitText(gitRoot, ["rev-parse", "HEAD"]).trim();
@@ -305,7 +314,12 @@ function captureSnapshot(gitRoot: string, workspaceId: string, purpose: string):
   const indexPath = gitText(gitRoot, ["rev-parse", "--path-format=absolute", "--git-path", "index"]).trim();
   const tempIndex = join(TEMP_DIR, `${safeRefSegment(workspaceId)}-${safeRefSegment(purpose)}-${randomUUID()}.index`);
   try {
-    if (existsSync(indexPath)) {
+    if (trackedTree) {
+      // Keep observing previously snapshotted files even if new ignore rules now
+      // hide them from the real index. git add still checks their current bytes
+      // and deletions; this is not permission to overlook destination edits.
+      gitBuffer(gitRoot, ["read-tree", trackedTree], { env: { ...process.env, GIT_INDEX_FILE: tempIndex } });
+    } else if (existsSync(indexPath)) {
       copyFileSync(indexPath, tempIndex);
     } else {
       writeFileSync(tempIndex, Buffer.alloc(0));
@@ -462,7 +476,7 @@ export function createWorkspace(input: {
   if (pathInside(destinationRoot, WORKSPACE_ROOT)) {
     throw new Error(`Pi workspace storage must be outside the destination repository. Set PI_WORKSPACE_ROOT to an external path (current: ${WORKSPACE_ROOT}).`);
   }
-  const includedPaths = ignoredFilePaths(destinationRoot, destinationCwd, input.ignoredFiles ?? []);
+  const includedPaths = ignoredFilePaths(destinationRoot, destinationCwd, input.ignoredFiles ?? [], true);
   const id = `${input.kind}-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
   const baseline = captureSnapshot(destinationRoot, id, "baseline");
   const requestedWorktreePath = join(TREES_DIR, id);
@@ -475,7 +489,11 @@ export function createWorkspace(input: {
   const includedIgnoredFiles: NonNullable<WorkspaceRecord["includedIgnoredFiles"]> = [];
   try {
     for (const path of includedPaths) {
-      const originalHash = regularFileHash(destinationRoot, path);
+      const originalHash = optionalFileHash(destinationRoot, path);
+      if (originalHash === null) {
+        includedIgnoredFiles.push({ path, originalHash });
+        continue;
+      }
       const target = join(worktreePath, path);
       if (!pathInside(worktreePath, target) || existsSync(target)) {
         throw new Error(`Cannot copy ignored file into worktree: ${path}`);
@@ -529,6 +547,40 @@ export function createWorkspace(input: {
   };
   saveWorkspace(record);
   return record;
+}
+
+/** Register newly created ignored files without copying into the origin by hand. */
+export async function includeNewIgnoredFiles(id: string, paths: string[]): Promise<WorkspaceRecord> {
+  return withWorkspaceLock(id, async (record) => {
+    assertWorkspaceAvailable(record);
+    assertManagedCleanup(record);
+    const included = [...(record.includedIgnoredFiles ?? [])];
+    for (const path of paths) {
+      const [normalized] = ignoredFilePaths(record.worktreePath, join(record.worktreePath, record.relativeCwd), [path]);
+      if (included.some((file) => file.path === normalized)) continue;
+      if (isWorkspaceFinalized(record) || record.integrationCommit) {
+        throw new Error("Cannot include new files after integration has been prepared or finalized.");
+      }
+      if (optionalFileHash(record.destinationRoot, normalized!) !== null
+        || gitBuffer(record.destinationRoot, ["ls-files", "--cached", "-z", "--", normalized!]).length > 0) {
+        throw new Error(`New ignored file already exists in the original checkout; refusing to overwrite: ${normalized}`);
+      }
+      included.push({ path: normalized!, originalHash: null });
+    }
+    record.includedIgnoredFiles = included;
+    saveWorkspace(record);
+    return record;
+  });
+}
+
+/** Must be called outside sandboxed Bash, after its mount-point cleanup. */
+export function repositoryStatus(cwd: string): string {
+  const root = findGitRoot(cwd);
+  if (!root) return `Not a Git repository: ${cwd}`;
+  if (canonicalPath(root) !== canonicalPath(cwd)) throw new Error(`Repository root changed before status inspection: ${cwd} → ${root}`);
+  const lines = gitText(root, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--short", "--untracked-files=all"]).split("\n");
+  const status = lines.join("\n").trim() ? lines.slice(0, 100).join("\n") : "(clean)";
+  return `Repository: ${root}\n${status}${lines.length > 100 ? `\n(${lines.length - 100} more status entries omitted)` : ""}`;
 }
 
 export function repositoryWriteRoots(cwd: string): string[] {
@@ -843,19 +895,71 @@ function changedIgnoredFiles(record: WorkspaceRecord): { path: string; hash: str
     if (record.resultTree && gitBuffer(record.worktreePath, ["ls-tree", "-r", "-z", record.resultTree, "--", file.path]).length > 0) {
       throw new Error(`Included ignored file became tracked in the workspace: ${file.path}`);
     }
-    const hash = regularFileHash(record.worktreePath, file.path);
+    const hash = optionalFileHash(record.worktreePath, file.path);
     if (hash === file.originalHash) continue;
-    const destinationHash = regularFileHash(record.destinationRoot, file.path);
-    if (gitBuffer(record.destinationRoot, ["ls-files", "--cached", "-z", "--", file.path]).length > 0
-      || gitResult(record.destinationRoot, ["check-ignore", "-q", "--", file.path]).status !== 0) {
-      throw new Error(`Included file is no longer ignored and untracked: ${file.path}`);
+    if (hash === null) throw new Error(`Included ignored file was deleted; deletion is not supported: ${file.path}`);
+    ignoredFilePaths(record.worktreePath, record.worktreePath, [file.path]);
+    const destinationHash = optionalFileHash(record.destinationRoot, file.path);
+    if (gitBuffer(record.destinationRoot, ["ls-files", "--cached", "-z", "--", file.path]).length > 0) {
+      throw new Error(`Included file became tracked in the original checkout: ${file.path}`);
     }
-    if (destinationHash !== file.originalHash && destinationHash !== hash) {
+    // Matching planned bytes can satisfy a copy during recovery (including a
+    // crash before its completion was recorded). Initial enrollment must still
+    // reject an independently created destination, even with identical bytes.
+    const matchesPlannedCopy = record.integrationIgnoredChanges?.some((change) => change.path === file.path && change.hash === hash);
+    if ((file.originalHash === null && destinationHash !== null && !(matchesPlannedCopy && destinationHash === hash))
+      || (destinationHash !== file.originalHash && destinationHash !== hash)) {
       throw new Error(`Ignored file changed in the original checkout; refusing to overwrite: ${file.path}`);
     }
     changed.push({ path: file.path, hash });
   }
   return changed;
+}
+
+function copyIgnoredFile(record: WorkspaceRecord, file: { path: string; hash: string }): boolean {
+  const original = record.includedIgnoredFiles?.find((entry) => entry.path === file.path);
+  if (!original) throw new Error(`Ignored file was not selected: ${file.path}`);
+  const destinationPath = join(record.destinationRoot, file.path);
+  if (!pathInside(record.destinationRoot, destinationPath)) throw new Error(`Ignored file would escape the original checkout: ${file.path}`);
+  if (gitResult(record.destinationRoot, ["check-ignore", "-q", "--", file.path]).status !== 0
+    || gitBuffer(record.destinationRoot, ["ls-files", "--cached", "-z", "--", file.path]).length > 0) {
+    throw new Error(`Included file is not ignored and untracked after applying the patch: ${file.path}`);
+  }
+  const hash = optionalFileHash(record.destinationRoot, file.path);
+  if (hash === file.hash) return false;
+  if (hash !== original.originalHash) throw new Error(`Ignored file changed in the original checkout; refusing to overwrite: ${file.path}`);
+  mkdirSync(dirname(destinationPath), { recursive: true });
+  if (!pathInside(record.destinationRoot, destinationPath)) throw new Error(`Ignored file would escape the original checkout: ${file.path}`);
+  const temporary = `${destinationPath}.pi-${randomUUID()}.tmp`;
+  try {
+    copyFileSync(join(record.worktreePath, file.path), temporary);
+    if (regularFileHash(record.destinationRoot, relative(record.destinationRoot, temporary)) !== file.hash) {
+      throw new Error(`Ignored file changed while copying: ${file.path}`);
+    }
+    if (original.originalHash === null) {
+      // Atomic no-clobber publication, including a file created after preflight.
+      linkSync(temporary, destinationPath);
+    } else {
+      if (optionalFileHash(record.destinationRoot, file.path) !== original.originalHash) {
+        throw new Error(`Ignored file changed while copying; refusing to overwrite: ${file.path}`);
+      }
+      renameSync(temporary, destinationPath);
+    }
+    return true;
+  } finally { rmSync(temporary, { force: true }); }
+}
+
+function assertSnapshotTree(root: string, expected: string, actual: string, message: string): void {
+  if (expected === actual) return;
+  const statuses = splitNul(gitBuffer(root, ["diff", "--no-renames", "--name-status", "-z", expected, actual]));
+  const lines: string[] = [];
+  for (let i = 0; i < statuses.length && lines.length < 50; i += 2) {
+    const path = statuses[i + 1]!;
+    const ignored = gitResult(root, ["check-ignore", "--no-index", "-q", "--", path]).status === 0;
+    lines.push(`${statuses[i]} ${JSON.stringify(path)}${ignored ? " (ignored by current rules)" : ""}`);
+  }
+  if (statuses.length / 2 > lines.length) lines.push("Additional changed paths omitted.");
+  throw new Error(`${message}\nMismatching paths (expected → current):\n${lines.join("\n")}`);
 }
 
 function assertWorkspaceAvailable(record: WorkspaceRecord): void {
@@ -899,7 +1003,7 @@ export async function previewWorkspaceIntegration(id: string, signal?: AbortSign
       return formatIntegrationChanges({
         files: integrationFiles(record.destinationRoot, destination.tree, merge.mergedTree),
         ignoredFiles: ignoredChanges
-          .filter((file) => regularFileHash(record.destinationRoot, file.path) !== file.hash)
+          .filter((file) => optionalFileHash(record.destinationRoot, file.path) !== file.hash)
           .map((file) => file.path),
       }, true);
     } finally {
@@ -975,7 +1079,8 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal, optio
         assertWorkspaceAvailable(current);
         const recheck = captureSnapshot(record.destinationRoot, record.id, `recheck-${randomUUID()}`);
         try {
-          if (recheck.tree !== destination.tree || recheck.indexFingerprint !== destination.indexFingerprint
+          assertSnapshotTree(record.destinationRoot, destination.tree, recheck.tree, "Destination files changed while integration was being prepared; retry integration.");
+          if (recheck.indexFingerprint !== destination.indexFingerprint
             || recheck.head !== destination.head || recheck.branch !== destination.branch) {
             throw new Error("Destination changed while integration was being prepared; retry integration.");
           }
@@ -1007,22 +1112,12 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal, optio
               }
             }
             for (const file of ignoredChanges) {
-              const destinationPath = join(record.destinationRoot, file.path);
-              if (regularFileHash(record.destinationRoot, file.path) === file.hash) continue;
-              const temporary = `${destinationPath}.pi-${randomUUID()}.tmp`;
-              try {
-                copyFileSync(join(record.worktreePath, file.path), temporary);
-                if (regularFileHash(record.destinationRoot, relative(record.destinationRoot, temporary)) !== file.hash) {
-                  throw new Error(`Ignored file changed while copying: ${file.path}`);
-                }
-                applicationStarted = true;
-                renameSync(temporary, destinationPath);
+              applicationStarted = true;
+              if (copyIgnoredFile(record, file)) {
                 changedIncludedFile = true;
                 review.ignoredFiles.push(file.path);
                 review.applied = true;
                 saveWorkspace(record);
-              } finally {
-                rmSync(temporary, { force: true });
               }
             }
             if (record.integrationCommit) assertCommittedWorktree(record);
@@ -1074,9 +1169,10 @@ function assertCommitSettled(record: WorkspaceRecord): void {
 }
 
 function assertCommittedWorktree(record: WorkspaceRecord): void {
-  const snapshot = captureSnapshot(record.destinationRoot, record.id, `publication-${randomUUID()}`);
+  const expected = record.integrationCommit!.afterTree;
+  const snapshot = captureSnapshot(record.destinationRoot, record.id, `publication-${randomUUID()}`, expected);
   try {
-    if (snapshot.tree !== record.integrationCommit!.afterTree) throw new Error("Destination files changed during commit publication; inspect the retained attempt before retrying.");
+    assertSnapshotTree(record.destinationRoot, expected, snapshot.tree, "Destination files changed during commit publication; inspect the retained attempt before retrying.");
   } finally { deleteRef(record.destinationRoot, snapshot.ref); }
 }
 
@@ -1089,12 +1185,12 @@ async function resumeWorkspaceCommit(record: WorkspaceRecord, signal?: AbortSign
     checkCancellation(signal);
     const source = captureSnapshot(record.worktreePath, record.id, `recovery-source-${randomUUID()}`);
     try {
-      if (source.tree !== plan.sourceTree) throw new Error("Workspace changed after commit preparation; preserve the newer edits before recovering this integration.");
+      assertSnapshotTree(record.worktreePath, plan.sourceTree, source.tree, "Workspace changed after commit preparation; preserve the newer edits before recovering this integration.");
     } finally { deleteRef(record.worktreePath, source.ref); }
-    const snapshot = captureSnapshot(record.destinationRoot, record.id, `recovery-${randomUUID()}`);
+    const snapshot = captureSnapshot(record.destinationRoot, record.id, `recovery-${randomUUID()}`, plan.afterTree);
     try {
       if (snapshot.tree !== plan.beforeTree && snapshot.tree !== plan.afterTree) {
-        throw new Error("Interrupted integration has partial or newer destination edits; inspect the saved comparison before continuing. No patch was reapplied.");
+        assertSnapshotTree(record.destinationRoot, plan.afterTree, snapshot.tree, "Interrupted integration has partial or newer destination edits; inspect the saved comparison before continuing. No patch was reapplied.");
       }
       if (snapshot.tree === plan.beforeTree && (review.applied || snapshot.head !== plan.parent || snapshot.indexFingerprint !== plan.indexBefore)) {
         throw new Error("Interrupted integration no longer matches its original unapplied state; refusing to reapply it.");
@@ -1115,14 +1211,9 @@ async function resumeWorkspaceCommit(record: WorkspaceRecord, signal?: AbortSign
         review.applied = true;
         saveWorkspace(record);
         for (const file of ignoredChanges) {
-          const temporary = join(record.destinationRoot, `${file.path}.pi-${randomUUID()}.tmp`);
-          try {
-            copyFileSync(join(record.worktreePath, file.path), temporary);
-            if (regularFileHash(record.destinationRoot, relative(record.destinationRoot, temporary)) !== file.hash) throw new Error(`Ignored source changed during recovery: ${file.path}`);
-            renameSync(temporary, join(record.destinationRoot, file.path));
-            if (!review.ignoredFiles.includes(file.path)) review.ignoredFiles.push(file.path);
-            saveWorkspace(record);
-          } finally { rmSync(temporary, { force: true }); }
+          copyIgnoredFile(record, file);
+          if (!review.ignoredFiles.includes(file.path)) review.ignoredFiles.push(file.path);
+          saveWorkspace(record);
         }
         assertCommittedWorktree(record);
       });
