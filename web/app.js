@@ -1563,7 +1563,13 @@ function createConversation(host, row) {
     details.append(text("summary", label), markdown ? renderMarkdown(value) : text("pre", typeof value === "string" ? value : JSON.stringify(value, null, 2)));
     return details;
   }
-  function contentNodes(content, prefix, markdown = true) {
+  function toolStartTime(startedAt) {
+    const date = startedAt ? new Date(startedAt) : null;
+    return text("p", date && Number.isFinite(date.getTime())
+      ? `Started: ${date.toLocaleString(undefined, { year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short" })}` : "Time unavailable", "muted");
+  }
+  function contentNodes(content, prefix, markdown = true, startedAt) {
     const messageText = value => markdown ? renderMarkdown(value) : text("div", value, "message-text");
     if (typeof content === "string") return [messageText(content)];
     if (!Array.isArray(content)) return [text("pre", JSON.stringify(content, null, 2))];
@@ -1577,6 +1583,7 @@ function createConversation(host, row) {
       if (block.type === "toolCall") {
         const details = blockDetails(block.name, block.arguments, `${prefix}-call-${block.id}`);
         details.dataset.kind = block.type;
+        details.insertBefore(toolStartTime(startedAt), details.children[1]);
         return details;
       }
       if (block.type === "image") return text("p", "[Image attachment]", "muted");
@@ -1630,7 +1637,10 @@ function createConversation(host, row) {
     // Keep live executions beside their owner, including completed records until
     // the corresponding history result arrives. Reuse its key and expanded DOM.
     const historyKeys = new Set(history.map(entry => entry.key));
+    const executions = new Map(conversation.tools.filter(tool => tool.messageKey)
+      .map(tool => [`tool-${tool.messageKey}-${tool.toolCallId}`, tool]));
     const messages = history.flatMap(entry => {
+      if (entry.message.role === "toolResult") entry.execution = executions.get(entry.key);
       const tools = live ? conversation.tools.filter(tool => tool.messageKey ? entry.anchor === tool.messageKey
         : entry.message.role === "assistant" && Array.isArray(entry.message.content)
           && entry.message.content.some(block => block.type === "toolCall" && block.id === tool.toolCallId)) : [];
@@ -1691,7 +1701,7 @@ function createConversation(host, row) {
         skills.set(key, skill);
       }
     }
-    const entries = visible.flatMap(({ key, message, tool }) => {
+    const entries = visible.flatMap(({ key, message, tool, execution, anchor }) => {
       const assistant = ["assistant", "toolResult", "bashExecution"].includes(message.role)
         || message.role === "custom" && ["spawn_completion", "spawn_control_result"].includes(message.customType);
       const resultSkill = message.role === "toolResult" && skills.get(key);
@@ -1699,11 +1709,12 @@ function createConversation(host, row) {
       // Split mixed assistant messages so text stays outside consecutive activity.
       const parts = message.role === "assistant" && Array.isArray(message.content)
         ? message.content.map((block, index) => ({ key: `${key}-block-${index}`, message: { ...message, content: [block] },
-          activity: block.type !== "text", skill: skills.get(`${key}-block-${index}`) }))
-        : [{ key, message, activity: assistant && message.role !== "assistant", skill: resultSkill }];
-      return parts.filter(part => part.message.role !== "assistant" || part.message.content?.[0]?.type !== "text" || part.message.content[0].text).map(({ key, message, activity, skill }) => ({
+          activity: block.type !== "text", skill: skills.get(`${key}-block-${index}`),
+          startedAt: anchor && executions.get(`tool-${anchor}-${block.id}`)?.startedAt }))
+        : [{ key, message, activity: assistant && message.role !== "assistant", skill: resultSkill, startedAt: execution?.startedAt }];
+      return parts.filter(part => part.message.role !== "assistant" || part.message.content?.[0]?.type !== "text" || part.message.content[0].text).map(({ key, message, activity, skill, startedAt }) => ({
         key, assistant, activity, isError: Boolean(skill?.isError || tool?.isError || message.isError),
-        value: [tool || message, skill], render() {
+        value: [tool || message, skill, startedAt], render() {
           const article = text(assistant ? "div" : "article", "", assistant ? "assistant-part" : "message");
           article.dataset.role = message.role;
           if (skill) {
@@ -1713,7 +1724,7 @@ function createConversation(host, row) {
             details.dataset.key = `skill-${key}`;
             details.dataset.kind = "skill";
             details.dataset.error = String(Boolean(skill.isError));
-            details.append(text("summary", `${state}: ${skill.name}`), text("p", skill.path, "muted"));
+            details.append(text("summary", `${state}: ${skill.name}`), toolStartTime(startedAt), text("p", skill.path, "muted"));
             if (skill.result) details.append(...contentNodes(skill.result.content ?? skill.result.output ?? skill.result, key));
             if (skill.result?.errorMessage) details.append(text("p", skill.result.errorMessage));
             article.append(details);
@@ -1721,19 +1732,20 @@ function createConversation(host, row) {
             const details = blockDetails(`${tool.toolName} / ${tool.state}`, tool.partialResult || tool.args, `output-${key}`);
             details.className = "tool-output";
             details.dataset.error = String(Boolean(tool.isError));
+            details.insertBefore(toolStartTime(startedAt), details.children[1]);
             article.append(details);
           } else if (message.role === "toolResult") {
             const details = document.createElement("details");
             details.className = "tool-output";
             details.dataset.key = `output-${key}`;
             details.dataset.error = String(Boolean(message.isError));
-            details.append(text("summary", `${message.toolName || "Tool"} / ${message.isError ? "error" : "output"}`));
+            details.append(text("summary", `${message.toolName || "Tool"} / ${message.isError ? "error" : "output"}`), toolStartTime(startedAt));
             details.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key, false));
             if (message.errorMessage) details.append(text("p", message.errorMessage));
             article.append(details);
           } else {
             if (!assistant) article.append(text("div", messageLabel(message), "message-label"));
-            article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key));
+            article.append(...contentNodes(message.content ?? message.output ?? message.text ?? message, key, true, startedAt));
             if (message.role !== "assistant" && message.errorMessage) article.append(text("p", message.errorMessage));
           }
           return article;

@@ -2,6 +2,7 @@ local floats = require("pi-integration.floats")
 local json = require("pi-integration.utils.json")
 local message_utils = require("pi-integration.utils.message")
 local pi_spawn_artifacts = require("pi-integration.spawn-artifacts")
+local time_utils = require("pi-integration.utils.time")
 
 local M = {}
 
@@ -406,7 +407,7 @@ function M.is_codemode_child(state, message)
 	return false
 end
 
-function M.record_execution_call(state, tool_name, tool_call_id, args, execution_status, parent_tool_call_id)
+function M.record_execution_call(state, tool_name, tool_call_id, args, execution_status, parent_tool_call_id, started_at)
 	if not tool_call_id then
 		return
 	end
@@ -418,6 +419,7 @@ function M.record_execution_call(state, tool_name, tool_call_id, args, execution
 	call.display = display_for_call(state, call.name, call.args) or call.display
 	-- Execution can finish while details.status still describes a running background job.
 	call.execution_status = execution_status or call.execution_status
+	call.started_at = started_at or call.started_at
 	state.tool_calls[tool_call_id] = call
 end
 
@@ -585,6 +587,11 @@ local function set_scratch_buffer(buf, name, filetype, lines)
 	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 end
 
+local function execution_start_label(state, output)
+	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
+	return call and call.started_at and ("Started: " .. time_utils.format_timestamp(call.started_at)) or "Time unavailable"
+end
+
 local function open_edit_diff_float(ctx, output)
 	local args = type(output.args) == "table" and output.args or {}
 	local path = path_from_args(args)
@@ -653,6 +660,9 @@ local function open_edit_diff_float(ctx, output)
 		title_pos = "left",
 	})
 
+	local start_label = execution_start_label(ctx.state, output)
+	vim.api.nvim_set_option_value("winbar", " " .. start_label, { win = left_win })
+	vim.api.nvim_set_option_value("winbar", " " .. start_label, { win = right_win })
 	set_diff_window_options(left_win)
 	set_diff_window_options(right_win)
 	vim.api.nvim_set_current_win(left_win)
@@ -1082,7 +1092,7 @@ function M.open_float(ctx, output_id, resolved)
 	end
 	local call = output.tool_call_id and state.tool_calls and state.tool_calls[output.tool_call_id]
 	local pending = call and (call.execution_status == "running" or call.execution_status == "interrupted")
-	if not pending and not agent_exchange_title(output) and output.spawn and pi_spawn_artifacts.open_output(ctx, output) then
+	if not pending and not agent_exchange_title(output) and output.spawn and pi_spawn_artifacts.open_output(ctx, output, execution_start_label(state, output)) then
 		return true
 	end
 	if not pending and output.name == "edit" and not output.is_error and open_edit_diff_float(ctx, output) then
@@ -1190,6 +1200,7 @@ function M.open_float(ctx, output_id, resolved)
 		footer = permission and " q close " or nil,
 	})
 
+	vim.api.nvim_set_option_value("winbar", " " .. execution_start_label(state, output), { win = win })
 	local wrap = output.name == "codemode" or output.name == "question" or output.name == "permission"
 		or agent_exchange_title(output) ~= nil or message_utils.agent_context(output.text) ~= nil
 	vim.api.nvim_set_option_value("wrap", wrap, { win = win })

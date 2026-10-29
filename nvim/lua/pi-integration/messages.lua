@@ -258,7 +258,7 @@ end
 
 local function with_tool_executions(messages, tools)
 	if not tools or #tools == 0 then return messages or {} end
-	local calls, results, by_id, at_message, anchors = {}, {}, {}, {}, {}
+	local calls, results, by_id, at_message, anchors, starts = {}, {}, {}, {}, {}, {}
 	local call_positions, result_positions = {}, {}
 	for index, message in ipairs(messages or {}) do
 		if message.messageKey then
@@ -296,6 +296,7 @@ local function with_tool_executions(messages, tools)
 		local at = key and anchors[key] or (not key and id and (calls[id] or results[id]))
 		local result_at, call_at = results[tool.toolCallId], calls[tool.toolCallId] or (id and calls[id])
 		local has_result = result_at and (not call_at or result_at > call_at)
+		local matched_result = has_result and result_at
 		if key and at then
 			-- Old nested records can outlive a reused parent ID. Attach them only
 			-- to their observed owner, and look for results in that occurrence.
@@ -303,11 +304,15 @@ local function with_tool_executions(messages, tools)
 			for _, position in ipairs(call_positions[id] or {}) do
 				if position > at then boundary = position; break end
 			end
-			has_result = false
+			has_result, matched_result = false, nil
 			for _, position in ipairs(result_positions[tool.toolCallId] or {}) do
-				if position > at and position < boundary then has_result = true; break end
+				if position > at and position < boundary then
+					has_result, matched_result = true, position
+					break
+				end
 			end
 		end
+		if at and matched_result then starts[matched_result] = tool.startedAt end
 		if at and not has_result then
 			at_message[at] = at_message[at] or {}
 			table.insert(at_message[at], tool)
@@ -315,6 +320,7 @@ local function with_tool_executions(messages, tools)
 	end
 	local visible = {}
 	for index, message in ipairs(messages or {}) do
+		if starts[index] then message = vim.tbl_extend("force", message, { startedAt = starts[index] }) end
 		table.insert(visible, message)
 		-- Nested calls have no standalone history message. Keep their live records
 		-- beside the root call, and omit records whose history anchor is gone.
@@ -510,6 +516,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 				toolName = message.toolName,
 				toolCallId = message.toolCallId,
 				parentToolCallId = message.parentToolCallId,
+				startedAt = message.startedAt,
 				content = result.content,
 				details = result.details,
 				isError = message.isError == true or result.isError == true,
@@ -519,7 +526,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 		if role == "tool_execution_start" or role == "tool_execution_update" then
 			if role == "tool_execution_start" then
 				pi_tool_output.record_execution_call(ctx.state, message.toolName, message.toolCallId, message.args,
-					message.state == "interrupted" and "interrupted" or "running", message.parentToolCallId)
+					message.state == "interrupted" and "interrupted" or "running", message.parentToolCallId, message.startedAt)
 			end
 			if not pi_skills.tool_result_skill_name(ctx.state, message) then
 				local partial = type(message.partialResult) == "table" and message.partialResult or {}
@@ -544,7 +551,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 			local name = message.toolName or "tool"
 			local text = message_utils.extract_text(message) or ""
 			local tool_call_id = message_utils.tool_call_id(message)
-			pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed", message.parentToolCallId)
+			pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed", message.parentToolCallId, message.startedAt)
 			if pi_skills.tool_result_skill_name(ctx.state, message) then
 				local output_id = pi_skills.apply_tool_result(ctx.state, message, text)
 				for _, item in ipairs(items) do

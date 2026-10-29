@@ -189,7 +189,7 @@ local function select_artifact(ctx, choices, prompt, is_output, send_action)
 end
 
 -- Inline outputs already contain normalized artifact paths in output.spawn.
-function M.open_output(ctx, output)
+function M.open_output(ctx, output, start_label)
 	if not output.spawn then
 		return false
 	end
@@ -198,7 +198,7 @@ function M.open_output(ctx, output)
 		ctx.ui.notify("No spawn artifacts found for this tool call", vim.log.levels.WARN)
 		return true
 	end
-	select_artifact(ctx, choices, "Open spawn artifact", true)
+	select_artifact(ctx, choices, "Open spawn artifact · " .. start_label, true)
 	return true
 end
 

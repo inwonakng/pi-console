@@ -16,6 +16,8 @@ export type ToolState = Omit<ToolStart, "type"> & {
   result?: ToolEnd["result"];
   isError?: boolean;
   durationMs?: number;
+  /** Owner-observed execution start; absent for unrecorded historical calls. */
+  startedAt?: string;
   /** Assistant message that owns this execution, including nested calls. */
   messageKey?: string;
 };
@@ -446,7 +448,7 @@ export class PiConversation {
             }
           }
         }
-        const execution: ToolState = { ...tool, messageKey: anchor, state: "running" };
+        const execution: ToolState = { ...tool, messageKey: anchor, state: "running", startedAt: new Date().toISOString() };
         this.reserve(`tool:${tool.toolCallId}`, execution);
         this.state.tools.push(execution);
         break;
