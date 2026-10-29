@@ -252,7 +252,7 @@ function M.new()
 			report(nil, "That group no longer exists")
 		end, "Rename selected group or session's group")
 		if config.role == "overview" then
-			map("<leader>pi", function()
+			map("<Esc><Esc>", function()
 				local entry = session()
 				if entry then report(runtime.control(entry, "interrupt")) end
 			end, "Interrupt current turn (keep session running)")
