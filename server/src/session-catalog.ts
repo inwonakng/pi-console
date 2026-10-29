@@ -268,6 +268,9 @@ export class SessionCatalog {
       session.deleted = true;
       this.updateSession(session);
     });
+    // Current side state has the same lifetime as its parent session.
+    try { await unlink(`${this.sessionFile(id)}.side.json`); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     await unlink(this.sessionFile(id));
     await syncDirectory(join(this.root, "sessions"));
   }

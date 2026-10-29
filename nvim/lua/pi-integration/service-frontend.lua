@@ -226,8 +226,6 @@ local function observe_authority(value, full)
 	if not authority or authority.epoch ~= value.serviceEpoch or authority.revision ~= value.runtimeRevision then
 		resources.invalidate()
 		if authority then tree.close(tree_ctx) end
-	elseif (authority.controller and authority.controller.grantId) ~= (controller and controller.grantId) then
-		tree.close(tree_ctx)
 	end
 	authority = { epoch = value.serviceEpoch, sequence = value.sequence, revision = value.runtimeRevision, controller = controller,
 		owner_view = owner_view, queue_view = queue_view }
@@ -2558,7 +2556,6 @@ tree_ctx.tree = {
 	cache_current = function(captured)
 		return captured and job and attachment and same_context(captured)
 			and captured.epoch == snapshot.serviceEpoch and authority and captured.epoch == authority.epoch
-			and captured.controller == (current_controller() and current_controller().grantId)
 	end,
 	read = function(done, since)
 		if not job or not attachment or not snapshot then
@@ -2566,7 +2563,8 @@ tree_ctx.tree = {
 			done(nil); return
 		end
 		local captured = stamp()
-		request("session.read", { kind = "entries", runtimeRevision = captured.revision, since = since }, function(ok, result)
+		local kind = vim.tbl_contains(hello.capabilities or {}, "history.treeEntries") and "treeEntries" or "entries"
+		request("session.read", { kind = kind, runtimeRevision = captured.revision, since = since }, function(ok, result)
 			if not tree_ctx.tree.cache_current(captured) then done(nil); return end
 			if not ok then
 				local missing_cursor = since and type(result.message) == "string" and result.message:find("Entry not found:", 1, true) ~= nil

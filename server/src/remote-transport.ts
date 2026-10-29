@@ -177,16 +177,32 @@ export class RemoteListener {
             diagnostics.action("terminate", "handler_cleanup"); ws.terminate(); });
         // Detect dead connections, including half-open controllers. No reconnect/replay.
         let alive = true;
-        ws.on("pong", () => { alive = true; diagnostics.pong(); });
+        let pongDeadline: NodeJS.Timeout | undefined;
+        ws.on("pong", () => { alive = true; clearTimeout(pongDeadline); diagnostics.pong(); });
         const ping = () => {
-          if (!alive) {
-            const error = Object.assign(new Error("WebSocket heartbeat expired: no pong within 15 seconds"), { code: "heartbeat_timeout" });
-            diagnostics.action("disconnect", "heartbeat_timeout", error);
-            peer.detach(error); diagnostics.action("destroy", "heartbeat_timeout"); stream.destroy();
-            diagnostics.action("terminate", "heartbeat_timeout"); ws.terminate();
-          } else { alive = false; diagnostics.ping(); ws.ping(); }
+          if (!alive) return;
+          alive = false;
+          // A ping can sit behind bulk data in the socket. Start its deadline
+          // after it is written, not while it is still queued locally.
+          ws.ping(undefined, false, error => {
+            if (error) {
+              diagnostics.action("disconnect", "websocket_error", error);
+              peer.detach(error); stream.destroy(); ws.terminate();
+              return;
+            }
+            diagnostics.ping();
+            // A fast peer may pong before the write callback runs.
+            if (alive || stream.destroyed) return;
+            pongDeadline = setTimeout(() => {
+              const error = Object.assign(new Error("WebSocket heartbeat expired: no pong within 15 seconds of sending ping"), { code: "heartbeat_timeout" });
+              diagnostics.action("disconnect", "heartbeat_timeout", error);
+              peer.detach(error); diagnostics.action("destroy", "heartbeat_timeout"); stream.destroy();
+              diagnostics.action("terminate", "heartbeat_timeout"); ws.terminate();
+            }, 15000);
+            pongDeadline.unref();
+          });
         };
-        this.pings.add(ping); ws.once("close", () => { peer.detach(); this.pings.delete(ping); });
+        this.pings.add(ping); ws.once("close", () => { clearTimeout(pongDeadline); peer.detach(); this.pings.delete(ping); });
       }); } catch (error) { release();
         this.sockets.get(socket)?.action("destroy", "upgrade_failed", error); socket.destroy(); }
     });

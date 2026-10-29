@@ -3,6 +3,7 @@ import { SERVICE_DIALOG_STATUS, serviceDialogTag, serviceUi } from "./shared/ser
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   SessionManager,
+  buildSessionProjection,
   sessionEntryToContextMessages,
   type ExtensionAPI,
   type ExtensionContext,
@@ -12,9 +13,9 @@ import {
   type SessionEntry,
   type SessionHeader,
 } from "@earendil-works/pi-coding-agent";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { messageKey, PERMISSION_HISTORY, permissionSnapshot } from "../scripts/permission-history.mjs";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,7 +33,9 @@ type Source = {
   systemPrompt: string;
 };
 
-type Seed = { source: Source; header: SessionHeader; entries: SessionEntry[]; boundary: string };
+type Reference = { source: Source; boundary: string; inheritedIds?: string[] };
+// Read-only compatibility with the old embedded side journal.
+type Seed = Reference & { header: SessionHeader; entries: SessionEntry[] };
 type RecordBase = { version: 1; parentSessionFile: string; parentSessionId: string; id: string };
 type JournalData =
   | { kind: "start"; seed?: Seed }
@@ -58,7 +61,8 @@ type Generation = {
   ctx: ExtensionContext;
   parentSessionFile: string;
   parentSessionId: string;
-  seed?: Seed;
+  reference?: Reference;
+  /** Only the side's own entries, never the inherited main context. */
   entries: SessionEntry[];
   leafId: string | null;
   messages: AgentMessage[];
@@ -70,7 +74,7 @@ type Generation = {
   running: boolean;
   error?: string;
   activity?: string;
-  journaled: boolean;
+  persisted: boolean;
   cancelled: boolean;
   dialogs: AbortController;
   dialogIds: Set<string>;
@@ -84,7 +88,7 @@ type Generation = {
   file?: string;
 };
 
-function snapshot(ctx: ExtensionContext, pi: ExtensionAPI): Seed {
+function reference(ctx: ExtensionContext, pi: ExtensionAPI): Reference {
   const source: Source = {
     capturedAt: new Date().toISOString(),
     cwd: ctx.cwd,
@@ -93,17 +97,38 @@ function snapshot(ctx: ExtensionContext, pi: ExtensionAPI): Seed {
     thinkingLevel: pi.getThinkingLevel(),
     systemPrompt: ctx.getSystemPrompt(),
   };
+  return { source, boundary: randomUUID() };
+}
+
+function materialize(ctx: ExtensionContext, ref: Reference): Seed {
+  const { source } = ref;
+  if (source.leafId && !ctx.sessionManager.getEntry(source.leafId)) throw new Error("Side context was deleted; start a new side conversation.");
   const manager = SessionManager.inMemory(source.cwd, { parentSession: ctx.sessionManager.getSessionFile() });
-  // Projection contains only finalized, effective context, including context edits.
-  for (const message of structuredClone(ctx.sessionManager.buildSessionProjection().messages)) {
+  // Reconstruct the captured branch, not today's active branch. Context edits
+  // after the reference point must not change an existing side conversation.
+  const branch = source.leafId ? ctx.sessionManager.getBranch(source.leafId) : [];
+  for (const message of structuredClone(buildSessionProjection(branch, source.leafId).messages)) {
     if (message.role === "compactionSummary") manager.appendCompaction(message.summary, null, message.tokensBefore);
     else if (message.role === "branchSummary") manager.branchWithSummary(manager.getLeafId(), message.summary);
     else manager.appendMessage(message);
   }
   if (source.model) manager.appendModelChange(source.model.provider, source.model.id);
   manager.appendThinkingLevelChange(source.thinkingLevel);
-  const boundary = manager.appendCustomEntry(BOUNDARY, { capturedAt: source.capturedAt });
-  return { source, header: manager.getHeader()!, entries: manager.getEntries(), boundary };
+  manager.appendCustomEntry(BOUNDARY, { capturedAt: source.capturedAt });
+  const generated = manager.getEntries();
+  if (ref.inheritedIds && ref.inheritedIds.length !== generated.length) throw new Error("Side context changed; start a new side conversation.");
+  // Compactions and context edits in the side can refer into inherited context.
+  // Keep those IDs stable too, not just the boundary. Legacy seeds retain only
+  // their ID list; new references derive IDs without storing main content.
+  const ids = new Map(generated.map((entry, index) => [entry.id, index === generated.length - 1 ? ref.boundary
+    : ref.inheritedIds?.[index] ?? createHash("sha256").update(`${ref.boundary}:${index}`).digest("hex").slice(0, 32)]));
+  const entries = generated.map(entry => {
+    const mapped = { ...entry, id: ids.get(entry.id)!, parentId: entry.parentId ? ids.get(entry.parentId) ?? entry.parentId : null };
+    if (mapped.type === "compaction") mapped.firstKeptEntryId = ids.get(mapped.firstKeptEntryId) ?? mapped.firstKeptEntryId;
+    if (mapped.type === "branch_summary" && mapped.fromId) mapped.fromId = ids.get(mapped.fromId) ?? mapped.fromId;
+    return mapped;
+  });
+  return { ...ref, header: manager.getHeader()!, entries };
 }
 
 function userText(message: AgentMessage | undefined): string | undefined {
@@ -113,13 +138,11 @@ function userText(message: AgentMessage | undefined): string | undefined {
 }
 
 function refreshMessages(g: Generation): void {
-  const boundary = g.seed ? g.entries.findIndex((entry) => entry.id === g.seed!.boundary) : -1;
-  g.messages = boundary < 0 ? [] : g.entries.slice(boundary + 1)
-    .flatMap(sessionEntryToContextMessages).filter((message) => message.role !== "system");
+  g.messages = g.entries.flatMap(sessionEntryToContextMessages).filter((message) => message.role !== "system");
   if (g.pendingPrompt) {
     // Keep an accepted prompt visible even if the child dies before persisting it.
-    const after = g.pendingAfter ? g.entries.findIndex((entry) => entry.id === g.pendingAfter) : boundary;
-    const persisted = g.entries.slice(Math.max(boundary, after) + 1).some((entry) =>
+    const after = g.pendingAfter ? g.entries.findIndex((entry) => entry.id === g.pendingAfter) : -1;
+    const persisted = g.entries.slice(after + 1).some((entry) =>
       entry.type === "message" && userText(entry.message) === g.pendingPrompt);
     if (persisted) g.pendingPrompt = undefined;
     else g.messages.push({ role: "user", content: g.pendingPrompt, timestamp: Date.now() });
@@ -136,26 +159,18 @@ export default function sideExtension(pi: ExtensionAPI) {
     return g.ctx.sessionManager.getSessionId() === g.parentSessionId;
   }
 
-  function record(g: Generation, data: JournalData): void {
-    if (!owns(g)) return;
-    pi.appendEntry(JOURNAL, {
-      version: 1,
-      parentSessionFile: g.parentSessionFile,
-      parentSessionId: g.parentSessionId,
-      id: g.id,
-      ...data,
-    });
-  }
-
-  function startJournal(g: Generation): void {
-    if (g.journaled) return;
-    record(g, { kind: "start", seed: g.seed });
-    g.journaled = true;
-  }
-
   function state(g: Generation): void {
-    startJournal(g);
-    record(g, { kind: "state", running: g.running, error: g.error, pendingPrompt: g.pendingPrompt, pendingAfter: g.pendingAfter });
+    if (current !== g || !owns(g) || !g.parentSessionFile || !existsSync(g.parentSessionFile)) return;
+    const path = `${g.parentSessionFile}.side.json`;
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify({ version: 2, parentSessionFile: g.parentSessionFile,
+        parentSessionId: g.parentSessionId, id: g.id, reference: g.reference, entries: g.entries, leafId: g.leafId,
+        draft: g.draft, running: g.running, error: g.error, pendingPrompt: g.pendingPrompt, pendingAfter: g.pendingAfter }),
+        { mode: 0o600, flag: "wx" });
+      renameSync(temporary, path);
+      g.persisted = true;
+    } finally { rmSync(temporary, { force: true }); }
   }
 
   function publish(g: Generation): void {
@@ -171,7 +186,7 @@ export default function sideExtension(pi: ExtensionAPI) {
     g.ctx.ui.setStatus("pi-side", JSON.stringify({
       parentSessionFile: g.parentSessionFile,
       id: g.id,
-      capturedAt: g.seed?.source.capturedAt,
+      capturedAt: g.reference?.source.capturedAt,
       messages: g.messages,
       tools: g.tools,
       messageKeys: g.messages.map(messageKey),
@@ -194,9 +209,9 @@ export default function sideExtension(pi: ExtensionAPI) {
     const known = new Set(g.entries.map((entry) => entry.id));
     const delta = entries.filter((entry) => !known.has(entry.id));
     if (delta.length || leafId !== g.leafId) {
-      record(g, { kind: "entries", entries: delta, leafId });
       g.entries.push(...delta);
       g.leafId = leafId;
+      state(g);
     }
     refreshMessages(g);
   }
@@ -207,7 +222,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       // message_end is emitted before SessionManager appends that message.
       await new Promise<void>((resolve) => setImmediate(resolve));
       const data = await g.child.request<{ entries: SessionEntry[]; leafId: string | null }>({
-        type: "get_entries", since: g.entries.at(-1)?.id,
+        type: "get_entries", since: g.entries.at(-1)?.id ?? g.reference?.boundary,
       });
       addEntries(g, data.entries, data.leafId);
     });
@@ -224,7 +239,9 @@ export default function sideExtension(pi: ExtensionAPI) {
         try { entries.push(JSON.parse(line) as SessionEntry); }
         catch { break; } // A killed child can leave a partial final line.
       }
-      addEntries(g, entries, entries.at(-1)?.id ?? g.leafId);
+      const boundary = entries.findIndex(entry => entry.id === g.reference?.boundary);
+      if (boundary < 0) throw new Error("Missing side context boundary");
+      addEntries(g, entries.slice(boundary + 1), entries.at(-1)?.id ?? g.leafId);
     } catch (error) {
       failure(g, `Unable to recover side transcript: ${String(error)}`);
     }
@@ -367,25 +384,24 @@ export default function sideExtension(pi: ExtensionAPI) {
   function ensureChild(g: Generation): Promise<SideRpc> {
     if (g.ready) return g.ready;
     g.ready = (async () => {
-      if (!g.seed) {
-        g.seed = snapshot(g.ctx, pi);
-        g.entries = [...g.seed.entries];
-        g.leafId = g.entries.at(-1)?.id ?? null;
-        startJournal(g);
-        record(g, { kind: "seed", seed: g.seed });
+      if (!g.reference) {
+        g.reference = reference(g.ctx, pi);
+        g.leafId = g.reference.boundary;
+        state(g);
       }
+      const seed = materialize(g.ctx, g.reference);
       g.directory = mkdtempSync(join(tmpdir(), "pi-side-"));
       g.file = join(g.directory, "session.jsonl");
-      writeFileSync(g.file, [g.seed.header, ...g.entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
+      writeFileSync(g.file, [seed.header, ...seed.entries, ...g.entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
       const promptFile = join(g.directory, "system-prompt.md");
-      writeFileSync(promptFile, `${g.seed.source.systemPrompt}\n\nYou are answering an independent side conversation. The earlier conversation is a fixed snapshot for reference. Do not resume its task or assume its tools are available: use only your currently declared tools. Act only on requests in this side conversation. Your access mode is fixed to ask; request approval for writes and additional shell capabilities. Side answers are not sent to the main agent.\n`, { mode: 0o600 });
+      writeFileSync(promptFile, `${g.reference.source.systemPrompt}\n\nYou are answering an independent side conversation. The earlier conversation is a fixed snapshot for reference. Do not resume its task or assume its tools are available: use only your currently declared tools. Act only on requests in this side conversation. Your access mode is fixed to ask; request approval for writes and additional shell capabilities. Side answers are not sent to the main agent.\n`, { mode: 0o600 });
       const args = ["--mode", "rpc", "--session", g.file, "--no-approve", "--no-context-files", "--system-prompt", promptFile,
         "-e", join(dirname(fileURLToPath(import.meta.url)), "access-mode.ts"),
         "-e", join(dirname(fileURLToPath(import.meta.url)), "service.ts"),
         "-e", "builtin:codemode", "-e", "builtin:tool-search", "--tools", "read,bash,edit,write,grep,find,ls,codemode,tool_search"];
-      if (g.seed.source.model) args.push("--provider", g.seed.source.model.provider, "--model", g.seed.source.model.id);
-      args.push("--thinking", g.seed.source.thinkingLevel);
-      const child: SideRpc = new SideRpc(args, g.seed.source.cwd, (data) => event(g, child, data), (error) => {
+      if (g.reference.source.model) args.push("--provider", g.reference.source.model.provider, "--model", g.reference.source.model.id);
+      args.push("--thinking", g.reference.source.thinkingLevel);
+      const child: SideRpc = new SideRpc(args, g.reference.source.cwd, (data) => event(g, child, data), (error) => {
         if (g.child !== child) return;
         g.dialogs.abort();
         recoverFile(g);
@@ -427,7 +443,7 @@ export default function sideExtension(pi: ExtensionAPI) {
   }
 
   async function retire(g: Generation): Promise<void> {
-    if (!g.journaled && !g.child) return;
+    if (!g.persisted && !g.child) return;
     g.cancelled = true;
     g.dialogs.abort();
     g.dialogIds.clear();
@@ -444,44 +460,79 @@ export default function sideExtension(pi: ExtensionAPI) {
     if (g.directory) rmSync(g.directory, { recursive: true, force: true });
   }
 
-  function fresh(ctx: ExtensionContext, seed?: Seed): Generation {
+  function fresh(ctx: ExtensionContext, ref?: Reference): Generation {
     return {
       id: randomUUID(), ctx,
       parentSessionFile: ctx.sessionManager.getSessionFile() ?? "",
       parentSessionId: ctx.sessionManager.getSessionId(),
-      seed, entries: seed ? [...seed.entries] : [], leafId: seed?.boundary ?? null,
-      messages: [], tools: [], draft: "", running: false, journaled: false,
+      reference: ref, entries: [], leafId: ref?.boundary ?? null,
+      messages: [], tools: [], draft: "", running: false, persisted: false,
       cancelled: false, dialogs: new AbortController(), dialogIds: new Set(), dialogControllers: new Map(), drain: Promise.resolve(),
     };
   }
 
   function restore(ctx: ExtensionContext): Generation {
     let g = fresh(ctx);
-    // Deliberately session-wide: /tree does not rewind the side conversation.
-    for (const entry of ctx.sessionManager.getEntries()) {
-      if (entry.type !== "custom" || entry.customType !== JOURNAL || !entry.data) continue;
-      const data = entry.data as JournalRecord;
-      if (data.version !== 1 || data.parentSessionFile !== g.parentSessionFile || data.parentSessionId !== g.parentSessionId) continue;
-      if (data.kind === "start") {
-        g = fresh(ctx, data.seed);
-        g.id = data.id;
-        g.journaled = true;
-      } else if (data.id === g.id) {
-        if (data.kind === "seed") {
-          g.seed = data.seed;
-          g.entries = [...data.seed.entries];
-          g.leafId = data.seed.boundary;
-        } else if (data.kind === "entries") {
-          g.entries.push(...data.entries);
-          g.leafId = data.leafId;
-        } else if (data.kind === "draft") g.draft = data.draft;
-        else if (data.kind === "state") {
-          g.running = data.running;
-          g.pendingPrompt = data.pendingPrompt;
-          g.pendingAfter = data.pendingAfter;
-          g.error = data.error;
+    const path = g.parentSessionFile && `${g.parentSessionFile}.side.json`;
+    if (path && existsSync(path)) {
+      try {
+        const saved = JSON.parse(readFileSync(path, "utf8")) as Pick<Generation,
+          "parentSessionId" | "parentSessionFile" | "id" | "reference" | "entries" | "leafId" | "draft" | "running" | "error" | "pendingPrompt" | "pendingAfter"> & { version: number };
+        if (saved.version !== 2 || saved.parentSessionId !== g.parentSessionId || saved.parentSessionFile !== g.parentSessionFile
+          || typeof saved.id !== "string" || !Array.isArray(saved.entries) || typeof saved.draft !== "string"
+          || saved.entries.some(entry => !entry || typeof entry.id !== "string")
+          || saved.reference?.inheritedIds && (!Array.isArray(saved.reference.inheritedIds)
+            || saved.reference.inheritedIds.some(id => typeof id !== "string"))
+          || saved.reference && (typeof saved.reference.boundary !== "string" || !saved.reference.source
+            || typeof saved.reference.source.systemPrompt !== "string"
+            || saved.reference.source.leafId !== null && typeof saved.reference.source.leafId !== "string")) {
+          throw new Error("Invalid side conversation state");
+        }
+        g = { ...g, id: saved.id, reference: saved.reference, entries: saved.entries, leafId: saved.leafId,
+          draft: saved.draft, running: saved.running, error: saved.error,
+          pendingPrompt: saved.pendingPrompt, pendingAfter: saved.pendingAfter, persisted: true };
+      } catch (error) {
+        g.error = `Unable to restore side conversation: ${String(error)}. Use :PiSideNew to reset it.`;
+        return g;
+      }
+    } else {
+      // Legacy journal migration reads only its last generation. Never rewrite the
+      // main history file; subsequent saves replace the separate current state.
+      for (const entry of ctx.sessionManager.getEntries()) {
+        if (entry.type !== "custom" || entry.customType !== JOURNAL || !entry.data) continue;
+        const data = entry.data as JournalRecord;
+        if (data.version !== 1 || data.parentSessionFile !== g.parentSessionFile || data.parentSessionId !== g.parentSessionId) continue;
+        if (data.kind === "start") {
+          g = fresh(ctx, data.seed && { source: data.seed.source, boundary: data.seed.boundary,
+            inheritedIds: data.seed.entries.map(entry => entry.id) });
+          g.id = data.id;
+          if (data.seed) {
+            const boundary = data.seed.entries.findIndex(entry => entry.id === data.seed!.boundary);
+            g.entries = data.seed.entries.slice(boundary + 1);
+          }
+          g.persisted = true;
+        } else if (data.id === g.id) {
+          if (data.kind === "seed") {
+            g.reference = { source: data.seed.source, boundary: data.seed.boundary,
+              inheritedIds: data.seed.entries.map(entry => entry.id) };
+            const boundary = data.seed.entries.findIndex(entry => entry.id === data.seed.boundary);
+            g.entries = data.seed.entries.slice(boundary + 1);
+            g.leafId = data.seed.boundary;
+          } else if (data.kind === "entries") {
+            g.entries.push(...data.entries);
+            g.leafId = data.leafId;
+          } else if (data.kind === "draft") g.draft = data.draft;
+          else if (data.kind === "state") {
+            g.running = data.running;
+            g.pendingPrompt = data.pendingPrompt;
+            g.pendingAfter = data.pendingAfter;
+            g.error = data.error;
+          }
         }
       }
+    }
+    if (g.reference?.source.leafId && !ctx.sessionManager.getEntry(g.reference.source.leafId)) {
+      return fresh(ctx, reference(ctx, pi));
     }
     if (g.running) {
       g.running = false;
@@ -494,6 +545,7 @@ export default function sideExtension(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     shuttingDown = false;
     current = restore(ctx);
+    if (current.persisted || current.reference) state(current);
     publish(current);
   });
 
@@ -509,7 +561,7 @@ export default function sideExtension(pi: ExtensionAPI) {
     current = undefined;
   });
 
-  const sideAction = async (args: string, ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext) => {
+  const sideAction = async (args: string, ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext): Promise<{ disposition: "accepted" } | undefined> => {
       if (ctx.mode !== "rpc") {
         ctx.ui.notify("Side conversations are controlled through the pi-console frontend.", "warning");
         return;
@@ -535,8 +587,20 @@ export default function sideExtension(pi: ExtensionAPI) {
         reject("The parent session changed; the side action was not applied.");
         return;
       }
-      const g = current ??= restore(ctx);
+      let g = current ??= restore(ctx);
       g.ctx = ctx;
+      if (g.reference?.source.leafId && !ctx.sessionManager.getEntry(g.reference.source.leafId)) {
+        if (transition) { reject("Side conversation is stopping or starting a new chat."); return; }
+        const next = fresh(ctx, reference(ctx, pi));
+        transition = retire(g).then(() => {
+          current = next;
+          state(next);
+          publish(next);
+        }).finally(() => { transition = undefined; });
+        try { await transition; }
+        catch (error) { failure(current ?? g, error); reject("Could not reset the invalidated side conversation."); return; }
+        g = next;
+      }
       if (request.action === "open") { publish(g); return reply(true); }
       if (transition) { reject("Side conversation is stopping or starting a new chat."); return; }
       if (request.action === "draft") {
@@ -545,8 +609,7 @@ export default function sideExtension(pi: ExtensionAPI) {
         }
         if (g.draft !== request.draft) {
           g.draft = request.draft;
-          startJournal(g);
-          record(g, { kind: "draft", draft: g.draft });
+          state(g);
         }
         publish(g);
         return reply(true);
@@ -557,14 +620,14 @@ export default function sideExtension(pi: ExtensionAPI) {
       }
       if (request.action === "reset") {
         // Capture now, before waiting for the old child, even while main streams.
-        const next = fresh(ctx, snapshot(ctx, pi));
+        const next = fresh(ctx, reference(ctx, pi));
         g.activity = "Starting new side conversation";
         publish(g);
         transition = retire(g).then(() => {
           current = next;
-          startJournal(next);
+          state(next);
           publish(next);
-        }).catch((error) => failure(g, error)).finally(() => { transition = undefined; });
+        }).catch((error) => failure(current ?? g, error)).finally(() => { transition = undefined; });
         return reply(true);
       }
       if (request.action === "abort") {
@@ -586,10 +649,8 @@ export default function sideExtension(pi: ExtensionAPI) {
       g.running = true;
       g.activity = "Starting side conversation";
       g.draft = "";
-      startJournal(g);
-      record(g, { kind: "draft", draft: "" });
       g.pendingPrompt = message;
-      g.pendingAfter = g.entries.at(-1)?.id;
+      g.pendingAfter = g.entries.at(-1)?.id ?? g.reference?.boundary;
       state(g);
       refreshMessages(g);
       publish(g);

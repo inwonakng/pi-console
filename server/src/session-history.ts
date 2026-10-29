@@ -58,12 +58,13 @@ export async function savedHistoryPreview(context: ResourceContext): Promise<Tra
 export const HISTORY_COMMAND = "pi-console-history-read";
 export const HISTORY_STATUS = "pi-console-history-result";
 export const HISTORY_RESULT_BYTES = 80 * 1024 * 1024 - 64 * 1024;
-export type HistoryKind = "projection" | "entries" | "tree";
+export type HistoryKind = "projection" | "entries" | "tree" | "treeEntries";
 export type HistoryIdentity = { version: 1; invocationId: string; runtimeId: string; sessionId: string; sessionFile: string; kind: HistoryKind };
 export type ProjectedHistory = { messages: PiMessage[]; omittedMessages: number };
 type Entries = Extract<RpcResponse, { command: "get_entries"; success: true }>["data"];
 type Tree = Extract<RpcResponse, { command: "get_tree"; success: true }>["data"];
-export type HistoryData = ProjectedHistory | Entries | Tree;
+type TreeEntries = { entries: Record<string, unknown>[]; leafId: string | null };
+export type HistoryData = ProjectedHistory | Entries | Tree | TreeEntries;
 
 /** Correlated history stream with bounded messages. Malformed transport fails closed. */
 export class HistoryRead {
@@ -129,7 +130,7 @@ export class HistoryRead {
       let data: unknown;
       try { data = JSON.parse(text); } catch { throw new Error("Invalid history JSON"); }
       if (!object(data)) throw new Error("Invalid history data");
-      if (Object.keys(data).length !== 2 || !Array.isArray(data[this.identity.kind])
+      if (Object.keys(data).length !== 2 || !Array.isArray(data[this.identity.kind === "treeEntries" ? "entries" : this.identity.kind])
         || (data.leafId !== null && typeof data.leafId !== "string")) throw new Error("Invalid history data");
       this.data = data as HistoryData;
     }

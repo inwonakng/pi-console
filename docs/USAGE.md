@@ -86,16 +86,22 @@ plus codemode, independently of the main agent's access mode. Approvals share
 the normal dialog UI and wait their turn if another request is open. The main
 agent keeps working; neither side prompts nor answers enter its model context.
 
-The first side prompt captures finalized main context. Follow-ups retain that
-snapshot. In either side buffer, normal-mode `<leader>n` (or `:PiSideNew`) starts
-a new side conversation: it cancels side work, clears side history and the draft,
-and captures fresh main context. `:PiSideAbort` stops only the side run. Select
+The first side prompt references the finalized main-history point. Follow-ups
+retain that context even as the main conversation advances. In either side buffer,
+normal-mode `<leader>n` (or `:PiSideNew`) replaces the current side conversation:
+it cancels side work, discards its history and draft, and references the current
+main-history point. `:PiSideAbort` stops only the side run. Select
 side transcript lines and use `:PiSteer` to explicitly send them to the main run.
 
-Side history and drafts are stored inside the parent session and restored on
-restart. Send a main prompt first to create the saved parent session. Navigating
-within the parent's history does not rewind the side conversation; a different
-parent session has its own side conversation. Stop side work before restarting.
+Only the current side conversation is saved, in `<parent-session-file>.side.json`,
+and restored on restart. Its main-context reference does not duplicate the main
+transcript; inherited context is materialized only for the side agent's temporary
+session. Older embedded journals are read for migration without rewriting the
+parent history file. Send a main prompt first to create the saved parent session.
+Navigating within the parent's history does not rewind the side conversation.
+Deleting its referenced history point resets it against the current main context.
+Deleting or trashing a saved parent also removes its current side-state file.
+A different parent session has its own side conversation. Stop side work before restarting.
 
 ### Restarting
 

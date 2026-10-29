@@ -846,6 +846,16 @@ are retained per connection; detaching releases them. Initial attachment updates
 start only after its history has been fetched. Both frontends assemble all pages
 before replacing their transcript baseline. Total transcript length has no cap;
 existing per-response and live-state budgets remain in force.
+Hosts advertising `history.treeEntries` accept typed `session.read` with
+`{ kind: "treeEntries", runtimeRevision, since? }`. It returns flat `entries` and
+`leafId` for the complete history tree (or all entries after `since`). Every raw
+ID/parent link is retained, along with full tree display/search text and workspace
+locations. Internal journals, image data, tool arguments/results and other unused
+metadata are excluded from this view only; ordinary transcript and raw-history
+reads are unchanged. Browsing caches do not depend on control ownership; history
+mutations still require a fresh authorized context. Older hosts retain the raw
+`entries` read path.
+
 Native queue snapshots and recent dispatch/acceptance/rejection/uncertain work metadata are diagnostic;
 these transport IDs are **not** frontend command receipts, deduplication or the
 editable accepted queue. Application receipts are separately exposed by
@@ -891,6 +901,9 @@ session editing, not network access. Heartbeat every 5 seconds with
 `heartbeat(attachmentId, token)`; expiry is 20 seconds on `performance.now()`, not
 client/wall-clock time. Heartbeats are ephemeral liveness checks, not durable
 commands, and never reacquire a grant. Timer/authority checks expire old grants.
+The independent WebSocket pong deadline starts after the ping write completes,
+so locally queued bulk output does not consume the peer's 15-second response window.
+This does not extend the control lease or reacquire expired control.
 Neovim's bridge renews control while the editor process remains alive and connected,
 including during modal prompts. Queue-edit reservation renewal still depends on the
 visible Neovim editor, so an interrupted editing pause can expire without losing

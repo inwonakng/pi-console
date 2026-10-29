@@ -1537,7 +1537,7 @@ export class OwnedSession {
     const worker = this.commandRuntime(input.runtimeRevision);
     const check = () => { admission?.(); this.commandRuntime(input.runtimeRevision, worker); };
     check();
-    if (input.kind === "entries" || input.kind === "tree") {
+    if (input.kind === "entries" || input.kind === "tree" || input.kind === "treeEntries") {
       const data = await this.readHistory(worker, input.kind, check, input.since);
       check();
       return { runtimeRevision: this.runtimeRevision, data };

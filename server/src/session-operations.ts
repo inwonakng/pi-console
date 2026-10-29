@@ -45,7 +45,7 @@ export function nativeCommand(command: NativeOperation): RpcCommand {
   }
 }
 export function isNative(value: { operation: string }): value is NativeOperation { return (NATIVE_OPERATIONS as readonly string[]).includes(value.operation); }
-export const SESSION_READS = ["models", "thinking", "entries", "tree", "stats", "forkMessages", "commands"] as const;
+export const SESSION_READS = ["models", "thinking", "entries", "tree", "treeEntries", "stats", "forkMessages", "commands"] as const;
 export type SessionRead = typeof SESSION_READS[number];
 export function readCommand(kind: unknown, since?: string): RpcCommand | undefined {
   switch (kind) {
@@ -61,6 +61,6 @@ export function readCommand(kind: unknown, since?: string): RpcCommand | undefin
 export function validRead(value: unknown): value is { kind: SessionRead; runtimeRevision: number; since?: string } {
   return object(value) && (SESSION_READS as readonly unknown[]).includes(value.kind)
     && (exact(value, ["kind", "runtimeRevision"])
-      || value.kind === "entries" && exact(value, ["kind", "runtimeRevision", "since"]) && string(value.since))
+      || (value.kind === "entries" || value.kind === "treeEntries") && exact(value, ["kind", "runtimeRevision", "since"]) && string(value.since))
     && Number.isSafeInteger(value.runtimeRevision) && Number(value.runtimeRevision) >= 0;
 }

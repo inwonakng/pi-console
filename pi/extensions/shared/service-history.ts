@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { serviceManaged, serviceRuntimeId } from "./service-ui";
 
 // Keep the private wire contract in step with server/src/session-history.ts.
@@ -7,7 +7,7 @@ const STATUS = "pi-console-history-result";
 const HISTORY_BYTES = 16 * 1024 * 1024;
 const RESULT_BYTES = 80 * 1024 * 1024 - 64 * 1024; // Public response envelope allowance.
 const CHUNK_UNITS = 64 * 1024;
-type Kind = "projection" | "entries" | "tree";
+type Kind = "projection" | "entries" | "tree" | "treeEntries";
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 class ReadRefusal extends Error {
   constructor(readonly code: "session_busy" | "resource_limit" | "resource_unavailable" | "stale_runtime", message: string) { super(message); }
@@ -15,16 +15,63 @@ class ReadRefusal extends Error {
 
 function capture(ctx: ExtensionCommandContext, kind: Kind, since?: string): string {
   const manager = ctx.sessionManager;
-  if (kind === "entries") {
+  if (kind === "entries" || kind === "treeEntries") {
     let entries = manager.getEntries();
     if (since !== undefined) {
       const index = entries.findIndex(entry => entry.id === since);
       if (index === -1) throw new ReadRefusal("resource_unavailable", `Entry not found: ${since}`);
       entries = entries.slice(index + 1);
     }
-    return encode({ entries, leafId: manager.getLeafId() });
+    return encode({ entries: kind === "treeEntries" ? entries.map(treeEntry) : entries, leafId: manager.getLeafId() });
   }
   return encode({ tree: manager.getTree(), leafId: manager.getLeafId() });
+}
+
+/** Complete topology and display text, without tool payloads or internal journals.
+ * Keep every ID/parent link: hidden entries still determine forks and jump targets.
+ */
+export function treeEntry(entry: SessionEntry): Record<string, unknown> {
+  const base = { type: entry.type, id: entry.id, parentId: entry.parentId, timestamp: entry.timestamp };
+  switch (entry.type) {
+    case "message": {
+      const message = entry.message;
+      if (message.role === "assistant") return { ...base, message: { role: message.role, stopReason: message.stopReason,
+        content: assistantContent(message.content) } };
+      if (message.role === "user") return { ...base, message: { role: message.role, content: displayText(message.content) } };
+      if (message.role === "toolResult") return { ...base, message: { role: message.role, toolName: message.toolName } };
+      return { ...base, message: { role: message.role } };
+    }
+    case "custom_message": return { ...base, customType: entry.customType, display: entry.display, content: displayText(entry.content) };
+    case "custom": return { ...base, customType: entry.customType,
+      ...(entry.customType === "pi-workspace-location" && object(entry.data) ? { data: {
+        workspaceId: entry.data.workspaceId, label: entry.data.label, cwd: entry.data.cwd } } : {}) };
+    case "compaction": case "branch_summary": return { ...base, summary: entry.summary };
+    case "model_change": return { ...base, provider: entry.provider, modelId: entry.modelId };
+    case "thinking_level_change": return { ...base, thinkingLevel: entry.thinkingLevel };
+    case "label": return { ...base, label: entry.label, targetId: entry.targetId };
+    default: return base;
+  }
+}
+
+function assistantContent(content: unknown): string | Record<string, unknown>[] {
+  if (typeof content === "string") return content;
+  // Raw legacy aborted messages may have null/missing content. Unlike the
+  // canonical projection, getEntries deliberately leaves those records raw.
+  if (!Array.isArray(content)) return [];
+  return content.flatMap<Record<string, unknown>>(block => {
+    if (typeof block === "string") return [{ type: "text", text: block }];
+    if (!object(block)) return [];
+    if (block.type === "text" && typeof block.text === "string") return [{ type: "text", text: block.text }];
+    if (block.type === "toolCall" || block.type === "tool_call") return [{ type: "toolCall", name: block.name ?? block.toolName ?? block.tool_name }];
+    return [];
+  });
+}
+
+function displayText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map(block => typeof block === "string" ? block : object(block)
+    ? [block.text, block.content, block.delta].find(value => typeof value === "string") ?? "" : "").join("");
 }
 
 const escapes = /["\\\u0000-\u001f\ud800-\udfff]/g;
@@ -62,8 +109,8 @@ export function registerServiceHistory(pi: ExtensionAPI): void {
     if (!serviceManaged(ctx) || !object(v) || v.version !== 1
       || Object.keys(v).some(key => !["version", "invocationId", "runtimeId", "sessionId", "sessionFile", "kind", "since"].includes(key))
       || ![v.invocationId, v.runtimeId, v.sessionId, v.sessionFile].every(part => typeof part === "string" && !!part && Buffer.byteLength(part) <= 4096)
-      || typeof v.kind !== "string" || !["projection", "entries", "tree"].includes(v.kind)
-      || (v.since !== undefined && (v.kind !== "entries" || typeof v.since !== "string" || !v.since || Buffer.byteLength(v.since) > 4096))) {
+      || typeof v.kind !== "string" || !["projection", "entries", "tree", "treeEntries"].includes(v.kind)
+      || (v.since !== undefined && (!["entries", "treeEntries"].includes(v.kind) || typeof v.since !== "string" || !v.since || Buffer.byteLength(v.since) > 4096))) {
       throw new Error("Invalid managed history read");
     }
     const identity = { version: 1, invocationId: v.invocationId, runtimeId: v.runtimeId,
