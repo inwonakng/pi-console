@@ -1984,10 +1984,6 @@ local function with_new_session_cwd(open)
 	end))
 	refresh(true)
 end
-function M.new_session()
-	if M.config.role ~= "conversation" then return require("pi-integration.service-hosts").new_conversation() end
-	with_new_session_cwd(function(cwd) M.select_owner(M.config, nil, false, cwd) end)
-end
 function M.restart()
 	if not session_id then notify("Connection ready; no conversation worker exists yet."); return end
 	local captured, label = stamp(), "Restart conversation worker"
@@ -2065,6 +2061,23 @@ function M.controls_session(entry)
 end
 function M.kill_session()
 	kill_session(false)
+end
+function M.new_session()
+	if M.config.role ~= "conversation" then return require("pi-integration.service-hosts").new_conversation() end
+	with_new_session_cwd(function(cwd)
+		local captured = stamp()
+		local function open() M.select_owner(M.config, nil, false, cwd) end
+		-- Unused, eagerly allocated windows do not have a conversation to leave.
+		if not session_id or ctx.ui.window_id and not ctx.ui.window_submission then open(); return end
+		local choices = { "Detach and start new", "Cancel" }
+		if can_kill_session() then table.insert(choices, 1, "Stop and start new") end
+		vim.ui.select(choices, { prompt = "Start a new conversation (Stop ends the current session):" }, function(choice)
+			if not same_selection(captured) then return end
+			if choice == "Stop and start new" then
+				if backup() then kill_session(true, open) end
+			elseif choice == "Detach and start new" then open() end
+		end)
+	end)
 end
 function M.assign_group()
 	local entry = { initial_group = state.initial_group }
