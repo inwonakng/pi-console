@@ -713,9 +713,8 @@ render = function(metadata_only)
 	if not state.frontend_visible then return end
 	layout.update_input_sidebar(ctx)
 	if valid(state.input_buf) then
-		vim.bo[state.input_buf].modifiable = not session_id or ctx.ui.window_id ~= nil
-			or snapshot ~= nil and snapshot.phase == "ready" and snapshot.conversation.hydrated
-				and snapshot.runtimeRevision == current_revision()
+		-- Drafting stays local even while history or workspace state is synchronizing.
+		vim.bo[state.input_buf].modifiable = true
 	end
 	local inputs = { messages = conversation and conversation.messages, keys = conversation and conversation.messageKeys,
 		partial = conversation and conversation.partialAssistant, tools = conversation and conversation.tools,
@@ -861,8 +860,8 @@ local function apply_snapshot(value)
 		elseif not restarting and (snapshot.phase == "initializing" or snapshot.phase == "ready") and snapshot.runtimeRevision == current_revision() and runtime and runtime.active
 			and snapshot.piState and snapshot.piState.sessionId == runtime.sessionId
 			and snapshot.piState.sessionFile == runtime.sessionFile then
-			-- Fresh runtime control also answers initialization dialogs. Prompt input
-			-- stays disabled until hydration/readiness; preview supplies no authority.
+			-- Fresh runtime control also answers initialization dialogs. Submission
+			-- waits for hydration/readiness; preview supplies no authority.
 			-- Explicit reopen retains takeover confirmation and consumes its intent once.
 			auto_control_selection = nil
 			if explicit then ctx.ui.take_control() else acquire_control(false, stamp()) end
@@ -2570,9 +2569,16 @@ tree_ctx.tree = {
 		return true
 	end,
 	jump = function(id, summarize, captured)
+		local input_buf = state.input_buf
+		local input_tick = valid(input_buf) and vim.api.nvim_buf_get_changedtick(input_buf)
 		history_command("history.navigate", { entryId = id, summarize = summarize }, captured, function(result)
-			if result.editorText ~= nil and valid(state.input_buf) then
-				layout.set_buffer_lines(ctx, state.input_buf, vim.split(result.editorText, "\n", { plain = true }), true)
+			if result.editorText == nil then return end
+			-- Navigation may finish after the user has started drafting another message.
+			if input_buf == state.input_buf and valid(input_buf)
+				and vim.api.nvim_buf_get_changedtick(input_buf) == input_tick then
+				layout.set_buffer_lines(ctx, input_buf, vim.split(result.editorText, "\n", { plain = true }), true)
+			else
+				draft_buffer(scratch_name("history-editor-draft"), result.editorText)
 			end
 		end)
 	end,
