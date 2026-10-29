@@ -5,6 +5,34 @@ local tool_groups = require("pi-integration.tool-groups")
 local M = {}
 local MAX_PREVIEW_BYTES = 4 * 1024 * 1024
 
+local function size_picker(winopts)
+	local available = math.max(1, vim.o.lines - vim.o.cmdheight)
+	local chrome = 3 -- prompt, separator, and header; count is inline with the prompt
+	local limit = math.min(available, math.max(chrome + 1, math.floor(available * 0.4)))
+	local list_height = math.min(limit, math.max(1, winopts.pi_history_rows) + chrome)
+	local preview_height = available - list_height
+	winopts.row = 1.0
+	winopts.height = preview_height >= 2 and 1.0 or list_height
+	winopts.preview.vertical = "up:" .. math.max(2, preview_height)
+	winopts.preview.hidden = preview_height < 2
+end
+
+-- Recompute absolute preview sizes before fzf-lua's resize handler redraws.
+vim.api.nvim_create_autocmd("VimResized", {
+	group = vim.api.nvim_create_augroup("PiHistoryPicker", { clear = true }),
+	callback = function()
+		local win = require("fzf-lua").win.__SELF()
+		if not win or win._o.winopts.pi_history_rows == nil then return end
+		size_picker(win._o.winopts)
+		local hidden = win._o.winopts.preview.hidden
+		if hidden ~= win.preview_hidden then
+			win.preview_hidden = hidden
+			if hidden then win:close_preview(true)
+			elseif not win:hidden() then win:redraw_preview() end
+		end
+	end,
+})
+
 local function render(row, contents, more, limited)
 	local records, by_id, leaf = {}, {}, nil
 	for line in contents:gmatch("[^\n]+") do
@@ -182,6 +210,10 @@ function M.pick(label, rows, owners, format_item, on_choice, opts)
 	end
 	local keymap = { ["ctrl-f"] = "preview-page-down", ["ctrl-b"] = "preview-page-up", ["ctrl-a"] = "toggle-all" }
 	if opts.select_all then keymap.load = "select-all+unbind(load)" end
+	local winopts = { width = 1.0, pi_history_rows = #rows,
+		preview = { layout = "vertical", hidden = false, wrap = true },
+		on_close = function() closed = true end }
+	size_picker(winopts)
 	require("fzf-lua").fzf_live(function(args)
 		local query = args[1] or ""
 		if query == "" then return entries end
@@ -198,8 +230,7 @@ function M.pick(label, rows, owners, format_item, on_choice, opts)
 	end, {
 		prompt = (opts.archived and "Archived" or "Sessions") .. " on " .. label .. " (regex) > ",
 		previewer = { _ctor = function() return previewer() end },
-		winopts = { height = 1.0, width = 1.0, preview = { layout = "vertical", vertical = "up:60%", hidden = false, wrap = true },
-			on_close = function() closed = true end },
+		winopts = winopts,
 		fzf_opts = { ["--delimiter"] = "[\t]", ["--with-nth"] = "2..", ["--multi"] = true, ["--no-sort"] = true,
 			["--header"] = "Tab: select / Ctrl-a: all / Ctrl-f, Ctrl-b: scroll preview" },
 		keymap = { builtin = { ["<C-f>"] = "preview-page-down", ["<C-b>"] = "preview-page-up" }, fzf = keymap },
