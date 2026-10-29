@@ -294,11 +294,11 @@ Pinned sessions without a runtime display `Stopped`; an unreachable host display
 unresolved create/resume ID. These do not replay work. See the C report for exact
 arguments, confirmations and what completion means.
 
-- `:PiControl` / `<leader>pc` acquires control, confirming before replacing another
+- `:PiControl` / `<leader>pC` acquires control, confirming before replacing another
   controller. Attach/reconnect automatically acquires unclaimed control; otherwise
   it stays view-only. `<leader>ph` / `:PiHosts` manages hosts;
   select a host and "Attach current frontend" to switch the conversation frontend
-  to it. `<leader>pC` / `:PiCd` selects a directory on that host. These
+  to it. `<leader>pc` / `:PiCd` selects a directory on that host. These
   selections and new frontend windows create no session until the first prompt
   or shell submission. Pre-start settings are applied before that submission.
 - `<C-CR>` text or slash commands, `<Esc><Esc>` abort; shared queue via `:PiQueue` / `<leader>pq`.

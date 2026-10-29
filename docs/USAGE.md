@@ -26,7 +26,7 @@ Legacy file-based history remains available through `pi-stable`/`pi-dev --sessio
 Closing Neovim detaches; work, accepted prompts and pending approvals remain owned
 by the service. `:PiHosts` / `<leader>ph` manages local or saved HTTP hosts. Select
 a host, then "Attach current frontend" to switch this conversation frontend to it,
-or choose a connection, editing or forgetting action. `:PiCd` / `<leader>pC` chooses
+or choose a connection, editing or forgetting action. `:PiCd` / `<leader>pc` chooses
 a directory on that host. These selections leave existing sessions running. Explicit remote
 launches accept `--remote http://HOST:8443`; remote creation selects a directory on
 that host, never this machine's cwd. Every service listens on all IPv4 interfaces,
