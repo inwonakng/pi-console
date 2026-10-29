@@ -39,7 +39,7 @@ local approval_win, approval_request, heartbeat
 local approval_context, pending_context
 local pending_seen, pending_replies = {}, {}
 local ctx, sync_pending
-local recovery_id, backup_scheduled, restarting_frontend, frontend_leaving
+local recovery_id, backup_scheduled, restarting_frontend, restart_confirming, frontend_leaving
 local render, refresh, connect, attach, acquire_control, recover_selection, tree_ctx, advance_start, host_options, backup
 local side_buf, side_input_buf, side_context, side_id
 local queue_editor
@@ -494,6 +494,8 @@ local function command(operation, payload, callback, captured, terminal, submiss
 end
 local function draft_buffer(name, contents, on_save, on_hide, target_win)
 	local buf = layout.create_buffer(nil, name, "markdown", true)
+	-- Unlike nofile, acwrite tracks unsaved edits for restart confirmation.
+	vim.bo[buf].buftype = "acwrite"
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(contents or "", "\n", { plain = true }))
 	vim.bo[buf].modified = false
 	drafts[buf] = name
@@ -1837,6 +1839,8 @@ local function open_pending(item)
 	state.active_ui_request_id = id
 	local input_buf = require("pi-integration.events").open_dialog(ctx, request_data, answer)
 	if valid(input_buf) then
+		vim.bo[input_buf].buftype = "acwrite"
+		vim.bo[input_buf].modified = false
 		local name = scratch_name("answer-draft")
 		drafts[input_buf] = name
 		vim.api.nvim_create_autocmd("BufWipeout", { buffer = input_buf, once = true, callback = function()
@@ -1846,6 +1850,7 @@ local function open_pending(item)
 			drafts[input_buf] = nil
 			if contents ~= "" then
 				local saved = layout.create_buffer(nil, name, "markdown", true)
+				vim.bo[saved].buftype = "acwrite"
 				vim.api.nvim_buf_set_lines(saved, 0, -1, false, vim.split(contents, "\n", { plain = true }))
 				drafts[saved] = name
 			end
@@ -2716,19 +2721,56 @@ end
 function M.restart_console()
 	local path = M.config.restart_file
 	if not path or path == "" then notify("Launch through pi-console to relaunch the frontend."); return end
-	if not can_close_frontend() then return end
-	local value = local_snapshot()
-	if ctx.ui.window_id and not ctx.ui.window_submission then
-		-- The old unused worker is released on exit; restart the window with a
-		-- fresh allocation while retaining its input and selected settings.
-		value.service_session, value.pending_host, value.pending_host_select = nil, nil, nil
+	if restart_confirming then return end
+	restart_confirming = true
+	local discarded = {}
+	local function proceed()
+		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+			-- Main and side input have dedicated restart restoration. Everything
+			-- else needs confirmation, including hidden drafts and ordinary files.
+			if buf ~= state.input_buf and buf ~= state.transcript_buf and buf ~= side_input_buf
+				and vim.bo[buf].modified
+				and discarded[buf] ~= vim.api.nvim_buf_get_changedtick(buf) then
+				local name = vim.api.nvim_buf_get_name(buf)
+				if name == "" then name = "[No Name] (" .. buf .. ")" end
+				local tick = vim.api.nvim_buf_get_changedtick(buf)
+				vim.ui.select({ "Discard", "Cancel" }, { prompt = "Discard unsaved changes to " .. name .. " and restart frontend?" }, function(choice)
+					if choice == "Discard" then
+						-- Do not change buffers until all confirmations succeed.
+						discarded[buf] = tick
+						proceed()
+					else
+						restart_confirming = false
+						if valid(buf) then
+							local win = buffer.find_window(buf)
+							if win then vim.api.nvim_set_current_win(win) else
+								vim.cmd("botright split")
+								vim.api.nvim_win_set_buf(0, buf)
+							end
+						end
+					end
+				end)
+				return
+			end
+		end
+		local value = local_snapshot()
+		-- Recovery snapshots remain available via :PiDrafts, but a normal
+		-- restart must not reopen auxiliary buffers as recovered splits.
+		value.drafts = nil
+		if ctx.ui.window_id and not ctx.ui.window_submission then
+			-- The old unused worker is released on exit; restart the window with a
+			-- fresh allocation while retaining its input and selected settings.
+			value.service_session, value.pending_host, value.pending_host_select = nil, nil, nil
+		end
+		local ok, err = pcall(function()
+			assert(vim.fn.writefile({ vim.json.encode(value) }, path) == 0, "Could not write restart handoff")
+			restarting_frontend = true
+			vim.cmd("qall!")
+		end)
+		restart_confirming = false
+		if not ok then restarting_frontend = false; vim.fn.delete(path); notify(tostring(err), vim.log.levels.ERROR) end
 	end
-	local ok, err = pcall(function()
-		assert(vim.fn.writefile({ vim.json.encode(value) }, path) == 0, "Could not write restart handoff")
-		restarting_frontend = true
-		vim.cmd("qall!")
-	end)
-	if not ok then restarting_frontend = false; vim.fn.delete(path); notify(tostring(err), vim.log.levels.ERROR) end
+	proceed()
 end
 function M.follow_markdown_link()
 	local buf = vim.api.nvim_get_current_buf()
@@ -2862,7 +2904,6 @@ function M.open(restore)
 	layout.open(ctx)
 	if restore then
 		layout.set_buffer_lines(ctx, state.input_buf, restore.input_lines or { "" }, true)
-		for _, draft in ipairs(restore.drafts or {}) do recovered_draft(draft) end
 	end
 	for name, fn in pairs({ PiControl = M.take_control, PiPending = M.restore_pending_action, PiQueue = M.pick_queue,
 		PiOffers = M.show_offers, PiDrafts = M.show_drafts, PiDetach = M.detach, PiReconnect = M.reconnect,
