@@ -13,7 +13,7 @@ export type CommandErrorCode = "invalid_command" | "stale_epoch" | "stale_runtim
   | "session_busy" | "unsupported_command" | "storage_pressure"
   | "resource_denied" | "resource_conflict" | "resource_limit" | "resource_unavailable";
 export class CommandError extends Error {
-  constructor(readonly code: CommandErrorCode, message: string) { super(message); }
+  constructor(readonly code: CommandErrorCode, message: string, readonly delivery?: "not_sent") { super(message); }
 }
 
 type Envelope = {

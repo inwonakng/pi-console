@@ -123,7 +123,8 @@ function M.timeline_messages(entries, session, snapshot)
 		place(item.text, item.error and item.error.message, item.timeline, item.status)
 	end
 	for _, entry in ipairs(entries) do
-		if entry.sessionId == session and entry.operation == "prompt.submit" and not queued[queue_id(entry)] then
+		if entry.sessionId == session and entry.operation == "prompt.submit" and entry.status ~= "Not sent"
+			and not queued[queue_id(entry)] then
 			place(entry.payload.text, entry.error, entry.timeline, entry.status)
 		end
 	end

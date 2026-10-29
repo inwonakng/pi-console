@@ -454,7 +454,8 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
         } finally { clearTimeout(warning); }
       } catch (error) {
         await send({ type: "response", id: record.id, success: false, error: {
-          code: error instanceof CommandError ? error.code : "service_error", message: error instanceof Error ? error.message : "Service request failed" } }, { control });
+          code: error instanceof CommandError ? error.code : "service_error", message: error instanceof Error ? error.message : "Service request failed",
+          ...(error instanceof CommandError && error.delivery ? { delivery: error.delivery } : {}) } }, { control });
       } finally {
         if (stopAfterReply || shutdownFailure) finish();
       }

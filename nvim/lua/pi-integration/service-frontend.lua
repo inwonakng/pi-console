@@ -426,6 +426,9 @@ local function command(operation, payload, callback, captured, terminal, submiss
 	if not hello or not vim.tbl_contains(hello.capabilities or {}, operation) then unavailable(operation); return end
 	if captured and not current(captured) then notify("Stale editor/dialog; its text remains a local draft.", vim.log.levels.WARN); return end
 	if not operation:match("^control%.") and not control_current() then notify("Viewer: use :PiControl first.", vim.log.levels.WARN); return end
+	if operation == "prompt.submit" and ctx.ui.prompt_blocked() then return end
+	local input_buf = submission and submission.input_buf
+	local input_tick = valid(input_buf) and vim.api.nvim_buf_get_changedtick(input_buf)
 	local sent_selection = stamp()
 	local envelope = { version = 1, id = uid(), sessionId = session_id, serviceEpoch = snapshot.serviceEpoch,
 		runtimeRevision = current_revision(), operation = operation, payload = object_payload(payload) }
@@ -435,12 +438,11 @@ local function command(operation, payload, callback, captured, terminal, submiss
 	if terminal then outcomes[envelope.id] = { callback = terminal, captured = captured or stamp(), lifecycle = operation == "session.kill", transition = operation == "history.navigate", history_refresh = operation == "history.delete" } end
 	if feedback_ui.tracks(operation) then
 		local entry = submission and submission.entry
-		local input_buf = submission and submission.input_buf
 		entry = entry or feedback_ui.add(feedback, envelope.id, operation, envelope.payload, session_id,
 			snapshot.serviceEpoch, current_revision(), snapshot)
 		entry.id, entry.sessionId, entry.serviceEpoch, entry.runtimeRevision = envelope.id, session_id, snapshot.serviceEpoch, current_revision()
 		entry.status, entry.sent = "Sending", true
-		if valid(input_buf) and operation ~= "side.prompt" then
+		if valid(input_buf) and operation ~= "side.prompt" and operation ~= "prompt.submit" then
 			layout.set_buffer_lines(ctx, input_buf, { "" }, true)
 			vim.bo[input_buf].modified = false
 		end
@@ -458,6 +460,13 @@ local function command(operation, payload, callback, captured, terminal, submiss
 	request("command", envelope, function(ok, result)
 		record_command(ok and result or { id = envelope.id, status = result.delivery == "not_sent" and "failed" or "unknown", error = result }, envelope, true)
 		feedback_ui.receipt(feedback, envelope.id, ok, result)
+		-- Keep rejected text in place, and never clear edits made while awaiting admission.
+		if operation == "prompt.submit" and ok and (result.status == "accepted" or result.status == "completed")
+			and same_selection(sent_selection) and valid(input_buf)
+			and vim.api.nvim_buf_get_changedtick(input_buf) == input_tick and text(input_buf) == payload.text then
+			layout.set_buffer_lines(ctx, input_buf, { "" }, true)
+			vim.bo[input_buf].modified = false
+		end
 		-- Keep pending IDs for status recovery, never for blocking a new send.
 		if result.delivery == "not_sent" then unresolved[envelope.id] = nil end
 		if callback and same_selection(sent_selection) then callback(ok, result) end
@@ -466,6 +475,7 @@ local function command(operation, payload, callback, captured, terminal, submiss
 			local outcome = outcomes[envelope.id]; outcomes[envelope.id] = nil
 			if outcome_current(outcome, result) then outcome.callback(result) end
 		end
+		if operation == "prompt.submit" then backup() end
 		render()
 		refresh()
 	end)
@@ -555,6 +565,14 @@ ctx = { state = state, config = M.config,
 	notices = { empty_session = "Send a message to begin." },
 	buffer = { valid = valid, set_modifiable = function(buf, value) vim.bo[buf].modifiable = value end },
 	session = { setup_keymaps = function() end }, transcript = {} }
+ctx.ui.prompt_blocked = function()
+	local owner = authority and authority.owner_view and authority.owner_view.data or snapshot
+	if owner and #owner.interactions.pending > 0 then
+		notify("Resolve the pending action first (<leader>pa); message remains in input.", vim.log.levels.WARN)
+		return true
+	end
+	return false
+end
 ctx.transcript.win_valid = function()
 	state.transcript_win = buffer.find_window(state.transcript_buf, state.transcript_win)
 	return state.transcript_win ~= nil
@@ -1610,10 +1628,9 @@ ctx.ui.submit_window = function(original)
 	local entry = feedback_ui.add(feedback, id, "prompt.submit", envelope.payload, session_id, hello.serviceEpoch, current_revision(), snapshot)
 	entry.hostRequest, entry.status, entry.sent = create_id, "Sending", true
 	ctx.ui.window_submission, unresolved[id] = entry, envelope
-	if text(state.input_buf) == original then
-		layout.set_buffer_lines(ctx, state.input_buf, { "" }, true)
-		vim.bo[state.input_buf].modified = false
-	end
+	local input_buf = text(state.input_buf) == original and state.input_buf or nil
+	local input_tick = valid(input_buf) and vim.api.nvim_buf_get_changedtick(input_buf)
+	local sent_selection = stamp()
 	render()
 	transcript.scroll_to_bottom_unless_focused(ctx)
 	if not backup() then
@@ -1627,6 +1644,12 @@ ctx.ui.submit_window = function(original)
 		if ok then envelope.sessionId = receipt.sessionId; entry.sessionId = receipt.sessionId end
 		record_command(ok and receipt or { id = id, status = receipt.delivery == "not_sent" and "failed" or "unknown", error = receipt }, envelope, true)
 		feedback_ui.receipt(feedback, id, ok, receipt)
+		if ok and (receipt.status == "accepted" or receipt.status == "completed")
+			and same_selection(sent_selection) and valid(input_buf)
+			and vim.api.nvim_buf_get_changedtick(input_buf) == input_tick and text(input_buf) == original then
+			layout.set_buffer_lines(ctx, input_buf, { "" }, true)
+			vim.bo[input_buf].modified = false
+		end
 		if ok and ctx.ui.window_id == create_id and ctx.ui.window_submission == entry then
 			ctx.ui.window_id, ctx.ui.window_submission = nil, nil
 			for operation, payload in pairs(settings) do
@@ -1644,6 +1667,12 @@ function M.submit_prompt(original)
 	original = original or text(state.input_buf)
 	local trimmed = vim.trim(original)
 	if trimmed == "" then return end
+	if ctx.ui.prompt_blocked() then return end
+	for _, pending in pairs(callbacks) do
+		if pending.method == "window.submit" or pending.method == "command" and pending.operation == "prompt.submit" then
+			notify("Message submission is pending; input remains local."); return
+		end
+	end
 	if ctx.ui.window_id and hello and job then ctx.ui.submit_window(original); return end
 	if session_id and (not snapshot or snapshot.phase ~= "ready" or not snapshot.conversation.hydrated
 		or snapshot.runtimeRevision ~= current_revision()) then

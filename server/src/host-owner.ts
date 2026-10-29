@@ -923,6 +923,7 @@ export class OwnedSession {
       const controller = this.control.current();
       if (controller && controller.attachmentId !== attachmentId) throw new CommandError("control_claimed", "Another attachment controls this window");
       this.checkRunning();
+      this.assertPromptAllowed();
       if (!this.catalog.get(this.id).provisional) throw new CommandError("session_busy", "Window already accepted work; review before submitting again");
       const item: AcceptedQueueItem = { id: randomUUID(), revision: 1, serviceEpoch: this.catalog.epoch,
         runtimeRevision: this.runtimeRevision, text, status: "queued", startup: settings, timeline: { afterMessage: null } };
@@ -931,7 +932,7 @@ export class OwnedSession {
         result: { queueItemId: item.id, queueItemRevision: 1, queueItemText: text } };
       // No liveness recheck after commitment: a close ordered behind acceptance
       // must retain the session, not retract already accepted text.
-      await this.catalog.reserveCommand({ fingerprint, receipt }, [...this.catalog.queue(this.id), item]);
+      await this.catalog.reserveCommand({ fingerprint, receipt }, [...this.catalog.queue(this.id), item], () => this.assertPromptAllowed());
       if (controller) this.queueRecipients.set(item.id, controller);
       this.publish({ command: receipt });
       this.queueChanged();
@@ -962,6 +963,7 @@ export class OwnedSession {
       this.control.authorize(command);
       const recipient = this.control.snapshot();
       const worker = this.commandRuntime(command.runtimeRevision);
+      if (command.operation === "prompt.submit") this.assertPromptAllowed();
       if ((this.startupPending || this.catalog.queue(this.id).some((item) => item.status === "queued" && item.startup !== undefined))
         && !command.operation.startsWith("control.") && !command.operation.startsWith("interaction.")
         && !["turn.abort", "session.kill"].includes(command.operation)) throw new CommandError("session_busy", "First prompt settings are being applied; retry after startup");
@@ -979,8 +981,12 @@ export class OwnedSession {
       }
       if (command.operation === "side.prompt") receipt.result = { submittedText: command.payload.text };
       const queue = this.prepareQueueCommand(command, receipt);
-      try { await this.catalog.reserveCommand({ fingerprint, receipt }, queue, admission); }
-      catch (error) {
+      try {
+        await this.catalog.reserveCommand({ fingerprint, receipt }, queue, () => {
+          admission?.();
+          if (command.operation === "prompt.submit") this.assertPromptAllowed();
+        });
+      } catch (error) {
         if (!(error instanceof CommandError)) this.commandFailure(error);
         throw error;
       }
@@ -1154,8 +1160,14 @@ export class OwnedSession {
     });
   }
 
+  private assertPromptAllowed(): void {
+    if (this.worker?.interactionCount) {
+      throw new CommandError("session_busy", "Resolve the pending action before sending a message; text was not sent", "not_sent");
+    }
+  }
+
   private queueCanDispatch(): boolean {
-    return !this.stopRequested && !this.error && !this.exit && this.phase === "ready" && this.usableWorkspace()
+    return !this.worker?.interactionCount && !this.stopRequested && !this.error && !this.exit && this.phase === "ready" && this.usableWorkspace()
       && !this.startupPending && !this.aborting && !this.rename && !this.nativePending && !this.bundled && !this.bundledInterrupt && !this.queueRunPending
       && !this.conversation.continuationPending && this.conversation.executionSettled;
   }
@@ -1828,6 +1840,7 @@ export class OwnedSession {
       }
     } catch (failure) { error = failure; }
     await this.finishCommand(receipt, error);
+    if (command.operation === "interaction.respond" || command.operation === "interaction.cancel") this.scheduleQueue();
   }
 
   private async abortTurn(revision: number, worker: PiProcess, receipt: CommandReceipt): Promise<void> {
@@ -2288,7 +2301,8 @@ export class OwnedSession {
     if (event.type === "agent_settled" || event.type === "compaction_end" || event.type === "auto_retry_end"
       || event.type === "summarization_retry_finished" || event.type === "queue_update"
       || event.type === "message_end" && event.message.role === "user"
-      || event.type === "extension_ui_request" && event.method === "setStatus" && event.statusKey === "pi-workspace-continuation") this.scheduleQueue();
+      || event.type === "extension_ui_request" && event.method === "setStatus"
+        && ["pi-workspace-continuation", "pi-console-dialog"].includes(event.statusKey)) this.scheduleQueue();
   }
 
   private dispatch(command: RpcCommand & { id: string }): void {
