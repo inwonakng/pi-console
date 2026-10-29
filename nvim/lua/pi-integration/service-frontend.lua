@@ -2066,6 +2066,24 @@ end
 function M.kill_session()
 	kill_session(false)
 end
+function M.assign_group()
+	local entry = { initial_group = state.initial_group }
+	local tmux = require("pi-integration.backends.tmux")
+	local frontend_id = tmux.available() and vim.json.encode({ vim.env.TMUX_PANE, vim.uv.os_getpid() }) or nil
+	if session_id and M.config.expected_host then
+		entry.host_id, entry.session_id = M.config.expected_host, session_id
+		entry.id = vim.json.encode({ entry.host_id, entry.session_id })
+		entry.frontend_keys = frontend_id and { "frontend:" .. frontend_id } or nil
+	elseif not session_id and frontend_id then
+		entry.frontend_id, entry.id = frontend_id, "frontend:" .. frontend_id
+	else
+		notify("Session identity is not available yet.", vim.log.levels.WARN)
+		return
+	end
+	require("pi-integration.session-list").assign_group(entry, function(ok, err)
+		if not ok then notify(err, vim.log.levels.ERROR) end
+	end)
+end
 function M.change_cwd(path)
 	if not hello or not job then notify("Connect to a host before choosing its directory."); return end
 	local captured, epoch = stamp(), hello.serviceEpoch

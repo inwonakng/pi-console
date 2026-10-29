@@ -90,6 +90,35 @@ function M.subagent_label(node)
 	return "       " .. icons.subagent_icon .. " " .. table.concat(parts, " · ")
 end
 
+function M.assign_group(entry, report)
+	local function create()
+		vim.ui.input({ prompt = "New group: " }, function(name)
+			if name then report(organization.create(name, entry)) end
+		end)
+	end
+	if not entry then return create() end
+	local entries, err = pins.merge(runtime.list())
+	if not entries then return report(nil, err) end
+	local found = false
+	for _, candidate in ipairs(entries) do
+		if candidate.id == entry.id then entry, found = candidate, true; break end
+	end
+	if not found then table.insert(entries, entry) end
+	-- Refresh membership as well as groups, including newly opened frontends.
+	local current
+	current, err = organization.sections(entries)
+	if not current then return report(nil, err) end
+	local choices = { { id = "", name = "Ungrouped" } }
+	for _, section in ipairs(current) do
+		if section.id ~= "" then table.insert(choices, section) end
+	end
+	table.insert(choices, { name = "+ New group…", create = true })
+	vim.ui.select(choices, { prompt = "Assign session to group", format_item = function(choice) return choice.name end, pi_select_layout = "compact" }, function(choice)
+		if not choice then return end
+		if choice.create then create() else report(organization.assign(entry, choice.id)) end
+	end)
+end
+
 function M.new()
 	local list = {}
 	local collapsed, expanded = {}, {}
@@ -203,25 +232,7 @@ function M.new()
 			end, delta == 1 and "Move group/session down" or "Move group/session up")
 		end
 		map("<leader>ga", function()
-			local entry = session()
-			local function create()
-				vim.ui.input({ prompt = "New group: " }, function(name)
-					if name then report(organization.create(name, entry)) end
-				end)
-			end
-			if not entry then return create() end
-			local choices = { { id = "", name = "Ungrouped" } }
-			-- Read again: another viewer may have added/deleted a group since rendering.
-			local current, err = organization.sections({})
-			if not current then return report(nil, err) end
-			for _, section in ipairs(current) do
-				if section.id ~= "" then table.insert(choices, section) end
-			end
-			table.insert(choices, { name = "+ New group…", create = true })
-			vim.ui.select(choices, { prompt = "Assign session to group", format_item = function(choice) return choice.name end, pi_select_layout = "compact" }, function(choice)
-				if not choice then return end
-				if choice.create then create() else report(organization.assign(entry, choice.id)) end
-			end)
+			M.assign_group(session(), report)
 		end, "Assign session to group / create group")
 		map("<leader>gr", function()
 			local node = selected()

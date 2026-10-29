@@ -12,6 +12,7 @@ M.specs = {
 		{ lhs = "<leader>i", action = "cycle_integration_mode", desc = "Cycle integration mode" },
 		{ lhs = "<leader>?", action = "show_help", desc = "Session help" },
 		{ lhs = "<leader>ph", action = "pick_hosts", desc = "Hosts" },
+		{ lhs = "<leader>ga", action = "assign_group", desc = "Assign session to group" },
 		{ lhs = "<leader>/", action = "pick_command", desc = "Pick Pi command" },
 		{ lhs = "<leader>pi", action = "show_input", desc = "Show Pi input" },
 		{ lhs = "<leader>pa", action = "restore_pending_action", desc = "Restore pending action" },
