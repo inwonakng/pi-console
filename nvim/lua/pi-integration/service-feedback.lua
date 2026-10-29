@@ -169,4 +169,36 @@ function M.timeline_messages(entries, session, snapshot)
 	-- Unknown chronology stays out of the transcript; request details remain in :PiLogs.
 	return visible, unmatched
 end
+-- Side prompts are serialized by the frontend and the side worker refuses a
+-- second active turn. The next user after the captured anchor replaces the
+-- display-only local echo; no text matching or delivery/replay inference.
+function M.side_timeline_messages(entries, session, side)
+	side = side or {}
+	local local_entries = {}
+	local keys, history = side.messageKeys or {}, side.messages or {}
+	for _, entry in ipairs(entries) do
+		if entry.operation == "side.prompt" and entry.sideConversationId == side.id then
+			local copy = vim.tbl_extend("force", {}, entry, { operation = "prompt.submit" })
+			copy.timeline = vim.deepcopy(entry.timeline)
+			local after = copy.timeline and copy.timeline.afterMessage
+			local at = after == vim.NIL and 0 or nil
+			for index, key in ipairs(keys) do if key == after then at = index; break end end
+			if at and entry.status ~= "Failed" and entry.status ~= "Not sent" then
+				for index = at + 1, #history do
+					if history[index].role == "user" then
+						copy.timeline.observedMessage = keys[index]
+						break
+					end
+				end
+			end
+			table.insert(local_entries, copy)
+		end
+	end
+	return M.timeline_messages(local_entries, session, { acceptedQueue = { items = {} }, conversation = {
+		messages = history, messageKeys = keys, permissions = side.permissions and side.permissions.items,
+		omittedPermissions = side.permissions and side.permissions.omitted,
+		partialAssistant = side.partialMessage and { message = side.partialMessage },
+		diagnostics = side.error and { { message = side.error, afterMessage = keys[#keys] or vim.NIL } },
+	} })
+end
 return M

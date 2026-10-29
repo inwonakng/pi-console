@@ -2,7 +2,16 @@
 local floats = require("pi-integration.floats")
 local buffer = require("pi-integration.utils.buffer")
 local markdown = require("pi-integration.markdown-render")
+local messages = require("pi-integration.messages")
+local transcript = require("pi-integration.transcript")
 local M = {}
+local render_state, render_cache = { show_nested_tools = false }, {}
+local function render_context()
+	return { state = render_state, buffer = buffer,
+		ui = { notify = function(...) require("pi-integration.logs").notify(...) end },
+		notices = { empty_session = "Send a message to begin." },
+		transcript = { metadata_lines = function() return {} end } }
+end
 local transcript_win, input_win, return_win, focus
 local input_cursor, transcript_view, hiding, displayed_buf
 local help_state = {}
@@ -17,7 +26,7 @@ local function geometry()
 	local top = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1 or 0
 	local bottom = vim.o.cmdheight + (vim.o.laststatus > 0 and 1 or 0) + 1
 	local usable = math.max(6, vim.o.lines - top - bottom)
-	local total = math.max(6, math.floor(usable * 0.75))
+	local total = math.max(6, math.floor(usable * 0.85))
 	local input_height = math.max(1, math.min(8, math.floor(total * 0.25)))
 	return width, math.max(1, total - input_height - 4), input_height,
 		top + math.floor((usable - total) / 2), math.max(0, math.floor((vim.o.columns - width) / 2))
@@ -38,14 +47,18 @@ function M.hide()
 	hiding = false
 end
 
-function M.open(transcript_buf, input_buf)
+function M.open(transcript_buf, input_buf, resources)
 	if M.visible() then
 		if valid(input_win) then vim.api.nvim_set_current_win(input_win) end
 		return
 	end
 	return_win = vim.api.nvim_get_current_win()
-	if displayed_buf ~= transcript_buf then input_cursor, transcript_view = nil, nil end
+	if displayed_buf ~= transcript_buf then
+		input_cursor, transcript_view = nil, nil
+		render_state, render_cache = { show_nested_tools = false }, {}
+	end
 	displayed_buf = transcript_buf
+	render_state.transcript_buf = transcript_buf
 	local width, th, ih, row, col = geometry()
 	transcript_win = vim.api.nvim_open_win(transcript_buf, false, {
 		relative = "editor", width = width, height = th, row = row, col = col,
@@ -56,6 +69,10 @@ function M.open(transcript_buf, input_buf)
 		style = "minimal", border = "rounded", title = " Side input ",
 		footer = " <leader>? keys ",
 	})
+	render_state.transcript_win = transcript_win
+	vim.keymap.set("n", "<CR>", function()
+		transcript.open_item_under_cursor(render_context(), resources)
+	end, { buffer = transcript_buf, desc = "Follow link, toggle tool group or open output" })
 	vim.api.nvim_clear_autocmds({ group = window_group, event = "WinClosed" })
 	for _, win in ipairs({ transcript_win, input_win }) do
 		vim.wo[win].wrap, vim.wo[win].linebreak, vim.wo[win].conceallevel = true, true, 2
@@ -73,17 +90,18 @@ function M.open(transcript_buf, input_buf)
 					"- `<C-CR>` sends from the input (normal or insert mode).",
 					"- `<C-k>` / `<C-w>k` focuses the transcript (normal mode).",
 					"- `<C-j>` / `<C-w>j` focuses the input (normal mode).",
-					"- `<CR>` in the transcript follows a link or inspects a permission.",
-					"- `<leader>pb` / `:q` hides both windows, preserving the draft and conversation.",
+					"- `<CR>` in the transcript follows a link, toggles a tool group, or opens output.",
+					"- `q` / `<leader>pb` / `:q` hides both windows, preserving the draft and conversation.",
 					"- `<leader>n` / `:PiSideNew` starts a new side conversation (normal mode).",
 					"- `:PiSideAbort` stops only side work.",
 					"- `<leader>pa` restores a pending action (normal mode).",
-					"- `q` / `<Esc>` closes this help; both keep native behavior in the side windows.",
+					"- `q` / `<Esc>` closes this help; `<Esc>` keeps native behavior in the side windows.",
 				},
 			})
 			if focus and help_state.help_win then focus:add(help_state.help_win) end
 		end, { buffer = buf, desc = "Side conversation help" })
 		vim.keymap.set("n", "<leader>pb", M.hide, { buffer = buf, desc = "Hide side conversation" })
+		vim.keymap.set("n", "q", M.hide, { buffer = buf, silent = true, desc = "Hide side conversation" })
 		for _, lhs in ipairs({ "<C-k>", "<C-w>k", "<C-w><C-k>" }) do
 			vim.keymap.set("n", lhs, function() if valid(transcript_win) then vim.api.nvim_set_current_win(transcript_win) end end, { buffer = buf })
 		end
@@ -96,11 +114,24 @@ function M.open(transcript_buf, input_buf)
 	if transcript_view then
 		vim.api.nvim_win_call(transcript_win, function() vim.fn.winrestview(transcript_view) end)
 	end
-	markdown.render(transcript_buf, transcript_win, { latex = true })
+	transcript.render(render_context())
 	markdown.render(input_buf, input_win)
 end
 
-function M.render(buf, lines)
+function M.render(buf, visible, tools, conversation_id)
+	if render_state.conversation_id ~= conversation_id then
+		render_state = { show_nested_tools = false, transcript_win = transcript_win, conversation_id = conversation_id }
+		render_cache = {}
+	end
+	render_state.transcript_buf = buf
+	local ctx = render_context()
+	local lines, items = messages.collect_message_lines(ctx, visible, tools, render_cache)
+	local split = {}
+	for _, line in ipairs(lines) do
+		vim.list_extend(split, vim.split(line, "\n", { plain = true }))
+	end
+	lines = split
+	transcript.apply_collected_transcript_items(ctx, items)
 	local preserve = vim.api.nvim_get_current_win() == transcript_win
 		or vim.deep_equal(vim.api.nvim_buf_get_lines(buf, 0, -1, false), lines)
 	local view = valid(transcript_win) and vim.api.nvim_win_call(transcript_win, vim.fn.winsaveview)
@@ -113,7 +144,7 @@ function M.render(buf, lines)
 				vim.cmd("normal! zb")
 			end
 		end)
-		markdown.render(buf, transcript_win, { latex = true })
+		transcript.render(ctx)
 	end
 end
 

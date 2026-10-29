@@ -6,6 +6,7 @@ import {
   sessionEntryToContextMessages,
   type ExtensionAPI,
   type ExtensionContext,
+  type JsonAgentSessionEvent,
   type RpcExtensionUIRequest,
   type RpcExtensionUIResponse,
   type SessionEntry,
@@ -41,6 +42,17 @@ type JournalData =
   | { kind: "state"; running: boolean; error?: string; pendingPrompt?: string; pendingAfter?: string };
 type JournalRecord = RecordBase & JournalData;
 
+type ToolStart = Extract<JsonAgentSessionEvent, { type: "tool_execution_start" }>;
+type ToolEnd = Extract<JsonAgentSessionEvent, { type: "tool_execution_end" }>;
+type SideTool = Omit<ToolStart, "type"> & {
+  state: "running" | "completed" | "interrupted";
+  messageKey?: string;
+  startedAt: string;
+  partialResult?: Extract<JsonAgentSessionEvent, { type: "tool_execution_update" }>["partialResult"];
+  result?: ToolEnd["result"];
+  isError?: boolean;
+};
+
 type Generation = {
   id: string;
   ctx: ExtensionContext;
@@ -50,6 +62,7 @@ type Generation = {
   entries: SessionEntry[];
   leafId: string | null;
   messages: AgentMessage[];
+  tools: SideTool[];
   partialMessage?: AgentMessage;
   draft: string;
   pendingPrompt?: string;
@@ -69,7 +82,6 @@ type Generation = {
   drain: Promise<void>;
   directory?: string;
   file?: string;
-  publishTimer?: NodeJS.Timeout;
 };
 
 function snapshot(ctx: ExtensionContext, pi: ExtensionAPI): Seed {
@@ -146,22 +158,22 @@ export default function sideExtension(pi: ExtensionAPI) {
     record(g, { kind: "state", running: g.running, error: g.error, pendingPrompt: g.pendingPrompt, pendingAfter: g.pendingAfter });
   }
 
-  function publish(g: Generation, immediate = true): void {
+  function publish(g: Generation): void {
     if (g !== current || shuttingDown || g.ctx.mode !== "rpc") return;
-    if (!immediate) {
-      g.publishTimer ??= setTimeout(() => { g.publishTimer = undefined; publish(g); }, 100);
-      return;
-    }
-    if (g.publishTimer) clearTimeout(g.publishTimer);
-    g.publishTimer = undefined;
+    // The frontend already coalesces streaming snapshots. Do not add another
+    // timer before the owner can even observe a side update.
     const permissions = permissionSnapshot(g.entries);
-    if (!g.running) permissions.items = permissions.items.map(item => item.state === "pending"
-      ? { ...item, state: "cancelled", reason: "Side conversation stopped without a recorded permission decision." } : item);
+    if (!g.running) {
+      for (const tool of g.tools) if (tool.state === "running") tool.state = "interrupted";
+      permissions.items = permissions.items.map(item => item.state === "pending"
+        ? { ...item, state: "cancelled", reason: "Side conversation stopped without a recorded permission decision." } : item);
+    }
     g.ctx.ui.setStatus("pi-side", JSON.stringify({
       parentSessionFile: g.parentSessionFile,
       id: g.id,
       capturedAt: g.seed?.source.capturedAt,
       messages: g.messages,
+      tools: g.tools,
       messageKeys: g.messages.map(messageKey),
       permissions,
       partialMessage: g.partialMessage,
@@ -293,7 +305,7 @@ export default function sideExtension(pi: ExtensionAPI) {
     } else if (data.type === "message_update") {
       if (data.message) g.partialMessage = data.message as AgentMessage;
       else if (g.partialMessage) updateSidePartial(g.partialMessage as unknown as SideRpcEvent, data);
-      publish(g, false);
+      publish(g);
     } else if (data.type === "message_end") {
       const message = data.message as AgentMessage;
       g.partialMessage = undefined;
@@ -308,10 +320,32 @@ export default function sideExtension(pi: ExtensionAPI) {
       publish(g);
       void drain(g).then(() => publish(g), () => undefined);
     } else if (data.type === "tool_execution_start") {
-      g.activity = `Running ${String(data.toolName)}`;
+      const { type: _type, ...tool } = data as ToolStart;
+      g.tools = g.tools.filter(previous => previous.toolCallId !== tool.toolCallId);
+      if (g.tools.length >= 256) {
+        const completed = g.tools.findIndex(previous => previous.state !== "running");
+        if (completed !== -1) g.tools.splice(completed, 1);
+      }
+      const parent = tool.parentToolCallId && g.tools.find(previous => previous.toolCallId === tool.parentToolCallId);
+      const message = [...g.messages].reverse().find(message => message.role === "assistant"
+        && message.content.some(block => block.type === "toolCall" && block.id === tool.toolCallId));
+      g.tools.push({ ...tool, state: "running", startedAt: new Date().toISOString(),
+        messageKey: parent ? parent.messageKey : message && messageKey(message) });
+      g.activity = `Running ${tool.toolName}`;
       publish(g);
-    } else if (data.type === "tool_execution_end") {
-      g.activity = undefined;
+    } else if (data.type === "tool_execution_update" || data.type === "tool_execution_end") {
+      const tool = g.tools.find(tool => tool.toolCallId === data.toolCallId);
+      if (tool) {
+        if (data.type === "tool_execution_update") {
+          tool.partialResult = data.partialResult as SideTool["partialResult"];
+        } else {
+          tool.state = "completed";
+          tool.partialResult = undefined;
+          tool.result = data.result as ToolEnd["result"];
+          tool.isError = data.isError === true;
+        }
+      }
+      g.activity = g.tools.some(tool => tool.state === "running") ? g.activity : undefined;
       publish(g);
     } else if (data.type === "agent_settled") {
       void drain(g).then(() => {
@@ -407,7 +441,6 @@ export default function sideExtension(pi: ExtensionAPI) {
     g.running = false;
     g.partialMessage = undefined;
     state(g);
-    if (g.publishTimer) clearTimeout(g.publishTimer);
     if (g.directory) rmSync(g.directory, { recursive: true, force: true });
   }
 
@@ -417,7 +450,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       parentSessionFile: ctx.sessionManager.getSessionFile() ?? "",
       parentSessionId: ctx.sessionManager.getSessionId(),
       seed, entries: seed ? [...seed.entries] : [], leafId: seed?.boundary ?? null,
-      messages: [], draft: "", running: false, journaled: false,
+      messages: [], tools: [], draft: "", running: false, journaled: false,
       cancelled: false, dialogs: new AbortController(), dialogIds: new Set(), dialogControllers: new Map(), drain: Promise.resolve(),
     };
   }

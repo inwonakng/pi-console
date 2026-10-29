@@ -31,7 +31,7 @@ local refresh_callbacks = {}
 local last_refresh = -math.huge
 local visibility_timer, visibility_pending
 local transcript_cache, rendered_transcript, rendered_metadata = {}, nil, nil
-local rendered_side, rendered_side_buf
+local rendered_side, rendered_side_buf, rendered_side_feedback
 local initial_scroll_pending = false
 state.frontend_visible = true -- Unknown visibility must not suppress the UI.
 local selection = 0
@@ -42,7 +42,6 @@ local ctx, sync_pending
 local recovery_id, backup_scheduled, restarting_frontend, frontend_leaving
 local render, refresh, connect, attach, acquire_control, recover_selection, tree_ctx, advance_start, host_options, backup
 local side_buf, side_input_buf, side_context, side_id
-local side_permission_state, side_permission_items = {}, {}
 local queue_editor
 local side_draft_saved, side_draft_pending, side_after_draft, restored_side_draft, side_prompt_pending
 local save_side_draft, side_save_scheduled, side_reset_draft
@@ -438,8 +437,10 @@ local function command(operation, payload, callback, captured, terminal, submiss
 	if terminal then outcomes[envelope.id] = { callback = terminal, captured = captured or stamp(), lifecycle = operation == "session.kill", transition = operation == "history.navigate", history_refresh = operation == "history.delete" } end
 	if feedback_ui.tracks(operation) then
 		local entry = submission and submission.entry
+		local side = operation == "side.prompt" and status_data("pi-side")
 		entry = entry or feedback_ui.add(feedback, envelope.id, operation, envelope.payload, session_id,
-			snapshot.serviceEpoch, current_revision(), snapshot)
+			snapshot.serviceEpoch, current_revision(), side and { conversation = side } or snapshot)
+		if side then entry.sideConversationId = side.id end
 		entry.id, entry.sessionId, entry.serviceEpoch, entry.runtimeRevision = envelope.id, session_id, snapshot.serviceEpoch, current_revision()
 		entry.status, entry.sent = "Sending", true
 		if valid(input_buf) and operation ~= "side.prompt" and operation ~= "prompt.submit" then
@@ -748,8 +749,13 @@ render = function(metadata_only)
 	end
 	rendered_metadata = metadata
 	local side_raw = conversation and conversation.statuses and conversation.statuses["pi-side"]
-	if valid(side_buf) and (side_buf ~= rendered_side_buf or side_raw ~= rendered_side) then
-		rendered_side_buf, rendered_side = side_buf, side_raw
+	local side_feedback = {}
+	for _, entry in ipairs(feedback) do
+		if entry.operation == "side.prompt" and entry.sessionId == session_id then table.insert(side_feedback, entry) end
+	end
+	if valid(side_buf) and (side_buf ~= rendered_side_buf or side_raw ~= rendered_side
+		or not vim.deep_equal(side_feedback, rendered_side_feedback)) then
+		rendered_side_buf, rendered_side, rendered_side_feedback = side_buf, side_raw, vim.deepcopy(side_feedback)
 		local side = status_data("pi-side")
 		if side and side.id and side.id ~= side_id then
 			if side_id and valid(side_input_buf) then
@@ -764,50 +770,8 @@ render = function(metadata_only)
 			end
 			side_id = side.id
 		end
-		local side_lines = {}
-		side_permission_items = {}
-		require("pi-integration.tool-output").reset(side_permission_state)
-		if side then
-			if side.error then messages.append_error(side_lines, side.error, false) end
-			local function permissions_after(key)
-				for _, permission in ipairs(side.permissions and side.permissions.items or {}) do
-					if permission.afterMessage == key then
-						require("pi-integration.permission-output").append({ state = side_permission_state }, side_lines, side_permission_items, permission)
-					end
-				end
-			end
-			if side.permissions and (side.permissions.omitted or 0) > 0 then
-				table.insert(side_lines, "> Older permission records are omitted from this view.")
-			end
-			permissions_after(vim.NIL)
-			local function append_side_message(message)
-				local content_lines = {}
-				if type(message.content) == "string" then content_lines = vim.split(message.content, "\n", { plain = true })
-				else for _, block in ipairs(message.content or {}) do
-					local content = block.text or block.thinking
-					if not content and block.type == "toolCall" then
-						content = "Tool: " .. tostring(block.name) .. "\n" .. vim.json.encode(block.arguments or {})
-					end
-					vim.list_extend(content_lines, vim.split(content or ("[" .. tostring(block.type or "Content") .. "]"), "\n", { plain = true }))
-				end end
-				if #content_lines > 0 then
-					messages.append_text_message(side_lines, message, table.concat(content_lines, "\n"), #side_lines > 0)
-				end
-				if message.errorMessage or message.stopReason == "error" or message.stopReason == "aborted" then
-					messages.append_error(side_lines,
-						message.errorMessage or (message.stopReason == "aborted" and "Response aborted." or "Model request failed."),
-						#side_lines > 0, message.stopReason == "aborted" and "Aborted" or "Error")
-				end
-			end
-			for index, message in ipairs(side.messages or {}) do
-				append_side_message(message)
-				permissions_after(side.messageKeys and side.messageKeys[index])
-			end
-			if side.partialMessage then append_side_message(side.partialMessage) end
-		end
-		side_view.render(side_buf, side_lines)
-		side_permission_state.transcript_items = side_permission_items
-		transcript.apply_quote_highlights_to_buffer(side_buf, side_permission_state)
+		local visible = feedback_ui.side_timeline_messages(feedback, session_id, side)
+		side_view.render(side_buf, visible, side and side.tools, side and side.id)
 	end
 	-- Every snapshot is a pure render; never replay event/effect handlers.
 	if body_changed or metadata_changed then transcript.render(ctx) end
@@ -2316,14 +2280,14 @@ function M.steer(initial)
 	native_draft("steering.submit", initial)
 end
 function M.follow_up() native_draft("followUp.submit") end
-save_side_draft = function(after)
+save_side_draft = function(after, skip_save)
 	if not valid(side_input_buf) or not side_context or not current(side_context) then return end
-	if after then side_after_draft = after end
+	if after then side_after_draft = { run = after, skip_save = skip_save } end
 	if side_draft_pending or side_prompt_pending then return end
 	local value, captured, input = text(side_input_buf), side_context, side_input_buf
-	if value == side_draft_saved then
+	if value == side_draft_saved or side_after_draft and side_after_draft.skip_save then
 		local action = side_after_draft; side_after_draft = nil
-		if action then action() end
+		if action then action.run() end
 		return
 	end
 	local pending = {}
@@ -2368,21 +2332,18 @@ function M.side_prompt()
 			if side and side.running then notify("The side conversation is working. Wait or use :PiSideAbort."); return end
 			if side_prompt_pending or side_after_draft then notify("Wait for the pending side message to finish submitting."); return end
 			local submitted, tick = text(input), vim.api.nvim_buf_get_changedtick(input)
+			if vim.trim(submitted) == "" then return end
+			-- Sending already backs up the local draft. Wait only for an existing
+			-- draft command; do not add a new remote save before every prompt.
 			save_side_draft(function()
 				if current(captured) and input == side_input_buf then submit_draft("side.prompt", input, captured, submitted, tick) end
-			end)
+			end, true)
 		end
 		vim.keymap.set({ "n", "i" }, "<C-CR>", function()
 			action_connection.run(submit)
 		end, { buffer = input, desc = "Send side message" })
 		vim.api.nvim_create_autocmd("BufHidden", { buffer = input, callback = function() save_side_draft() end })
 		local resource = owner_resources()
-		vim.keymap.set("n", "<CR>", function()
-			if require("pi-integration.utils.markdown-links").follow(nil, resource) then return end
-			local item = require("pi-integration.tool-groups").item_at_line(side_permission_items, vim.api.nvim_win_get_cursor(0)[1])
-			if item then require("pi-integration.tool-output").open_float({ state = side_permission_state,
-				ui = { notify = notify }, window = { parent = vim.api.nvim_get_current_win() }, resources = resource }, item.output_id) end
-		end, { buffer = side_buf, desc = "Inspect side permission" })
 		for _, buf in ipairs({ side_buf, side_input_buf }) do
 			resource.bind(buf)
 			require("pi-integration.markdown-render").prepare_buffer(buf, { latex = buf == side_buf })
@@ -2390,7 +2351,7 @@ function M.side_prompt()
 			vim.keymap.set("n", "<leader>pa", M.restore_pending_action, { buffer = buf, desc = "Restore pending action" })
 		end
 	end
-	side_view.open(side_buf, side_input_buf)
+	side_view.open(side_buf, side_input_buf, owner_resources())
 	render()
 end
 function M.toggle_side()
@@ -2700,17 +2661,7 @@ function M.show_help()
 	require("pi-integration.help").toggle(ctx)
 end
 function M.open_transcript_item()
-	local resource = owner_resources()
-	if require("pi-integration.utils.markdown-links").follow(nil, resource) then return end
-	local item = transcript.transcript_item_at_line(ctx, vim.api.nvim_win_get_cursor(0)[1])
-	if not item then return end
-	local inspect_ctx = { state = state, ui = { notify = notify }, window = { parent = state.transcript_win }, resources = resource }
-	if item.kind == "tool_group" then require("pi-integration.tool-groups").toggle(ctx, item); render()
-	elseif item.kind == "tool" then require("pi-integration.tool-output").open_float(inspect_ctx, item.output_id)
-	elseif item.kind == "thinking" then require("pi-integration.thinking-output").open_float(inspect_ctx, item.output_id)
-	elseif item.kind == "compaction" then require("pi-integration.compaction-output").open_float(inspect_ctx, item)
-	elseif item.kind == "skill" then require("pi-integration.skills").open_float(inspect_ctx, item.output_id)
-	else unavailable("This transcript action") end
+	transcript.open_item_under_cursor(ctx, owner_resources())
 end
 function M.show_owner_transcript()
 	require("pi-integration.spawn-transcript").open({ state = state, ui = { notify = notify }, window = { parent = state.transcript_win }, resources = owner_resources() }, nil, "History (all branches)", { kind = "history" })

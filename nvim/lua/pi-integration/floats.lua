@@ -279,6 +279,12 @@ function M.track_window(win, opts)
 		group = opts.group,
 		close = opts.close,
 	}
+	-- Inspectors opened by a member belong to the same focus boundary.
+	-- Otherwise a paired dialog pulls focus back and immediately hides them.
+	for index = #focus_groups, 1, -1 do
+		local group = focus_groups[index]
+		if group.members[opts.parent] then group:add(win); break end
+	end
 	return win
 end
 

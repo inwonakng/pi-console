@@ -650,6 +650,19 @@ function M.transcript_item_at_line(ctx, line)
 	return tool_groups.item_at_line(ctx.state.transcript_items, line)
 end
 
+function M.open_item_under_cursor(ctx, resources)
+	if require("pi-integration.utils.markdown-links").follow(nil, resources) then return end
+	local item = M.transcript_item_at_line(ctx, vim.api.nvim_win_get_cursor(0)[1])
+	if not item then return end
+	local inspect = { state = ctx.state, ui = ctx.ui, resources = resources,
+		window = { parent = vim.api.nvim_get_current_win() } }
+	if item.kind == "tool_group" then tool_groups.toggle(ctx, item); M.render(ctx)
+	elseif item.kind == "tool" then tool_output.open_float(inspect, item.output_id)
+	elseif item.kind == "thinking" then require("pi-integration.thinking-output").open_float(inspect, item.output_id)
+	elseif item.kind == "compaction" then require("pi-integration.compaction-output").open_float(inspect, item)
+	elseif item.kind == "skill" then require("pi-integration.skills").open_float(inspect, item.output_id) end
+end
+
 function M.write_tool_output(ctx, output_id)
 	local state = ctx.state
 	if not ctx.buffer.valid(state.transcript_buf) then
