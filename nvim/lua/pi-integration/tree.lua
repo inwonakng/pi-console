@@ -11,6 +11,54 @@ local tree_highlight_ns = vim.api.nvim_create_namespace("pi-console-tree-highlig
 local search_highlight_ns = vim.api.nvim_create_namespace("pi-console-tree-search")
 local workspace_highlight_count = 14
 
+local function update_activity(ctx)
+	local state = ctx.state
+	state.tree_loading = state.tree_work and "building history" or state.tree_reading and "loading history" or nil
+	if ctx.ui.status_changed then ctx.ui.status_changed() end
+end
+
+local function checkpoint(ctx)
+	local task = ctx.state.tree_work
+	if task and coroutine.running() == task.thread then task.checkpoint() end
+end
+
+local function cancel_work(ctx)
+	ctx.state.tree_work = nil
+end
+
+-- Yield at a time budget, not after every record. All buffer APIs still execute
+-- on Neovim's main thread; timers and input get a turn between batches.
+local function run_work(ctx, work, completed)
+	local state = ctx.state
+	local task = {}
+	local deadline
+	task.checkpoint = function()
+		if vim.uv.hrtime() >= deadline then coroutine.yield() end
+	end
+	state.tree_work = task
+	update_activity(ctx)
+	local thread = coroutine.create(work)
+	task.thread = thread
+	local function resume()
+		if state.tree_work ~= task then return end
+		deadline = vim.uv.hrtime() + 6 * 1000000
+		local ok, err = coroutine.resume(thread)
+		if not ok then
+			state.tree_work, state.tree_model, state.tree_model_count = nil, nil, nil
+			state.tree_reading = nil
+			update_activity(ctx)
+			ctx.ui.notify("Could not build history: " .. tostring(err), vim.log.levels.ERROR)
+		elseif coroutine.status(thread) == "dead" then
+			state.tree_work = nil
+			update_activity(ctx)
+			if completed then completed() end
+		else
+			vim.defer_fn(resume, 1)
+		end
+	end
+	vim.schedule(resume)
+end
+
 local function node_text(ctx, node)
 	return tree_model.node_text(node, ctx.messages.extract_text)
 end
@@ -91,14 +139,33 @@ local function compact_text(text, max_width)
 end
 
 local function build_tree(ctx)
-	local records = ctx.state.tree_records
-	local model = tree_model.build(records or {})
+	local state = ctx.state
+	local records = state.tree_records or {}
+	local model = state.tree_model
+	local count = state.tree_model_count or 0
+	if not model or count ~= #records then
+		-- An interrupted update must never leave a partially mutated cache reusable.
+		state.tree_model, state.tree_model_count = nil, nil
+		if model and count < #records then
+			local added = {}
+			for index = count + 1, #records do
+				added[#added + 1] = records[index]
+				checkpoint(ctx)
+			end
+			model = tree_model.append(model, added, function() checkpoint(ctx) end)
+		else
+			model = nil
+		end
+		model = model or tree_model.build(records, function() checkpoint(ctx) end)
+		state.tree_model, state.tree_model_count = model, #records
+	end
 	local requested_leaf = ctx.state.tree_leaf_id
 	local active_ids = {}
 	local raw = model.raw_by_id[requested_leaf]
-	while raw do
+	while raw and state.tree_scope == "branch" do
 		active_ids[raw.record.id] = true
 		raw = raw.parent
+		checkpoint(ctx)
 	end
 	local query = ctx.state.tree_search_query or ""
 	local included = {}
@@ -113,13 +180,15 @@ local function build_tree(ctx)
 				if #positions > 0 then
 					matches[node] = positions
 					local ancestor = node
-					while ancestor do
+					while ancestor and not included[ancestor] do
 						included[ancestor] = true
 						ancestor = ancestor.parent
+						checkpoint(ctx)
 					end
 				end
 			end
 		end
+		checkpoint(ctx)
 	end
 	local visible = {}
 	local visible_by_node = {}
@@ -141,6 +210,7 @@ local function build_tree(ctx)
 			visible_by_node[node] = view
 			table.insert(visible, view)
 		end
+		checkpoint(ctx)
 	end
 
 	local roots = {}
@@ -156,6 +226,7 @@ local function build_tree(ctx)
 		else
 			table.insert(roots, node)
 		end
+		checkpoint(ctx)
 	end
 
 	local leaf_node = tree_model.node_for_record(model, requested_leaf)
@@ -247,12 +318,23 @@ local function render_node_line(ctx, node, leaf_id, lines, line_nodes, highlight
 		workspace_data = node.workspace
 		workspace = " [" .. node.workspace.label .. "]"
 	end
+	local max_width = math.max(1, tree_window_width(ctx) - 1)
+	local workspace_group = workspace_data and workspace_highlight(ctx, workspace_data)
+	local source = node.model_node
+	local cache_key = not node.match_positions and table.concat({ tostring(max_width), line_prefix,
+		tostring(current), workspace_group or "", tostring(node.search_context) }, "\0")
+	if cache_key and source.row and source.row.key == cache_key then
+		lines[#lines + 1] = source.row.label
+		line_nodes[#lines] = node
+		highlights_by_line[#lines] = source.row.highlights
+		return
+	end
 	local label_prefix = string.format("%s%s ", line_prefix, marker)
 	local heading = label_prefix .. title .. workspace .. ": "
 	local suffix = current and "  ← current" or ""
-	local max_width = math.max(1, tree_window_width(ctx) - 1)
 	local text_width = max_width - display_width(heading) - display_width(suffix)
-	local text = node_text(ctx, node)
+	local text = node.match_positions and node_text(ctx, node)
+		or tree_model.node_summary(node, ctx.messages.extract_text, max_width)
 	if node.match_positions then
 		-- Begin near the first match, even when the matching text is far beyond the summary.
 		local first = vim.fn.charidx(text, node.match_positions[1])
@@ -277,7 +359,7 @@ local function render_node_line(ctx, node, leaf_id, lines, line_nodes, highlight
 			table.insert(highlights, {
 				start_col = start_col,
 				end_col = end_col,
-				hl_group = workspace_highlight(ctx, workspace_data),
+				hl_group = workspace_group,
 			})
 		end
 	end
@@ -285,29 +367,28 @@ local function render_node_line(ctx, node, leaf_id, lines, line_nodes, highlight
 		highlights = { { start_col = 0, end_col = #label, hl_group = "Comment" } }
 	end
 	highlights_by_line[#lines] = highlights
+	if cache_key then source.row = { key = cache_key, label = label, highlights = highlights } end
 end
 
 local function render_node(ctx, node, leaf_id, lines, line_nodes, highlights_by_line, line_prefix, child_prefix)
-	render_node_line(ctx, node, leaf_id, lines, line_nodes, highlights_by_line, line_prefix)
-
-	local child_count = #node.children
-	if child_count == 0 then
-		return
-	end
-
-	if child_count == 1 then
-		-- Most session history is a single parent→child chain. Keep that
-		-- continuation visually flat so long conversations do not drift right.
-		render_node(ctx, node.children[1], leaf_id, lines, line_nodes, highlights_by_line, child_prefix, child_prefix)
-		return
-	end
-
-	-- Only spend horizontal space when there is an actual branch.
-	for index, child in ipairs(node.children) do
-		local is_last = index == child_count
-		local connector = is_last and "└─ " or "├─ "
-		local next_child_prefix = child_prefix .. (is_last and "   " or "│  ")
-		render_node(ctx, child, leaf_id, lines, line_nodes, highlights_by_line, child_prefix .. connector, next_child_prefix)
+	local stack = { { node, line_prefix, child_prefix } }
+	while #stack > 0 do
+		local item = table.remove(stack)
+		node, line_prefix, child_prefix = item[1], item[2], item[3]
+		render_node_line(ctx, node, leaf_id, lines, line_nodes, highlights_by_line, line_prefix)
+		local child_count = #node.children
+		for index = child_count, 1, -1 do
+			local child = node.children[index]
+			if child_count == 1 then
+				-- Only real forks spend horizontal space.
+				stack[#stack + 1] = { child, child_prefix, child_prefix }
+			else
+				local is_last = index == child_count
+				stack[#stack + 1] = { child, child_prefix .. (is_last and "└─ " or "├─ "),
+					child_prefix .. (is_last and "   " or "│  ") }
+			end
+		end
+		checkpoint(ctx)
 	end
 end
 
@@ -326,33 +407,38 @@ local function render_nodes(ctx, nodes, leaf_id, lines, line_nodes, highlights_b
 	end
 end
 
-local function apply_tree_highlights(ctx, row)
+local function apply_tree_highlights(ctx, first, last)
 	local state = ctx.state
 	if not ctx.buffer.valid(state.tree_buf) then
 		return
 	end
 
-	vim.api.nvim_buf_clear_namespace(state.tree_buf, tree_highlight_ns, row and row - 1 or 0, row or -1)
-	local highlights_by_line = row and { [row] = state.tree_highlights_by_line[row] } or state.tree_highlights_by_line or {}
-	for line, highlights in pairs(highlights_by_line) do
-		for _, highlight in ipairs(highlights) do
+	last = last or first
+	vim.api.nvim_buf_clear_namespace(state.tree_buf, tree_highlight_ns, first and first - 1 or 0, last or -1)
+	for line = first or 1, last or vim.api.nvim_buf_line_count(state.tree_buf) do
+		for _, highlight in ipairs(state.tree_highlights_by_line[line] or {}) do
 			vim.api.nvim_buf_set_extmark(state.tree_buf, tree_highlight_ns, line - 1, highlight.start_col, {
 				end_col = highlight.end_col,
 				hl_group = highlight.hl_group,
 				priority = highlight.priority or 250,
 			})
 		end
+		checkpoint(ctx)
 	end
 end
 
 local function close_tree_window(ctx, preserve_data, keep_request)
 	local state = ctx.state
 	if not keep_request then
+		cancel_work(ctx)
+		state.tree_reading = nil
+		update_activity(ctx)
 		state.tree_request = (state.tree_request or 0) + 1
 		state.tree_context = nil
 	end
 	if preserve_data == false then
 		state.tree_records, state.tree_cache_context, state.tree_leaf_id = nil, nil, nil
+		state.tree_model, state.tree_model_count = nil, nil
 	end
 	local win, preview_win = state.tree_win, state.tree_preview_win
 	state.tree_win, state.tree_preview_win = nil, nil
@@ -544,7 +630,8 @@ local function hint_line(items)
 end
 
 local function action_hint(ctx)
-	ctx.state.tree_writable = not not ctx.tree.writable(ctx.state.tree_context)
+	ctx.state.tree_writable = not ctx.state.tree_work and not ctx.state.tree_reading
+		and not not ctx.tree.writable(ctx.state.tree_context)
 	if not ctx.state.tree_writable then
 		return hint_line({ { "r", "Refresh (read-only)" }, { "/", "Search" }, { "<leader>?", "Help" }, { "q", "Close" } })
 	end
@@ -559,6 +646,39 @@ local function update_action_hint(ctx)
 	vim.api.nvim_buf_set_lines(ctx.state.tree_buf, 1, 2, false, { line })
 	vim.api.nvim_set_option_value("modifiable", false, { buf = ctx.state.tree_buf })
 	apply_tree_highlights(ctx, 2)
+end
+
+-- Preserve unchanged rows and their extmarks. A normal append should not rewrite
+-- thousands of old lines just to move the current marker and add the next turn.
+local function write_tree_rows(ctx, lines, highlights)
+	local state = ctx.state
+	local old_lines = vim.api.nvim_buf_get_lines(state.tree_buf, 0, -1, false)
+	local old_highlights = state.tree_highlights_by_line or {}
+	local prefix, suffix = 0, 0
+	local function same(old_row, new_row)
+		return old_lines[old_row] == lines[new_row] and vim.deep_equal(old_highlights[old_row], highlights[new_row])
+	end
+	if not state.tree_render_dirty then
+		while prefix < math.min(#old_lines, #lines) and same(prefix + 1, prefix + 1) do
+			prefix = prefix + 1
+			checkpoint(ctx)
+		end
+		while suffix < math.min(#old_lines, #lines) - prefix and same(#old_lines - suffix, #lines - suffix) do
+			suffix = suffix + 1
+			checkpoint(ctx)
+		end
+	end
+	state.tree_highlights_by_line = highlights
+	if prefix == #old_lines and prefix == #lines then return end
+	state.tree_render_dirty = true
+	vim.api.nvim_buf_clear_namespace(state.tree_buf, tree_highlight_ns, prefix, #old_lines - suffix)
+	local replacement = {}
+	for row = prefix + 1, #lines - suffix do replacement[#replacement + 1] = lines[row] end
+	vim.api.nvim_set_option_value("modifiable", true, { buf = state.tree_buf })
+	vim.api.nvim_buf_set_lines(state.tree_buf, prefix, #old_lines - suffix, false, replacement)
+	vim.api.nvim_set_option_value("modifiable", false, { buf = state.tree_buf })
+	if #replacement > 0 then apply_tree_highlights(ctx, prefix + 1, #lines - suffix) end
+	state.tree_render_dirty = nil
 end
 
 local function render_tree_buffer(ctx, opts)
@@ -589,22 +709,21 @@ local function render_tree_buffer(ctx, opts)
 		search_row = #lines
 	end
 	table.insert(lines, "")
-	state.tree_nodes_by_line = {}
-	state.tree_match_rows = {}
-	state.tree_highlights_by_line = highlights
+	local line_nodes, match_rows = {}, {}
 	state.tree_workspace_highlights = {}
 	state.tree_workspace_highlight_slots = {}
 	if #roots == 0 then
 		table.insert(lines, (state.tree_search_query or "") ~= "" and "No matching turns." or "No tree entries found in this session.")
 	else
-		render_nodes(ctx, roots, leaf_id, lines, state.tree_nodes_by_line, state.tree_highlights_by_line)
+		render_nodes(ctx, roots, leaf_id, lines, line_nodes, highlights)
 	end
-	for row, node in pairs(state.tree_nodes_by_line) do
-		if node.match_positions then table.insert(state.tree_match_rows, row) end
+	for row, node in pairs(line_nodes) do
+		if node.match_positions then table.insert(match_rows, row) end
+		checkpoint(ctx)
 	end
-	table.sort(state.tree_match_rows)
+	table.sort(match_rows)
 	if search_row then
-		local suffix = " · " .. #state.tree_match_rows .. " matches · "
+		local suffix = " · " .. #match_rows .. " matches · "
 		local key_hint = "n/N Next/previous"
 		local query_width = tree_window_width(ctx) - display_width("Search: " .. suffix .. key_hint)
 		local prefix = "Search: " .. truncate_display(query, math.max(1, query_width)) .. suffix
@@ -614,9 +733,11 @@ local function render_tree_buffer(ctx, opts)
 			{ start_col = #prefix, end_col = #prefix + 3, hl_group = "PiOverviewKey" },
 		}
 	end
-	ctx.buffer.set_lines(state.tree_buf, lines, false)
-	apply_tree_highlights(ctx)
+	state.tree_nodes_by_line, state.tree_match_rows = line_nodes, match_rows
+	write_tree_rows(ctx, lines, highlights)
 	state.tree_focus_id, state.tree_rendered_query = focus_id, query
+	state.tree_rendered_count, state.tree_rendered_leaf = #state.tree_records, state.tree_leaf_id
+	state.tree_rendered_scope, state.tree_rendered_filter = state.tree_scope, state.tree_filter_mode
 	return true, focus_id
 end
 
@@ -647,13 +768,21 @@ local function restore_tree_view(ctx, opts)
 	end)
 end
 
-local function refresh_tree_in_place(ctx, opts)
+local function render_tree_in_place(ctx, opts)
 	if not render_tree_buffer(ctx, { allow_empty = true }) then
 		return false
 	end
 	restore_tree_view(ctx, opts)
 	update_preview(ctx)
 	return true
+end
+
+local function refresh_tree_in_place(ctx, opts, completed)
+	run_work(ctx, function() render_tree_in_place(ctx, opts) end, function()
+		update_action_hint(ctx)
+		if completed then completed() end
+	end)
+	update_action_hint(ctx)
 end
 
 local function cycle_search_match(ctx, direction)
@@ -693,12 +822,13 @@ local function search_turns(ctx)
 		if query == (state.tree_search_query or "") then return end
 		local position = selected_tree_position(ctx)
 		state.tree_search_query = query
-		refresh_tree_in_place(ctx, position)
-		local selected = current_node(ctx)
-		if query ~= "" and #state.tree_match_rows > 0 and not (selected and selected.match_positions) then
-			vim.api.nvim_win_set_cursor(state.tree_win, { state.tree_match_rows[1], 0 })
-			update_preview(ctx)
-		end
+		refresh_tree_in_place(ctx, position, function()
+			local selected = current_node(ctx)
+			if query ~= "" and #state.tree_match_rows > 0 and not (selected and selected.match_positions) then
+				vim.api.nvim_win_set_cursor(state.tree_win, { state.tree_match_rows[1], 0 })
+				update_preview(ctx)
+			end
+		end)
 	end
 	local function finish(accept)
 		if closing then return end
@@ -758,10 +888,12 @@ end
 local function show_tree(ctx, position, reuse)
 	local state = ctx.state
 	reuse = reuse and state.tree_rendered_query == (state.tree_search_query or "")
+		and state.tree_rendered_count == #(state.tree_records or {}) and state.tree_rendered_leaf == state.tree_leaf_id
+		and state.tree_rendered_scope == state.tree_scope and state.tree_rendered_filter == state.tree_filter_mode
 	if win_valid(state.tree_win) then
 		position = position or selected_tree_position(ctx)
 		position.view = position.view or save_tree_view(ctx)
-		if reuse then update_action_hint(ctx) else refresh_tree_in_place(ctx, position) end
+		if reuse then update_action_hint(ctx) else render_tree_in_place(ctx, position) end
 		vim.api.nvim_set_current_win(state.tree_win)
 		return
 	end
@@ -770,7 +902,7 @@ local function show_tree(ctx, position, reuse)
 	local same_width = state.tree_width == width
 	state.tree_width = width
 	local rendered, focus_id
-	if reuse and same_width and ctx.buffer.valid(state.tree_buf) and ctx.buffer.valid(state.tree_preview_buf) then
+	if reuse and same_width and not state.tree_render_dirty and ctx.buffer.valid(state.tree_buf) and ctx.buffer.valid(state.tree_preview_buf) then
 		update_action_hint(ctx)
 		rendered, focus_id = true, state.tree_focus_id
 	else
@@ -918,11 +1050,13 @@ function M.show(ctx, position)
 		position = position or selected_tree_position(ctx)
 		position.view = position.view or save_tree_view(ctx)
 	end
+	cancel_work(ctx)
 	state.tree_request = (state.tree_request or 0) + 1
 	local request = state.tree_request
 	state.tree_context = nil -- Cached views cannot authorize mutations.
+	state.tree_reading = true
+	update_activity(ctx)
 	local cached = state.tree_records
-	if cached then show_tree(ctx, position, true) end
 	local last = cached and cached[#cached]
 	local function read(since)
 		ctx.tree.read(function(data, captured, missing_cursor)
@@ -935,22 +1069,31 @@ function M.show(ctx, position)
 				vim.list_extend(state.tree_records, data.entries)
 			else
 				state.tree_records = data.entries
+				state.tree_model, state.tree_model_count = nil, nil
 			end
 			state.tree_context, state.tree_cache_context, state.tree_leaf_id = captured, captured, leaf
-			if win_valid(state.tree_win) then
-				local current_position = selected_tree_position(ctx)
-				current_position.view = save_tree_view(ctx)
-				if changed then refresh_tree_in_place(ctx, current_position) else update_action_hint(ctx) end
-			else
-				show_tree(ctx, position)
-			end
+			state.tree_reading = nil
+			run_work(ctx, function()
+				if win_valid(state.tree_win) then
+					local current_position = selected_tree_position(ctx)
+					current_position.view = save_tree_view(ctx)
+					if changed then render_tree_in_place(ctx, current_position) else update_action_hint(ctx) end
+				else
+					show_tree(ctx, position)
+				end
+			end, function() update_action_hint(ctx) end)
 		end, since)
 	end
-	read(last and last.id)
+	if cached then
+		run_work(ctx, function() show_tree(ctx, position, true) end, function() read(last and last.id) end)
+	else
+		read(nil)
+	end
 end
 
 function M.update(ctx)
-	if win_valid(ctx.state.tree_win) and ctx.state.tree_writable ~= not not ctx.tree.writable(ctx.state.tree_context) then
+	local writable = not ctx.state.tree_work and not ctx.state.tree_reading and not not ctx.tree.writable(ctx.state.tree_context)
+	if win_valid(ctx.state.tree_win) and ctx.state.tree_writable ~= writable then
 		update_action_hint(ctx)
 	end
 end

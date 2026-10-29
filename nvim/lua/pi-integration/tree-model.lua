@@ -69,10 +69,11 @@ local function group_is_assistant_activity(raw_records)
 	return false
 end
 
-local function add_display_node(model, parent, kind, raw_records)
+local function add_display_node(model, parent, kind, raw_records, checkpoint)
 	local records = {}
 	for _, raw in ipairs(raw_records) do
 		table.insert(records, raw.record)
+		checkpoint()
 	end
 	local first = raw_records[1]
 	local last = raw_records[#raw_records]
@@ -86,6 +87,7 @@ local function add_display_node(model, parent, kind, raw_records)
 				cwd = data.cwd,
 			}
 		end
+		checkpoint()
 	end
 	local node = {
 		kind = kind,
@@ -106,6 +108,7 @@ local function add_display_node(model, parent, kind, raw_records)
 	table.insert(model.nodes, node)
 	for _, raw in ipairs(raw_records) do
 		model.by_record_id[raw.record.id] = node
+		checkpoint()
 	end
 	return node
 end
@@ -114,14 +117,14 @@ local function is_cursor(raw)
 	return raw.record.type == "custom" and raw.record.customType == "pi-workspace-cursor"
 end
 
-local function project_raw(model, raw, parent)
+local function project_one(model, raw, parent, checkpoint)
 	local kind = boundary_kind(raw.record)
+	raw.projection_parent = parent
+	raw.group_start = raw
 	if kind then
-		local node = add_display_node(model, parent, kind, { raw })
-		for _, child in ipairs(raw.children) do
-			project_raw(model, child, node)
-		end
-		return
+		local node = add_display_node(model, parent, kind, { raw }, checkpoint)
+		raw.display_node = node
+		return raw.children, node
 	end
 
 	-- Pi stores a new assistant record after each tool round-trip. Collapse the
@@ -152,6 +155,7 @@ local function project_raw(model, raw, parent)
 		elseif #cursor_branches == 0 and #progression == 1 and not boundary_kind(progression[1].record) then
 			current = progression[1]
 			table.insert(grouped, current)
+			checkpoint()
 		else
 			next_children = {}
 			vim.list_extend(next_children, progression)
@@ -163,18 +167,36 @@ local function project_raw(model, raw, parent)
 		end
 	end
 
+	for _, member in ipairs(grouped) do
+		member.group_start = raw
+		checkpoint()
+	end
 	local next_parent = parent
 	if group_is_assistant_activity(grouped) then
-		next_parent = add_display_node(model, parent, "assistant", grouped)
+		next_parent = add_display_node(model, parent, "assistant", grouped, checkpoint)
 	elseif is_workspace_location(current.record) then
-		next_parent = add_display_node(model, parent, "location", grouped)
+		next_parent = add_display_node(model, parent, "location", grouped, checkpoint)
 	end
-	for _, child in ipairs(next_children) do
-		project_raw(model, child, next_parent)
+	raw.display_node = next_parent ~= parent and next_parent or nil
+	return next_children, next_parent
+end
+
+local function project_raw(model, raw, parent, checkpoint)
+	local stack = { { raw, parent } }
+	while #stack > 0 do
+		local item = table.remove(stack)
+		local children, next_parent = project_one(model, item[1], item[2], checkpoint)
+		for index = #children, 1, -1 do
+			stack[#stack + 1] = { children[index], next_parent }
+		end
+		checkpoint()
 	end
 end
 
-function M.build(records)
+local function noop() end
+
+function M.build(records, checkpoint)
+	checkpoint = checkpoint or noop
 	local model = {
 		roots = {},
 		nodes = {},
@@ -190,6 +212,7 @@ function M.build(records)
 			model.last_id = record.id
 			table.insert(raw_records, raw)
 		end
+		checkpoint()
 	end
 
 	local raw_roots = {}
@@ -201,18 +224,63 @@ function M.build(records)
 		else
 			table.insert(raw_roots, raw)
 		end
+		checkpoint()
 	end
 
-	local function assign_workspace(raw, inherited)
-		raw.workspace = workspace_after(raw.record, inherited)
-		for _, child in ipairs(raw.children) do
-			assign_workspace(child, raw.workspace)
-		end
+	local stack = {}
+	for index = #raw_roots, 1, -1 do stack[#stack + 1] = raw_roots[index] end
+	while #stack > 0 do
+		local raw = table.remove(stack)
+		raw.workspace = workspace_after(raw.record, raw.parent and raw.parent.workspace)
+		for index = #raw.children, 1, -1 do stack[#stack + 1] = raw.children[index] end
+		checkpoint()
 	end
 	for _, root in ipairs(raw_roots) do
-		assign_workspace(root, nil)
-		project_raw(model, root, nil)
+		project_raw(model, root, nil, checkpoint)
 	end
+	return model
+end
+
+-- Ordinary turns extend the chronological tail. Reproject only its final group:
+-- a tool round-trip can extend that group, while a new user turn starts another.
+-- Forks and non-tail changes deliberately fall back to a fresh authoritative build.
+function M.append(model, records, checkpoint)
+	checkpoint = checkpoint or noop
+	if #records == 0 then return model end
+	local previous = model.last_id
+	if not previous then return nil end
+	local seen = {}
+	for _, record in ipairs(records) do
+		if not record.id or record.parentId ~= previous or model.raw_by_id[record.id] or seen[record.id] then return nil end
+		seen[record.id], previous = true, record.id
+		checkpoint()
+	end
+	local last = model.raw_by_id[model.last_id]
+	local head = last.group_start
+	local old_node = head.display_node
+	if model.nodes[#model.nodes] ~= (old_node or head.projection_parent) then return nil end
+	if old_node then
+		local siblings = old_node.parent and old_node.parent.children or model.roots
+		if siblings[#siblings] ~= old_node then return nil end
+		table.remove(siblings)
+		table.remove(model.nodes)
+	end
+	local raw = head
+	while raw do
+		model.by_record_id[raw.record.id] = nil
+		raw.display_node = nil
+		raw = raw.children[1]
+		checkpoint()
+	end
+	for _, record in ipairs(records) do
+		local child = { record = record, parent = last, children = {}, order = last.order + 1 }
+		child.workspace = workspace_after(record, last.workspace)
+		last.children[1] = child
+		model.raw_by_id[record.id] = child
+		model.last_id, last = record.id, child
+		checkpoint()
+	end
+	project_raw(model, head, head.projection_parent, checkpoint)
 	return model
 end
 
@@ -277,7 +345,7 @@ local function tool_names(node)
 	return names
 end
 
-function M.node_text(node, extract_text)
+local function full_node_text(node, extract_text)
 	if node.kind == "assistant" then
 		local chunks = {}
 		for _, record in ipairs(node.records) do
@@ -319,6 +387,58 @@ function M.node_text(node, extract_text)
 		return record.label or "label cleared"
 	end
 	return ""
+end
+
+local function source_node(node)
+	return node.model_node or node
+end
+
+function M.node_text(node, extract_text)
+	node = source_node(node)
+	if node.text == nil then node.text = full_node_text(node, extract_text) end
+	return node.text
+end
+
+-- Build only enough normalized text for a row, not the entire assistant turn.
+-- Full text is cached separately, on demand, for previews and searches.
+function M.node_summary(node, extract_text, limit)
+	node = source_node(node)
+	if node.summary and node.summary_limit >= limit then return node.summary end
+	local parts = {}
+	if node.kind == "assistant" then
+		for _, record in ipairs(node.records) do
+			local message = record.type == "message" and record.message
+			if message and message.role == "assistant" then
+				local content = message.content
+				local before = #parts
+				if type(content) == "string" and content ~= "" then
+					parts[#parts + 1] = content
+				elseif type(content) == "table" then
+					for _, item in ipairs(content) do
+						local text = type(item) == "string" and item or type(item) == "table" and item.type == "text" and item.text
+						if type(text) == "string" and text ~= "" then parts[#parts + 1] = text end
+					end
+				end
+				if #parts > before then parts[#parts + 1] = "\n\n" end
+			end
+		end
+	end
+	if #parts == 0 then parts[1] = tostring(M.node_text(node, extract_text)) end
+	local prefix, length = "", 0
+	for _, part in ipairs(parts) do
+		local offset = 0
+		while length <= limit do
+			local chunk = vim.fn.strcharpart(part, offset, math.max(128, limit * 2))
+			if chunk == "" then break end
+			offset = offset + vim.fn.strchars(chunk)
+			prefix = (prefix .. chunk):gsub("%s+", " "):gsub("^%s+", "")
+			length = vim.fn.strchars(prefix)
+		end
+		if length > limit then break end
+	end
+	node.summary = vim.fn.strcharpart(vim.trim(prefix), 0, limit + 1)
+	node.summary_limit = limit
+	return node.summary
 end
 
 -- Neovim's fuzzy matcher returns character offsets; extmarks need byte offsets.

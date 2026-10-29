@@ -238,7 +238,8 @@ local function activity_statusline_label(state)
 	if request and not request.navigation and (not request.expires or request.expires > vim.uv.now()) then
 		return " waiting·" .. request.label .. suffix .. (request.hidden and "·<leader>pa" or "")
 	end
-	if not state.is_loading and not state.is_agent_running and not state.is_streaming
+	local history_activity = state.tree_loading or state.history_operation and state.history_operation.label
+	if not history_activity and not state.is_loading and not state.is_agent_running and not state.is_streaming
 		and not state.is_retrying and not state.awaiting_agent_output then
 		if next_pending and (next_pending.edit_buf or next_pending.id == state.queue_edit_item) then
 			return " waiting·editing queued message" .. suffix
@@ -246,7 +247,9 @@ local function activity_statusline_label(state)
 		return (sending and " sending" or "") .. suffix
 	end
 	local label
-	if state.is_loading then
+	if history_activity then
+		label = history_activity
+	elseif state.is_loading then
 		label = state.loading_stage or "loading"
 	elseif state.is_retrying then
 		label = "retry"
@@ -662,7 +665,7 @@ function M.setup(ctx)
 			if not timer then return end
 			local state = ctx.state
 			if state.frontend_visible == false then return end
-			if not state.is_loading and not state.is_agent_running and not state.is_streaming
+			if not state.tree_loading and not state.history_operation and not state.is_loading and not state.is_agent_running and not state.is_streaming
 				and not state.is_retrying and not state.awaiting_agent_output then return end
 			if not buffer.window_matches(state.status_win, state.status_buf) then return end
 			state.activity_spinner_tick = math.floor(vim.uv.hrtime() / (interval_ms * 1000000)) % #activity_spinner_frames + 1

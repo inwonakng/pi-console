@@ -341,6 +341,11 @@ record_command = function(receipt, envelope, live)
 	local operation = receipt.operation or envelope and envelope.operation
 	if not operation then return end
 	local status = receipt.status or "unknown"
+	if state.history_operation and state.history_operation.id == id
+		and status ~= "accepted" and status ~= "sending" then
+		state.history_operation = nil
+		statusline.update(ctx)
+	end
 	local label = action_name(operation)
 	local failed = status == "failed" or status == "uncertain" or status == "unknown"
 	local message = label .. ": " .. status
@@ -434,6 +439,11 @@ local function command(operation, payload, callback, captured, terminal, submiss
 	if operation ~= "control.acquire" and operation ~= "control.takeover" then envelope.controlToken = grant and grant.token end
 	unresolved[envelope.id] = envelope -- Diagnostic identity only, never replayed.
 	record_command({ id = envelope.id, status = "sending" }, envelope)
+	local history_labels = { ["history.navigate"] = "switching branch", ["history.delete"] = "deleting branch", ["history.clone"] = "cloning history" }
+	if history_labels[operation] then
+		state.history_operation = { id = envelope.id, label = history_labels[operation] }
+		statusline.update(ctx)
+	end
 	if terminal then outcomes[envelope.id] = { callback = terminal, captured = captured or stamp(), lifecycle = operation == "session.kill", transition = operation == "history.navigate", history_refresh = operation == "history.delete" } end
 	if feedback_ui.tracks(operation) then
 		local entry = submission and submission.entry
@@ -942,6 +952,7 @@ local function disconnected(reason, details, intentional)
 		record_command({ id = envelope.id, status = "unknown", error = { message = "Connection lost before the outcome was confirmed. Reconnect to check its status; nothing will be resent automatically." } }, envelope)
 	end
 	tree.close(tree_ctx)
+	state.history_operation = nil
 	offers = {}
 	resources.invalidate()
 	generation = generation + 1
@@ -975,6 +986,7 @@ attach = function(id, acquire, initial)
 	if pending_new_session and pending_new_session.session ~= id then cancel_new_session() end
 	auto_control_selection = nil
 	tree.close(tree_ctx)
+	state.history_operation = nil
 	offers = {}
 	if pending_host then pending_host_select = false end
 	resources.invalidate()
@@ -1385,6 +1397,7 @@ local function detach_selection()
 	request("detach", {})
 	close_approval()
 	tree.close(tree_ctx)
+	state.history_operation = nil
 	offers, outcomes = {}, {}
 	resources.invalidate()
 	attachment, grant, authority, auto_control_selection = nil, nil, nil, nil
@@ -2531,7 +2544,7 @@ local function history_command(operation, payload, captured, completed)
 	end)
 end
 tree_ctx = {
-	state = state, config = M.config, ui = { notify = notify },
+	state = state, config = M.config, ui = { notify = notify, status_changed = function() statusline.update(ctx) end },
 	buffer = { valid = valid, create = function(name, ft, editable) return layout.create_buffer(nil, name, ft, editable) end,
 		set_lines = function(buf, lines, editable) layout.set_buffer_lines(ctx, buf, lines, editable) end },
 	messages = { extract_text = require("pi-integration.utils.message").extract_text },
@@ -2558,8 +2571,11 @@ tree_ctx.tree = {
 			done(result.data, captured)
 		end)
 	end,
-	writable = function(captured) return tree_ctx.tree.cache_current(captured) and current(captured) end,
+	writable = function(captured) return not state.history_operation and tree_ctx.tree.cache_current(captured) and current(captured) end,
 	can_mutate = function(captured, action)
+		if state.tree_work or state.tree_reading or state.history_operation then
+			notify("Wait for the history operation to finish.", vim.log.levels.WARN); return false
+		end
 		if not control_current() then notify("Viewer: use :PiControl first.", vim.log.levels.WARN); return false end
 		if not tree_ctx.tree.cache_current(captured) or not current(captured) then notify("History context changed; refresh the tree before changing history.", vim.log.levels.WARN); return false end
 		if not require("pi-integration.utils.guard").if_history_change_allowed(tree_ctx, "changing history") then return false end
