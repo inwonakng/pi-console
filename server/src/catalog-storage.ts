@@ -287,8 +287,54 @@ export function splitReceipt(receipt: CommandReceipt): { metadata: CommandReceip
   return { metadata, recovery: queueItemText !== undefined || submittedText !== undefined || editorText !== undefined || cleared !== undefined || reviewRecovery !== undefined ? { queueItemText, submittedText, editorText, cleared, reviewRecovery } : undefined };
 }
 
+function validActivation(value: unknown, channel: Channel): value is Activation {
+  return object(value) && value.schemaVersion === 2 && value.database === "catalog.sqlite" && value.channel === channel
+    && typeof value.hostId === "string" && uuid.test(value.hostId) && ["initializing", "ready"].includes(String(value.phase))
+    && (value.sourceDigest === undefined || typeof value.sourceDigest === "string" && /^[a-f0-9]{64}$/.test(value.sourceDigest));
+}
+
+async function inspectDatabase(path: string): Promise<DatabaseSync> {
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    try {
+      const stat = await lstat(path + suffix);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) throw new Error("Invalid private SQLite file: " + path + suffix);
+    } catch (error) { if (!object(error) || error.code !== "ENOENT") throw error; }
+  }
+  return new DatabaseSync(path, { readOnly: true });
+}
+
+/** Read-only discovery, including when owner.lock was removed. Never adopts or migrates data. */
+export async function catalogOwnerEpochs(root: string, channel: Channel): Promise<string[]> {
+  const path = join(root, "catalog.sqlite");
+  const value = await optionalJson(join(root, "catalog.json"));
+  if (value === undefined || object(value) && value.schemaVersion === 1) {
+    try { await lstat(path); throw new Error("SQLite exists without an activation guard; offline inspection required"); }
+    catch (error) { if (!object(error) || error.code !== "ENOENT") throw error; }
+    if (value === undefined) return [];
+    const sessions = catalogData(value, channel).sessions;
+    if (sessions.some((session) => session.state === "open" && !session.ownerEpoch)) throw new Error("Legacy ownership lacks an execution epoch; manual inspection required");
+    return [...new Set(sessions.flatMap((session) => session.ownerEpoch ? [session.ownerEpoch] : []))];
+  }
+  if (!validActivation(value, channel)) throw new Error("Unsupported service catalog activation schema or identity; leaving data unchanged");
+  try { await lstat(path); }
+  catch (error) {
+    if (!object(error) || error.code !== "ENOENT") throw error;
+    if (value.phase === "initializing") return []; // openStorage can finish interrupted initialization.
+    throw new Error("Authoritative SQLite database missing; refusing JSON fallback");
+  }
+  const inspection = await inspectDatabase(path);
+  try {
+    const version = Number(inspection.prepare("PRAGMA user_version").get()!.user_version);
+    if (version === 0 && value.phase === "initializing" && Number(inspection.prepare("SELECT count(*) AS n FROM sqlite_master").get()!.n) === 0) return [];
+    if (![1, DATABASE_VERSION].includes(version)) throw new Error("Unsupported SQLite catalog schema; leaving data unchanged");
+    const profile = inspection.prepare("SELECT host_id,channel FROM profile WHERE singleton=1").get();
+    if (profile?.host_id !== value.hostId || profile.channel !== channel) throw new Error("SQLite profile identity mismatch");
+    return inspection.prepare("SELECT DISTINCT owner_epoch FROM sessions WHERE owner_epoch IS NOT NULL").all().map((row) => String(row.owner_epoch));
+  } finally { inspection.close(); }
+}
+
 /** Exclusive initialization only. Callers retain the claim on any mutation failure. */
-export async function openStorage(root: string, channel: Channel, mutating: () => void, recoveryEpoch?: string): Promise<{ db: DatabaseSync; hostId: string }> {
+export async function openStorage(root: string, channel: Channel, mutating: () => void, recoveryEpochs?: readonly string[]): Promise<{ db: DatabaseSync; hostId: string }> {
   const path = join(root, "catalog.sqlite");
   const value = await optionalJson(join(root, "catalog.json"));
   let activation: Activation;
@@ -310,9 +356,7 @@ export async function openStorage(root: string, channel: Channel, mutating: () =
     if (source) activation.sourceDigest = (await sourceCopy(root, source)).digest;
     await activate(root, activation);
   } else {
-    if (!object(value) || value.schemaVersion !== 2 || value.database !== "catalog.sqlite" || value.channel !== channel
-      || typeof value.hostId !== "string" || !uuid.test(value.hostId) || !["initializing", "ready"].includes(String(value.phase))
-      || (value.sourceDigest !== undefined && (typeof value.sourceDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.sourceDigest)))) {
+    if (!validActivation(value, channel)) {
       throw new Error("Unsupported service catalog activation schema or identity; leaving data unchanged");
     }
     activation = value as Activation;
@@ -332,15 +376,9 @@ export async function openStorage(root: string, channel: Channel, mutating: () =
   }
   // Refuse links/foreign or public files before SQLite can follow them. Sidecars
   // inherit the database's 0600 mode; the containing profile is also 0700.
-  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-    try {
-      const stat = await lstat(path + suffix);
-      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) throw new Error("Invalid private SQLite file: " + path + suffix);
-    } catch (error) { if (!object(error) || error.code !== "ENOENT") throw error; }
-  }
   // Inspect the version before writable opening / journal PRAGMAs. Empty v0 is
   // permitted only while initializing; a newer schema is never downgraded.
-  const inspection = new DatabaseSync(path, { readOnly: true });
+  const inspection = await inspectDatabase(path);
   let version: number;
   try {
     version = Number(inspection.prepare("PRAGMA user_version").get()!.user_version);
@@ -352,7 +390,7 @@ export async function openStorage(root: string, channel: Channel, mutating: () =
       const owned = inspection.prepare(version === 1
         ? "SELECT owner_epoch FROM sessions WHERE state='open' OR owner_epoch IS NOT NULL"
         : "SELECT owner_epoch FROM sessions WHERE owner_epoch IS NOT NULL").all();
-      if (owned.some((row) => !recoveryEpoch || row.owner_epoch !== recoveryEpoch)) throw new Error("Catalog contains unresolved live ownership; recovery required");
+      if (owned.some((row) => !recoveryEpochs?.includes(String(row.owner_epoch)))) throw new Error("Catalog contains unresolved live ownership; recovery required");
     }
   } finally { inspection.close(); }
   mutating();

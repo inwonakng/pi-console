@@ -8,11 +8,23 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 // Keep ordinary editor/TUI extension imports free of SQLite initialization.
 const require = createRequire(import.meta.url);
-function database(path) { const { DatabaseSync } = require('node:sqlite'); return new DatabaseSync(path); }
+function database(path, options = {}) { const { DatabaseSync } = require('node:sqlite'); return new DatabaseSync(path, options); }
 
 const script = fileURLToPath(import.meta.url);
 const contexts = new WeakMap();
-const terminal = "('done','cancelled')";
+const terminal = "('done','cancelled','interrupted')";
+
+/** Linux boot evidence only. Unavailable evidence never implies a reboot. */
+export function bootIdentity() {
+  if (process.platform !== 'linux') return;
+  try {
+    const machineId = readFileSync('/etc/machine-id', 'utf8').trim();
+    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    if (/^[a-f0-9]{32}$/i.test(machineId) && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(bootId)) return { machineId, bootId };
+  } catch (error) {
+    if (!['ENOENT', 'EACCES', 'EPERM'].includes(error.code)) throw error;
+  }
+}
 
 export function assertManagedResources(env = process.env) {
   if (!env.PI_CONSOLE_RESOURCE_MANIFEST) return;
@@ -69,17 +81,39 @@ export function registry(path) {
   try {
     db.exec('PRAGMA busy_timeout=1000');
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    if (v !== 0 && v !== 1) throw new Error('Unsupported managed ownership registry');
+    if (![0, 1, 2].includes(v)) throw new Error('Unsupported managed ownership registry');
     db.exec('PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;');
     if (v === 0) db.exec(`BEGIN IMMEDIATE;
-      CREATE TABLE epochs(id TEXT PRIMARY KEY, state TEXT NOT NULL);
+      CREATE TABLE epochs(id TEXT PRIMARY KEY, state TEXT NOT NULL, claim TEXT, owner TEXT, boot TEXT, recovery TEXT);
       CREATE TABLE jobs(id TEXT PRIMARY KEY, epoch TEXT NOT NULL REFERENCES epochs(id), parent TEXT REFERENCES jobs(id), label TEXT NOT NULL, status TEXT NOT NULL, launch_open INTEGER NOT NULL, result TEXT);
       CREATE INDEX jobs_epoch ON jobs(epoch,status);
       CREATE INDEX jobs_parent ON jobs(parent);
       CREATE TABLE recoveries(epoch TEXT PRIMARY KEY, claim TEXT NOT NULL);
-      PRAGMA user_version=1; COMMIT;`);
+      PRAGMA user_version=2; COMMIT;`);
+    if (v === 1) db.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE epochs ADD COLUMN claim TEXT;
+      ALTER TABLE epochs ADD COLUMN owner TEXT;
+      ALTER TABLE epochs ADD COLUMN boot TEXT;
+      ALTER TABLE epochs ADD COLUMN recovery TEXT;
+      PRAGMA user_version=2; COMMIT;`);
     return db;
   } catch (e) { db.close(); throw e; }
+}
+
+/** Read-only startup/status guard; never creates or upgrades a registry. */
+export function unreconciledEpochs(path) {
+  let stat;
+  try { stat = lstatSync(path); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw new Error('Invalid private ownership file: ' + path);
+  const db = database(path, { readOnly: true });
+  try {
+    const version = db.prepare('PRAGMA user_version').get().user_version;
+    if (version === 1 || version === 0 && db.prepare('SELECT count(*) AS n FROM sqlite_master').get().n === 0) return []; // Legacy identity is available only in the claim/catalog.
+    if (version !== 2) throw new Error('Unsupported managed ownership registry');
+    return db.prepare(`SELECT id FROM epochs WHERE claim IS NOT NULL AND
+      (state!='sealed' OR EXISTS(SELECT 1 FROM jobs WHERE epoch=epochs.id AND status NOT IN ${terminal}))`).all().map(row => row.id);
+  } finally { db.close(); }
 }
 
 function transaction(db, f) {
@@ -113,10 +147,27 @@ function ancestorsOpen(db, job) {
   return true;
 }
 
-export function beginEpoch(path, epoch) {
+export function beginEpoch(path, epoch, ownership) {
   const db = registry(path);
-  try { db.prepare("INSERT INTO epochs VALUES(?,'active')").run(epoch); }
-  finally { db.close(); }
+  try {
+    db.prepare("INSERT INTO epochs(id,state,claim,owner,boot) VALUES(?,'active',?,?,?)")
+      .run(epoch, ownership?.claim ?? null, ownership?.owner ?? null, JSON.stringify(bootIdentity() ?? null));
+  } finally { db.close(); }
+}
+
+/** Caller holds the owner lease and has established reboot evidence/confirmation. */
+export function interruptEpoch(path, epoch, evidence) {
+  const db = registry(path);
+  try { transaction(db, () => {
+    const row = db.prepare('SELECT state,recovery FROM epochs WHERE id=?').get(epoch);
+    if (row?.state !== 'sealed') throw new Error('Seal the execution epoch before recording interruption');
+    if (row.recovery) return; // Keep the original evidence across interrupted reconciliation.
+    const jobs = db.prepare(`SELECT id,status FROM jobs WHERE epoch=? AND status NOT IN ${terminal}`).all(epoch);
+    db.prepare('UPDATE epochs SET recovery=? WHERE id=?').run(JSON.stringify({ ...evidence, jobs }), epoch);
+    // Preserve result bytes and original statuses in recovery evidence. Interrupted
+    // means no surviving local work, not a successful command outcome.
+    db.prepare(`UPDATE jobs SET status='interrupted',launch_open=0 WHERE epoch=? AND status NOT IN ${terminal}`).run(epoch);
+  }); } finally { db.close(); }
 }
 
 function sealTree(db, id) {

@@ -8,6 +8,7 @@ import { WorkspaceReviews, type ReviewMutation } from "./workspace-reviews.js";
 import { fingerprint, readResource, completeFiles, completeDirectory, type ResourceContext } from "./resource-reads.js";
 import { hostCommand, hostFingerprint, type HostReceipt } from "./host-commands.js";
 import { inspectEpoch } from "../../pi/scripts/managed-process.mjs";
+import type { RecoveryOptions } from "./service-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { SavedHelperUnresolved, savedSessionHelper, withSavedSessionHelper, type SavedPreview, type SavedSessionRequest } from "./saved-sessions.js";
 import { isAbsolute, join } from "node:path";
@@ -159,7 +160,7 @@ export class HostOwner {
   }
 
   /** Explicit recovery only; callers then reopen and explicitly resume a saved session. */
-  static reconcile(options: { root: string; channel: Channel }): Promise<void> { return SessionCatalog.reconcile(options); }
+  static reconcile(options: RecoveryOptions): Promise<void> { return SessionCatalog.reconcile(options); }
 
   get shutdownStarted(): boolean { return this.closing; }
   get buildId(): string { return this.resources.buildId; }
@@ -575,7 +576,7 @@ export class HostOwner {
       if (this.catalog.list().some((session) => session.acceptedQueue?.some((item) => item.status !== "failed"))) {
         throw new CommandError("session_busy", "Accepted queued work would be interrupted");
       }
-      if (inspectEpoch(this.catalog.processRegistry, this.serviceEpoch).some((job) => job.parent !== null && !["done", "cancelled"].includes(job.status))) {
+      if (inspectEpoch(this.catalog.processRegistry, this.serviceEpoch).some((job) => job.parent !== null && !["done", "cancelled", "interrupted"].includes(job.status))) {
         throw new CommandError("session_busy", "Known managed child work remains; use an intentional force stop to interrupt it");
       }
     }

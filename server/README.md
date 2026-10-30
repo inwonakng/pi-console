@@ -92,19 +92,38 @@ explicit forced administrative shutdown, not frontend detach. Headless installat
 is available through `--server-only`. Confirmed session restart/kill
 are attachment-bound commands, separate from these service administration actions.
 
-After owner death, `server reconcile` invokes the existing B2 managed recovery gate;
-then explicitly `server start` and `server resume --session ID`. Neither ordinary
-start nor resume performs reconciliation. Known unresolved managed work blocks it;
-possible unknown escaped descendants do not. No command/queue/approval replay is
-allowed. The operational recovery path passed macOS B3 checks on Node 26.12 and actual
-22.19; Linux remains unexecuted.
+After owner death, run `server reconcile`, then explicitly `server start` and
+`server resume --session ID`. Neither ordinary start nor resume performs recovery
+or replays commands, queues or approvals. Do not delete `owner.lock`: errors include
+its path and the recovery command. If it was already removed, reconciliation can
+recover the installation/epoch identity retained in `processes.sqlite` and find
+orphaned session ownership in the catalog.
+
+New Linux epochs record machine and kernel boot IDs. Explicit reconciliation can
+therefore distinguish a previous boot's interrupted local jobs from potentially
+live same-boot workers. It records those jobs as `interrupted`, preserves their
+results and original statuses as recovery evidence, and releases sessions without
+claiming that commands succeeded. Same-boot live/unresolved work still refuses
+replacement. A profile copied from another machine is not proof of worker death.
+
+For older epochs without boot evidence, **only after confirming that this host
+rebooted since the old owner ran**, use `server reconcile --after-reboot`. This is
+an administrative assertion, not process detection; it cannot override a recorded
+same-boot identity. A legacy missing-lock epoch also needs a matching startup
+registration to establish installation ownership; otherwise manual inspection is
+required. Recovery remains explicit even after a reboot. Possible unknown escaped
+or externally handed-off work is outside local cleanup guarantees.
 
 ### Service environment and startup
 
 Installation never enables startup. On macOS, `server enable` installs a per-user
 LaunchAgent; on Linux it enables a user-systemd unit. Enable also starts/discovers
 the service. `start` uses that supervisor when configured, or a detached process
-otherwise. Neither policy automatically restarts after exit/crash: retained claims
+otherwise. Linux service output is in the user journal; `status` and startup
+errors show the exact `journalctl` command. Failed systemd startup reports its exit
+state and current-invocation journal excerpt rather than waiting for the readiness
+timeout. Detached startup errors include only the new launch's log excerpt.
+Neither policy automatically restarts after exit/crash: retained claims
 must be inspected, never automatically reconciled. `stop` leaves startup enabled;
 `disable` performs guarded IPC shutdown before unregistering startup. Normal
 stop/restart/disable refuses work at the owner's execution boundary, not from a
@@ -619,15 +638,20 @@ in `plans/server-mode.md` intentionally accepts unknown escaped descendants.
   their own cleanup/publication. TERM begins after 2s, KILL after 5s; unresolved
   local work is reported after 8s, nested evidence after at most 12s (plus bounded
   process-table work). These are shutdown policies, not generation deadlines.
-- `HostOwner.reconcile({root, channel})` is explicit administration. It first takes
-  the old owner's kernel lifetime lease, seals the epoch transactionally, cancels
-  ungranted intents and waits for known jobs. Live/unresolved granted jobs refuse
-  replacement. PID files, closed pipes and empty groups are never recovery authority.
-  Supervisor/anchor loss without sufficient completion evidence remains unresolved.
-- Exact old claim bytes are immutably stored by a FULL SQLite commit in
+- `HostOwner.reconcile({root, channel, appRoot, afterReboot?})` is explicit
+  administration, serialized with other management commands. It takes the old
+  owner's kernel lifetime lease, validates installation identities, seals epochs,
+  cancels ungranted intents and waits for known jobs. Live/unresolved same-boot jobs
+  refuse replacement. Previous-boot evidence or explicit legacy reboot confirmation
+  accounts for interrupted local work without inventing successful results.
+  PID files, closed pipes and empty groups are never recovery authority.
+- Registry schema 2 adds durable epoch claim/installation, boot and interruption
+  evidence to schema 1; existing rows receive no invented boot identity. Exact old
+  claim bytes are immutably stored by a FULL SQLite commit in
   `processes.sqlite.recoveries` before changing the main catalog or unlinking the
-  claim. Repeating reconciliation after interrupted publication/catalog commit is
-  idempotent. Legacy B1 claims have no such evidence and still require inspection.
+  claim. A legacy reconstruction from a matching startup registration is explicitly
+  labelled. Repeating recovery after interrupted publication/catalog commit is
+  idempotent. Legacy B1 claims without managed epoch evidence still require inspection.
   Session/Pi/host identities and all recovery text remain intact. Reopen marks
   unresolved receipts uncertain and unfinished queue items failed; resume is explicit.
 - Spawn waits for managed cleanup before final patch capture; a durable child

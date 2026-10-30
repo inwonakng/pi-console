@@ -5,12 +5,13 @@ import { isAbsolute, join, basename, dirname } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { type DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { object } from "./pi-records.js";
-import { assertManagedLaunchAllowed, beginEpoch, ownerLease, registry, sealEpoch, inspectEpoch } from "../../pi/scripts/managed-process.mjs";
-import { setTimeout as delay } from "node:timers/promises";
+import { assertManagedLaunchAllowed, beginEpoch, ownerLease, sealEpoch, inspectEpoch, unreconciledEpochs } from "../../pi/scripts/managed-process.mjs";
+import { managementIdentity, reconcileCommand } from "./service-paths.js";
+import { reconcileService, type RecoveryOptions } from "./service-recovery.js";
 import { CommandError, type CommandReceipt, type StoredCommand } from "./session-commands.js";
 import { validQueueItem, type AcceptedQueueItem } from "./session-queue.js";
 import { validEffectiveTitle } from "./session-rename.js";
-import { commandBytes, insertCommand, insertQueue, insertSession, openStorage, privateDirectory, privateJson,
+import { catalogOwnerEpochs, commandBytes, insertCommand, insertQueue, insertSession, openStorage, privateDirectory, privateJson,
   readManagedMetadata, splitReceipt, syncDirectory, validateManagedFile, type CatalogSession, type Channel } from "./catalog-storage.js";
 export type { CatalogSession, Channel } from "./catalog-storage.js";
 
@@ -40,58 +41,8 @@ export class SessionCatalog {
 
   get processRegistry(): string { return join(this.root, "processes.sqlite"); }
 
-  /** Explicit administrative reconciliation, never invoked by open/resume. No PID from disk is signalled. */
-  static async reconcile(options: { root: string; channel: Channel }): Promise<void> {
-    const root = await realpath(options.root);
-    await privateDirectory(root);
-    const lifetime = ownerLease(root);
-    try {
-      const path = join(root, "owner.lock");
-      const claim = await privateJson(path, 16384);
-      if (!object(claim) || claim.schemaVersion !== 3 || typeof claim.epoch !== "string") {
-        throw new Error("Legacy or invalid service lock lacks managed execution evidence; manual inspection required");
-      }
-      const epoch = claim.epoch;
-      const processes = join(root, "processes.sqlite");
-      sealEpoch(processes, epoch); // Cancels intents and fences surviving launchers in one transaction.
-      const deadline = performance.now() + 10000;
-      for (;;) {
-        const jobs = inspectEpoch(processes, epoch);
-        const pending = jobs.filter((job) => job.status !== "done" && job.status !== "cancelled");
-        if (!pending.length) break;
-        if (pending.some((job) => job.status === "unresolved") || performance.now() >= deadline) {
-          throw new Error("Known managed work is still live or unresolved; replacement blocked: " + pending.map((job) => `${job.id} (${job.status})`).join(", "));
-        }
-        await delay(50);
-      }
-      // Atomic immutable evidence, before changing the catalog or removing the
-      // claim. SQLite FULL commits make interrupted publication restart-safe.
-      const evidence = registry(processes);
-      try {
-        const bytes = await open(path, "r");
-        let text: string;
-        try { text = await bytes.readFile("utf8"); } finally { await bytes.close(); }
-        evidence.prepare("INSERT OR IGNORE INTO recoveries VALUES(?,?)").run(epoch, text);
-        if (evidence.prepare("SELECT claim FROM recoveries WHERE epoch=?").get(epoch)?.claim !== text) throw new Error("Conflicting recovery claim evidence");
-        const { db } = await openStorage(root, options.channel, () => {}, epoch);
-        try {
-          db.exec("BEGIN IMMEDIATE");
-          for (const row of db.prepare("SELECT id,metadata FROM sessions WHERE owner_epoch=?").all(epoch)) {
-            const session = JSON.parse(String(row.metadata)) as CatalogSession;
-            // An accepted kill remains an explicit stop even if the owner crashed.
-            if (session.stopReason !== "user") session.stopReason = "error";
-            delete session.ownerEpoch;
-            db.prepare("UPDATE sessions SET owner_epoch=NULL,metadata=? WHERE id=?").run(JSON.stringify(session), row.id);
-          }
-          db.exec("COMMIT");
-          if (db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()?.busy !== 0) throw new Error("Recovery checkpoint blocked; retain original claim");
-        } finally { db.close(); }
-        if (JSON.stringify(await privateJson(path, 16384)) !== JSON.stringify(claim)) throw new Error("Service lock changed during recovery");
-        await unlink(path);
-        await syncDirectory(root);
-      } finally { evidence.close(); }
-    } finally { lifetime.close(); }
-  }
+  /** Explicit administration only; no worker starts or command replay. */
+  static reconcile(options: RecoveryOptions): Promise<void> { return reconcileService(options); }
 
   static async open(options: { root: string; channel: Channel; appRoot: string }): Promise<SessionCatalog> {
     if (options.channel !== "stable" && options.channel !== "dev") throw new Error("Unknown service channel");
@@ -101,14 +52,18 @@ export class SessionCatalog {
     const lockPath = join(root, "owner.lock");
     const lifetime = ownerLease(root);
     let lock: FileHandle;
-    try { lock = await open(lockPath, "wx", 0o600); }
+    try {
+      const owned = [...new Set([...await catalogOwnerEpochs(root, options.channel), ...unreconciledEpochs(join(root, "processes.sqlite"))])];
+      if (owned.length) throw new Error(`Ownership remains from interrupted service epoch(s): ${owned.join(", ")}. \nRun explicit recovery: ${reconcileCommand(options.channel, root)}\nDo not delete ${lockPath}.`);
+      lock = await open(lockPath, "wx", 0o600);
+    }
     catch (error) {
       lifetime.close();
       if (object(error) && error.code === "EEXIST") {
         let owner = "unknown checkout";
         try { const value = await privateJson(lockPath, 16384); if (object(value) && typeof value.appRoot === "string") owner = value.appRoot; }
         catch { /* Unreadable claims still block replacement. */ }
-        throw new Error(`Service profile is in use or requires recovery (${owner}); refusing to start another service process`);
+        throw new Error(`Service owner lock remains: ${lockPath} (${owner}).\nRun explicit recovery: ${reconcileCommand(options.channel, root)}\nDo not delete the lock. No replacement started.`);
       }
       throw error;
     }
@@ -116,10 +71,11 @@ export class SessionCatalog {
     let retainClaim = false;
     let catalog: SessionCatalog | undefined;
     try {
-      await lock.writeFile(JSON.stringify({ schemaVersion: 3, epoch, appRoot: await realpath(options.appRoot) }) + "\n");
+      const claim = JSON.stringify({ schemaVersion: 3, epoch, appRoot: await realpath(options.appRoot) }) + "\n";
+      await lock.writeFile(claim);
       await lock.sync();
       await syncDirectory(root);
-      beginEpoch(join(root, "processes.sqlite"), epoch);
+      beginEpoch(join(root, "processes.sqlite"), epoch, { claim, owner: await managementIdentity(options.appRoot, options.channel) });
       await privateDirectory(join(root, "sessions"));
       await privateDirectory(join(root, "workspaces"));
       const { db, hostId } = await openStorage(root, options.channel, () => { retainClaim = true; });
@@ -526,7 +482,7 @@ export class SessionCatalog {
       }
       if (this.db.prepare("SELECT 1 FROM sessions WHERE owner_epoch IS NOT NULL LIMIT 1").get()) throw new Error("Stop owned sessions before releasing the service catalog");
       const jobs = inspectEpoch(this.processRegistry, this.epoch);
-      if (jobs.some((job) => !["done", "cancelled"].includes(job.status))) throw new Error("Known managed processes remain unresolved; retain ownership");
+      if (jobs.some((job) => !["done", "cancelled", "interrupted"].includes(job.status))) throw new Error("Known managed processes remain unresolved; retain ownership");
       sealEpoch(this.processRegistry, this.epoch);
       try { this.checkpoint(true); this.db.close(); }
       catch (error) { throw this.fence(error); }

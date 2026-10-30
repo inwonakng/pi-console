@@ -4,9 +4,11 @@ import { lstat, open } from "node:fs/promises";
 import { join, isAbsolute } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { checkPi } from "../../pi/scripts/check-pi.mjs";
+import { unreconciledEpochs } from "../../pi/scripts/managed-process.mjs";
 import { LocalClient } from "./local-client.js";
 import { object } from "./pi-records.js";
-import { managementIdentity } from "./service-paths.js";
+import { managementIdentity, reconcileCommand } from "./service-paths.js";
+import { catalogOwnerEpochs } from "./catalog-storage.js";
 import { listenerPort } from "./remote-transport.js";
 import { managementLock, ServiceSupervisor } from "./service-supervisor.js";
 import type { HostOwnerOptions } from "./host-owner.js";
@@ -38,9 +40,14 @@ export async function manageService(action: ManagementAction, options: HostOwner
     }
   };
   const requireNoClaim = async (): Promise<void> => {
-    try { await lstat(join(root, "owner.lock")); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-    throw new Error("Service lock remains without a reachable service. Inspect startup/cleanup and explicitly reconcile if appropriate; no supervisor teardown or automatic recovery occurred.");
+    const claimPath = join(root, "owner.lock");
+    let claimPresent = false;
+    try { await lstat(claimPath); claimPresent = true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const reason = claimPresent ? `Service owner lock remains without a reachable service: ${claimPath}.`
+      : (await catalogOwnerEpochs(root, channel)).length || unreconciledEpochs(join(root, "processes.sqlite")).length
+        ? "Catalog or process registry retains ownership from an interrupted service, even though owner.lock is missing." : undefined;
+    if (reason) throw new Error(`${reason}\nRun explicit recovery: ${reconcileCommand(channel, root)}\nDo not delete ownership files. No recovery was attempted.`);
   };
   const privateLog = async () => {
     const file = await open(join(root, "service.log"), constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
@@ -61,6 +68,29 @@ export async function manageService(action: ManagementAction, options: HostOwner
       throw new Error("Service instance changed; restart was not sent");
     }
     let startupExit: string | undefined;
+    let startupLogOffset = 0;
+    const startupError = async (summary: string): Promise<Error> => {
+      if (supervisor) return new Error(await supervisor.startupFailure() ?? `${summary}\nInspect: ${supervisor.logLocation()}`);
+      let details = "";
+      try {
+        const log = await open(join(root, "service.log"), constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const stat = await log.stat();
+          if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.nlink !== 1 || stat.mode & 0o077) throw new Error("service.log is not a private same-user regular file");
+          const start = Math.max(startupLogOffset, stat.size - 16 * 1024);
+          const buffer = Buffer.alloc(Math.max(0, stat.size - start));
+          const { bytesRead } = await log.read(buffer, 0, buffer.length, start);
+          details = buffer.subarray(0, bytesRead).toString("utf8").trim();
+        } finally { await log.close(); }
+      } catch (error) { details = `Log excerpt unavailable: ${(error as Error).message}`; }
+      return new Error(summary + (details ? `\n${details}` : "") + `\nInspect: ${join(root, "service.log")}`);
+    };
+    const startSupervised = async (start: () => Promise<void>): Promise<void> => {
+      const log = await privateLog();
+      try { startupLogOffset = (await log.stat()).size; } finally { await log.close(); }
+      try { await start(); }
+      catch (error) { throw await startupError(`Service launch failed: ${(error as Error).message}`); }
+    };
     if (existing) {
       try {
         await assertManagementOwner(existing.hello);
@@ -84,11 +114,13 @@ export async function manageService(action: ManagementAction, options: HostOwner
       existing?.client.close();
       await (await privateLog()).close();
       supervisor = await ServiceSupervisor.create({ ...options, binary: binary!, directory: supervisorDirectory, path, extraArgs });
-      await supervisor.enable(!existing);
+      if (existing) await supervisor.enable(false);
+      else await startSupervised(() => supervisor!.enable(true));
     } else if (action === "enable") {
       existing?.client.close();
       if (!existing) await supervisor!.configurePort(explicitPort ? port : undefined);
-      await supervisor!.enable(!existing);
+      if (existing) await supervisor!.enable(false);
+      else await startSupervised(() => supervisor!.enable(true));
     } else if (action === "stop" || action === "restart" || action === "disable") {
       if (existing) {
         try { await existing.client.request("service.stop", { serviceEpoch: existing.hello.serviceEpoch, force }); }
@@ -124,13 +156,13 @@ export async function manageService(action: ManagementAction, options: HostOwner
     if (action !== "enable") {
       await requireNoClaim();
       if (supervisor) {
-        await (await privateLog()).close();
         await supervisor.configurePort(explicitPort ? port : undefined);
-        await supervisor.start();
+        await startSupervised(() => supervisor!.start());
       }
       else {
         const log = await privateLog();
         try {
+          startupLogOffset = (await log.stat()).size;
           const child = spawn(process.execPath, [join(options.appRoot, "server/dist/cli.js"), "run", "--channel", channel, "--root", root, "--app-root", options.appRoot, ...extraArgs],
             { detached: true, cwd: options.appRoot, stdio: ["ignore", log.fd, log.fd], env: { ...process.env, PI_BINARY: binary! } });
           child.once("exit", (code, signal) => { startupExit = `code ${code}, signal ${signal}`; });
@@ -140,7 +172,7 @@ export async function manageService(action: ManagementAction, options: HostOwner
       }
     }
     for (let n = 0; n < 600; n++) {
-      if (startupExit) throw new Error(`Service exited during startup (${startupExit}); inspect ${join(root, "service.log")}`);
+      if (startupExit) throw await startupError(`Service exited during startup (${startupExit}).`);
       const view = await connect(true);
       if (view) {
         view.client.close(); await assertManagementOwner(view.hello);
@@ -149,8 +181,12 @@ export async function manageService(action: ManagementAction, options: HostOwner
         return { hello: view.hello, alreadyRunning: action === "enable" && !!existing,
           startup: action === "enable" ? await supervisor!.status() : undefined };
       }
+      if (supervisor && n % 5 === 0) {
+        const failure = await supervisor.startupFailure();
+        if (failure) throw new Error(failure);
+      }
       await delay(100);
     }
-    throw new Error(`Service did not become ready; inspect ${join(root, "service.log")}. Existing claims require explicit reconcile, never automatic removal.`);
+    throw new Error(`Service did not become ready within the readiness wait.\nInspect: ${supervisor?.logLocation() ?? join(root, "service.log")}`);
   } finally { await unlock(); }
 }

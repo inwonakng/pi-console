@@ -11,6 +11,7 @@ usage() {
     printf 'Local launches select the invocation directory; the first prompt or shell command creates a session.\n' >&2
     printf 'server enable [--path PATH] [--supervisor-dir DIR] enables login startup; Pi is discovered on PATH.\n' >&2
     printf 'server status shows a readable summary; add --json for full machine-readable details.\n' >&2
+    printf 'server reconcile repairs interrupted ownership explicitly; --after-reboot asserts a full host reboot for legacy records without boot evidence.\n' >&2
     printf 'stop/restart/disable refuse active work unless --force; idle sessions are stopped and saved.\n' >&2
     exit "${1:-2}"
 }

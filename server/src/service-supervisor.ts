@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { privateDirectory, privateJson, syncDirectory } from "./catalog-storage.js";
 import { object } from "./pi-records.js";
-import { managementIdentity, selectedApplication } from "./service-paths.js";
+import { managementIdentity, selectedApplication, shellQuote } from "./service-paths.js";
 import type { Channel } from "./session-catalog.js";
 
 const exec = promisify(execFile);
@@ -185,6 +185,32 @@ export class ServiceSupervisor {
       : await systemctl(["show", `${this.config.label}.service`, "--property=ActiveState", "--value"]);
     return this.config.platform === "darwin" ? /^\s*pid = \d+/m.test(stdout) : !["inactive", "failed"].includes(stdout.trim());
   }
+  logLocation(): string {
+    return this.config.platform === "linux"
+      ? `journalctl --user -u ${shellQuote(this.config.label + ".service")} -b -n 60 --no-pager`
+      : join(this.config.root, "service.log");
+  }
+  /** Type=exec start can succeed before application initialization fails. */
+  async startupFailure(): Promise<string | undefined> {
+    if (this.config.platform !== "linux") return;
+    const unit = `${this.config.label}.service`;
+    const { stdout } = await systemctl(["show", unit, "--property=ActiveState,Result,ExecMainStatus,InvocationID"]);
+    const fields = new Map(stdout.trim().split("\n").map((line) => {
+      const separator = line.indexOf("=");
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }));
+    if (!["failed", "inactive"].includes(fields.get("ActiveState") ?? "")) return;
+    let details = "";
+    const invocation = fields.get("InvocationID");
+    if (invocation && /^[a-f0-9]{32}$/i.test(invocation)) {
+      try {
+        details = (await exec("journalctl", ["--user", "-u", unit, `_SYSTEMD_INVOCATION_ID=${invocation}`,
+          "-n", "40", "--no-pager", "--output=cat"], { maxBuffer: 64 * 1024 })).stdout.trim().slice(-16 * 1024);
+      } catch (error) { details = `Journal excerpt unavailable: ${(error as Error).message}`; }
+    }
+    return `Service exited during startup (systemd ${fields.get("ActiveState")}, result ${fields.get("Result")}, exit status ${fields.get("ExecMainStatus")}).`
+      + (details ? `\n${details}` : "") + `\nInspect: ${this.logLocation()}`;
+  }
   async assertStopped(): Promise<void> {
     if (await this.running()) throw new Error("Supervisor startup/shutdown is in progress without a reachable service; wait and retry explicitly. No service was interrupted.");
   }
@@ -267,6 +293,6 @@ export class ServiceSupervisor {
       }
       enabled = definitionPresent && ["enabled", "enabled-runtime"].includes(output);
     }
-    return { registered: true, enabled, loaded, definitionPresent, supervisor: this.config.platform === "darwin" ? "launchd" : "user-systemd", definition: definitionPath(this.config), application: this.config.application };
+    return { registered: true, enabled, loaded, definitionPresent, supervisor: this.config.platform === "darwin" ? "launchd" : "user-systemd", definition: definitionPath(this.config), application: this.config.application, log: this.logLocation() };
   }
 }

@@ -1,14 +1,15 @@
 import { lstat, realpath } from "node:fs/promises";
 import { manageService, type ManagementAction } from "./service-management.js";
+import { unreconciledEpochs } from "../../pi/scripts/managed-process.mjs";
 import { resolve, join, isAbsolute, basename, dirname } from "node:path";
 import { listenerPort } from "./remote-transport.js";
 import { randomUUID } from "node:crypto";
 import { HostOwner } from "./host-owner.js";
-import { privateJson } from "./catalog-storage.js";
+import { catalogOwnerEpochs } from "./catalog-storage.js";
 import { object } from "./pi-records.js";
 import { LocalClient } from "./local-client.js";
 import { runService } from "./local-service.js";
-import { applicationRoot, defaultRoot, managementIdentity, requireNode, serviceBuild } from "./service-paths.js";
+import { applicationRoot, defaultRoot, managementIdentity, reconcileCommand, requireNode, serviceBuild } from "./service-paths.js";
 import { ServiceSupervisor } from "./service-supervisor.js";
 import type { Channel } from "./session-catalog.js";
 
@@ -38,7 +39,7 @@ function reportStartup(startup: Record<string, unknown>): void {
 
 function reportStatus(status: Record<string, unknown>, root: string): void {
   console.log(terminalText(`pi-console ${status.channel}`, "1", process.stdout));
-  row("Server", status.running ? status.stopping ? "Stopping" : "Running" : status.claimPresent ? "Unreachable (owner lock remains)" : "Stopped",
+  row("Server", status.running ? status.stopping ? "Stopping" : "Running" : status.claimPresent ? "Unreachable (owner lock remains)" : status.recoveryRequired ? "Recovery required (ownership remains)" : "Stopped",
     status.running && !status.stopping ? "32" : "33");
   reportStartup(object(status.startup) ? status.startup : { enabled: false });
   row("Version", displayVersion(status.running ? status : { buildId: status.selectedBuildId }));
@@ -64,15 +65,16 @@ function reportStatus(status: Record<string, unknown>, root: string): void {
   }
   console.log();
   row("Profile", root);
-  row("Log", join(root, "service.log"));
+  row("Log", object(status.startup) && typeof status.startup.log === "string" ? status.startup.log : join(root, "service.log"));
   if (object(status.startup) && typeof status.startup.definition === "string") row("Startup file", status.startup.definition);
   if (status.restartRequired) {
     console.log();
     console.log(terminalText("Selected build differs. Run server restart to apply it (active work blocks restart).", "33", process.stdout));
   }
-  if (status.claimPresent) {
+  if (status.claimPresent || status.recoveryRequired) {
     console.log();
-    console.log(terminalText("Inspect the service log and remaining processes before using server reconcile. No recovery was attempted.", "33", process.stdout));
+    if (status.claimPresent) row("Owner lock", join(root, "owner.lock"));
+    console.log(terminalText(`Recovery is explicit: ${reconcileCommand(status.channel as Channel, root)}. Do not delete ownership files.`, "33", process.stdout));
   }
 }
 
@@ -98,10 +100,12 @@ async function main(): Promise<void> {
   const flags = new Map<string, string>();
   let force = false;
   let json = false;
+  let afterReboot = false;
   let startupBinary: string | undefined;
   while (args.length) {
     const key = args.shift()!;
     if (key === "--force") { force = true; continue; }
+    if (key === "--after-reboot" && action === "reconcile" && !afterReboot) { afterReboot = true; continue; }
     if (key === "--json" && action === "status" && !json) { json = true; continue; }
     // Existing startup definitions pinned Pi in argv. New definitions use the
     // captured environment; retain run-only decoding so updates still boot.
@@ -121,11 +125,6 @@ async function main(): Promise<void> {
   const binary = startupBinary ?? process.env.PI_BINARY;
   const options = { root, channel: channel as Channel, binary: binary ?? "", appRoot: await realpath(flags.get("--app-root") ?? applicationRoot()),
     provider: flags.get("--provider") ?? process.env.PI_PROVIDER, model: flags.get("--model") ?? process.env.PI_MODEL };
-  const assertManagementOwner = async (hello: Record<string, unknown>): Promise<void> => {
-    const selected = await managementIdentity(options.appRoot, channel);
-    const running = typeof hello.appRoot === "string" ? await managementIdentity(hello.appRoot, channel) : undefined;
-    if (running !== selected) throw new Error(`Profile belongs to another installation/checkout (${running}); refusing management from ${selected}. Use a separate --root or its launcher. Explicit compatible frontend attachment remains allowed.`);
-  };
   const connect = async (allowDisconnect = false): Promise<Awaited<ReturnType<typeof LocalClient.open>> | undefined> => {
     try { return await LocalClient.open(root, channel); }
     catch (error) {
@@ -136,11 +135,8 @@ async function main(): Promise<void> {
   };
   const port = listenerPort(flags.get("--port"), channel);
   if (action === "reconcile") {
-    const claim = await privateJson(join(root, "owner.lock"), 16384);
-    if (!object(claim)) throw new Error("Invalid recovery claim");
-    await assertManagementOwner(claim);
-    await HostOwner.reconcile({ root, channel });
-    console.log("Reconciled known managed work. No worker started or command replayed; start the service, inspect saved data, then explicitly resume."); return;
+    await HostOwner.reconcile({ root, channel, appRoot: options.appRoot, afterReboot });
+    console.log("Reconciled ownership. Reboot-interrupted job outcomes remain unknown. No worker started or command replayed; start the service, inspect saved data, then explicitly resume."); return;
   }
   if (action === "run") {
     await managementIdentity(options.appRoot, channel);
@@ -161,7 +157,8 @@ async function main(): Promise<void> {
     if (!view) {
       let claimPresent = false;
       try { await lstat(join(root, "owner.lock")); claimPresent = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      const status = { running: false, channel, endpoint: join(root, "service.sock"), selectedBuildId, claimPresent, startup: supervisor ? await supervisor.status() : { enabled: false } };
+      const recoveryRequired = claimPresent || (await catalogOwnerEpochs(root, channel)).length > 0 || unreconciledEpochs(join(root, "processes.sqlite")).length > 0;
+      const status = { running: false, channel, endpoint: join(root, "service.sock"), selectedBuildId, claimPresent, recoveryRequired, startup: supervisor ? await supervisor.status() : { enabled: false } };
       if (json) console.log(JSON.stringify(status)); else reportStatus(status, root);
       return;
     }
@@ -174,7 +171,7 @@ async function main(): Promise<void> {
     finally { view.client.close(); }
     return;
   }
-  if (!["create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|enable|disable|reconcile|list|create|resume} [--channel stable|dev] [--root PATH] [--port PORT] [--force] [--cwd PATH|--session ID] [--id COMMAND_ID]");
+  if (!["create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|enable|disable|reconcile|list|create|resume} [--channel stable|dev] [--root PATH] [--port PORT] [--force] [reconcile: --after-reboot] [--cwd PATH|--session ID] [--id COMMAND_ID]");
   const { client, hello } = await LocalClient.open(root, channel);
   try {
     let result: unknown;

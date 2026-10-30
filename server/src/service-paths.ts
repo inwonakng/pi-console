@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import type { Channel } from "./session-catalog.js";
 
 export const endpoint = (root: string): string => join(root, "service.sock");
+export const shellQuote = (value: string): string => "'" + value.replaceAll("'", "'\\''") + "'";
+export const reconcileCommand = (channel: Channel, root: string): string =>
+  `${channel === "dev" ? "pi-console-dev" : "pi-console"} server reconcile --root ${shellQuote(root)}`;
 export const applicationRoot = (): string => fileURLToPath(new URL("../../", import.meta.url));
 // Service profiles are HOME-based, independent of XDG_STATE_HOME; --root is explicit.
 export const defaultRoot = (channel: Channel): string => join(homedir(), ".local/state/pi-console/service", channel);

@@ -302,13 +302,35 @@ window. Unknown detach/reparent/namespace/external-service escapes remain possib
 No persisted PID is used to signal recovery targets.
 
 `SessionCatalog` holds a separate kernel lifetime lease. Explicit
-`HostOwner.reconcile({root,channel})` acquires it, seals the old epoch, waits for
-known managed jobs and stores exact old claim bytes in an immutable FULL SQLite
-recovery row before catalog transition/claim retirement. Interrupted publication
-and catalog commit are idempotent. This lease serializes recovery; it does not
-prove worker death. Legacy B1 claims lacking this evidence still refuse automatic
-reconciliation. SQLite ledger identity/schema and recovery payloads are unchanged;
-reopen marks unfinished receipts uncertain and queue items failed, never replayed.
+`HostOwner.reconcile({root,channel,appRoot,afterReboot?})` acquires it under the
+management lock, validates all installation identities, seals old epochs, waits for
+known managed jobs and stores exact retained claim bytes in immutable FULL SQLite
+recovery rows before catalog transition/claim retirement. Interrupted publication
+and catalog commit are idempotent. The lease alone does not prove worker death.
+
+Registry schema 2 adds nullable epoch claim, stable management owner, Linux
+machine/boot identity and interruption evidence; schema-1 migration does not invent
+boot/owner evidence. Missing-lock recovery discovers catalog ownership and durable
+service epochs instead of guessing a fresh owner. A failed replacement claim and
+an older catalog owner are reconciled together only after both identities validate.
+A different boot ID on the same recorded Linux machine accounts for interrupted
+local jobs. They become terminal `interrupted`, retain result bytes, and their
+original statuses and recovery basis are retained on the epoch. This is local
+cleanup evidence, not a successful command outcome. Same-boot unresolved work
+continues to block. Foreign-host evidence refuses local recovery. Legacy epochs
+without usable boot evidence require the explicit administrator assertion
+`server reconcile --after-reboot`; it cannot override known same-boot work. A
+legacy epoch missing both its lock and durable owner also requires matching startup
+registration; reconstructed claim evidence is labelled, not presented as original
+bytes. Legacy B1 claims without managed epoch evidence still refuse recovery.
+Catalog schemas and recovery payloads are unchanged; reopen marks unfinished
+receipts uncertain and queue items failed, never replayed.
+
+Startup remains non-recovering. Ownership errors show the lock path/recovery
+command even when only catalog ownership remains. Linux startup observes systemd
+exit state and includes the current invocation's journal excerpt and exact journal
+command; detached startup excerpts start at the new launch's log offset. Readiness
+timeouts do not claim that ownership caused an otherwise unexplained failure.
 
 Spawn awaits managed cleanup before patch capture. A durable child-workspace marker
 and persisted cleanup error prevent later join/capture/integration/removal from
