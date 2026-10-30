@@ -18,8 +18,8 @@ export type BootIdentity = { machineId: string; bootId: string };
 export function bootIdentity(): BootIdentity | undefined;
 export function beginEpoch(path: string, epoch: string, ownership?: { claim: string; owner: string }): void;
 export function interruptEpoch(path: string, epoch: string, evidence: {
-  basis: "previous_boot" | "administrator_confirmed_reboot";
-  recordedBoot: BootIdentity | null; currentBoot: BootIdentity | null; time: string;
+  basis: "previous_boot";
+  recordedBoot: BootIdentity; currentBoot: BootIdentity; time: string;
 }): void;
 export function assertManagedLaunchAllowed(path: string, epoch: string): void;
 export function sealEpoch(path: string, epoch: string): void;

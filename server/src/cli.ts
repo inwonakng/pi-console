@@ -100,12 +100,10 @@ async function main(): Promise<void> {
   const flags = new Map<string, string>();
   let force = false;
   let json = false;
-  let afterReboot = false;
   let startupBinary: string | undefined;
   while (args.length) {
     const key = args.shift()!;
     if (key === "--force") { force = true; continue; }
-    if (key === "--after-reboot" && action === "reconcile" && !afterReboot) { afterReboot = true; continue; }
     if (key === "--json" && action === "status" && !json) { json = true; continue; }
     // Existing startup definitions pinned Pi in argv. New definitions use the
     // captured environment; retain run-only decoding so updates still boot.
@@ -135,7 +133,7 @@ async function main(): Promise<void> {
   };
   const port = listenerPort(flags.get("--port"), channel);
   if (action === "reconcile") {
-    await HostOwner.reconcile({ root, channel, appRoot: options.appRoot, afterReboot });
+    await HostOwner.reconcile({ root, channel, appRoot: options.appRoot });
     console.log("Reconciled ownership. Reboot-interrupted job outcomes remain unknown. No worker started or command replayed; start the service, inspect saved data, then explicitly resume."); return;
   }
   if (action === "run") {
@@ -171,7 +169,7 @@ async function main(): Promise<void> {
     finally { view.client.close(); }
     return;
   }
-  if (!["create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|enable|disable|reconcile|list|create|resume} [--channel stable|dev] [--root PATH] [--port PORT] [--force] [reconcile: --after-reboot] [--cwd PATH|--session ID] [--id COMMAND_ID]");
+  if (!["create", "resume", "list"].includes(action ?? "")) throw new Error("Usage: pi-console server {run|start|status|stop|restart|enable|disable|reconcile|list|create|resume} [--channel stable|dev] [--root PATH] [--port PORT] [--force] [--cwd PATH|--session ID] [--id COMMAND_ID]");
   const { client, hello } = await LocalClient.open(root, channel);
   try {
     let result: unknown;

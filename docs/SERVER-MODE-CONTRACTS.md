@@ -302,27 +302,27 @@ window. Unknown detach/reparent/namespace/external-service escapes remain possib
 No persisted PID is used to signal recovery targets.
 
 `SessionCatalog` holds a separate kernel lifetime lease. Explicit
-`HostOwner.reconcile({root,channel,appRoot,afterReboot?})` acquires it under the
+`HostOwner.reconcile({root,channel,appRoot})` acquires it under the
 management lock, validates all installation identities, seals old epochs, waits for
 known managed jobs and stores exact retained claim bytes in immutable FULL SQLite
 recovery rows before catalog transition/claim retirement. Interrupted publication
 and catalog commit are idempotent. The lease alone does not prove worker death.
 
-Registry schema 2 adds nullable epoch claim, stable management owner, Linux
-machine/boot identity and interruption evidence; schema-1 migration does not invent
-boot/owner evidence. Missing-lock recovery discovers catalog ownership and durable
-service epochs instead of guessing a fresh owner. A failed replacement claim and
+Registry schema 2 stores epoch claim, stable management owner, Linux machine/boot
+identity and interruption evidence. Older execution registry formats are rejected,
+not migrated. The one-time upgrade requires a successful stop with the old runtime
+and removal of only the execution registry and its sidecars before installing and
+starting the new runtime. Catalog/session data remains intact. Missing-lock
+recovery discovers catalog ownership and durable service epochs instead of
+guessing a fresh owner. A failed replacement claim and
 an older catalog owner are reconciled together only after both identities validate.
 A different boot ID on the same recorded Linux machine accounts for interrupted
 local jobs. They become terminal `interrupted`, retain result bytes, and their
 original statuses and recovery basis are retained on the epoch. This is local
 cleanup evidence, not a successful command outcome. Same-boot unresolved work
-continues to block. Foreign-host evidence refuses local recovery. Legacy epochs
-without usable boot evidence require the explicit administrator assertion
-`server reconcile --after-reboot`; it cannot override known same-boot work. A
-legacy epoch missing both its lock and durable owner also requires matching startup
-registration; reconstructed claim evidence is labelled, not presented as original
-bytes. Legacy B1 claims without managed epoch evidence still refuse recovery.
+continues to block. Foreign-host evidence refuses local recovery. Missing durable
+service identity or unresolved work without usable boot evidence refuses recovery;
+there is no override or identity reconstruction.
 Catalog schemas and recovery payloads are unchanged; reopen marks unfinished
 receipts uncertain and queue items failed, never replayed.
 

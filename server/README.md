@@ -106,13 +106,18 @@ results and original statuses as recovery evidence, and releases sessions withou
 claiming that commands succeeded. Same-boot live/unresolved work still refuses
 replacement. A profile copied from another machine is not proof of worker death.
 
-For older epochs without boot evidence, **only after confirming that this host
-rebooted since the old owner ran**, use `server reconcile --after-reboot`. This is
-an administrative assertion, not process detection; it cannot override a recorded
-same-boot identity. A legacy missing-lock epoch also needs a matching startup
-registration to establish installation ownership; otherwise manual inspection is
-required. Recovery remains explicit even after a reboot. Possible unknown escaped
-or externally handed-off work is outside local cleanup guarantees.
+Recovery requires durable service identity. Unresolved jobs without usable boot
+evidence refuse replacement; there is no manual reboot override or identity
+reconstruction. Recovery remains explicit even after a reboot. Possible unknown
+escaped or externally handed-off work is outside local cleanup guarantees.
+
+**One-time upgrade from execution registry schema 1:** stop the service successfully
+with the currently installed version, remove only `processes.sqlite` and its
+`-wal`, `-shm`, and `-journal` sidecars from that service profile, install the new
+version and start it. A fresh schema-2 execution registry is created automatically.
+Do not remove `catalog.sqlite`, `catalog.json`, `sessions/`, `workspaces/` or
+ownership files. Saved conversations and their IDs are unchanged. Fresh
+installations need no reset. Existing execution registries are never migrated.
 
 ### Service environment and startup
 
@@ -638,20 +643,19 @@ in `plans/server-mode.md` intentionally accepts unknown escaped descendants.
   their own cleanup/publication. TERM begins after 2s, KILL after 5s; unresolved
   local work is reported after 8s, nested evidence after at most 12s (plus bounded
   process-table work). These are shutdown policies, not generation deadlines.
-- `HostOwner.reconcile({root, channel, appRoot, afterReboot?})` is explicit
+- `HostOwner.reconcile({root, channel, appRoot})` is explicit
   administration, serialized with other management commands. It takes the old
   owner's kernel lifetime lease, validates installation identities, seals epochs,
   cancels ungranted intents and waits for known jobs. Live/unresolved same-boot jobs
-  refuse replacement. Previous-boot evidence or explicit legacy reboot confirmation
-  accounts for interrupted local work without inventing successful results.
+  refuse replacement. Previous-boot evidence accounts for interrupted local work
+  without inventing successful results.
   PID files, closed pipes and empty groups are never recovery authority.
-- Registry schema 2 adds durable epoch claim/installation, boot and interruption
-  evidence to schema 1; existing rows receive no invented boot identity. Exact old
-  claim bytes are immutably stored by a FULL SQLite commit in
+- Registry schema 2 stores durable epoch claim/installation, boot and interruption
+  evidence. Only this format is supported; there is no execution-registry migration.
+  Exact durable claim bytes are immutably stored by a FULL SQLite commit in
   `processes.sqlite.recoveries` before changing the main catalog or unlinking the
-  claim. A legacy reconstruction from a matching startup registration is explicitly
-  labelled. Repeating recovery after interrupted publication/catalog commit is
-  idempotent. Legacy B1 claims without managed epoch evidence still require inspection.
+  claim. Repeating recovery after interrupted publication/catalog commit is
+  idempotent. Missing durable service identity refuses recovery.
   Session/Pi/host identities and all recovery text remain intact. Reopen marks
   unresolved receipts uncertain and unfinished queue items failed; resume is explicit.
 - Spawn waits for managed cleanup before final patch capture; a durable child

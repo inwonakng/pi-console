@@ -81,7 +81,7 @@ export function registry(path) {
   try {
     db.exec('PRAGMA busy_timeout=1000');
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1, 2].includes(v)) throw new Error('Unsupported managed ownership registry');
+    if (v !== 0 && v !== 2) throw new Error(`Unsupported execution registry schema ${v} at ${path}; expected 2. No migration is supported.`);
     db.exec('PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;');
     if (v === 0) db.exec(`BEGIN IMMEDIATE;
       CREATE TABLE epochs(id TEXT PRIMARY KEY, state TEXT NOT NULL, claim TEXT, owner TEXT, boot TEXT, recovery TEXT);
@@ -89,12 +89,6 @@ export function registry(path) {
       CREATE INDEX jobs_epoch ON jobs(epoch,status);
       CREATE INDEX jobs_parent ON jobs(parent);
       CREATE TABLE recoveries(epoch TEXT PRIMARY KEY, claim TEXT NOT NULL);
-      PRAGMA user_version=2; COMMIT;`);
-    if (v === 1) db.exec(`BEGIN IMMEDIATE;
-      ALTER TABLE epochs ADD COLUMN claim TEXT;
-      ALTER TABLE epochs ADD COLUMN owner TEXT;
-      ALTER TABLE epochs ADD COLUMN boot TEXT;
-      ALTER TABLE epochs ADD COLUMN recovery TEXT;
       PRAGMA user_version=2; COMMIT;`);
     return db;
   } catch (e) { db.close(); throw e; }
@@ -109,8 +103,8 @@ export function unreconciledEpochs(path) {
   const db = database(path, { readOnly: true });
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (version === 1 || version === 0 && db.prepare('SELECT count(*) AS n FROM sqlite_master').get().n === 0) return []; // Legacy identity is available only in the claim/catalog.
-    if (version !== 2) throw new Error('Unsupported managed ownership registry');
+    if (version === 0 && db.prepare('SELECT count(*) AS n FROM sqlite_master').get().n === 0) return [];
+    if (version !== 2) throw new Error(`Unsupported execution registry schema ${version} at ${path}; expected 2. No migration is supported.`);
     return db.prepare(`SELECT id FROM epochs WHERE claim IS NOT NULL AND
       (state!='sealed' OR EXISTS(SELECT 1 FROM jobs WHERE epoch=epochs.id AND status NOT IN ${terminal}))`).all().map(row => row.id);
   } finally { db.close(); }
@@ -155,7 +149,7 @@ export function beginEpoch(path, epoch, ownership) {
   } finally { db.close(); }
 }
 
-/** Caller holds the owner lease and has established reboot evidence/confirmation. */
+/** Caller holds the owner lease and has established previous-boot evidence. */
 export function interruptEpoch(path, epoch, evidence) {
   const db = registry(path);
   try { transaction(db, () => {
@@ -178,7 +172,7 @@ function sealTree(db, id) {
 export function sealEpoch(path, epoch) {
   const db = registry(path);
   try { transaction(db, () => {
-    if (!db.prepare('SELECT 1 FROM epochs WHERE id=?').get(epoch)) throw new Error('Unknown legacy execution epoch; manual recovery required');
+    if (!db.prepare('SELECT 1 FROM epochs WHERE id=?').get(epoch)) throw new Error('Execution epoch is missing; manual inspection required');
     db.prepare("UPDATE epochs SET state='sealed' WHERE id=?").run(epoch);
     db.prepare("UPDATE jobs SET launch_open=0,status=CASE WHEN status='intent' THEN 'cancelled' ELSE status END WHERE epoch=?").run(epoch);
   }); } finally { db.close(); }
