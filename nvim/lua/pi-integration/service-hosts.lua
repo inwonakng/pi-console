@@ -1012,7 +1012,9 @@ local function pick_host(callback, on_all)
 	if on_all then table.insert(choices, 1, { alias = "All hosts (connected)", all = true }) end
 	table.insert(choices, { alias = "+ Add host", add = true })
 	vim.ui.select(choices, { prompt = "Hosts", format_item = function(host)
-		return host.alias
+		if host.all or host.add then return host.alias end
+		local status = host.connected and "connected" or host.connecting and "connecting" or "disconnected"
+		return host.alias .. " [" .. status .. "]"
 	end }, function(host)
 		if not host then return end
 		if host.all then on_all(); return end
