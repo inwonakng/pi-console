@@ -1,5 +1,6 @@
 import { lstat, realpath } from "node:fs/promises";
-import { manageService, type ManagementAction } from "./service-management.js";
+import { manageService, ServiceRecoveryRequired, type ManagementAction } from "./service-management.js";
+import { createInterface } from "node:readline/promises";
 import { unreconciledEpochs } from "../../pi/scripts/managed-process.mjs";
 import { resolve, join, isAbsolute, basename, dirname } from "node:path";
 import { listenerPort } from "./remote-transport.js";
@@ -142,8 +143,26 @@ async function main(): Promise<void> {
     await runService({ ...options, port }); return;
   }
   if (["start", "stop", "restart", "enable", "disable"].includes(action ?? "")) {
-    const result = await manageService(action as ManagementAction, options, { force,
+    const manage = () => manageService(action as ManagementAction, options, { force,
       port: flags.has("--port") ? port : undefined, supervisorDirectory: flags.get("--supervisor-dir"), path: flags.get("--path") });
+    let result;
+    try { result = await manage(); }
+    catch (error) {
+      if (!(error instanceof ServiceRecoveryRequired) || !["start", "restart"].includes(action!)
+        || !process.stdin.isTTY || !process.stderr.isTTY) throw error;
+      console.error(terminalText(error.reason, "33", process.stderr));
+      console.error("Reconciliation preserves saved data and does not replay commands or resume sessions. Live or unresolved workers still block startup.");
+      const prompt = createInterface({ input: process.stdin, output: process.stderr });
+      let answer: string;
+      try { answer = await prompt.question("Reconcile interrupted ownership and start the server? [y/N] "); }
+      finally { prompt.close(); }
+      if (!/^(y|yes)$/i.test(answer.trim())) throw error;
+      // Management has released its lock. Recovery acquires its own locks and
+      // rechecks ownership; the retry then performs normal startup checks again.
+      await HostOwner.reconcile({ root, channel, appRoot: options.appRoot });
+      console.error("Reconciled ownership. Interrupted job outcomes may remain unknown. Starting the server; saved sessions remain stopped.");
+      result = await manage();
+    }
     if (result.hello) await reportStarted(result.hello, result.alreadyRunning, result.startup);
     else if (result.message) console.log(terminalText(result.message, "22;32", process.stdout));
     return;

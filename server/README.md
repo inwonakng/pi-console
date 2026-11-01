@@ -92,10 +92,15 @@ explicit forced administrative shutdown, not frontend detach. Headless installat
 is available through `--server-only`. Confirmed session restart/kill
 are attachment-bound commands, separate from these service administration actions.
 
-After owner death, run `server reconcile`, then explicitly `server start` and
-`server resume --session ID`. Neither ordinary start nor resume performs recovery
-or replays commands, queues or approvals. Do not delete `owner.lock`: errors include
-its path and the recovery command. If it was already removed, reconciliation can
+After owner death, interactive `server start` and `server restart` offer to
+reconcile interrupted ownership before starting. Recovery requires an explicit
+`y` or `yes`; declining leaves ownership unchanged. Non-interactive commands
+refuse recovery and show the explicit `server reconcile` command instead.
+Reconciliation still refuses live/unresolved workers and foreign ownership;
+confirmation does not bypass those checks. Saved sessions remain stopped until
+`server resume --session ID`; commands, queues and approvals are never replayed.
+Do not delete `owner.lock`: errors include its path and the recovery command.
+If it was already removed, reconciliation can
 recover the installation/epoch identity retained in `processes.sqlite` and find
 orphaned session ownership in the catalog.
 

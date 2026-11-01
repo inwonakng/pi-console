@@ -14,6 +14,11 @@ import { managementLock, ServiceSupervisor } from "./service-supervisor.js";
 import type { HostOwnerOptions } from "./host-owner.js";
 
 export type ManagementAction = "start" | "stop" | "restart" | "enable" | "disable";
+export class ServiceRecoveryRequired extends Error {
+  constructor(readonly reason: string, channel: HostOwnerOptions["channel"], root: string) {
+    super(`${reason}\nRun explicit recovery: ${reconcileCommand(channel, root)}\nDo not delete ownership files. No recovery was attempted.`);
+  }
+}
 /** Shared CLI/frontend lifecycle path. Never reconciles or removes retained claims. */
 export async function manageService(action: ManagementAction, options: HostOwnerOptions & { root: string }, config: {
   force: boolean; port?: number; supervisorDirectory?: string; path?: string; expectedEpoch?: string;
@@ -47,7 +52,7 @@ export async function manageService(action: ManagementAction, options: HostOwner
     const reason = claimPresent ? `Service owner lock remains without a reachable service: ${claimPath}.`
       : (await catalogOwnerEpochs(root, channel)).length || unreconciledEpochs(join(root, "processes.sqlite")).length
         ? "Catalog or process registry retains ownership from an interrupted service, even though owner.lock is missing." : undefined;
-    if (reason) throw new Error(`${reason}\nRun explicit recovery: ${reconcileCommand(channel, root)}\nDo not delete ownership files. No recovery was attempted.`);
+    if (reason) throw new ServiceRecoveryRequired(reason, channel, root);
   };
   const privateLog = async () => {
     const file = await open(join(root, "service.log"), constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
