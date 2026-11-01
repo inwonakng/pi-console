@@ -9,7 +9,7 @@ export interface ExtensionSettings {
 	};
 	server?: {
 		port?: number;
-		webui?: { enabled?: boolean; "allowed-origins"?: string[] };
+		webui?: { enabled?: boolean };
 	};
 	notifications?: {
 		default?: "enabled" | "disabled";

@@ -511,8 +511,7 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
       owner.notifications.on("notification", pushNotification);
     }
     remote = new RemoteListener(port, (stream, onDetach, connectionId, diagnostics) => connection(stream, true, onDetach, connectionId, diagnostics),
-      webRoot ? { root: webRoot, serviceRoot: options.root, channel: options.channel, hostId: owner.hostId,
-        allowedOrigins: webSettings?.["allowed-origins"], push: webPush } : undefined);
+      webRoot ? { root: webRoot, serviceRoot: options.root, channel: options.channel, hostId: owner.hostId, push: webPush } : undefined);
     await remote.listen();
     remoteNotifications.start();
     console.log(JSON.stringify({ network: listenerAddresses(port) }));

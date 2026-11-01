@@ -23,22 +23,10 @@ connects using the serving host's stable/dev channel and displays it as a read-o
 label. The frontend is disabled by default; configuration and asset changes require
 a service restart.
 
-For an HTTPS reverse proxy, add the external dashboard origin explicitly:
-
-```yaml
-server:
-  webui:
-    enabled: true
-    allowed-origins:
-      - https://pi.hyrax-pollux.ts.net
-```
-
-`allowed-origins` defaults to an empty list. Entries must be exact HTTP(S) origins
-(scheme, hostname, and non-default port if needed), with no path, credentials,
-wildcards, or trailing slash. Direct same-origin HTTP access remains available.
-The proxy must support WebSocket upgrades; forwarded headers do not grant access.
-Install a runtime supporting this setting before adding it to the configuration,
-then restart the matching service.
+For an HTTPS reverse proxy, preserve the browser-facing Host and support WebSocket
+upgrades. No hostname allowlist or public URL configuration is needed. Browser
+origins must match that Host over HTTP or HTTPS; forwarded headers do not grant
+access.
 
 **Anyone who can reach the server port can view and control sessions as the
 host user, including sessions on its registered hosts. There is no authentication
@@ -49,7 +37,7 @@ or encryption.** Use only trusted internal networks/VPNs and firewall rules.
 When enabled, the listener serves `/` (`index.html`), `/app.js`, `/client.js`,
 `/style.css`, and the read-only `/v1/hosts` registry. Browser WebSockets at
 `/v1/stream` and `/v1/hosts/<key>/stream` use the page's origin. The listener accepts
-its direct HTTP origin and configured `server.webui.allowed-origins` only;
+HTTP or HTTPS origins matching the request Host only;
 connections initiated by unrelated websites are rejected. Registered streams relay
 only enabled targets from the serving machine's `hosts.yaml` (`hosts-dev.yaml` for
 dev), including local root profiles. Saved host identity pins and the selected
@@ -116,8 +104,8 @@ formatting, image display, and offline session access are outside this draft.
 
 ## iPhone notifications
 
-Serve the app over HTTPS through a trusted-network reverse proxy and add that
-exact HTTPS origin to `server.webui.allowed-origins` as above. Do not expose this
+Serve the app over HTTPS through a trusted-network reverse proxy that preserves
+the browser-facing Host. Do not expose this
 unauthenticated service to the public internet. On iOS 16.4 or later, add the app
 to the Home Screen, open it from that icon, then turn on **Settings > Notifications
 on this device** and allow the system permission prompt. A browser bookmark alone

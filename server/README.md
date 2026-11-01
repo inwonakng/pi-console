@@ -280,10 +280,10 @@ restart the matching service, then open `http://HOST:8444/` (`8443` for dev, or 
 configured port).
 The page uses the serving host's channel automatically. The UI uses the same
 trusted-network access policy without authentication. Browser WebSockets require
-an enabled web UI and either its direct HTTP origin or an exact origin listed in
-`server.webui.allowed-origins` (for example `https://pi.hyrax-pollux.ts.net` behind
-a reverse proxy). The list defaults to empty and changes require a service restart.
-Forwarded headers do not grant access; unrelated website origins are rejected.
+an enabled web UI and an HTTP or HTTPS origin matching the request Host. Reverse
+proxies must preserve the browser-facing Host; no hostname allowlist or public URL
+configuration is needed. Forwarded headers do not grant access; unrelated website
+origins are rejected.
 The web Overview combines open sessions across registered hosts through the read-only
 `/v1/hosts` registry and same-origin `/v1/hosts/<key>/stream` relays. Relay targets come
 only from enabled host registrations; saved identities and channel checks apply.
