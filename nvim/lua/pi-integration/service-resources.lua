@@ -87,16 +87,16 @@ function M.new(options)
 		end
 		fetch(query)
 	end
-	function resource.open_readonly(query, title, filetype, anchor)
+	function resource.open_readonly(query, title, filetype, anchor, on_dismiss)
 		resource.read(query, function(page)
 			require("pi-integration.spawn-artifacts").open_resource({ state = options.state, ui = { notify = options.notify },
-				window = { parent = options.state.transcript_win }, resources = resource }, query, title, filetype, page, anchor)
+				window = { parent = options.state.transcript_win }, resources = resource, on_dismiss = on_dismiss }, query, title, filetype, page, anchor)
 		end)
 	end
-	function resource.open(query, title, filetype, anchor)
+	function resource.open(query, title, filetype, anchor, on_dismiss)
 		if query.kind == "file" and query.offset == nil and query.version == nil and resource.edit then
 			resource.edit(query, title, filetype, anchor)
-		else resource.open_readonly(query, title, filetype, anchor) end
+		else resource.open_readonly(query, title, filetype, anchor, on_dismiss) end
 	end
 	function resource.follow(destination, base)
 		resource.select()

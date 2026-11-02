@@ -90,6 +90,7 @@ function M.open(transcript_buf, input_buf, resources)
 					"- `<C-CR>` sends from the input (normal or insert mode).",
 					"- `<C-k>` / `<C-w>k` focuses the transcript (normal mode).",
 					"- `<C-j>` / `<C-w>j` focuses the input (normal mode).",
+					"- Moving past either window with `<C-h/j/k/l>` / `<C-w>h/j/k/l` hides the side conversation.",
 					"- `<CR>` in the transcript follows a link, toggles a tool group, or opens output.",
 					"- `q` / `<leader>pb` / `:q` hides both windows, preserving the draft and conversation.",
 					"- `<leader>n` / `:PiSideNew` starts a new side conversation (normal mode).",
@@ -102,11 +103,17 @@ function M.open(transcript_buf, input_buf, resources)
 		end, { buffer = buf, desc = "Side conversation help" })
 		vim.keymap.set("n", "<leader>pb", M.hide, { buffer = buf, desc = "Hide side conversation" })
 		vim.keymap.set("n", "q", M.hide, { buffer = buf, silent = true, desc = "Hide side conversation" })
-		for _, lhs in ipairs({ "<C-k>", "<C-w>k", "<C-w><C-k>" }) do
-			vim.keymap.set("n", lhs, function() if valid(transcript_win) then vim.api.nvim_set_current_win(transcript_win) end end, { buffer = buf })
-		end
-		for _, lhs in ipairs({ "<C-j>", "<C-w>j", "<C-w><C-j>" }) do
-			vim.keymap.set("n", lhs, function() if valid(input_win) then vim.api.nvim_set_current_win(input_win) end end, { buffer = buf })
+		for _, direction in ipairs({ "h", "j", "k", "l" }) do
+			local function navigate()
+				local current = vim.api.nvim_get_current_win()
+				local target = direction == "j" and current == transcript_win and input_win
+					or direction == "k" and current == input_win and transcript_win
+				if valid(target) then vim.api.nvim_set_current_win(target)
+				else M.hide() end
+			end
+			for _, lhs in ipairs({ "<C-" .. direction .. ">", "<C-w>" .. direction, "<C-w><C-" .. direction .. ">" }) do
+				vim.keymap.set("n", lhs, navigate, { buffer = buf, silent = true, desc = "Navigate side conversation" })
+			end
 		end
 	end
 	focus = floats.focus_group({ transcript_win, input_win })

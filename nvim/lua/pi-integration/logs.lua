@@ -137,7 +137,7 @@ function M.notify(message, level, opts)
 	if changed then M.display(message, level) end
 end
 
-local function open_float(buf, title, parent, footer)
+local function open_float(buf, title, parent, footer, on_dismiss)
 	local width = math.max(1, math.min(math.floor(vim.o.columns * 0.85), vim.o.columns - 4))
 	local height = math.max(1, math.min(math.floor(vim.o.lines * 0.8), vim.o.lines - 4))
 	local win = vim.api.nvim_open_win(buf, true, {
@@ -149,21 +149,21 @@ local function open_float(buf, title, parent, footer)
 	})
 	vim.wo[win].wrap, vim.wo[win].linebreak = true, true
 	local function close() floats.close_window(win) end
-	floats.close_on_win_leave(buf, close, { win = win, parent = parent })
+	floats.close_on_win_leave(buf, close, { win = win, parent = parent, on_dismiss = on_dismiss })
 	for _, key in ipairs({ "q", "<Esc>" }) do
-		vim.keymap.set("n", key, close, { buffer = buf, silent = true, desc = "Close Pi log" })
+		vim.keymap.set("n", key, function() floats.dismiss_window(win) end, { buffer = buf, silent = true, desc = "Close Pi log" })
 	end
 	return win
 end
 
-function M.detail(contents, title)
+function M.detail(contents, title, on_dismiss)
 	local parent = vim.api.nvim_get_current_win()
 	local buf = vim.api.nvim_create_buf(false, true)
 	vim.bo[buf].bufhidden = "wipe"
 	vim.bo[buf].filetype = "markdown"
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(contents, "\n", { plain = true }))
 	vim.bo[buf].modifiable = false
-	return open_float(buf, title or "Pi log details", parent)
+	return open_float(buf, title or "Pi log details", parent, nil, on_dismiss)
 end
 
 function M.show()

@@ -121,19 +121,16 @@ local function open_item(ctx, state, parent_win)
 	return false
 end
 
-function M.open(ctx, path, title, query, contents, subagent)
+function M.open(ctx, path, title, query, contents, subagent, page)
 	assert(ctx.resources, "Session resources required")
 	query = query or { kind = "spawn", runId = path and path:match("/runs/([^/]+)/"), artifact = "transcript" }
 	local raw_title = (title or "Transcript") .. " (raw)"
 	if not contents then
 		if query.kind == "spawn" and query.artifact == "transcript" then
-			ctx.resources.read(vim.tbl_extend("force", query, { view = "transcript" }), function(page)
-				M.open(ctx, page.path, title, query, page.text, subagent)
+			ctx.resources.read(vim.tbl_extend("force", query, { view = "transcript" }), function(result)
+				M.open(ctx, result.path, title, query, result.text, subagent, result)
 			end, function(error)
 				ctx.ui.notify(error.message or "Could not read transcript")
-				if error.code == "resource_limit" then
-					ctx.resources.open(query, raw_title, "json")
-				end
 			end)
 		else
 			ctx.resources.document(query, function(text, page)
@@ -193,8 +190,10 @@ function M.open(ctx, path, title, query, contents, subagent)
 		col = col,
 		style = "minimal",
 		border = "rounded",
-		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. (title or "Spawn transcript") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. (title or "Spawn transcript")
+			.. (page and (" [bytes " .. page.offset .. ".." .. (page.nextOffset ~= vim.NIL and page.nextOffset or page.size) .. "/" .. page.size .. "]") or "") .. " ",
 		title_pos = "left",
+		footer = query.kind == "spawn" and " n next page | p first page | r reload | gR raw | q back " or " r reload | gR raw | q close ",
 	})
 	state.transcript_win = win
 	owner.spawn_buf = buf
@@ -210,19 +209,37 @@ function M.open(ctx, path, title, query, contents, subagent)
 		if owner.spawn_win == win then owner.spawn_win = nil end
 		if owner.spawn_buf == buf then owner.spawn_buf = nil end
 	end
-	floats.close_on_win_leave(buf, close_win, { win = win, parent = ctx.window and ctx.window.parent or owner.transcript_win })
+	floats.close_on_win_leave(buf, close_win, { win = win, parent = ctx.window and ctx.window.parent or owner.transcript_win,
+		on_dismiss = function()
+			if owner.spawn_win == win then owner.spawn_win, owner.spawn_buf = nil, nil end
+			if not ctx.resources.current() then return end
+			ctx.resources.select()
+			if ctx.on_dismiss then ctx.on_dismiss() end
+		end,
+	})
 	local dismiss = function()
-		if ctx.resources then ctx.resources.select() end
-		close_win()
+		ctx.resources.select()
+		floats.dismiss_window(win)
 	end
 	vim.keymap.set("n", "q", dismiss, { buffer = buf, silent = true, desc = "Close spawn transcript" })
 	vim.keymap.set("n", "<Esc>", dismiss, { buffer = buf, silent = true, desc = "Close spawn transcript" })
 	vim.keymap.set("n", "gR", function()
-		ctx.resources.open(query, raw_title, "json")
+		ctx.resources.open(query, raw_title, "json", nil, ctx.on_dismiss)
 	end, { buffer = buf, silent = true, desc = "Open raw paged transcript" })
 	vim.keymap.set("n", "r", function()
-		M.open(ctx, path, title, query, nil, subagent)
+		local fresh = vim.tbl_extend("force", query, { offset = 0 }); fresh.version = nil
+		M.open(ctx, path, title, fresh, nil, subagent)
 	end, { buffer = buf, silent = true, desc = "Refresh spawn transcript" })
+	if page and query.kind == "spawn" then
+		local function navigate(offset)
+			M.open(ctx, path, title, vim.tbl_extend("force", query, { offset = offset, version = page.version }), nil, subagent)
+		end
+		vim.keymap.set("n", "n", function()
+			if page.nextOffset and page.nextOffset ~= vim.NIL then navigate(page.nextOffset)
+			else ctx.ui.notify("End of transcript") end
+		end, { buffer = buf, silent = true, desc = "Next rendered transcript page" })
+		vim.keymap.set("n", "p", function() navigate(0) end, { buffer = buf, silent = true, desc = "First rendered transcript page" })
+	end
 	vim.keymap.set("n", "<CR>", function()
 		if not require("pi-integration.utils.markdown-links").follow((owner.workspace or {}).cwd, ctx.resources) then
 			open_item(ctx, state, win)

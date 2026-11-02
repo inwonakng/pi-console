@@ -2409,7 +2409,7 @@ function M.pick_spawn()
 		end
 	end
 	local data, captured = status_data("pi-spawn-runs"), stamp()
-	vim.ui.select(data and data.runs or {}, { prompt = "Subagents", format_item = run_label }, function(run)
+	local function pick_actions(run)
 		if not run or not same_context(captured) then return end
 		local details = { "# Subagent", "", "**Model:** " .. run_model(run), "" }
 		fields(details, run, { { "agent", "Subagent profile" }, { "role", "Role" } })
@@ -2428,7 +2428,9 @@ function M.pick_spawn()
 			preview_text = table.concat(details, "\n"), preview_filetype = "markdown",
 		}, function(action)
 			if not same_context(captured) then return end
-			if action == "Artifacts" then require("pi-integration.spawn-artifacts").pick_run({ state = state, ui = { notify = notify }, resources = owner_resources() }, run, function() end)
+			local function return_to_actions() pick_actions(run) end
+			if action == "Artifacts" then require("pi-integration.spawn-artifacts").pick_run({ state = state, ui = { notify = notify },
+				resources = owner_resources(), on_dismiss = return_to_actions }, run, function() end)
 			elseif action == "Inspect" then
 				local lines = { "# Subagent", "", "**Model:** " .. run_model(run), "", "## Assignment", "" }
 				fields(lines, assignment, { { "id", "Assignment" }, { "prompt", "Current task" }, { "outcome", "Outcome" } })
@@ -2458,14 +2460,15 @@ function M.pick_spawn()
 				if (tonumber(run.changedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Changed: %d more files (full list in status artifact)", run.changedFilesOmitted)) end
 				for _, path in ipairs(run.unpreservedFiles or {}) do table.insert(lines, "Not preserved: " .. path) end
 				if (tonumber(run.unpreservedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Not preserved: %d more files (full list in status artifact)", run.unpreservedFilesOmitted)) end
-				local win = logs.detail(table.concat(lines, "\n"), "Subagent")
+				local win = logs.detail(table.concat(lines, "\n"), "Subagent", return_to_actions)
 				local buf = vim.api.nvim_win_get_buf(win)
 				local markdown = require("pi-integration.markdown-render")
 				markdown.prepare_buffer(buf)
 				markdown.render(buf, win)
 			elseif action == "Join" or action == "Stop" then command(action == "Join" and "spawn.join" or "spawn.stop", { id = run.runId }, nil, captured) end
 		end)
-	end)
+	end
+	vim.ui.select(data and data.runs or {}, { prompt = "Subagents", format_item = run_label }, pick_actions)
 end
 function M.toggle_notifications()
 	setting("notifications.set", { enabled = state.notification_status ~= "notify on" })

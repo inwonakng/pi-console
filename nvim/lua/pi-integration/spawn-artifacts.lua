@@ -135,10 +135,15 @@ local function open_text(ctx, title, path, filetype, is_output, page, query, anc
 			state.spawn_buf = nil
 		end
 	end
-	floats.close_on_win_leave(buf, close_win, { win = win, parent = ctx.window.parent })
+	floats.close_on_win_leave(buf, close_win, { win = win, parent = ctx.window.parent, on_dismiss = function()
+		if state.spawn_win == win then state.spawn_win, state.spawn_buf = nil, nil end
+		if not ctx.resources.current() then return end
+		ctx.resources.select()
+		if ctx.on_dismiss then ctx.on_dismiss() end
+	end })
 	if ctx.resources then
 		local function navigate(offset)
-			ctx.resources.open(vim.tbl_extend("force", query, { offset = offset, version = page.version }), title, filetype)
+			ctx.resources.open(vim.tbl_extend("force", query, { offset = offset, version = page.version }), title, filetype, nil, ctx.on_dismiss)
 		end
 		vim.keymap.set("n", "n", function()
 			if page.nextOffset and page.nextOffset ~= vim.NIL then navigate(page.nextOffset) else ctx.ui.notify("End of document") end
@@ -146,7 +151,7 @@ local function open_text(ctx, title, path, filetype, is_output, page, query, anc
 		vim.keymap.set("n", "p", function() navigate(0) end, { buffer = buf, desc = "First document chunk" })
 		vim.keymap.set("n", "r", function()
 			local fresh = vim.tbl_extend("force", query, { offset = 0 }); fresh.version = nil
-			ctx.resources.open(fresh, title, filetype)
+			ctx.resources.open(fresh, title, filetype, nil, ctx.on_dismiss)
 		end, { buffer = buf, desc = "Reload document" })
 		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, ctx.resources) end, { buffer = buf, desc = "Follow link" })
 		if anchor then pcall(require("pi-integration.utils.markdown-links").jump_to_heading, anchor) end
@@ -154,7 +159,8 @@ local function open_text(ctx, title, path, filetype, is_output, page, query, anc
 	local description = is_output and "spawn output" or "spawn artifact"
 	local dismiss = function()
 		if ctx.resources then ctx.resources.select() end
-		close_win()
+		floats.dismiss_window(win)
+		if state.spawn_win == win then state.spawn_win, state.spawn_buf = nil, nil end
 	end
 	vim.keymap.set("n", "q", dismiss, { buffer = buf, silent = true, desc = "Close " .. description })
 	vim.keymap.set("n", "<Esc>", dismiss, { buffer = buf, silent = true, desc = "Close " .. description })
@@ -175,15 +181,20 @@ local function select_artifact(ctx, choices, prompt, is_output, send_action)
 	}, function(choice)
 		if ctx.resources and not ctx.resources.current(ticket) then return end
 		if not choice then
+			if ctx.on_dismiss then ctx.on_dismiss() end
 			return
+		end
+		local function return_to_picker()
+			select_artifact(ctx, choices, prompt, is_output, send_action)
 		end
 		if choice.kind == "send-action" then
 			send_action()
 		elseif choice.kind == "transcript" then
 			local query = ctx.resources and { kind = "spawn", runId = choice.runId, artifact = choice.kind } or nil
-			require("pi-integration.spawn-transcript").open(ctx, choice.path, "Spawn transcript", query, nil, choice.subagent)
+			require("pi-integration.spawn-transcript").open(vim.tbl_extend("force", ctx, { on_dismiss = return_to_picker }),
+				choice.path, "Spawn transcript", query, nil, choice.subagent)
 		else
-			ctx.resources.open({ kind = "spawn", runId = choice.runId, artifact = choice.kind }, "Spawn " .. choice.label, choice.filetype)
+			ctx.resources.open({ kind = "spawn", runId = choice.runId, artifact = choice.kind }, "Spawn " .. choice.label, choice.filetype, nil, return_to_picker)
 		end
 	end)
 end
@@ -210,6 +221,7 @@ function M.pick_run(ctx, run, send_action)
 		state = ctx.state,
 		resources = ctx.resources,
 		ui = ctx.ui,
+		on_dismiss = ctx.on_dismiss,
 		window = { parent = ctx.state.transcript_win },
 	}
 	select_artifact(artifact_ctx, choices, run_label(run), false, send_action)

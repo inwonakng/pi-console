@@ -149,6 +149,7 @@ local function normalize_options(buf, close_fn, opts)
 		parent = opts.parent,
 		group = opts.group,
 		close = close_fn,
+		on_dismiss = opts.on_dismiss,
 	}
 end
 
@@ -263,10 +264,18 @@ function M.close_window(win)
 	if info then
 		focus_nearest_parent(win)
 	end
+	untrack(win)
 	if win_valid(win) then
 		vim.api.nvim_win_close(win, true)
 	end
-	untrack(win)
+end
+
+-- Explicit/native dismissal may return to a picker; replacement and focus-leave
+-- cleanup use close_window instead and must never reopen navigation UI.
+function M.dismiss_window(win)
+	local info = win and tracked[win]
+	M.close_window(win)
+	if info and info.on_dismiss then vim.schedule(info.on_dismiss) end
 end
 
 function M.track_window(win, opts)
@@ -278,6 +287,7 @@ function M.track_window(win, opts)
 		parent = opts.parent,
 		group = opts.group,
 		close = opts.close,
+		on_dismiss = opts.on_dismiss,
 	}
 	-- Inspectors opened by a member belong to the same focus boundary.
 	-- Otherwise a paired dialog pulls focus back and immediately hides them.
@@ -301,8 +311,16 @@ function M.close_on_win_leave(buf, close_fn, opts)
 		return
 	end
 
-	M.track_window(info.win, { parent = info.parent, group = info.group, close = close_fn })
+	M.track_window(info.win, { parent = info.parent, group = info.group, close = close_fn, on_dismiss = info.on_dismiss })
 	pcall(vim.api.nvim_clear_autocmds, { group = close_on_leave_augroup, buffer = buf })
+	vim.api.nvim_create_autocmd("WinClosed", {
+		group = close_on_leave_augroup, pattern = tostring(info.win), once = true,
+		callback = function()
+			local entry = tracked[info.win]
+			untrack(info.win)
+			if entry and entry.on_dismiss then vim.schedule(entry.on_dismiss) end
+		end,
+	})
 
 	vim.api.nvim_create_autocmd("WinLeave", {
 		group = close_on_leave_augroup,

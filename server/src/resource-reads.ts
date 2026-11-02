@@ -71,8 +71,7 @@ function readInput(value: unknown): ReadInput {
     || typeof value.kind !== "string" || !["history", "file", "skill", "output", "spawn"].includes(value.kind)
     || (value.path !== undefined && !pathString(value.path)) || !offset(value.offset)
     || (value.version !== undefined && (typeof value.version !== "string" || !/^[a-f0-9]{64}$/.test(value.version)))
-    || (value.view !== undefined && (value.view !== "transcript" || value.kind !== "spawn" || value.artifact !== "transcript"
-      || value.offset !== undefined || value.version !== undefined))
+    || (value.view !== undefined && (value.view !== "transcript" || value.kind !== "spawn" || value.artifact !== "transcript"))
     || ((value.offset as number | undefined) ?? 0) > 0 && value.version === undefined) {
     refuse("resource_payload", "Invalid read payload or missing continuation version");
   }
@@ -231,17 +230,27 @@ function transcriptRecord(record: unknown): boolean {
   return !!event && ["entry_appended", "message_end", "tool_execution_start", "tool_execution_update",
     "tool_execution_end", "agent_end", "agent_settled", "child_exit"].includes(String(event.type));
 }
-async function transcriptView(target: Target, check: () => void): Promise<TextChunk> {
+async function transcriptView(target: Target, input: ReadInput, check: () => void): Promise<TextChunk> {
   const opened = await openTarget(target, check, true);
   try {
-    const size = Number(opened.stamp.size);
-    if (size > SCAN_BYTES) refuse("resource_oversize", "Transcript snapshot exceeds the 256 MiB scan limit; use raw paged text");
+    const size = Number(opened.stamp.size), version = fingerprint(opened.stamp);
+    if (input.version !== undefined && input.version !== version) changed();
+    const offset = input.offset ?? 0;
+    if (offset > size) refuse("resource_offset", "Offset is beyond end of transcript");
+    if (offset > 0 && (await readBytes(opened, offset - 1, 1, check))[0] !== 10) {
+      refuse("resource_offset", "Transcript pages must start at a JSONL record boundary");
+    }
     const parts: string[] = [];
     let fragments: Buffer[] = [], recordSize = 0, viewSize = 0;
+    let recordStart = offset, capturedEnd = offset, nextOffset: number | null = null;
     const captured = createHash("sha256");
-    for (let position = 0; position < size; position += CHUNK_BYTES) {
+    // Bound each scan, not the transcript's total size. Never split a record;
+    // one record may exceed the 4 MiB page target, up to the 16 MiB record cap.
+    const scanEnd = Math.min(size, offset + SCAN_BYTES);
+    scan: for (let position = offset; position < scanEnd; position += CHUNK_BYTES) {
       const block = await readBytes(opened, position, Math.min(CHUNK_BYTES, size - position), check);
       captured.update(block);
+      capturedEnd = position + block.length;
       let start = 0;
       for (;;) {
         const end = block.indexOf(10, start);
@@ -258,26 +267,36 @@ async function transcriptView(target: Target, check: () => void): Promise<TextCh
           try { record = JSON.parse(text); }
           catch { refuse("resource_metadata", "Invalid JSONL record in transcript"); }
           if (transcriptRecord(record)) {
+            if (parts.length && viewSize + bytes.length + 1 > VIEW_BYTES) {
+              nextOffset = recordStart;
+              break scan;
+            }
             viewSize += bytes.length + 1;
-            if (viewSize > VIEW_BYTES) refuse("resource_oversize", "Rendered transcript exceeds 4 MiB; use raw paged text");
             parts.push(text + "\n");
           }
         }
         start = end + 1;
+        recordStart = position + start;
+        if (viewSize >= VIEW_BYTES) {
+          nextOffset = recordStart < size ? recordStart : null;
+          break scan;
+        }
       }
       await yieldTurn(); check();
     }
-    // An unfinished tail (including a split UTF-8 sequence) is not yet a record.
-    // Verify the entire captured extent, rather than treating mtime changes from
-    // normal appends as conflicts or accepting edits to previously read bytes.
+    if (nextOffset === null && capturedEnd < size) nextOffset = recordStart;
+    // An unfinished EOF tail (including split UTF-8) is not yet a record.
+    // Verify the captured page extent. Only a fresh first-page read permits
+    // normal appends; pinned continuations must not mix versions across pages.
     const verified = createHash("sha256");
-    for (let position = 0; position < size; position += CHUNK_BYTES) {
-      verified.update(await readBytes(opened, position, Math.min(CHUNK_BYTES, size - position), check));
+    for (let position = offset; position < capturedEnd; position += CHUNK_BYTES) {
+      verified.update(await readBytes(opened, position, Math.min(CHUNK_BYTES, capturedEnd - position), check));
       await yieldTurn(); check();
     }
     if (captured.digest("hex") !== verified.digest("hex")) changed();
-    await appended(opened, check);
-    return { text: parts.join(""), path: opened.canonical, offset: 0, nextOffset: null, version: fingerprint(opened.stamp), size };
+    if (input.version === undefined) await appended(opened, check);
+    else await unchanged(opened, check);
+    return { text: parts.join(""), path: opened.canonical, offset, nextOffset, version, size };
   } finally { await opened.file.close(); }
 }
 export async function metadata(target: Target, check: () => void, budget: { bytes: number }): Promise<Record<string, unknown>> {
@@ -525,7 +544,7 @@ export async function readResource(context: ResourceContext, input: unknown): Pr
         break;
       }
     }
-    return request.view === "transcript" ? transcriptView(target, context.check) : chunk(target, request, context.check);
+    return request.view === "transcript" ? transcriptView(target, request, context.check) : chunk(target, request, context.check);
   });
 }
 
