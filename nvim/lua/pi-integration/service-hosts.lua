@@ -128,7 +128,7 @@ local function flush_cache(host)
 		host.cache_retry_at = not ok and vim.uv.hrtime() / 1e6 + 1000 or nil
 	end
 	if host.pins_dirty and (not host.pins_retry_at or vim.uv.hrtime() / 1e6 >= host.pins_retry_at) then
-		local ok, err = require("pi-integration.service-pins").refresh(host.host_id, host.rows, host_label(host))
+		local ok, err = require("pi-integration.service-pins").refresh(host.host_id, host.rows, host.alias)
 		host.pins_dirty, host.pins_error = not ok, not ok and err or nil
 		host.pins_retry_at = not ok and vim.uv.hrtime() / 1e6 + 1000 or nil
 	end
@@ -312,7 +312,7 @@ function M.list()
 				for _, run in ipairs(host.connected and live.subagentRuns or {}) do
 					if run.status == "running" then table.insert(active_runs, run) end
 				end
-				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host_label(host),
+				table.insert(entries, { id = id, host_id = identity, session_id = row.id, host_name = host.alias,
 					connected = host.connected == true, status = host.connected and status or "Unknown", frontend_keys = frontend_keys, initial_group = initial_group,
 					title = session_title(row), cwd = row.cwd, directory = row.cwd,
 					location = host.alias, controller = host.connected and live.controller or nil, activity = nil,
@@ -334,7 +334,7 @@ function M.list()
 			entry.id = "frontend:" .. entry.frontend_id
 			entry.frontend_pane, entry.frontend_host_id = pane.id, pane.host_id
 			entry.host_id, entry.session_id = nil, nil
-			entry.host_name = host and host_label(host) or "Unconnected frontend"
+			entry.host_name = host and host.alias or "Unconnected frontend"
 			entry.location = host and host.alias or pane.location
 			entry.directory, entry.is_new_session = pane.cwd, true
 			table.insert(entries, entry)

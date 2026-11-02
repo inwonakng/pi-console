@@ -49,6 +49,7 @@ function M.open(config)
 	vim.o.showmode = false
 	vim.o.ruler = false
 	local ns = vim.api.nvim_create_namespace("pi-sidebar")
+	local selection_ns = vim.api.nvim_create_namespace("pi-sidebar-selection")
 	local list = session_list.new()
 	local rows, starts, status_icons = {}, {}, {}
 	local navigation = session_navigation.new(win)
@@ -61,6 +62,17 @@ function M.open(config)
 	local query = ""
 	local function selected()
 		return vim.api.nvim_win_is_valid(win) and rows[vim.api.nvim_win_get_cursor(win)[1]] or nil
+	end
+	local function highlight_selection()
+		vim.api.nvim_buf_clear_namespace(buf, selection_ns, 0, -1)
+		local row = vim.api.nvim_win_get_cursor(win)[1]
+		local node = rows[row]
+		if not node or node.kind ~= "session" then return end
+		for line = row, row + 1 do
+			vim.api.nvim_buf_set_extmark(buf, selection_ns, line - 1, 0, {
+				end_row = line, end_col = 0, hl_group = "CursorLine", hl_eol = true, priority = 200,
+			})
+		end
 	end
 	local function notify(err)
 		require("pi-integration.logs").notify(err or "Session operation failed", vim.log.levels.WARN, { title = "Pi sidebar" })
@@ -182,6 +194,7 @@ function M.open(config)
 			vim.fn.winrestview(view)
 		end)
 		navigation.set_rows(starts)
+		highlight_selection()
 		updating = false
 	end
 	local function refresh()
@@ -242,6 +255,7 @@ function M.open(config)
 		callback = function()
 			if not updating then
 				navigation.snap()
+				highlight_selection()
 			end
 		end,
 	})
