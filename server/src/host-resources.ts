@@ -173,6 +173,8 @@ class ResourceFingerprint {
   private readonly hash: Hash = createHash("sha256");
   private readonly directories = new Set<string>();
   private readonly packages = new Set<string>();
+  // One fingerprint owns this cache; never reuse lookup results across startups.
+  private readonly checkedLookups = new Set<string>();
   private entries = 0;
   private bytes = 0;
 
@@ -182,11 +184,10 @@ class ResourceFingerprint {
   async tree(path: string, depth = 0): Promise<void> {
     if (++this.entries > MAX_ENTRIES || depth > MAX_DEPTH) throw new Error("Host resource entry/depth limit exceeded");
     const target = await realpath(path);
-    const info = await lstat(target);
     const stamp = await lstat(target, { bigint: true });
     this.files.push({ path, target, ino: String(stamp.ino), mode: String(stamp.mode), size: String(stamp.size), mtimeNs: String(stamp.mtimeNs), ctimeNs: String(stamp.ctimeNs) });
-    this.record([path, target, info.mode]);
-    if (info.isDirectory()) {
+    this.record([path, target, Number(stamp.mode)]);
+    if (stamp.isDirectory()) {
       if (this.directories.has(target)) return;
       this.directories.add(target);
       for (const name of (await readdir(target)).sort()) {
@@ -194,8 +195,9 @@ class ResourceFingerprint {
       }
       return;
     }
-    if (!info.isFile()) throw new Error(`Unsupported host resource type: ${path}`);
-    this.bytes += info.size;
+    if (!stamp.isFile()) throw new Error(`Unsupported host resource type: ${path}`);
+    const size = Number(stamp.size);
+    this.bytes += size;
     if (this.bytes > MAX_BYTES) throw new Error("Host resources exceed the 1 GiB fingerprint limit");
     const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
@@ -204,11 +206,11 @@ class ResourceFingerprint {
       let bytes = 0;
       for await (const chunk of file.createReadStream({ autoClose: false })) {
         bytes += chunk.length;
-        if (bytes > info.size) throw new Error(`Host resource grew during fingerprinting: ${path}`);
+        if (bytes > size) throw new Error(`Host resource grew during fingerprinting: ${path}`);
         content.update(chunk);
       }
       const after = await file.stat({ bigint: true });
-      if (bytes !== info.size || before.ino !== after.ino || before.size !== after.size
+      if (bytes !== size || before.ino !== after.ino || before.size !== after.size
         || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) {
         throw new Error(`Host resource changed during fingerprinting: ${path}`);
       }
@@ -235,11 +237,13 @@ class ResourceFingerprint {
         // Pin every search candidate, including absent nearer candidates, rather
         // than assuming that package.json is the only resolution boundary.
         for (const path of [candidate, candidate + ".js", candidate + ".json", candidate + ".node"]) {
+          if (this.checkedLookups.has(path)) continue;
           let target: string | null = null;
           try { target = await realpath(path); }
           catch (error) { if (!missing(error)) throw error; }
           this.lookup.push({ path, target });
           if (target) await this.tree(path);
+          this.checkedLookups.add(path);
         }
         try { await access(join(candidate, "package.json")); dependency ??= candidate; }
         catch (error) { if (!missing(error)) throw error; }

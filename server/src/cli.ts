@@ -25,6 +25,33 @@ function row(label: string, value: string, style?: string): void {
   console.log(`  ${terminalText(label.padEnd(12), "2", process.stdout)} ${style ? terminalText(value, style, process.stdout) : value}`);
 }
 
+/** Terminal-only progress: redirected launcher startup and machine output stay quiet. */
+function lifecycleProgress(action: string): { step: (message: string) => void; finish: (success: boolean) => void } {
+  const enabled = !!process.stdout.isTTY && !!process.stderr.isTTY;
+  const started = performance.now();
+  let current = "", stepStarted = started;
+  let timer: NodeJS.Timeout | undefined;
+  const elapsed = () => ((performance.now() - started) / 1000).toFixed(1);
+  const print = (message: string) => {
+    if (enabled) console.error(`  [${elapsed()}s] ${message}`);
+  };
+  return {
+    step(message) {
+      if (!enabled || message === current) return;
+      clearInterval(timer);
+      current = message;
+      stepStarted = performance.now();
+      print(`${message}...`);
+      timer = setInterval(() => print(`Still in progress (${((performance.now() - stepStarted) / 1000).toFixed(0)}s): ${current}`), 5000);
+      timer.unref();
+    },
+    finish(success) {
+      clearInterval(timer);
+      print(success ? `${action} completed.` : `${action} did not complete${current ? ` during: ${current}` : "."}`);
+    },
+  };
+}
+
 function displayVersion(hello: Record<string, unknown>): string {
   const version = typeof hello.appRoot === "string" && basename(dirname(hello.appRoot)) === "versions"
     ? basename(hello.appRoot) : String(hello.buildId ?? "Unknown");
@@ -143,8 +170,17 @@ async function main(): Promise<void> {
     await runService({ ...options, port }); return;
   }
   if (["start", "stop", "restart", "enable", "disable"].includes(action ?? "")) {
-    const manage = () => manageService(action as ManagementAction, options, { force,
-      port: flags.has("--port") ? port : undefined, supervisorDirectory: flags.get("--supervisor-dir"), path: flags.get("--path") });
+    const manage = async () => {
+      const progress = lifecycleProgress(`Server ${action}`);
+      let success = false;
+      try {
+        const result = await manageService(action as ManagementAction, options, { force,
+          port: flags.has("--port") ? port : undefined, supervisorDirectory: flags.get("--supervisor-dir"), path: flags.get("--path"),
+          progress: progress.step });
+        success = true;
+        return result;
+      } finally { progress.finish(success); }
+    };
     let result;
     try { result = await manage(); }
     catch (error) {
@@ -165,6 +201,9 @@ async function main(): Promise<void> {
     }
     if (result.hello) await reportStarted(result.hello, result.alreadyRunning, result.startup);
     else if (result.message) console.log(terminalText(result.message, "22;32", process.stdout));
+    if (action === "stop" || action === "restart" || action === "disable") {
+      console.log("Saved history is preserved; sessions are not resumed by this command.");
+    }
     return;
   }
   if (action === "status") {

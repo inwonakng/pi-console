@@ -92,6 +92,13 @@ explicit forced administrative shutdown, not frontend detach. Headless installat
 is available through `--server-only`. Confirmed session restart/kill
 are attachment-bound commands, separate from these service administration actions.
 
+In a terminal, lifecycle commands show named steps and elapsed time on stderr,
+with an update every five seconds while a step is pending. Startup readiness includes
+fingerprinting Pi/extensions and their dependencies, claiming catalog ownership,
+and opening listeners; it does not resume saved sessions. Redirected output and
+automatic frontend startup omit progress. Failures identify the pending step before
+the error details. These messages are CLI output, not conversation transcript entries.
+
 After owner death, interactive `server start` and `server restart` offer to
 reconcile interrupted ownership before starting. Recovery requires an explicit
 `y` or `yes`; declining leaves ownership unchanged. Non-interactive commands

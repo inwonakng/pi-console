@@ -22,9 +22,10 @@ export class ServiceRecoveryRequired extends Error {
 /** Shared CLI/frontend lifecycle path. Never reconciles or removes retained claims. */
 export async function manageService(action: ManagementAction, options: HostOwnerOptions & { root: string }, config: {
   force: boolean; port?: number; supervisorDirectory?: string; path?: string; expectedEpoch?: string;
+  progress?: (step: string) => void;
 }): Promise<{ hello?: Record<string, unknown>; alreadyRunning?: boolean; startup?: Record<string, unknown>; message?: string }> {
   const { root, channel, binary } = options;
-  const { force, supervisorDirectory, path, expectedEpoch } = config;
+  const { force, supervisorDirectory, path, expectedEpoch, progress } = config;
   const explicitPort = config.port !== undefined;
   const port = listenerPort(config.port, channel);
   const extraArgs: string[] = [];
@@ -45,6 +46,7 @@ export async function manageService(action: ManagementAction, options: HostOwner
     }
   };
   const requireNoClaim = async (): Promise<void> => {
+    progress?.("Checking that previous service ownership is released");
     const claimPath = join(root, "owner.lock");
     let claimPresent = false;
     try { await lstat(claimPath); claimPresent = true; }
@@ -62,9 +64,12 @@ export async function manageService(action: ManagementAction, options: HostOwner
     }
     return file;
   };
+  progress?.("Checking installation identity");
   await managementIdentity(options.appRoot, channel);
+  progress?.("Acquiring management lock (waiting for other lifecycle commands)");
   const unlock = await managementLock(root);
   try {
+    progress?.("Checking supervisor registration and current server");
     let supervisor = await ServiceSupervisor.load(root, channel, options.appRoot, supervisorDirectory);
     if (supervisor) await supervisor.loaded();
     const existing = await connect();
@@ -108,6 +113,7 @@ export async function manageService(action: ManagementAction, options: HostOwner
     // Check start configuration before stopping a healthy owner.
     if ((action === "enable" || action === "restart" || action === "start" && !existing) && !supervisor) {
       try {
+        progress?.("Checking Pi version and launch configuration");
         if (!binary || !isAbsolute(binary)) throw new Error("Pi >=1.3.0 is required to start a local server. Install Pi and make sure pi is available on PATH.");
         checkPi(binary);
       } catch (error) { existing?.client.close(); throw error; }
@@ -116,20 +122,25 @@ export async function manageService(action: ManagementAction, options: HostOwner
     // registration as well as launch; never let another checkout claim startup.
     if (action === "enable" && !existing) await requireNoClaim();
     if (action === "enable" && !supervisor) {
+      progress?.("Registering login startup and requesting server launch if stopped");
       existing?.client.close();
       await (await privateLog()).close();
       supervisor = await ServiceSupervisor.create({ ...options, binary: binary!, directory: supervisorDirectory, path, extraArgs });
       if (existing) await supervisor.enable(false);
       else await startSupervised(() => supervisor!.enable(true));
     } else if (action === "enable") {
+      progress?.("Enabling login startup and requesting server launch if stopped");
       existing?.client.close();
       if (!existing) await supervisor!.configurePort(explicitPort ? port : undefined);
       if (existing) await supervisor!.enable(false);
       else await startSupervised(() => supervisor!.enable(true));
     } else if (action === "stop" || action === "restart" || action === "disable") {
       if (existing) {
+        progress?.(force ? "Requesting forced shutdown: interrupting owned work and saving session state"
+          : "Requesting shutdown: checking for active work, stopping idle sessions and saving state");
         try { await existing.client.request("service.stop", { serviceEpoch: existing.hello.serviceEpoch, force }); }
         finally { existing.client.close(); }
+        progress?.("Waiting for the old server endpoint to close");
         // Do not mistake the old listener for the replacement during restart.
         let closed = false;
         for (let n = 0; n < 600; n++) {
@@ -145,10 +156,16 @@ export async function manageService(action: ManagementAction, options: HostOwner
           await delay(100);
         }
         if (!closed) throw new Error("Old service endpoint remains; refusing supervisor teardown/replacement");
-        await supervisor?.waitStopped();
+        if (supervisor) {
+          progress?.("Waiting for the supervisor to confirm process exit");
+          await supervisor.waitStopped();
+        }
       } else await supervisor?.assertStopped();
       await requireNoClaim();
-      if (action === "disable") await supervisor?.disable();
+      if (action === "disable" && supervisor) {
+        progress?.("Removing login startup registration");
+        await supervisor.disable();
+      }
       if (action !== "restart") {
         const message = action === "disable" ? "Server shut down successfully; startup disabled."
           : existing ? "Server shut down successfully." : "Server is already stopped.";
@@ -161,10 +178,12 @@ export async function manageService(action: ManagementAction, options: HostOwner
     if (action !== "enable") {
       await requireNoClaim();
       if (supervisor) {
+        progress?.(`Launching server via ${supervisor.config.platform === "linux" ? "user systemd" : "launchd"}`);
         await supervisor.configurePort(explicitPort ? port : undefined);
         await startSupervised(() => supervisor!.start());
       }
       else {
+        progress?.("Launching detached server process");
         const log = await privateLog();
         try {
           startupLogOffset = (await log.stat()).size;
@@ -176,6 +195,8 @@ export async function manageService(action: ManagementAction, options: HostOwner
         } finally { await log.close(); }
       }
     }
+    progress?.(action === "enable" && existing ? "Confirming running server and startup registration"
+      : "Waiting for server readiness: Pi/resource fingerprint checks, catalog ownership and listeners");
     for (let n = 0; n < 600; n++) {
       if (startupExit) throw await startupError(`Service exited during startup (${startupExit}).`);
       const view = await connect(true);
