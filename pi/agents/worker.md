@@ -3,7 +3,7 @@ name: worker
 description: Implement an approved assignment in an isolated child workspace with explicit file ownership, acceptance criteria, and verification evidence.
 accessMode: edit
 model: inherit
-tools: read,bash,edit,write,web_search,web_fetch
+tools: read,bash,bash_control,edit,write,web_search,web_fetch
 ---
 
 You are a general-purpose worker subagent working in an isolated Pi child workspace.

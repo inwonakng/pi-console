@@ -318,6 +318,8 @@ function M.list()
 					location = host.alias, controller = host.connected and live.controller or nil, activity = nil,
 					workspace_cwd = row.live and row.live.cwd or row.cwd, last_focused_at = focused,
 					subagent_runs = active_runs, subagents = #active_runs,
+					running_commands = host.connected and tonumber(live.runningCommands) or 0,
+					unresolved_commands = host.connected and tonumber(live.unresolvedCommands) or 0,
 					access_mode = host.connected and live.accessMode or nil, integration_mode = host.connected and live.integrationMode or nil,
 					notification_status = host.connected and (live.notificationsEnabled and "notify on" or "notify off") or nil,
 					channel = channel, service_epoch = host.hello and host.hello.serviceEpoch,

@@ -194,13 +194,19 @@ export class PiProcess {
     if (this.stopping || this.exited) return this.closed;
     this.stopping = true;
     this.process.stdin.end();
-    if (stopManaged(this.process)) return this.closed;
-    // Shutdown escalation, not a deadline on agent work. Signals target only the
-    // live ChildProcess handle; never recover or kill a PID read from disk.
-    const terminate = setTimeout(() => { this.process.kill("SIGTERM"); }, 2000);
-    const kill = setTimeout(() => { this.process.kill("SIGKILL"); }, 5000);
+    // Give session_shutdown time to stop owned jobs/children and durably record
+    // their cleanup before managed fallback seals admission and terminates Pi.
+    // Recheck the live handle at escalation: EOF may already have completed it.
+    let kill: NodeJS.Timeout | undefined;
+    const terminate = setTimeout(() => {
+      if (this.exited) return;
+      if (!stopManaged(this.process)) {
+        this.process.kill("SIGTERM");
+        kill = setTimeout(() => { if (!this.exited) this.process.kill("SIGKILL"); }, 5000);
+      }
+    }, 20000);
     try { return await this.closed; }
-    finally { clearTimeout(terminate); clearTimeout(kill); }
+    finally { clearTimeout(terminate); if (kill) clearTimeout(kill); }
   }
 
   private async write(record: RpcCommand | RpcExtensionUIResponse, reserve?: () => void): Promise<void> {

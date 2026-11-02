@@ -224,7 +224,7 @@ function M.open(config)
 				local entry = node.entry
 				local prefix = " " .. session_list.session_prefix(node)
 				local badge = build_info.is_dev(entry) and "DEV " or ""
-				local suffix = node.running > 0 and (" · " .. icons.subagent_icon .. " " .. node.running) or ""
+				local suffix = (node.running > 0 and (" · " .. icons.subagent_icon .. " " .. node.running) or "") .. session_list.command_suffix(entry)
 				table.insert(lines, prefix .. badge .. text(entry.title) .. suffix)
 				if badge ~= "" then highlight(row, #prefix, #prefix + 3, "PiBuildDev") end
 				highlight(row, #prefix + #badge, #lines[row] - #suffix, entry.is_new_session and "PiOverviewNewSession" or "PiOverviewTitle")

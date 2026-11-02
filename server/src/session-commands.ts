@@ -6,6 +6,7 @@ import type { ReviewRecovery } from "./workspace-review-actions.js";
 import { validRenameTitle } from "./session-rename.js";
 import { validNative, type NativeOperation } from "./session-operations.js";
 import { validBundled, type BundledOperation } from "./session-bundled.js";
+import type { BashServiceResult } from "./session-bash.js";
 
 export type CommandErrorCode = "invalid_command" | "stale_epoch" | "stale_runtime" | "session_unavailable"
   | "attachment_closed" | "control_required" | "control_revoked" | "control_claimed"
@@ -46,7 +47,7 @@ export type CommandReceipt = {
   recoveryAvailable?: true;
   authority?: "management";
   /** Completion describes command handling, NOT completion of agent work. */
-  result?: { delivery?: "flushed"; cleared?: { steering: string[]; followUp: string[] }; idle?: boolean;
+  result?: { bash?: BashServiceResult; waitId?: string; delivery?: "flushed"; cleared?: { steering: string[]; followUp: string[] }; idle?: boolean;
     queueItemId?: string; queueItemRevision?: number; queueItemText?: string; reservationId?: string; title?: string;
     submittedText?: string; editorText?: string; contextRevision?: number; disposition?: "queued" | "handled" | "accepted"; exitCode?: number; cancelled?: boolean;
     resourceVersion?: string; resourceId?: string; resourcePath?: string; reviewRecovery?: ReviewRecovery;

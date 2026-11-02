@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { serviceManaged, serviceRuntimeId } from "./service-ui";
+import type { BashControlResult } from "./bash-jobs";
 
 export type BundledOperation =
   | { operation: "access.set"; payload: { mode: "readonly" | "ask" | "edit" | "full" } }
@@ -21,6 +22,11 @@ export type BundledOperation =
   | { operation: "side.reset"; payload: Record<string, never> }
   | { operation: "side.abort"; payload: Record<string, never> }
   | { operation: "spawn.cancel"; payload: Record<string, never> }
+  | { operation: "bash.interrupt"; payload: { phase: "hold" | "confirm"; frontendAvailable: boolean } }
+  | { operation: "bash.transition"; payload: { action: "acquire" | "release"; token: string } }
+  | { operation: "bash.list"; payload: { offset?: number } }
+  | { operation: "bash.status" | "bash.join" | "bash.stop"; payload: { jobId: string } }
+  | { operation: "bash.cancel-wait"; payload: { invocationId: string } }
   | { operation: "spawn.join"; payload: { id: string } }
   | { operation: "spawn.stop"; payload: { id: string } }
   | { operation: "title.generate"; payload: Record<string, never> }
@@ -50,13 +56,20 @@ export function validBundled(operation: unknown, p: Record<string, unknown>): bo
       && typeof p.reason === "string" && !!p.reason.trim() && !p.reason.includes("\0") && Buffer.byteLength(p.reason) <= 8192;
     case "usage.refresh": case "title.generate": case "side.open": case "side.reset": case "side.abort": case "spawn.cancel": return exact(p, []);
     case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";
+    case "bash.transition": return exact(p, ["action", "token"]) && ["acquire", "release"].includes(String(p.action))
+      && typeof p.token === "string" && /^[\w-]{1,128}$/.test(p.token);
+    case "bash.interrupt": return exact(p, ["phase", "frontendAvailable"]) && ["hold", "confirm"].includes(String(p.phase)) && typeof p.frontendAvailable === "boolean";
     case "side.prompt": return exact(p, ["text"]) && typeof p.text === "string" && !!p.text.trim() && Buffer.byteLength(p.text) <= 1024 * 1024;
     case "side.draft": return exact(p, ["text"]) && typeof p.text === "string" && Buffer.byteLength(p.text) <= 1024 * 1024;
+    case "bash.list": return Object.keys(p).every(key => key === "offset") && (p.offset === undefined || Number.isSafeInteger(p.offset) && Number(p.offset) >= 0);
+    case "bash.status": case "bash.join": case "bash.stop": return exact(p, ["jobId"]) && typeof p.jobId === "string" && /^[A-Za-z0-9_-]{22}$/.test(p.jobId);
+    case "bash.cancel-wait": return exact(p, ["invocationId"]) && typeof p.invocationId === "string" && /^[\w-]{1,128}$/.test(p.invocationId);
     case "spawn.join": case "spawn.stop": return exact(p, ["id"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id);
     default: return false;
   }
 }
-export type OperationData = { mode?: string; changed?: boolean; sessionFile?: string; cwd?: string;
+export type BashServiceResult = Exclude<BashControlResult, { kind: "bash_job_output" }> | { kind: "bash_wait_cancelled"; invocationId: string; cancelled: boolean };
+export type OperationData = { bash?: BashServiceResult; mode?: string; changed?: boolean; sessionFile?: string; cwd?: string;
   workspaceId?: string; lifecycle?: string; integration?: string; commit?: string; reverts?: string; disposition?: "accepted"; status?: string; title?: string; enabled?: boolean; editorText?: string };
 export type OperationResult = {
   version: 1; invocationId: string; runtimeId: string; sessionId: string; sessionFile: string;
@@ -68,7 +81,7 @@ export type OperationResult = {
  */
 type Payloads = { [O in BundledOperation as O["operation"]]: O["payload"] };
 export function registerServiceOperation<O extends keyof Payloads>(pi: ExtensionAPI, operation: O,
-  run: (payload: Payloads[O], ctx: ExtensionCommandContext) => Promise<OperationData | undefined>): void {
+  run: (payload: Payloads[O], ctx: ExtensionCommandContext, identity: { invocationId: string; runtimeId: string }) => Promise<OperationData | undefined>): void {
   if (process.env.PI_CONSOLE_SERVICE !== "1") return;
   pi.registerCommand(operationCommand(operation), { description: "Internal typed service operation", handler: async (args, ctx) => {
     const v: unknown = JSON.parse(args);
@@ -84,10 +97,14 @@ export function registerServiceOperation<O extends keyof Payloads>(pi: Extension
       reply({ status: "failed", code: "stale_context" }); return;
     }
     try {
-      const data = await run(v.payload as Payloads[O], ctx);
+      const data = await run(v.payload as Payloads[O], ctx, identity);
       reply(data ? { status: "completed", data } : { status: "failed", code: "not_applied" });
     } catch (error) {
-      reply({ status: "uncertain", code: "operation_uncertain",
+      const refused = !!error && typeof error === "object" && "bashTransitionBlocked" in error && error.bashTransitionBlocked === true;
+      // Job adapters never launch or mutate project files. Invalid ownership,
+      // output failures and wait cancellation must not poison the whole session.
+      const observational = ["bash.list", "bash.status", "bash.join", "bash.stop", "bash.cancel-wait"].includes(operation);
+      reply({ status: refused || observational ? "failed" : "uncertain", code: refused ? "bash_transition_blocked" : observational ? "bash_operation_failed" : "operation_uncertain",
         diagnostic: (error instanceof Error ? error.stack ?? error.message : String(error)).slice(0, 2048) });
     }
   } });

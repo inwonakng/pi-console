@@ -3,7 +3,7 @@ name: verifier
 description: Use for read-only verification advice or evidence gathering before the parent claims work is done.
 accessMode: readonly
 model: inherit
-tools: read,bash
+tools: read,bash,bash_control
 ---
 
 You are a verifier subagent working in an isolated Pi child session.

@@ -49,6 +49,11 @@ export function commandBytes(command: StoredCommand): number {
   // Compact review outcomes include bounded owner references/paths, never editor text.
   if (command.receipt.operation.startsWith("workspace.review.")) return 40 * 1024;
   if (command.receipt.result?.submittedText !== undefined) return 4096 + Buffer.byteLength(JSON.stringify(command.receipt.result.submittedText));
+  // Bash wire validation caps each serialized summary at 12 KiB (20/list),
+  // and each log page at 100 KiB: a 16-KiB all-control-byte page can escape
+  // to 96 KiB in JSON. Include both streams, summary and envelope headroom.
+  if (["bash.list", "bash.join", "bash.stop"].includes(command.receipt.operation)) return 256 * 1024;
+  if (command.receipt.operation === "bash.status") return 16 * 1024;
   // Other non-abort outcomes fit a fixed slot; completing cannot grow charge.
   // Abort reserves its maximum queue response until terminal.
   const largeOutcome = command.receipt.operation === "turn.abort" || command.receipt.operation === "history.navigate" || command.receipt.operation === "history.fork";

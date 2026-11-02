@@ -25,6 +25,7 @@ M.specs = {
 		{ lhs = "<leader>pl", action = "show_logs", desc = "Show Pi logs" },
 		{ lhs = "<leader>pu", action = "show_usage", desc = "Show Codex usage" },
 		{ lhs = "<leader>ps", action = "pick_spawn", desc = "Show subagents" },
+		{ lhs = "<leader>pj", action = "pick_jobs", desc = "Show Bash jobs" },
 		{ lhs = "<leader>pS", action = "steer", desc = "Steer active Pi run" },
 		{ lhs = "<leader>pb", action = "toggle_side", desc = "Toggle side conversation" },
 		{ lhs = "<leader>pq", action = "pick_queue", desc = "View/edit queued messages" },

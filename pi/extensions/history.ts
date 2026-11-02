@@ -1,5 +1,5 @@
 import { serviceUi } from "./shared/service-ui";
-import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { spawnSync } from "child_process";
 import {
@@ -23,6 +23,8 @@ import { locationForEntry, moveToLocation } from "./shared/workspace-navigation"
 import { collectDeletedIds, locationWorkspaceId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import { pathInside, resolveToolPath } from "./shared/paths";
+import { registerCheckpointEnrollment } from "./shared/checkpoint-enrollment";
+import { assertBashTransitionAllowed, withBashTransition } from "./shared/bash-jobs";
 
 type SnapshotState =
   | { kind: "missing" }
@@ -48,7 +50,6 @@ type TurnRecord = {
 
 type FileState = {
 	before: SnapshotState;
-	after?: SnapshotState;
 };
 
 type TurnState = {
@@ -56,8 +57,6 @@ type TurnState = {
 	workspaceId: string;
 	cwd: string;
 	root: string;
-	gitRoot: string;
-	dirtyAtStart: Set<string>;
 	files: Map<string, FileState>;
 };
 
@@ -154,32 +153,6 @@ function absolutePath(root: string, path: string) {
 	return resolvedPath;
 }
 
-function parseGitStatus(output: string) {
-	const paths = new Set<string>();
-	const parts = output.split("\0").filter((part) => part.length > 0);
-	for (let index = 0; index < parts.length; index++) {
-		const part = parts[index];
-		const status = part.slice(0, 2);
-		const path = part.slice(3);
-		if (status.includes("R") || status.includes("C")) {
-			index++;
-			const nextPath = parts[index];
-			if (nextPath) {
-				paths.add(nextPath);
-			}
-		}
-		if (path) {
-			paths.add(path);
-		}
-	}
-	return paths;
-}
-
-function gitStatusPaths(gitRoot: string) {
-	const output = runGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: gitRoot });
-	return parseGitStatus(String(output));
-}
-
 function snapshotCurrentFile(root: string, path: string): SnapshotState {
 	ensureSnapshotStore();
 	const filePath = absolutePath(root, path);
@@ -199,26 +172,6 @@ function snapshotCurrentFile(root: string, path: string): SnapshotState {
 	return { kind: "file", blob: String(output).trim(), mode: stats.mode & 0o777 };
 }
 
-function snapshotGitHead(gitRoot: string, path: string): SnapshotState {
-	const treeEntry = String(runGit(["ls-tree", "-z", "HEAD", "--", path], { cwd: gitRoot }));
-	if (!treeEntry) {
-		return { kind: "missing" };
-	}
-	const header = treeEntry.slice(0, treeEntry.indexOf("\t"));
-	const [mode, type, object] = header.split(" ");
-	if (type !== "blob") {
-		return { kind: "unsupported", reason: `Git entry ${header}` };
-	}
-	assertOk(object, `Missing Git history object for ${path}: ${header}`);
-	const content = runGit(["cat-file", "-p", object], { cwd: gitRoot, binary: true }) as Buffer;
-	if (mode === "120000") {
-		return { kind: "symlink", target: content.toString("utf8") };
-	}
-	ensureSnapshotStore();
-	const blob = runGit(["--git-dir", SNAPSHOT_GIT_DIR, "hash-object", "-w", "--stdin"], { input: content });
-	return { kind: "file", blob: String(blob).trim(), mode: mode === "100755" ? 0o755 : 0o644 };
-}
-
 function sameState(left: SnapshotState, right: SnapshotState) {
 	if (left.kind !== right.kind) return false;
 	// Unsupported states cannot establish equality or rollback coverage.
@@ -227,66 +180,6 @@ function sameState(left: SnapshotState, right: SnapshotState) {
 	if (left.kind === "symlink") return left.target === (right as { kind: "symlink"; target: string }).target;
 	const other = right as { kind: "file"; blob: string; mode: number };
 	return left.blob === other.blob && left.mode === other.mode;
-}
-
-function formatBytes(bytes: number) {
-	const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-	let value = bytes;
-	let unitIndex = 0;
-	while (value >= 1024 && unitIndex < units.length - 1) {
-		value /= 1024;
-		unitIndex++;
-	}
-	const digits = unitIndex > 0 && value < 10 ? 1 : 0;
-	return `${value.toFixed(digits)} ${units[unitIndex]}`;
-}
-
-function snapshotBefore(path: string) {
-	assertOk(turn, "No active turn");
-	const normalizedPath = normalizePath(turn.root, turn.cwd, path);
-	if (normalizedPath === undefined || isHistoryIgnoredPath(normalizedPath)) {
-		return;
-	}
-	if (!turn.files.has(normalizedPath)) {
-		turn.files.set(normalizedPath, {
-			before: snapshotCurrentFile(turn.root, normalizedPath),
-		});
-	}
-}
-
-function snapshotAfter(path: string) {
-	assertOk(turn, "No active turn");
-	const normalizedPath = normalizePath(turn.root, turn.cwd, path);
-	if (normalizedPath === undefined || isHistoryIgnoredPath(normalizedPath)) {
-		return;
-	}
-	const current = turn.files.get(normalizedPath) || {
-		before: snapshotCurrentFile(turn.root, normalizedPath),
-	};
-	current.after = snapshotCurrentFile(turn.root, normalizedPath);
-	turn.files.set(normalizedPath, current);
-}
-
-function recordGitChanges() {
-	if (!turn) {
-		return;
-	}
-	const dirtyNow = gitStatusPaths(turn.gitRoot);
-	const observedPaths = new Set([...turn.dirtyAtStart, ...dirtyNow]);
-	for (const normalizedPath of observedPaths) {
-		if (isHistoryIgnoredPath(normalizedPath)) {
-			continue;
-		}
-		if (!turn.files.has(normalizedPath)) {
-			turn.files.set(normalizedPath, {
-				before: turn.dirtyAtStart.has(normalizedPath)
-					? snapshotCurrentFile(turn.root, normalizedPath)
-					: snapshotGitHead(turn.gitRoot, normalizedPath),
-			});
-		}
-		const current = turn.files.get(normalizedPath)!;
-		current.after = snapshotCurrentFile(turn.root, normalizedPath);
-	}
 }
 
 async function appendRecord(sessionFile: string | undefined, record: TurnRecord) {
@@ -408,6 +301,7 @@ function validateCurrentState(root: string, files: FileRecord[]) {
 
 type HistoryOutcome = { changed: true; status: "applied" | "cleanup_incomplete" };
 async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null, selected: SessionEntry | undefined, isRuntimeActive: () => boolean): Promise<HistoryOutcome | undefined> {
+	assertBashTransitionAllowed();
 	const blocked = subagentHistoryBlockReason();
 	if (blocked) {
 		ctx.ui.notify(blocked, "warning");
@@ -489,115 +383,123 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 		+ `Continue in ${target.cwd}.\n`
 		+ (patches.length ? workspaceDiscardWarning(patches) : "No worktree will be discarded."));
 	if (!approved) return;
+	assertBashTransitionAllowed();
 	assertOk(isRuntimeActive() && ctx.sessionManager.getSessionFile() === sessionFile
 		&& ctx.sessionManager.getLeafId() === sourceLeaf, "Session history changed; select the subtree again.");
-	let historyDeleted = false;
-	let filesRestored = false;
-	let cleanupIncomplete = false;
-	ctx.ui.setStatus("pi-history-revert", "pending");
-	try {
-		const moved = await moveToLocation(ctx, target.cwd, plan.desiredLeafId, {
-			reload: true,
-			saveCursor: false,
-			beforeSwitch: async () => {
-				assertOk(isRuntimeActive() && ctx.isIdle() && !hasRunningSubagents() && !subagentHistoryBlockReason(),
-					"Pi or a subagent became busy; revert cancelled.");
-				assertOk(ctx.sessionManager.getSessionFile() === sessionFile && ctx.sessionManager.getLeafId() === sourceLeaf,
-					"Session history changed; select the subtree again.");
-				const validateSession = () => assertOk(
-					JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(records),
-					"Session history changed while preparing revert; select the rollback point again.");
-				validateSession();
-				validateFiles();
+	return withBashTransition(async () => {
+		let historyDeleted = false;
+		let filesRestored = false;
+		let cleanupIncomplete = false;
+		ctx.ui.setStatus("pi-history-revert", "pending");
+		try {
+			const moved = await moveToLocation(ctx, target.cwd, plan.desiredLeafId, {
+				reload: true,
+				saveCursor: false,
+				beforeSwitch: async () => {
+					assertBashTransitionAllowed();
+					assertOk(isRuntimeActive() && ctx.isIdle() && !hasRunningSubagents() && !subagentHistoryBlockReason(),
+						"Pi or a subagent became busy; revert cancelled.");
+					assertOk(ctx.sessionManager.getSessionFile() === sessionFile && ctx.sessionManager.getLeafId() === sourceLeaf,
+						"Session history changed; select the subtree again.");
+					const validateSession = () => assertOk(
+						JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(records),
+						"Session history changed while preparing revert; select the rollback point again.");
+					validateSession();
+					validateFiles();
+					for (const { workspace, files } of rollback) {
+						for (const file of files) {
+							await withFileMutationQueue(absolutePath(workspace.worktreePath, file.path), async () => {
+								assertBashTransitionAllowed();
+								assertOk(sameState(snapshotCurrentFile(workspace.worktreePath, file.path), file.after),
+									`File changed while preparing revert: ${file.path}`);
+								filesRestored = true;
+								restoreState(workspace.worktreePath, file.path, file.before);
+							});
+						}
+					}
+					await withFileMutationQueue(sessionFile, async () => {
+						assertBashTransitionAllowed();
+						validateSession();
+						writeJsonlFile(sessionFile, plan.records);
+						historyDeleted = true;
+					});
+				},
+				onArrival: async (nextCtx) => {
+					const warnings: string[] = [];
+					try {
+						const path = historyFile(sessionFile);
+						await withFileMutationQueue(path, async () => {
+							writeJsonlFile(path, readRecords(sessionFile).filter((record) => {
+								const entryId = recordEntryId(record, entries);
+								return !entryId || !deletedIds.has(entryId);
+							}));
+						});
+					} catch (error) {
+						warnings.push(`Could not prune rollback records: ${error instanceof Error ? error.message : String(error)}`);
+					}
+					for (const record of discarded) {
+						try {
+							const cleaned = await removeWorkspace(record.id,
+								record.integration === "applied" || record.integration === "none" ? "integrated" : "discarded");
+							if (cleaned.lifecycle === "cleanup_failed") {
+								warnings.push(`Could not remove ${record.label}: ${cleaned.integrationReason}`);
+							}
+						} catch (error) {
+							warnings.push(`Could not remove ${record.label}: ${error instanceof Error ? error.message : String(error)}`);
+						}
+					}
+					cleanupIncomplete = warnings.length > 0;
+					nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
+					nextCtx.ui.setStatus("pi-history-revert", "complete");
+					markHistoryChanged(nextCtx);
+					nextCtx.ui.notify(warnings.length
+						? `History was permanently reverted, but cleanup is incomplete:\n${warnings.join("\n")}`
+						: `Permanently reverted ${deletedIds.size} history entries and ${fileCount} recorded file change(s).`,
+						warnings.length ? "warning" : "info");
+				},
+			});
+			if (!moved) {
+				// Cancellation happens before runtime replacement, so ctx is still live.
+				// Restore its original tree before allowing it to append anything else.
+				try {
+					await withFileMutationQueue(sessionFile, async () => {
+						assertBashTransitionAllowed();
+						assertOk(JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(plan.records),
+							"Session changed after the revert commit; refusing to overwrite concurrent entries.");
+						writeJsonlFile(sessionFile, records);
+						historyDeleted = false;
+					});
+				} catch (error) {
+					throw new Error(`Reload was cancelled and the original history could not be restored; Pi is shutting down to prevent stale history writes: ${error instanceof Error ? error.message : String(error)}`);
+				}
 				for (const { workspace, files } of rollback) {
 					for (const file of files) {
 						await withFileMutationQueue(absolutePath(workspace.worktreePath, file.path), async () => {
-							assertOk(sameState(snapshotCurrentFile(workspace.worktreePath, file.path), file.after),
-								`File changed while preparing revert: ${file.path}`);
-							filesRestored = true;
-							restoreState(workspace.worktreePath, file.path, file.before);
+							assertBashTransitionAllowed();
+							assertOk(sameState(snapshotCurrentFile(workspace.worktreePath, file.path), file.before),
+								`File changed after revert was cancelled: ${file.path}`);
+							restoreState(workspace.worktreePath, file.path, file.after);
 						});
 					}
 				}
-				await withFileMutationQueue(sessionFile, async () => {
-					validateSession();
-					writeJsonlFile(sessionFile, plan.records);
-					historyDeleted = true;
-				});
-			},
-			onArrival: async (nextCtx) => {
-				const warnings: string[] = [];
-				try {
-					const path = historyFile(sessionFile);
-					await withFileMutationQueue(path, async () => {
-						writeJsonlFile(path, readRecords(sessionFile).filter((record) => {
-							const entryId = recordEntryId(record, entries);
-							return !entryId || !deletedIds.has(entryId);
-						}));
-					});
-				} catch (error) {
-					warnings.push(`Could not prune rollback records: ${error instanceof Error ? error.message : String(error)}`);
-				}
-				for (const record of discarded) {
-					try {
-						const cleaned = await removeWorkspace(record.id,
-							record.integration === "applied" || record.integration === "none" ? "integrated" : "discarded");
-						if (cleaned.lifecycle === "cleanup_failed") {
-							warnings.push(`Could not remove ${record.label}: ${cleaned.integrationReason}`);
-						}
-					} catch (error) {
-						warnings.push(`Could not remove ${record.label}: ${error instanceof Error ? error.message : String(error)}`);
-					}
-				}
-				cleanupIncomplete = warnings.length > 0;
-				nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
-				nextCtx.ui.setStatus("pi-history-revert", "complete");
-				markHistoryChanged(nextCtx);
-				nextCtx.ui.notify(warnings.length
-					? `History was permanently reverted, but cleanup is incomplete:\n${warnings.join("\n")}`
-					: `Permanently reverted ${deletedIds.size} history entries and ${fileCount} recorded file change(s).`,
-					warnings.length ? "warning" : "info");
-			},
-		});
-		if (!moved) {
-			// Cancellation happens before runtime replacement, so ctx is still live.
-			// Restore its original tree before allowing it to append anything else.
-			try {
-				await withFileMutationQueue(sessionFile, async () => {
-					assertOk(JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(plan.records),
-						"Session changed after the revert commit; refusing to overwrite concurrent entries.");
-					writeJsonlFile(sessionFile, records);
-					historyDeleted = false;
-				});
-			} catch (error) {
-				throw new Error(`Reload was cancelled and the original history could not be restored; Pi is shutting down to prevent stale history writes: ${error instanceof Error ? error.message : String(error)}`);
+				filesRestored = false;
+				ctx.ui.setStatus("pi-history-revert", undefined);
+				ctx.ui.notify("Revert cancelled. Original history and files were restored; no worktrees were removed.", "warning");
 			}
-			for (const { workspace, files } of rollback) {
-				for (const file of files) {
-					await withFileMutationQueue(absolutePath(workspace.worktreePath, file.path), async () => {
-						assertOk(sameState(snapshotCurrentFile(workspace.worktreePath, file.path), file.before),
-							`File changed after revert was cancelled: ${file.path}`);
-						restoreState(workspace.worktreePath, file.path, file.after);
-					});
-				}
+			return moved ? { changed: true, status: cleanupIncomplete ? "cleanup_incomplete" : "applied" } : undefined;
+		} catch (error) {
+			// A switch can throw before teardown as well as after it. Only the former
+			// leaves an old runtime able to append beneath deleted entries.
+			if (isRuntimeActive()) {
+				ctx.ui.setStatus("pi-history-revert", undefined);
+				if (historyDeleted) ctx.shutdown();
 			}
-			filesRestored = false;
-			ctx.ui.setStatus("pi-history-revert", undefined);
-			ctx.ui.notify("Revert cancelled. Original history and files were restored; no worktrees were removed.", "warning");
+			const reason = error instanceof Error ? error.message : String(error);
+			throw new Error(historyDeleted
+				? `History was deleted, but revert could not finish: ${reason}. Restart or resume ${sessionFile} before continuing; inspect workspace cleanup.`
+				: `Revert stopped without deleting history: ${reason}${filesRestored ? ". File restoration started and may be partial; inspect the affected files." : ""}`);
 		}
-		return moved ? { changed: true, status: cleanupIncomplete ? "cleanup_incomplete" : "applied" } : undefined;
-	} catch (error) {
-		// A switch can throw before teardown as well as after it. Only the former
-		// leaves an old runtime able to append beneath deleted entries.
-		if (isRuntimeActive()) {
-			ctx.ui.setStatus("pi-history-revert", undefined);
-			if (historyDeleted) ctx.shutdown();
-		}
-		const reason = error instanceof Error ? error.message : String(error);
-		throw new Error(historyDeleted
-			? `History was deleted, but revert could not finish: ${reason}. Restart or resume ${sessionFile} before continuing; inspect workspace cleanup.`
-			: `Revert stopped without deleting history: ${reason}${filesRestored ? ". File restoration started and may be partial; inspect the affected files." : ""}`);
-	}
+	});
 }
 
 export async function revertSubtree(ctx: ExtensionCommandContext, entryId: string, isRuntimeActive: () => boolean): Promise<HistoryOutcome | undefined> {
@@ -613,85 +515,63 @@ export default function historyExtension(pi: ExtensionAPI) {
 	let runtimeActive = true;
 	pi.on("session_shutdown", () => { runtimeActive = false; });
 
+	const ENROLLMENT = "pi-checkpoint-enrollment";
+	const enrolledPaths = (ctx: ExtensionContext, workspaceId: string): Set<string> => {
+		const paths = new Set<string>();
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type !== "custom" || entry.customType !== ENROLLMENT) continue;
+			const data = entry.data as { version?: number; workspaceId?: string; path?: string } | undefined;
+			if (data?.version === 1 && data.workspaceId === workspaceId && typeof data.path === "string") paths.add(data.path);
+		}
+		return paths;
+	};
+	const unsubscribe = registerCheckpointEnrollment((ctx, path) => {
+		if (!runtimeActive) return;
+		const workspace = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile());
+		if (workspace?.kind !== "task" || !sameSessionFile(workspace.sourceSessionFile, ctx.sessionManager.getSessionFile())) return;
+		const normalized = normalizePath(workspace.worktreePath, ctx.cwd, path);
+		if (normalized === undefined || isHistoryIgnoredPath(normalized)) return;
+		// Capture before the first authorized filesystem operation, even when the
+		// edit is a no-op or a later syscall fails. Denied calls never reach here.
+		if (turn?.workspaceId === workspace.id && !turn.files.has(normalized)) {
+			turn.files.set(normalized, { before: snapshotCurrentFile(turn.root, normalized) });
+		}
+		if (!enrolledPaths(ctx, workspace.id).has(path)) {
+			pi.appendEntry(ENROLLMENT, { version: 1, workspaceId: workspace.id, path });
+		}
+	});
+	pi.on("session_shutdown", () => { unsubscribe(); turn = undefined; });
+
 	pi.on("turn_start", (_event, ctx) => {
 		turn = undefined;
 		const workspace = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile());
-		if (!workspace || !existsSync(workspace.worktreePath)) {
-			return;
-		}
+		if (workspace?.kind !== "task" || !sameSessionFile(workspace.sourceSessionFile, ctx.sessionManager.getSessionFile())
+			|| !existsSync(workspace.worktreePath)) return;
 		turn = {
-			baseEntryId: ctx.sessionManager.getLeafId(),
-			workspaceId: workspace.id,
-			cwd: ctx.cwd,
-			root: workspace.worktreePath,
-			gitRoot: workspace.worktreePath,
-			dirtyAtStart: gitStatusPaths(workspace.worktreePath),
-			files: new Map(),
+			baseEntryId: ctx.sessionManager.getLeafId(), workspaceId: workspace.id,
+			cwd: ctx.cwd, root: workspace.worktreePath, files: new Map(),
 		};
-
-		const snapshotPaths: string[] = [];
-		let snapshotBytes = 0;
-		for (const path of turn.dirtyAtStart) {
-			if (isHistoryIgnoredPath(path)) {
-				continue;
-			}
-			snapshotPaths.push(path);
-			try {
-				const stats = lstatSync(absolutePath(turn.root, path));
-				if (stats.isFile()) {
-					snapshotBytes += stats.size;
-				}
-			} catch {
-				// Missing or unreadable paths are represented by the snapshot itself.
+		// Enrollment follows only the active branch. Legacy rollback FileRecords
+		// are intentionally never enrollment evidence.
+		for (const path of enrolledPaths(ctx, workspace.id)) {
+			const normalized = normalizePath(turn.root, turn.cwd, path);
+			if (normalized !== undefined && !isHistoryIgnoredPath(normalized)) {
+				turn.files.set(normalized, { before: snapshotCurrentFile(turn.root, normalized) });
 			}
 		}
-
-		if (snapshotPaths.length > 0) {
-			const noun = snapshotPaths.length === 1 ? "file" : "files";
-			ctx.ui.notify(
-				`History: snapshotting ${snapshotPaths.length} dirty ${noun} (${formatBytes(snapshotBytes)}) for rollback`,
-				"info",
-			);
-		}
-		for (const path of snapshotPaths) {
-			if (!turn.files.has(path)) {
-				turn.files.set(path, { before: snapshotCurrentFile(turn.root, path) });
-			}
-		}
-	});
-
-	pi.on("tool_call", (event) => {
-		if (!turn) {
-			return undefined;
-		}
-		if ((event.toolName === "edit" || event.toolName === "write") && typeof event.input.path === "string") {
-			snapshotBefore(event.input.path);
-		}
-		return undefined;
-	});
-
-	pi.on("tool_result", (event) => {
-		if (!turn || event.isError) {
-			return undefined;
-		}
-		if ((event.toolName === "edit" || event.toolName === "write") && typeof event.input.path === "string") {
-			snapshotAfter(event.input.path);
-		}
-		return undefined;
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
 		if (!turn) {
 			return;
 		}
-		recordGitChanges();
 		const files: FileRecord[] = [];
 		const unsupportedPaths: string[] = [];
 		for (const [path, state] of turn.files) {
 			if (isHistoryIgnoredPath(path)) {
 				continue;
 			}
-			const after = state.after || snapshotCurrentFile(turn.root, path);
+			const after = snapshotCurrentFile(turn.root, path);
 			const unsupported = state.before.kind === "unsupported" ? state.before
 				: after.kind === "unsupported" ? after : undefined;
 			if (unsupported) unsupportedPaths.push(`${path} (${unsupported.reason})`);

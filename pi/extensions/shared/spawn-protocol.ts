@@ -1,12 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
-import { registerPermissionRouter, type PermissionAttempt, type PermissionPreview } from "./permissions";
+import { registerAdmissionRouter, registerPermissionRouter, type PermissionAttempt, type PermissionPreview, type PermissionSnapshot } from "./permissions";
+import { getAccessMode, parseAccessMode, synchronizeWorkerAccess } from "./access-state";
 
 export const SPAWN_PROTOCOL_VERSION = 1;
 export const SPAWN_PROTOCOL_TITLE = "pi-spawn-protocol:";
 export const SPAWN_PERMISSION_CANCEL = "pi-spawn-permission-cancel";
 export const SPAWN_PERMISSION_FINISH = "pi-spawn-permission-finish";
+export const SPAWN_AUTHORITY_ACK = "pi-spawn-authority-ack";
 export const WORKER_TOOLS = ["spawn_report", "spawn_question"];
 export type WorkerLifetime = "bounded" | "conversational";
 export type WorkerExecution = "working" | "waiting_parent" | "waiting_user" | "idle" | "closing" | "closed" | "failed" | "cancelled";
@@ -58,6 +60,16 @@ export type WorkerPermissionRequest = PermissionAttempt & {
   resolvedAt?: string;
   decision?: { actor: "parent" | "user" | "worker"; outcome: "approved" | "denied" | "cancelled"; reason?: string };
 };
+export type WorkerAdmissionOperation = {
+  version: 1;
+  operation: "admission";
+  workerId: string;
+  assignmentId: string;
+  runtimeId: string;
+  parentRuntimeId: string;
+  snapshot: PermissionSnapshot;
+};
+
 export type WorkerPermissionOperation = {
   version: 1;
   operation: "permission" | "permission_execute" | "permission_recheck";
@@ -115,6 +127,34 @@ export function registerWorkerProtocol(pi: ExtensionAPI): void {
   };
   const runtimeId = process.env.PI_SPAWN_RUNTIME_ID;
   const parentRuntimeId = process.env.PI_SPAWN_PARENT_RUNTIME_ID;
+  if (runtimeId && parentRuntimeId) {
+    pi.registerCommand("spawn-authority", {
+      description: "Runtime-only authority synchronization",
+      handler: async (args, ctx) => {
+        const input = JSON.parse(args);
+        const mode = parseAccessMode(input.mode);
+        if (ctx.mode !== "rpc" || !ctx.hasUI || input.workerId !== workerId || input.parentId !== parentId || input.runtimeId !== runtimeId
+          || input.parentRuntimeId !== parentRuntimeId || !mode || typeof input.syncId !== "string" || !input.syncId) throw new Error("Invalid authority address");
+        synchronizeWorkerAccess(mode, input.revision);
+        // A prompt response alone is not acknowledgment: Pi reports command
+        // handler errors separately, even when that response is successful.
+        ctx.ui.setStatus(SPAWN_AUTHORITY_ACK, JSON.stringify({ version: 1, workerId, parentId, runtimeId, parentRuntimeId,
+          syncId: input.syncId, revision: input.revision, mode: getAccessMode() }));
+      },
+    });
+    registerAdmissionRouter(async (ctx, snapshot) => {
+      if (!assignmentId || reported || ctx.mode !== "rpc" || !ctx.hasUI) throw new Error("No managed assignment for action admission");
+      const operation: WorkerAdmissionOperation = { version: 1, operation: "admission", workerId, assignmentId,
+        runtimeId, parentRuntimeId, snapshot };
+      const raw = await ctx.ui.input(SPAWN_PROTOCOL_TITLE + JSON.stringify(operation), undefined, { signal: ctx.signal });
+      const reply = raw && JSON.parse(raw);
+      if (!reply || reply.version !== 1 || reply.workerId !== workerId || reply.assignmentId !== operation.assignmentId
+        || reply.runtimeId !== runtimeId || reply.parentRuntimeId !== parentRuntimeId || reply.sender?.kind !== "parent"
+        || reply.sender.id !== parentId || reply.revision !== snapshot.parentRevision || reply.allowed !== true) {
+        throw new Error("Worker action fenced: parent authority changed or synchronization is unacknowledged");
+      }
+    });
+  }
   if (runtimeId && parentRuntimeId) registerPermissionRouter(async (ctx, attempt, userPreview) => {
     if (!assignmentId || reported) throw new Error("No active assignment for permission routing");
     const address = { version: 1 as const, workerId, assignmentId, runtimeId, parentRuntimeId, attemptId: randomUUID(), attempt };

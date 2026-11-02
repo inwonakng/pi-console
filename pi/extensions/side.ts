@@ -100,7 +100,7 @@ function reference(ctx: ExtensionContext, pi: ExtensionAPI): Reference {
   return { source, boundary: randomUUID() };
 }
 
-function materialize(ctx: ExtensionContext, ref: Reference): Seed {
+function materialize(ctx: ExtensionContext, ref: Reference, sessionId: string): Seed {
   const { source } = ref;
   if (source.leafId && !ctx.sessionManager.getEntry(source.leafId)) throw new Error("Side context was deleted; start a new side conversation.");
   const manager = SessionManager.inMemory(source.cwd, { parentSession: ctx.sessionManager.getSessionFile() });
@@ -128,7 +128,9 @@ function materialize(ctx: ExtensionContext, ref: Reference): Seed {
     if (mapped.type === "branch_summary" && mapped.fromId) mapped.fromId = ids.get(mapped.fromId) ?? mapped.fromId;
     return mapped;
   });
-  return { ...ref, header: manager.getHeader()!, entries };
+  // The generation ID is persisted in the parent's side state. Reuse it as
+  // the side session/Bash owner identity when rebuilding ephemeral RPC files.
+  return { ...ref, header: { ...manager.getHeader()!, id: sessionId }, entries };
 }
 
 function userText(message: AgentMessage | undefined): string | undefined {
@@ -389,7 +391,7 @@ export default function sideExtension(pi: ExtensionAPI) {
         g.leafId = g.reference.boundary;
         state(g);
       }
-      const seed = materialize(g.ctx, g.reference);
+      const seed = materialize(g.ctx, g.reference, g.id);
       g.directory = mkdtempSync(join(tmpdir(), "pi-side-"));
       g.file = join(g.directory, "session.jsonl");
       writeFileSync(g.file, [seed.header, ...seed.entries, ...g.entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
@@ -398,7 +400,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       const args = ["--mode", "rpc", "--session", g.file, "--no-approve", "--no-context-files", "--system-prompt", promptFile,
         "-e", join(dirname(fileURLToPath(import.meta.url)), "access-mode.ts"),
         "-e", join(dirname(fileURLToPath(import.meta.url)), "service.ts"),
-        "-e", "builtin:codemode", "-e", "builtin:tool-search", "--tools", "read,bash,edit,write,grep,find,ls,codemode,tool_search"];
+        "-e", "builtin:codemode", "-e", "builtin:tool-search", "--tools", "read,bash,bash_control,edit,write,grep,find,ls,codemode,tool_search"];
       if (g.reference.source.model) args.push("--provider", g.reference.source.model.provider, "--model", g.reference.source.model.id);
       args.push("--thinking", g.reference.source.thinkingLevel);
       const child: SideRpc = new SideRpc(args, g.reference.source.cwd, (data) => event(g, child, data), (error) => {
@@ -457,6 +459,8 @@ export default function sideExtension(pi: ExtensionAPI) {
     g.running = false;
     g.partialMessage = undefined;
     state(g);
+    // Only transcript/prompt materialization is ephemeral. Side Bash artifacts
+    // live under the parent-bound durable owner directory, not this directory.
     if (g.directory) rmSync(g.directory, { recursive: true, force: true });
   }
 

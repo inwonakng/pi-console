@@ -8,11 +8,12 @@ import {
   type ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 import assert from "node:assert";
+import { randomUUID } from "node:crypto";
 import { beginRepositoryMutation } from "./shared/subagent-state";
 import { constants, existsSync, readFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { Type } from "typebox";
-import { accessRevision, getAccessMode, parseAccessMode, setAccessMode } from "./shared/access-state";
+import { accessGeneration, accessRuntimeGeneration, getAccessMode, parseAccessMode, setAccessMode, workerAccessCeiling } from "./shared/access-state";
 import { registerServiceOperation } from "./shared/service-operation";
 import {
   createAccessControlledBashOperations,
@@ -21,6 +22,8 @@ import {
 } from "./shared/bash-sandbox";
 import {
   canonicalPath,
+  admitPermissionSnapshot,
+  capturePermissionSnapshot,
   getSessionGrants,
   hasPermission,
   pathInside,
@@ -34,8 +37,12 @@ import {
 import { loadSessionSetting, saveSessionSetting } from "./shared/session-settings";
 import { loadExtensionSettings } from "./shared/extension-settings";
 import { workspaceToolBlock } from "./shared/workspace-policy";
+import { bashJobs, initializeBashJobs, shutdownBashJobs, BashJobLaunchSchema, BashControlResultSchema, assertBashTransitionAllowed, reserveBashTransition, releaseBashTransition, type BashControlResult } from "./shared/bash-jobs";
+import { BashDelivery } from "./shared/bash-delivery";
+import { enrollCheckpointPath } from "./shared/checkpoint-enrollment";
+import { serviceRuntimeId } from "./shared/service-ui";
 
-const READONLY_TOOLS = new Set(["web_search", "web_fetch", "todowrite", "question"]);
+const READONLY_TOOLS = new Set(["web_search", "web_fetch", "todowrite", "question", "bash_control"]);
 const PATH_READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const MUTATION_TOOLS = new Set(["edit", "write"]);
 const KNOWN_TOOLS = new Set([
@@ -174,7 +181,7 @@ function saveAccessState(pi: ExtensionAPI): void {
 function restoreAccessState(ctx: ExtensionContext, restoreGrants = true): void {
   const stored = loadSessionSetting(ctx, ACCESS_SETTING) as PersistedAccessState | undefined;
   const spawnMode = process.env.PI_SIDE_AGENT === "1" ? "ask" : parseAccessMode(process.env.PI_SPAWN_ACCESS_MODE);
-  setAccessMode(spawnMode ?? parseAccessMode(stored?.mode) ?? loadExtensionSettings()["access-mode"]?.default ?? "ask");
+  setAccessMode(workerAccessCeiling() ? getAccessMode() : spawnMode ?? parseAccessMode(stored?.mode) ?? loadExtensionSettings()["access-mode"]?.default ?? "ask");
   const legacy: Permission[] = [];
   for (const path of Array.isArray(stored?.readPaths) ? stored.readPaths : []) {
     if (typeof path === "string" && path.startsWith("/")) legacy.push({ kind: "read", scope: path });
@@ -190,24 +197,112 @@ function restoreAccessState(ctx: ExtensionContext, restoreGrants = true): void {
 }
 
 export default function accessModeExtension(pi: ExtensionAPI) {
+  let delivery: BashDelivery | undefined;
+  const jobWaits = new Map<string, { sessionId: string; controller: AbortController }>();
+  const observeJoin = async (jobId: string, invocationId: string, ctx: ExtensionContext) => {
+    if (jobWaits.size >= 16) throw new Error("Too many pending Bash joins");
+    const controller = new AbortController();
+    jobWaits.set(invocationId, { sessionId: ctx.sessionManager.getSessionId(), controller });
+    try { return await bashJobs(ctx).observeJoin(jobId, controller.signal); }
+    finally { jobWaits.delete(invocationId); }
+  };
+  registerServiceOperation(pi, "bash.list", async ({ offset }, ctx) => ({ bash: bashJobs(ctx).list(offset) }));
+  registerServiceOperation(pi, "bash.status", async ({ jobId }, ctx) => ({ bash: { kind: "bash_job_status", job: bashJobs(ctx).status(jobId) } }));
+  registerServiceOperation(pi, "bash.join", async ({ jobId }, ctx, { invocationId }) => ({ bash: await observeJoin(jobId, invocationId, ctx) }));
+  registerServiceOperation(pi, "bash.stop", async ({ jobId }, ctx) => ({ bash: await bashJobs(ctx).stop(jobId) }));
+  registerServiceOperation(pi, "bash.cancel-wait", async ({ invocationId }, ctx) => {
+    const wait = jobWaits.get(invocationId);
+    const cancelled = wait?.sessionId === ctx.sessionManager.getSessionId();
+    if (cancelled) wait!.controller.abort();
+    return { bash: { kind: "bash_wait_cancelled", invocationId, cancelled } };
+  });
+  // User commands are observational, even in the native TUI: they must not
+  // collect agent completions or release an interrupt delivery hold.
+  pi.registerCommand("pi-jobs", { description: "Bash jobs: list [offset], status/output/join/stop <jobId>, cancel-wait <waitId>", handler: async (args, ctx) => {
+    const [action = "list", jobId, stream = "stdout", offset = "0"] = args.trim().split(/\s+/).filter(Boolean);
+    try {
+      const jobs = bashJobs(ctx);
+      if (action === "cancel-wait") {
+        const wait = jobWaits.get(jobId!);
+        if (wait?.sessionId === jobs.sessionId) wait.controller.abort();
+        ctx.ui.notify(wait ? "Bash join wait cancelled; command left running." : "No pending Bash wait.", "info");
+        return;
+      }
+      let result: BashControlResult;
+      if (action === "list") result = jobs.list(jobId === undefined ? 0 : Number(jobId));
+      else if (action === "status") result = { kind: "bash_job_status", job: jobs.status(jobId!) };
+      else if (action === "output") {
+        if (stream !== "stdout" && stream !== "stderr") throw new Error("Choose stdout or stderr");
+        result = { kind: "bash_job_output", output: jobs.output(jobId!, stream, Number(offset)) };
+      } else if (action === "stop") result = await jobs.stop(jobId!);
+      else if (action === "join") {
+        const waitId = `native-${randomUUID()}`;
+        ctx.ui.notify(`Waiting for ${jobId}. /pi-jobs stop ${jobId} stops it; /pi-jobs cancel-wait ${waitId} cancels only this wait.`, "info");
+        void observeJoin(jobId!, waitId, ctx).then(result => ctx.ui.notify(JSON.stringify(result, null, 2), "info"))
+          .catch(error => ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning"));
+        return;
+      } else throw new Error("Usage: /pi-jobs list [offset] | status/join/stop <jobId> | output <jobId> [stdout|stderr] [offset] | cancel-wait <waitId>");
+      ctx.ui.notify(JSON.stringify(result, null, 2), "info");
+    } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning"); }
+  } });
   registerPermissionHistory(pi);
+  pi.on("input", (event) => { delivery?.input(event.source); });
+  pi.on("before_agent_start", (event) => { delivery?.starting(event); });
+  pi.on("agent_start", (_event, ctx) => { delivery?.watchSignal(ctx); });
+  pi.on("message_start", (event) => { if (event.message.role === "user") delivery?.userMessage(); });
+  pi.on("message_end", (event) => {
+    if (event.message.role === "custom") delivery?.message(event.message.customType, event.message.details);
+  });
+  pi.on("context", () => { delivery?.reconcile(); });
+  pi.on("agent_before_settle", (event, ctx) => delivery?.boundary(event, ctx));
+  pi.on("agent_settled", (event) => { delivery?.settled(event.aborted); });
+  // Private handshake, deliberately not a public Bash dashboard operation.
+  registerServiceOperation(pi, "bash.interrupt", async ({ phase, frontendAvailable }, ctx) => {
+    if (!delivery) return;
+    if (phase === "hold") {
+      try { delivery.hold(); } finally { ctx.abort(); }
+    } else delivery.confirm(frontendAvailable);
+    return { changed: true };
+  });
+  registerServiceOperation(pi, "bash.transition", async ({ action, token }, ctx) => {
+    const ownerToken = `${serviceRuntimeId(ctx)}:${token}`;
+    if (action === "acquire") reserveBashTransition(ownerToken);
+    else if (!releaseBashTransition(ownerToken)) return;
+    return { changed: true };
+  });
+  // Native gates reject current ownership. Pi exposes no cancellation-finally
+  // hook for later native vetoes/summaries; pi-console's callers own the scoped
+  // reservation across those waits. session_shutdown is cleanup, not a veto.
+  const guardTransition = (_event: unknown, ctx: ExtensionContext) => {
+    try { assertBashTransitionAllowed(); }
+    catch (error) {
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+      return { cancel: true as const };
+    }
+  };
+  pi.on("session_before_switch", guardTransition);
+  pi.on("session_before_fork", guardTransition);
+  pi.on("session_before_tree", guardTransition);
   // File mutations queue inside Pi. Authorize at their first filesystem
   // operation, after that queue, rather than releasing a stale hook approval.
   const mutationGuard = (ctx: ExtensionContext, name: "edit" | "write", input: Record<string, unknown>, signal?: AbortSignal) => {
     let execution: PermissionExecution | undefined;
     let releaseMutation: (() => void) | undefined;
-    const revision = accessRevision();
-    return { finish: () => { execution?.finish(); releaseMutation?.(); }, check: async (target: string) => {
-      if (signal?.aborted) throw new Error("aborted");
+    let enrolled = false;
+    const generation = accessGeneration();
+    const runtimeGeneration = accessRuntimeGeneration();
+    const operationSignal = signal ?? ctx.signal;
+    return { finish: () => { execution?.finish(); releaseMutation?.(); }, run: async <T>(target: string, operation: () => Promise<T>): Promise<T> => {
+      if (operationSignal?.aborted) throw new Error("aborted");
       if (canonicalPath(target) !== target || target !== input.path) throw new Error("File target changed before execution");
       const blocked = workspaceToolBlock(name, input, ctx);
       if (blocked) throw new Error(blocked.reason);
       releaseMutation ??= beginRepositoryMutation([target]);
-      if (accessRevision() !== revision) throw new Error("File permission authority changed");
+      if (accessGeneration() !== generation) throw new Error("File permission authority changed");
       if (!execution) {
         const scope = pathInside(canonicalPath(ctx.cwd), target) && !hasPermission({ kind: "write", scope: target }, ctx.cwd)
           ? canonicalPath(ctx.cwd) : target;
-        const authorization = await requestPermission({ ...ctx, signal: signal ?? ctx.signal }, { kind: "write", scope }, name,
+        const authorization = await requestPermission({ ...ctx, signal: operationSignal }, { kind: "write", scope }, name,
           () => previewForTool({ toolName: name, input } as ToolCallEvent, ctx), () => saveAccessState(pi), true,
           { modelPreview: { text: jsonPreview(input), filetype: "json" } });
         execution = await authorization.begin();
@@ -215,7 +310,20 @@ export default function accessModeExtension(pi: ExtensionAPI) {
       // Every operation checks the live action, including writes following an
       // awaited read/mkdir. Admission itself remains single-use.
       await execution.recheck();
-      if (signal?.aborted || accessRevision() !== revision || canonicalPath(target) !== target) throw new Error("File operation cancelled or target changed");
+      if (operationSignal?.aborted || accessGeneration() !== generation || canonicalPath(target) !== target) throw new Error("File operation cancelled or target changed");
+      const snapshot = capturePermissionSnapshot();
+      const parentAdmitted = await admitPermissionSnapshot({ ...ctx, signal: operationSignal }, snapshot);
+      if (operationSignal?.aborted || (!parentAdmitted && accessGeneration() !== generation)
+        || accessRuntimeGeneration() !== runtimeGeneration || target !== input.path || canonicalPath(target) !== target) throw new Error("File operation cancelled or target changed");
+      if (!enrolled) {
+        enrollCheckpointPath(ctx, target);
+        enrolled = true;
+      }
+      if (operationSignal?.aborted || (!parentAdmitted && accessGeneration() !== generation)
+        || accessRuntimeGeneration() !== runtimeGeneration || target !== input.path || canonicalPath(target) !== target) throw new Error("File operation cancelled or target changed");
+      // Invoke the syscall in this continuation: awaiting a separate check
+      // would reopen a microtask gap after the final teardown/path fence.
+      return operation();
     } };
   };
   const defaultEdit = createEditToolDefinition(process.cwd());
@@ -224,9 +332,9 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     const guard = mutationGuard(ctx, "edit", params, signal);
     try {
       return await createEditToolDefinition(ctx.cwd, { operations: {
-        access: async (path) => { await guard.check(path); await access(path, constants.R_OK | constants.W_OK); },
-        readFile: async (path) => { await guard.check(path); return readFile(path); },
-        writeFile: async (path, contents) => { await guard.check(path); await writeFile(path, contents); },
+        access: (path) => guard.run(path, () => access(path, constants.R_OK | constants.W_OK)),
+        readFile: (path) => guard.run(path, () => readFile(path)),
+        writeFile: (path, contents) => guard.run(path, () => writeFile(path, contents)),
       } }).execute(id, params, signal, update, ctx);
     } finally { guard.finish(); }
   } });
@@ -236,8 +344,8 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     const guard = mutationGuard(ctx, "write", params, signal);
     try {
       return await createWriteToolDefinition(ctx.cwd, { operations: {
-        mkdir: async (directory) => { await guard.check(params.path); await mkdir(directory, { recursive: true }); },
-        writeFile: async (path, contents) => { await guard.check(path); await writeFile(path, contents); },
+        mkdir: (directory) => guard.run(params.path, async () => { await mkdir(directory, { recursive: true }); }),
+        writeFile: (path, contents) => guard.run(path, () => writeFile(path, contents)),
       } }).execute(id, params, signal, update, ctx);
     } finally { guard.finish(); }
   } });
@@ -246,12 +354,13 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     ...defaultBash,
     label: "bash (sandboxed)",
     executionMode: "sequential",
-    description: `${defaultBash.description} Reads are unrestricted by default. Temporary space and configured write paths are writable without approval; edit mode also allows workspace writes. Request additional writePaths before execution, and narrow readPaths only when read access is configured to be restricted. networkAccess requests outbound access to any host, approved once or for this conversation without lifting filesystem restrictions. workspaceWriteAccess requests writing the current directory. unixSocketPaths requests path-scoped Unix-socket binding and connections on macOS while retaining other sandbox restrictions. If granular sandbox permissions cannot support the operation, request unsandboxed for unrestricted access, approved once or for this session: the exact command/CWD, any command from this CWD, or any command from any CWD. Normally sandboxed commands remain sandboxed. Use timeout for short diagnostic probes or a user-requested execution deadline; omit it otherwise. Execution deadlines start after approvals. When Git SSH fails because of sandbox proxy authentication, request one-time unsandboxed execution of the exact Git command.`,
-    outputSchema: Type.Intersect([defaultBash.outputSchema!, Type.Object({
+    description: `${defaultBash.description} With background=true, returns an owned job launch receipt instead of command output; use bash_control to inspect or collect it. Reads are unrestricted by default. Temporary space and configured write paths are writable without approval; edit mode also allows workspace writes. Request additional writePaths before execution, and narrow readPaths only when read access is configured to be restricted. networkAccess requests outbound access to any host, approved once or for this conversation without lifting filesystem restrictions. workspaceWriteAccess requests writing the current directory. unixSocketPaths requests path-scoped Unix-socket binding and connections on macOS while retaining other sandbox restrictions. If granular sandbox permissions cannot support the operation, request unsandboxed for unrestricted access, approved once or for this session: the exact command/CWD, any command from this CWD, or any command from any CWD. Normally sandboxed commands remain sandboxed. Use timeout for short diagnostic probes or a user-requested execution deadline; omit it otherwise. Execution deadlines start after approvals. When Git SSH fails because of sandbox proxy authentication, request one-time unsandboxed execution of the exact Git command.`,
+    outputSchema: Type.Union([Type.Intersect([defaultBash.outputSchema!, Type.Object({
       sandbox_blocked: Type.Optional(Type.Boolean({ description: "The sandbox detected denied access; output may be partial even when exit_code is zero." })),
-    })]),
+    })]), BashJobLaunchSchema]),
     parameters: Type.Object({
       ...defaultBash.parameters.properties,
+      background: Type.Optional(Type.Boolean({ description: "Start an owned background command after approval. Returns a job identity, not an exit code. Use bash_control to inspect, join, or explicitly stop it. No stdin or PTY; the job survives turn cancellation and frontend detach until its owner ends." })),
       timeout: Type.Optional(Type.Number({
         description: "Harness-enforced execution deadline in seconds, starting after approvals. Set for diagnostic probes expected to finish quickly or when the user requests a deadline; omit otherwise.",
       })),
@@ -292,6 +401,15 @@ export default function accessModeExtension(pi: ExtensionAPI) {
       "Denied access is not task completion. A sandbox-blocked command may have partially executed and written files, even when its exit code is zero. Inspect partial output and state, then request needed access with an appropriate continuation. Do not blindly rerun. Permissions are requested through tool arguments, not the question tool.",
     ],
     async execute(id, params, signal, onUpdate, ctx) {
+      if (params.background) {
+        const launch = await bashJobs(ctx).start(params.command, ctx.cwd, params.timeout, signal,
+          async ({ admissionSignal, lifetimeSignal, hooks, onBlocked, onDiagnostic }) => {
+            const operations = createAccessControlledBashOperations(ctx, params, () => saveAccessState(pi), onBlocked,
+              { signal: lifetimeSignal, hooks });
+            return operations.exec(params.command, ctx.cwd, { signal: admissionSignal, timeout: params.timeout, onData: onDiagnostic });
+          });
+        return { content: [{ type: "text", text: JSON.stringify(launch) }], details: { background: launch, truncation: undefined }, structuredContent: launch };
+      }
       let sandboxBlocked = false;
       const sandboxedBash = createBashToolDefinition(ctx.cwd, {
         operations: createAccessControlledBashOperations(ctx, params, () => saveAccessState(pi), () => {
@@ -310,11 +428,39 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "bash_control", label: "Bash jobs", executionMode: "parallel",
+    description: "Control this session's owned background Bash commands. list/status/output are observational. join waits without stopping the command; cancellation stops only that wait. An agent join or stop collects its completion. stop waits for managed descendant cleanup and reports unresolved ownership truthfully. Supervision is best-effort, not containment of arbitrary escaped descendants. Output uses bounded byte-offset pages (at most 16 KiB/2000 lines); full stdout and stderr remain in owned durable logs. Restored jobs are inspection-only: no PID adoption or restart.",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("list"), Type.Literal("status"), Type.Literal("output"), Type.Literal("join"), Type.Literal("stop")]),
+      jobId: Type.Optional(Type.String()),
+      stream: Type.Optional(Type.Union([Type.Literal("stdout"), Type.Literal("stderr")])),
+      offset: Type.Optional(Type.Integer({ minimum: 0 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16384 })),
+    }),
+    outputSchema: BashControlResultSchema,
+    async execute(_id, params, signal, _update, ctx) {
+      const jobs = bashJobs(ctx);
+      if (params.action !== "list" && !params.jobId) throw new Error("jobId is required");
+      const result: BashControlResult = params.action === "list" ? jobs.list(params.offset, params.limit)
+        : params.action === "status" ? { kind: "bash_job_status" as const, job: jobs.status(params.jobId!) }
+        : params.action === "output" ? { kind: "bash_job_output" as const, output: jobs.output(params.jobId!, params.stream ?? "stdout", params.offset, params.limit) }
+        : params.action === "join" ? await jobs.joinForAgent(params.jobId!, signal)
+        : await jobs.stopForAgent(params.jobId!, signal);
+      return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, structuredContent: result,
+        isError: result.kind === "bash_job_result" && (result.job.cleanup === "unresolved" || result.job.sandboxBlocked || result.job.error !== undefined || result.job.signal !== null || result.job.exitCode !== 0) };
+    },
+  });
+
   pi.on("session_start", async (event, ctx) => {
+    delivery?.dispose();
+    delivery = undefined;
+    await shutdownBashJobs();
     const startsAnotherSession = event.reason === "new" || event.reason === "fork";
     restoreAccessState(ctx, !startsAnotherSession);
     if (event.reason === "fork" && !process.env.PI_SPAWN_ACCESS_MODE) saveAccessState(pi);
     await initializeBashSandbox(ctx);
+    delivery = new BashDelivery(pi, initializeBashJobs(ctx), ctx);
   });
 
   pi.on("session_tree", (_event, ctx) => {
@@ -322,10 +468,12 @@ export default function accessModeExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    delivery?.dispose();
+    delivery = undefined;
     await shutdownBashSandbox();
   });
 
-  pi.on("tool_call", async (event, ctx) => {
+  const authorizeTool = async (event: ToolCallEvent, ctx: ExtensionContext) => {
     setStatus(ctx);
     const blocked = workspaceToolBlock(event.toolName, event.input as Record<string, unknown>, ctx);
     if (blocked) return blocked;
@@ -386,6 +534,31 @@ export default function accessModeExtension(pi: ExtensionAPI) {
         () => previewForTool(event, ctx), () => saveAccessState(pi));
       await authorization.validate();
       return undefined;
+    } catch (error) {
+      return { block: true, reason: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  pi.on("tool_call", async (event, ctx) => {
+    const generation = accessGeneration();
+    const runtimeGeneration = accessRuntimeGeneration();
+    const input = event.input as Record<string, unknown>;
+    try {
+      // Retain the exact scope being authorized, not a newly resolved target
+      // after an approval or parent-admission wait.
+      const readPath = PATH_READ_TOOLS.has(event.toolName)
+        ? canonicalPath(resolveToolPath(typeof input.path === "string" ? input.path : ".", ctx.cwd)) : undefined;
+      if (readPath !== undefined) input.path = readPath;
+      const result = await authorizeTool(event, ctx);
+      if (result?.block || ["bash", "edit", "write"].includes(event.toolName)) return result;
+      if (generation !== accessGeneration()) throw new Error("Tool authority changed before admission");
+      const parentAdmitted = await admitPermissionSnapshot(ctx, capturePermissionSnapshot());
+      if ((!parentAdmitted && generation !== accessGeneration()) || accessRuntimeGeneration() !== runtimeGeneration || ctx.signal?.aborted) {
+        throw new Error("Tool authority changed before admission");
+      }
+      if (readPath !== undefined && (input.path !== readPath || canonicalPath(readPath) !== readPath)) {
+        throw new Error("Read target changed before execution");
+      }
+      return result;
     } catch (error) {
       return { block: true, reason: error instanceof Error ? error.message : String(error) };
     }

@@ -27,13 +27,15 @@ import { RENAME_COMMAND, RENAME_RESULT, renameResult, type RenameResult } from "
 import { prepareHostResources, type HostResources } from "./host-resources.js";
 import { readHostOptions, OptionsHelperUnresolved, type HostOptions } from "./host-options.js";
 import { isNative, nativeCommand, readCommand, validRead, type NativeOperation } from "./session-operations.js";
-import { isBundled, BUNDLED_SOURCES, OPERATION_RESULT, operationCommand, operationResult, type BundledOperation, type OperationResult } from "./session-bundled.js";
+import { isBundled, BASH_TRANSITION_COMMAND, type BashTransitionPayload, BUNDLED_SOURCES, OPERATION_RESULT, operationCommand, operationResult, type BundledOperation, type OperationResult } from "./session-bundled.js";
+import { bashOperation } from "./session-bash.js";
 
 type TrustStatus = { state: "pending" | "ready" | "restart" | "error"; cwd: string; sessionFile: string; error?: string };
 type WorkspaceStatus = { cwd: string; sessionFile: string; transitionPending: boolean; transitionError?: string; [key: string]: unknown };
 type BundledFlight = {
   worker: PiProcess; revision: number; runtimeId: string; invocationId: string; operation: BundledOperation["operation"];
   message: string; dispatched: boolean; requestId?: string; result?: OperationResult; resultRevision?: number; recipient?: Controller;
+  bashJobId?: string; cancelWaitId?: string;
 };
 type HistoryFlight = {
   worker: PiProcess; revision: number; read: HistoryRead; message: string; requestId?: string;
@@ -47,6 +49,8 @@ type RenameFlight = {
 type SessionActivity = {
   status: "Starting" | "Stopping" | "Stopped" | "Error" | "Waiting" | "Compacting" | "Retrying" | "Working" | "Done" | "Idle";
   completionSeq: number;
+  runningCommands: number;
+  unresolvedCommands: number;
   turnOutcome?: ConversationSnapshot["execution"]["outcome"];
   subagentRuns: {
     runId: string; status: string; execution?: string; writerOwned: boolean; readyForReview: boolean; quiescent: boolean;
@@ -581,14 +585,30 @@ export class HostOwner {
       }
     }
     this.closing = true;
-    // Drain maintenance before closing its managed transport or catalog authority.
-    if (this.workspaceCleanup) await this.workspaceCleanup.catch(() => undefined);
-    if (this.helperUnresolved) throw this.helperUnresolved;
-    // stop() revokes runtime execution before its first await.
-    const results = await Promise.allSettled([...this.sessions.values()].map((session) => session.stop()));
-    const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-    if (errors.length) throw new AggregateError(errors, "Owned cleanup failed; retain service claim for recovery");
-    await this.catalog.close();
+    const releases: (() => Promise<void>)[] = [];
+    if (!force) {
+      try {
+        // A child can admit work after the status preflight. Reserve in each
+        // runtime before stopping any owner; a refusal leaves all owners alive.
+        for (const session of this.sessions.values()) {
+          if (!session.finished) releases.push(await session.reserveStopTransition());
+        }
+      } catch (error) {
+        try { await Promise.all(releases.map(release => release())); }
+        finally { this.closing = false; }
+        throw error;
+      }
+    }
+    try {
+      // Drain maintenance before closing its managed transport or catalog authority.
+      if (this.workspaceCleanup) await this.workspaceCleanup.catch(() => undefined);
+      if (this.helperUnresolved) throw this.helperUnresolved;
+      // stop() revokes runtime execution before its first await.
+      const results = await Promise.allSettled([...this.sessions.values()].map((session) => session.stop()));
+      const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      if (errors.length) throw new AggregateError(errors, "Owned cleanup failed; retain service claim for recovery");
+      await this.catalog.close();
+    } finally { await Promise.all(releases.map(release => release())); }
   }
 
   /** Closing a view must not call this or OwnedSession.stop(). */
@@ -635,6 +655,9 @@ export class OwnedSession {
   private nativeQueueCommands = new Set<Promise<void>>();
   private bundled?: BundledFlight;
   private bundledInterrupt?: BundledFlight;
+  // Observational job operations never occupy the mutation/join lane. Stop and
+  // cancel have separate capacity so waiters cannot prevent their own release.
+  private readonly bashFlights = new Map<string, BundledFlight>();
   private readonly subagentCancellations = new Map<string, SubagentCancellation>();
   // Delivery provenance is ephemeral, separate from durable accepted work. A
   // restart never revives a grant; explicit edits capture their own recipient.
@@ -654,6 +677,8 @@ export class OwnedSession {
   private admitting = 0;
   private readonly commands = new Set<Promise<void>>();
   private aborting = 0;
+  private interruptFlight?: { worker: PiProcess; revision: number; done: Promise<CommandReceipt["result"]> };
+  private interruptCommands?: { worker: PiProcess; revision: number; commands: Extract<RpcResponse, { command: "get_commands"; success: true }>["data"]["commands"] };
   private sequence: number;
   private viewedCompletionSeq = 0;
   private refresh?: Promise<void>;
@@ -972,6 +997,7 @@ export class OwnedSession {
       if (this.bundled && contextOperation(this.bundled.operation) && ["prompt.submit", "queue.edit"].includes(command.operation)) throw new CommandError("session_busy", "History transition pending; retain text and review after arrival");
       if (isNative(command)) this.assertNativeReady(command);
       const bundled = isBundled(command) ? this.prepareBundled(command, worker) : undefined;
+      if (command.operation === "session.restart") this.assertBashIdle();
       if ((command.operation === "session.restart" || command.operation === "session.kill") && this.lifecyclePending) throw new CommandError("session_busy", "Session lifecycle operation pending");
       if (command.operation === "interaction.respond" || command.operation === "interaction.cancel") this.interactionResponse(command);
       const receipt: CommandReceipt = { id: command.id, sessionId: this.id, serviceEpoch: this.catalog.epoch,
@@ -981,11 +1007,13 @@ export class OwnedSession {
         if ("command" in command.payload) receipt.result = { submittedText: command.payload.command };
       }
       if (command.operation === "side.prompt") receipt.result = { submittedText: command.payload.text };
+      if (bundled?.operation === "bash.join") receipt.result = { waitId: bundled.invocationId };
       const queue = this.prepareQueueCommand(command, receipt);
       try {
         await this.catalog.reserveCommand({ fingerprint, receipt }, queue, () => {
           admission?.();
           if (command.operation === "prompt.submit") this.assertPromptAllowed();
+          if (isNative(command)) this.assertNativeTransitionAllowed(command);
         });
       } catch (error) {
         if (!(error instanceof CommandError)) this.commandFailure(error);
@@ -998,7 +1026,8 @@ export class OwnedSession {
       if (itemId && command.operation === "queue.remove") this.queueRecipients.delete(itemId);
       if (rename) this.rename = rename;
       if (bundled) {
-        if (this.bundled) this.bundledInterrupt = bundled;
+        if (bashOperation(bundled.operation)) this.bashFlights.set(bundled.invocationId, bundled);
+        else if (this.bundled) this.bundledInterrupt = bundled;
         else this.bundled = bundled;
       }
       this.publish({ command: receipt });
@@ -1169,6 +1198,7 @@ export class OwnedSession {
 
   private queueCanDispatch(): boolean {
     return !this.worker?.interactionCount && !this.stopRequested && !this.error && !this.exit && this.phase === "ready" && this.usableWorkspace()
+      && !this.bashTransitionToken && !this.lifecyclePending
       && !this.startupPending && !this.aborting && !this.rename && !this.nativePending && !this.bundled && !this.bundledInterrupt && !this.queueRunPending
       && !this.conversation.continuationPending && this.conversation.executionSettled;
   }
@@ -1398,21 +1428,44 @@ export class OwnedSession {
     flight.result = result;
   }
 
+  private bashTransitionToken?: string;
+  private bashBlockReason(): string | undefined {
+    const raw = this.conversation.status("pi-bash-jobs");
+    if (!raw) return;
+    try {
+      const counts: unknown = JSON.parse(raw);
+      if (!object(counts) || !Number.isSafeInteger(counts.running) || !Number.isSafeInteger(counts.unresolved)
+        || Number(counts.running) < 0 || Number(counts.unresolved) < 0) return "Bash ownership status is unavailable";
+      if (Number(counts.running) || Number(counts.unresolved)) return "Active or unresolved Bash jobs block this transition; join or explicitly stop them first";
+    } catch { return "Bash ownership status is unavailable"; }
+  }
+  private assertBashIdle(): void {
+    const reason = this.bashBlockReason();
+    if (reason) throw new CommandError("session_busy", reason);
+  }
   get workspaceTransitionPending(): boolean {
-    return this.conversation.workspaceTransitionPending || this.workspacePending()
+    return !!this.bashTransitionToken || this.conversation.workspaceTransitionPending || this.workspacePending()
       || !!this.bundled && contextOperation(this.bundled.operation) || this.lifecyclePending;
   }
 
   private prepareBundled(command: { runtimeRevision: number } & BundledOperation, worker: PiProcess): BundledFlight {
-    if (this.workspaceTransitionPending) throw new CommandError("session_busy", "Workspace transition pending; wait for arrival before changing session settings");
+    const bash = bashOperation(command.operation);
+    if (bash) {
+      const count = [...this.bashFlights.values()].filter(f => f.operation === command.operation).length;
+      if (count >= (command.operation === "bash.join" ? 16 : 4)) throw new CommandError("session_busy", "Bash operation concurrency limit reached");
+    }
+    if (!bash && this.workspaceTransitionPending) throw new CommandError("session_busy", "Workspace transition pending; wait for arrival before changing session settings");
     if (contextOperation(command.operation)) this.assertSavedIdle();
+    if (contextOperation(command.operation) || command.operation.startsWith("history.")) this.assertBashIdle();
     const interruptingJoin = command.operation === "spawn.stop" && this.bundled?.operation === "spawn.join" && !this.bundledInterrupt;
-    if (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another session operation is pending");
-    if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
+    if (!bash && (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting)) throw new CommandError("session_busy", "Another session operation is pending");
+    if (this.phase !== "ready" || !bash && !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
     if (command.operation.startsWith("history.") || command.operation.startsWith("workspace.") || command.operation === "title.generate") this.assertRenameReady();
     const runtimeId = worker.interactionRuntime()!.id;
     const invocationId = randomUUID();
     return { worker, revision: command.runtimeRevision, runtimeId, invocationId, operation: command.operation, dispatched: false,
+      bashJobId: "jobId" in command.payload ? command.payload.jobId : undefined,
+      cancelWaitId: command.operation === "bash.cancel-wait" ? command.payload.invocationId : undefined,
       recipient: this.control.current(), message: `/${operationCommand(command.operation)} ${JSON.stringify({ version: 1, invocationId,
         runtimeId, sessionId: this.record.piSessionId, sessionFile: this.catalog.sessionFile(this.id), payload: command.payload })}` };
   }
@@ -1423,13 +1476,14 @@ export class OwnedSession {
     let historyRefreshed = false;
     try {
       const guard = () => {
-        if (!contextOperation(flight.operation) && this.workspaceTransitionPending) {
+        if (!bashOperation(flight.operation) && !contextOperation(flight.operation) && this.workspaceTransitionPending) {
           throw new CommandError("session_busy", "Workspace transition pending; operation was not dispatched");
         }
         if (contextOperation(flight.operation)) this.assertSavedIdle();
+        if (contextOperation(flight.operation) || flight.operation.startsWith("history.")) this.assertBashIdle();
         this.commandRuntime(flight.revision, flight.worker);
-        if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
-        this.assertReady(flight.revision);
+        if (this.phase !== "ready" || !bashOperation(flight.operation) && !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
+        if (!bashOperation(flight.operation)) this.assertReady(flight.revision);
         if (flight.operation.startsWith("history.") || flight.operation.startsWith("workspace.") || flight.operation === "title.generate") this.assertRenameReady();
       };
       try {
@@ -1462,6 +1516,15 @@ export class OwnedSession {
             outcome.result = { changed: true, ...(flight.operation === "history.navigate" ? { contextRevision: flight.resultRevision } : {}),
               ...(result.data.status !== undefined ? { status: result.data.status } : {}),
               ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
+          } else if (bashOperation(flight.operation)) {
+            const bash = result.data?.bash;
+            const expected = flight.operation === "bash.list" ? ["bash_job_list"] : flight.operation === "bash.status" ? ["bash_job_status"]
+              : flight.operation === "bash.cancel-wait" ? ["bash_wait_cancelled"] : flight.operation === "bash.join" ? ["bash_job_result", "bash_join_cancelled"] : ["bash_job_result"];
+            if (!bash || !expected.includes(bash.kind)
+              || "job" in bash && bash.job.jobId !== flight.bashJobId
+              || bash.kind === "bash_join_cancelled" && bash.jobId !== flight.bashJobId
+              || bash.kind === "bash_wait_cancelled" && bash.invocationId !== flight.cancelWaitId) throw new Error("Missing or mismatched typed Bash completion");
+            outcome.result = { ...outcome.result, bash, cancelled: bash.kind === "bash_join_cancelled" };
           } else if (modeOperation(flight.operation)) {
             if (typeof result.data?.mode !== "string") throw new Error("Missing mode completion");
             outcome.result = { mode: result.data.mode };
@@ -1498,13 +1561,13 @@ export class OwnedSession {
             checkRuntime();
             await this.refreshConversation(checkRuntime);
             historyRefreshed = !this.refreshAgain;
-          } else if (!modeOperation(flight.operation)) {
+          } else if (!modeOperation(flight.operation) && !bashOperation(flight.operation)) {
             await flight.worker.request({ type: "get_state" }, checkRuntime);
           }
           // A correlated mode result already proves application. The agent may
           // replace its cwd runtime immediately afterward; a refresh in that gap
           // must not turn a completed settings change into a fatal uncertainty.
-          if (!modeOperation(flight.operation)) this.checkIdentity();
+          if (!modeOperation(flight.operation) && !bashOperation(flight.operation)) this.checkIdentity();
         } else outcome.error = { code: result.code ?? "operation_failed", message: result.status === "failed"
           ? "Operation was refused/cancelled before application" : "Operation may be partially applied; inspect before taking further action" };
       } catch (error) {
@@ -1520,6 +1583,7 @@ export class OwnedSession {
         await this.catalog.updateCommand(outcome, clone);
         if (this.bundled === flight) this.bundled = undefined;
         if (this.bundledInterrupt === flight) this.bundledInterrupt = undefined;
+        this.bashFlights.delete(flight.invocationId);
         this.publish({ command: outcome });
       });
       this.admission = completion.then(() => undefined, () => undefined);
@@ -1527,8 +1591,9 @@ export class OwnedSession {
     } finally {
       if (this.bundled === flight) this.bundled = undefined;
       if (this.bundledInterrupt === flight) this.bundledInterrupt = undefined;
+      this.bashFlights.delete(flight.invocationId);
       this.scheduleQueue();
-      if (!historyRefreshed || !this.conversation.hydrated) this.scheduleRefresh();
+      if (!bashOperation(flight.operation) && (!historyRefreshed || !this.conversation.hydrated)) this.scheduleRefresh();
     }
   }
 
@@ -1551,7 +1616,7 @@ export class OwnedSession {
   private readonly reviews = new WorkspaceReviews(() => JSON.stringify([this.catalog.epoch, this.id, this.runtimeRevision]));
   private reviewContext(worker: PiProcess, check: () => void): ResourceContext {
     const runtime = worker.interactionRuntime()!;
-    return { sessionFile: this.catalog.sessionFile(this.id), cwd: runtime.cwd,
+    return { sessionFile: this.catalog.sessionFile(this.id), sessionId: this.record.piSessionId, cwd: runtime.cwd,
       workspaceRoot: typeof this.workspace?.path === "string" ? this.workspace.path : runtime.cwd,
       workspaceId: typeof this.workspace?.id === "string" ? this.workspace.id : undefined,
       workspacesRoot: join(this.catalog.root, "workspaces"), tempRoot: this.options.environment?.TMPDIR ?? tmpdir(),
@@ -1559,6 +1624,7 @@ export class OwnedSession {
   }
   private async editReview(command: SessionCommand & ReviewMutation, receipt: CommandReceipt, admission?: () => void): Promise<void> {
     let error: unknown;
+    let releaseTransition: (() => Promise<void>) | undefined;
     try {
       const worker = this.commandRuntime(command.runtimeRevision);
       const check = () => {
@@ -1567,6 +1633,8 @@ export class OwnedSession {
       };
       check();
       await this.catalog.validateSessionFile(this.id);
+      check();
+      releaseTransition = await this.acquireBashTransition(command.runtimeRevision, worker);
       check();
       const context = this.reviewContext(worker, check);
       if (command.operation === "workspace.review.save") receipt.result = await this.reviews.save(context, command.payload);
@@ -1580,6 +1648,8 @@ export class OwnedSession {
         receipt.result = { ...receipt.result, ...result };
       }
     } catch (failure) { error = failure; }
+    try { await releaseTransition?.(); }
+    catch (failure) { error ??= failure; this.commandFailure(failure); }
     await this.finishCommand(receipt, error);
   }
   private resourceReaders = 0;
@@ -1592,6 +1662,18 @@ export class OwnedSession {
   private async resourceRead(method: "resource.read" | "resource.complete", input: unknown, admission: () => void): Promise<unknown> {
     if (!object(input) || !Number.isSafeInteger(input.runtimeRevision)) throw new CommandError("invalid_command", "Missing resource context");
     const { runtimeRevision, ...payload } = input;
+    // Retained logs need no live process. Inspection never resumes/adopts jobs.
+    if (method === "resource.read" && payload.kind === "bash-job" && this.done) {
+      const check = () => {
+        admission(); this.catalog.assertExecutionAllowed();
+        if (Number(runtimeRevision) !== this.runtimeRevision || !this.done || this.catalog.get(this.id).deleted) throw new CommandError("stale_runtime", "Bash inspection context changed");
+      };
+      check();
+      await this.catalog.validateSessionFile(this.id);
+      const data = await readResource({ sessionFile: this.catalog.sessionFile(this.id), sessionId: this.record.piSessionId, cwd: this.record.cwd, workspaceRoot: this.record.cwd,
+        workspacesRoot: join(this.catalog.root, "workspaces"), tempRoot: tmpdir(), skillPaths: [], liveOutputPaths: [], check }, payload);
+      return { runtimeRevision, data };
+    }
     const revision = Number(runtimeRevision), worker = this.commandRuntime(revision);
     const check = () => {
       admission(); this.commandRuntime(revision, worker);
@@ -1625,8 +1707,16 @@ export class OwnedSession {
     }
   }
 
+  private assertNativeTransitionAllowed(command: NativeOperation): void {
+    if (command.operation === "retry.abort" || command.operation === "shell.abort") return;
+    if (this.bashTransitionToken || this.lifecyclePending) {
+      throw new CommandError("session_busy", "Destructive transition pending; native operation was not dispatched");
+    }
+  }
+
   private assertNativeReady(command: NativeOperation): void {
     if (this.phase !== "ready" || !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
+    this.assertNativeTransitionAllowed(command);
     if (command.operation === "retry.abort" || command.operation === "shell.abort") return;
     if (this.rename || this.bundled || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another session operation is pending");
     if (command.operation === "steering.submit") this.assertSteeringActive();
@@ -1641,6 +1731,7 @@ export class OwnedSession {
       const worker = this.commandRuntime(command.runtimeRevision);
       const response = await worker.request(nativeCommand(command), () => {
         this.commandRuntime(command.runtimeRevision, worker);
+        this.assertNativeTransitionAllowed(command);
         this.assertReady(command.runtimeRevision);
         if (command.operation === "steering.submit" || command.operation === "followUp.submit") {
           if (this.aborting) throw new CommandError("session_busy", "Abort is clearing native queues; text retained in this command receipt");
@@ -1730,7 +1821,15 @@ export class OwnedSession {
         }
       } catch { /* A malformed extension status cannot change owner activity. */ }
     }
-    return { status, completionSeq: this.conversation.completedTurns, turnOutcome: this.conversation.turnOutcome, subagentRuns };
+    let runningCommands = 0, unresolvedCommands = 0;
+    try {
+      const counts: unknown = JSON.parse(this.conversation.status("pi-bash-jobs") ?? "null");
+      if (object(counts)) {
+        if (Number.isSafeInteger(counts.running) && Number(counts.running) >= 0) runningCommands = Number(counts.running);
+        if (Number.isSafeInteger(counts.unresolved) && Number(counts.unresolved) >= 0) unresolvedCommands = Number(counts.unresolved);
+      }
+    } catch { /* Status is never log content or execution authority. */ }
+    return { status, runningCommands, unresolvedCommands, completionSeq: this.conversation.completedTurns, turnOutcome: this.conversation.turnOutcome, subagentRuns };
   }
 
   private ownerState(): OwnedSessionState {
@@ -1795,13 +1894,47 @@ export class OwnedSession {
     this.publish({ command: outcome });
   }
 
+  private async acquireBashTransition(revision: number, worker: PiProcess): Promise<() => Promise<void>> {
+    this.assertBashIdle();
+    if (this.bashTransitionToken) throw new CommandError("session_busy", "Another destructive transition is pending");
+    // Native RPC Bash bypasses the extension's filesystem lease. Its service
+    // admission lasts through response/receipt completion, including stdin waits.
+    if (this.nativePending) throw new CommandError("session_busy", "Wait for pending native operations before starting a destructive transition");
+    const token = randomUUID();
+    const runtimeId = worker.interactionRuntime()!.id;
+    this.bashTransitionToken = token; // Fence queue dispatch before the handshake awaits.
+    const request = (action: BashTransitionPayload["action"]) => this.interruptOperation(revision, worker, "bash-transition", "access-mode.ts", { action, token });
+    try { await request("acquire"); }
+    catch (error) {
+      // A confirmed refusal owns nothing. An unconfirmed acquire may own the
+      // fence; retire that runtime rather than leave an invisible reservation.
+      if (!(error instanceof CommandError)) this.commandFailure(error);
+      if (this.bashTransitionToken === token) this.bashTransitionToken = undefined;
+      this.scheduleQueue();
+      throw error;
+    }
+    return async () => {
+      try {
+        // A replacement/shutdown cannot release a newer runtime's reservation.
+        const runtime = worker.interactionRuntime();
+        if (worker === this.worker && runtime?.active && runtime.id === runtimeId) await request("release");
+      } finally {
+        if (this.bashTransitionToken === token) this.bashTransitionToken = undefined;
+        this.scheduleQueue();
+      }
+    };
+  }
+
   private async executeLifecycle(command: { runtimeRevision: number; operation: "session.kill" | "session.restart" }, receipt: CommandReceipt, closeAttachment?: string): Promise<void> {
     let error: unknown;
+    let releaseTransition: (() => Promise<void>) | undefined;
     try {
       // No takeover can cancel an already accepted kill/restart. Context and
       // storage still fence it; a new runtime must never be killed by an old ID.
       this.commandRuntime(command.runtimeRevision);
       if (command.operation === "session.restart") {
+        releaseTransition = await this.acquireBashTransition(command.runtimeRevision, this.worker!);
+        this.commandRuntime(command.runtimeRevision);
         const ready = new Promise<void>((resolve, reject) => { this.restartReady = { resolve, reject }; });
         this.restartRequested = true;
         this.requestStop();
@@ -1812,10 +1945,14 @@ export class OwnedSession {
         if (this.cleanupError) throw this.cleanupError;
       }
     } catch (failure) { error = failure; }
+    try { await releaseTransition?.(); } catch (failure) { error ??= failure; }
     try {
       await this.finishCommand(receipt, error);
       if (!error && closeAttachment) this.publish({ closeFrontend: { attachmentId: closeAttachment, commandId: receipt.id } });
-    } finally { this.lifecyclePending = false; }
+    } finally {
+      this.lifecyclePending = false;
+      this.scheduleQueue();
+    }
   }
 
   private requestStop(): void {
@@ -1845,11 +1982,28 @@ export class OwnedSession {
   }
 
   private async abortTurn(revision: number, worker: PiProcess, receipt: CommandReceipt): Promise<void> {
+    const previous = this.interruptFlight;
+    if (previous?.worker === worker && previous.revision === revision) {
+      receipt.result = structuredClone(await previous.done);
+      return;
+    }
+    const done = this.interruptTurn(revision, worker, receipt);
+    const flight = { worker, revision, done };
+    this.interruptFlight = flight;
+    try { await done; }
+    finally { if (this.interruptFlight === flight) this.interruptFlight = undefined; }
+  }
+
+  private async interruptTurn(revision: number, worker: PiProcess, receipt: CommandReceipt): Promise<CommandReceipt["result"]> {
     const state = this.conversation.snapshot();
     const active = this.queueRunPending || this.conversation.awaitingSettlement || state.execution.running || state.piState?.isCompacting || state.execution.compaction?.type === "compaction_start"
       || state.execution.retry?.type === "auto_retry_start" || !!state.execution.summarization;
     this.aborting++;
     try {
+      // Fence completion delivery and initiate agent cancellation BEFORE any
+      // dialog, queue, or worker cleanup waits. hasUI in raw RPC is not evidence
+      // that a human can answer; only this owner supplies frontend availability.
+      await this.interruptOperation(revision, worker, "bash-interrupt", "access-mode.ts", { phase: "hold", frontendAvailable: false });
       // Idle Escape still explicitly cancels main dialogs. Side operations keep
       // their own lifetimes; detach/takeover never comes through this path.
       await this.cancelMainInteractions(revision, worker);
@@ -1873,39 +2027,59 @@ export class OwnedSession {
         if (!(error instanceof PiCommandError && error.outcome === "rejected")) throw error;
         clearingError = error;
       }
-      // Existing behavior attempts abort even after native clear_queue rejection.
-      try { await this.cancelSubagents(revision, worker); }
-      finally { await worker.request({ type: "abort" }, guard); }
+      // Await agent stop before the optional job question. Keep explicit worker
+      // cancellation even if queue clearing was rejected (including idle aborts).
+      try { await worker.request({ type: "abort" }, guard); }
+      finally { await this.cancelSubagents(revision, worker); }
       if (clearingError) throw clearingError;
     } finally { this.aborting--; this.scheduleQueue(); }
+    // This command starts a detached, coalesced question; it never waits for an
+    // answer. It runs outside abort's dialog-cancellation window.
+    await this.interruptOperation(revision, worker, "bash-interrupt", "access-mode.ts",
+      { phase: "confirm", frontendAvailable: this.viewers.size > 0 && !!this.control.current() });
+    return receipt.result;
   }
 
-  private async cancelSubagents(revision: number, worker: PiProcess): Promise<void> {
+  private cancelSubagents(revision: number, worker: PiProcess): Promise<void> {
+    return this.interruptOperation(revision, worker, "spawn-cancel", "spawn.ts", {});
+  }
+
+  private async interruptOperation(revision: number, worker: PiProcess, suffix: "spawn-cancel" | "bash-interrupt" | "bash-transition", source: string,
+    payload: Record<string, unknown>): Promise<void> {
     const guard = () => { this.commandRuntime(revision, worker); };
-    const discovery = await worker.request({ type: "get_commands" }, guard);
-    const name = "pi-console-spawn-cancel";
-    if (discovery.command !== "get_commands" || discovery.data.commands.filter((command) => command.name === name
-      && command.source === "extension" && command.sourceInfo?.path === join(this.options.appRoot, "pi", "extensions", "spawn.ts")).length !== 1) {
-      throw new CommandError("unsupported_command", "Subagent cancellation capability is missing or ambiguous");
+    // Startup already discovers this runtime's commands. On the normal Stop
+    // path the first RPC write is the hold/abort handshake, not a discovery wait.
+    if (this.interruptCommands?.worker !== worker || this.interruptCommands.revision !== revision) {
+      const discovery = await worker.request({ type: "get_commands" }, guard);
+      if (discovery.command !== "get_commands") throw new Error("Unexpected interrupt command discovery response");
+      this.interruptCommands = { worker, revision, commands: discovery.data.commands };
+    }
+    const name = suffix === "bash-transition" ? BASH_TRANSITION_COMMAND : `pi-console-${suffix}`;
+    if (this.interruptCommands.commands.filter((command) => command.name === name
+      && command.source === "extension" && command.sourceInfo?.path === join(this.options.appRoot, "pi", "extensions", source)).length !== 1) {
+      throw new CommandError("unsupported_command", "Interrupt capability is missing or ambiguous");
     }
     guard();
     const invocationId = randomUUID();
     const runtimeId = worker.interactionRuntime()!.id;
     const flight: SubagentCancellation = { runtimeId, message: `/${name} ${JSON.stringify({ version: 1, invocationId,
-      runtimeId, sessionId: this.record.piSessionId, sessionFile: this.catalog.sessionFile(this.id), payload: {} })}` };
+      runtimeId, sessionId: this.record.piSessionId, sessionFile: this.catalog.sessionFile(this.id), payload })}` };
     this.subagentCancellations.set(invocationId, flight);
     try {
       const response = await worker.request({ type: "prompt", message: flight.message }, guard);
+      if (suffix === "bash-transition" && flight.result?.status === "failed") {
+        throw new CommandError("session_busy", "Bash transition was refused before application; join or stop active jobs and retry");
+      }
       if (response.command !== "prompt" || response.data.disposition !== "handled"
         || flight.result?.status !== "completed" || flight.result.data?.changed !== true) {
-        throw new Error("Subagent cancellation did not confirm cleanup; inspect retained work before changing history");
+        throw new Error("Interrupt operation did not confirm its outcome; inspect retained work before changing history");
       }
     } finally { this.subagentCancellations.delete(invocationId); }
   }
 
   private async cancelMainInteractions(revision: number, worker: PiProcess): Promise<void> {
     for (const pending of worker.interactionSnapshot().pending) {
-      if (pending.submitted || sideInteraction(pending.request.title)) continue;
+      if (pending.submitted || sideInteraction(pending.request.title) || bashInterruptInteraction(pending.request.title)) continue;
       this.commandRuntime(revision, worker);
       // A concurrently answered/closed dialog is not an abort failure.
       if (!worker.hasPendingInteraction(pending.request.id)) continue;
@@ -1935,6 +2109,8 @@ export class OwnedSession {
   stopBlockReason(): string | undefined {
     if (this.lifecyclePending) return `Session ${this.id} has a pending lifecycle outcome; stop refused`;
     if (this.done) return;
+    const bashBlocked = this.bashBlockReason();
+    if (bashBlocked) return `Session ${this.id}: ${bashBlocked}; stop refused`;
     if (this.activity().subagentRuns.some((run) => !run.quiescent || run.writerOwned || run.pendingRequests.length)) {
       return `Session ${this.id} has active workers or unresolved contributions; stop refused`;
     }
@@ -1943,6 +2119,19 @@ export class OwnedSession {
       || this.worker?.interactionCount || this.catalog.queue(this.id).some((item) => item.status !== "failed")) {
       return `Session ${this.id} has active work, approval, accepted queue or transition; stop refused`;
     }
+  }
+
+  /** Service replacement must reserve in the child, not trust an earlier status. */
+  async reserveStopTransition(): Promise<() => Promise<void>> {
+    const blocked = this.stopBlockReason();
+    if (blocked) throw new CommandError("session_busy", blocked);
+    const release = await this.acquireBashTransition(this.runtimeRevision, this.worker!);
+    const changed = this.stopBlockReason();
+    if (changed) {
+      await release();
+      throw new CommandError("session_busy", changed);
+    }
+    return release;
   }
 
   /** Explicit owner shutdown, not frontend detach or a guarded service-stop API. */
@@ -1967,6 +2156,9 @@ export class OwnedSession {
         return;
       }
       this.restartRequested = false;
+      // runOnce proved the previous process stopped. Its reservation must not
+      // block a trust-driven replacement during the incoming startup.
+      this.bashTransitionToken = undefined;
       this.stopRequested = false;
       this.done = false;
       this.phase = "initializing";
@@ -2025,7 +2217,10 @@ export class OwnedSession {
         this.checkRunning();
         if (!restart) break;
         if (replacement >= 1) throw new Error("Project trust repeatedly requested a Pi restart");
-        const exit = await this.worker.stop();
+        const releaseTransition = await this.acquireBashTransition(this.runtimeRevision, this.worker);
+        let exit: PiExit;
+        try { exit = await this.worker.stop(); }
+        finally { await releaseTransition(); }
         this.syncRevision();
         if (exit.error || exit.code !== 0 || exit.descendantsUnresolved) throw new Error("Pi managed work did not finish cleanly for project trust replacement");
         this.exit = undefined;
@@ -2088,6 +2283,7 @@ export class OwnedSession {
       const commands = await worker.request({ type: "get_commands" });
       this.startupTimings!.commandDiscoveryMs += performance.now() - stage;
       if (commands.command !== "get_commands") throw new Error("Unexpected Pi command discovery response");
+      this.interruptCommands = { worker, revision, commands: commands.data.commands };
       stage = performance.now();
       try {
         await this.ensureHistoryCapability(worker, () => {
@@ -2231,7 +2427,7 @@ export class OwnedSession {
         cancellation.result = result;
         return;
       }
-      const flight = [this.bundled, this.bundledInterrupt].find((flight) => flight?.invocationId === result.invocationId);
+      const flight = this.bashFlights.get(result.invocationId) ?? [this.bundled, this.bundledInterrupt].find((flight) => flight?.invocationId === result.invocationId);
       if (!flight?.dispatched || flight.result || result.invocationId !== flight.invocationId || result.runtimeId !== flight.runtimeId
         || result.sessionId !== this.record.piSessionId || result.sessionFile !== this.catalog.sessionFile(this.id)) throw new Error("Unmatched managed operation result");
       if (result.diagnostic) {
@@ -2276,7 +2472,7 @@ export class OwnedSession {
         this.offerEffect(change);
       } else this.retain(change);
     }
-    if (dialogRequest(event) && this.aborting && !sideInteraction(event.title) && this.worker) {
+    if (dialogRequest(event) && this.aborting && !sideInteraction(event.title) && !bashInterruptInteraction(event.title) && this.worker) {
       const worker = this.worker;
       const revision = this.runtimeRevision;
       // Run after the current stdout batch, with fresh liveness/runtime checks.
@@ -2290,7 +2486,7 @@ export class OwnedSession {
       || ["agent_start", "agent_settled", "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end",
         "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished"].includes(event.type)
       || (event.type === "extension_ui_request" && event.method === "setStatus"
-        && ["pi-console-runtime", "pi-console-dialog", "pi-project-trust", "pi-workspace", "pi-workspace-continuation"].includes(event.statusKey))) this.changed();
+        && ["pi-console-runtime", "pi-console-dialog", "pi-project-trust", "pi-workspace", "pi-workspace-continuation", "pi-bash-jobs"].includes(event.statusKey))) this.changed();
     if (event.type === "agent_settled" || event.type === "compaction_end"
       || (event.type === "extension_ui_request" && event.method === "setStatus"
         && (event.statusKey === "pi-history-changed" || event.statusKey === "pi-workspace" && workspaceChanged))) {
@@ -2314,7 +2510,7 @@ export class OwnedSession {
       cancellation.requestId = command.id;
       return;
     }
-    const flight = [this.bundled, this.bundledInterrupt].find((flight) => flight?.dispatched && command.type === "prompt" && command.message === flight.message);
+    const flight = [this.bundled, this.bundledInterrupt, ...this.bashFlights.values()].find((flight) => flight?.dispatched && command.type === "prompt" && command.message === flight.message);
     if (flight) {
       flight.requestId = command.id;
       return;
@@ -2359,7 +2555,8 @@ export class OwnedSession {
       return;
     }
     if ([...this.subagentCancellations.values()].some((flight) => response.id === flight.requestId)) return;
-    if (response.id === this.rename?.requestId || response.id === this.bundled?.requestId || response.id === this.bundledInterrupt?.requestId) return;
+    if (response.id === this.rename?.requestId || response.id === this.bundled?.requestId || response.id === this.bundledInterrupt?.requestId
+      || [...this.bashFlights.values()].some(flight => flight.requestId === response.id)) return;
     // Prompt acceptance precedes its user events in Pi's stdout stream. Record
     // it synchronously, before a later event in the same batch is reduced.
     const flight = this.queueFlight;
@@ -2685,6 +2882,14 @@ function modeOperation(operation: string): boolean {
 
 function contextOperation(operation: string): boolean {
   return operation === "history.navigate" || operation === "history.delete" || operation.startsWith("workspace.");
+}
+
+// serviceUi envelopes plain generic confirmation titles. No frontend-specific UI.
+function bashInterruptInteraction(title: string): boolean {
+  try {
+    const value: unknown = JSON.parse(title);
+    return object(value) && value.kind === "pi_service_dialog" && value.title === "Stop running background commands too?";
+  } catch { return false; }
 }
 
 function sideInteraction(title: string): boolean {

@@ -1,4 +1,5 @@
 import { serviceUi } from "./shared/service-ui";
+import { assertBashTransitionAllowed, withBashTransition } from "./shared/bash-jobs";
 import { registerServiceOperation } from "./shared/service-operation";
 import {
   type ExtensionAPI,
@@ -638,6 +639,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         throw new Error("ignoredFiles only applies to action=enter or action=integrate.");
       }
       if (TRANSITION_ACTIONS.has(action)) {
+        assertBashTransitionAllowed();
         if (hasRunningSubagents()) {
           throw new Error("Cannot change workspaces while subagents or their cleanup are active. Use spawn_control join/join_all, or stop them and wait for cleanup, then retry this workspace action.");
         }
@@ -653,6 +655,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         const prompt = `Remove ${target.integrationCommit!.oid} from ${preview.branch}?${target.integrationCommit!.undo ? "\nResume the interrupted undo." : ""}\n\nAffected paths:\n${preview.files.map(path => JSON.stringify(path)).join("\n")}\n\nReason: ${params.reason}\n\nWorking files stay unchanged; the commit's changes become unstaged (new files become untracked). Unrelated staging is preserved. Ignored-file updates are not restored. Reflogs, saved refs and artifacts may retain the commit.\n\nRemote-tracking refs may be stale. Confirm that this commit has not been pushed or shared.`;
         const confirmed = await confirmDestructive(ctx, "Remove local integration commit?", prompt, params.approved, true);
         if (!confirmed) return { content: [{ type: "text", text: `Commit undo was not approved; no branch or index changes were made.${getInteractionMode(ctx) === "noninteractive" ? `\n\n${prompt}` : ""}` }], details: undefined };
+        assertBashTransitionAllowed();
         const record = await undoWorkspaceIntegration({ id: params.id, cwd: ctx.cwd, reason: params.reason, expected: preview }, signal);
         publishWorkspaceState(ctx);
         return { content: [{ type: "text", text: `Removed ${record.integrationCommit!.oid} from ${preview.branch}. Working files were left unchanged and unrelated staging preserved. The removed commit may remain in reflogs, saved refs and artifacts.\n\n${formatWorkspaceRecord(record)}` }], details: record };
@@ -799,6 +802,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
             terminate: true,
           };
         }
+        assertBashTransitionAllowed();
         const integrated = await integrateWorkspace(selected.id, operationSignal, { commitMessage });
         if (integrated.integration !== "applied" && integrated.integration !== "none") {
           return {
@@ -842,12 +846,16 @@ export default function workspaceExtension(pi: ExtensionAPI) {
       if (!confirmed) {
         return { content: [{ type: "text", text: "Workspace discard was not approved." }], details: prepared };
       }
+      assertBashTransitionAllowed();
       const active = workspaceForContext(ctx.cwd, sessionFile(ctx));
       if (prepared.kind === "task" && active?.id === prepared.id) {
-        await updateWorkspace(prepared.id, (current) => {
-          current.lifecycle = "discard_pending";
+        await withBashTransition(async () => {
+          await updateWorkspace(prepared.id, (current) => {
+            assertBashTransitionAllowed();
+            current.lifecycle = "discard_pending";
+          });
+          publishWorkspaceContinuation(ctx, prepared.id);
         });
-        publishWorkspaceContinuation(ctx, prepared.id);
         if (move) await move("return", prepared.id);
         else queueCommand(pi, `/pi-workspace-return ${prepared.id}`);
         return {

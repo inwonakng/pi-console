@@ -1,4 +1,5 @@
 import { pathInside } from "./paths";
+import { assertBashMutationAllowed } from "./bash-jobs";
 
 type SubagentRuntime = {
   owner: symbol;
@@ -66,6 +67,7 @@ export async function withRepositoryMutation<T>(roots: string[], denied: string[
 }
 
 export function beginRepositoryMutation(roots: string[], denied: string[] = []): () => void {
+  assertBashMutationAllowed();
   const mutation = { roots, denied };
   mutations.add(mutation);
   return () => { mutations.delete(mutation); };

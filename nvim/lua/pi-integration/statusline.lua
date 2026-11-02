@@ -456,6 +456,9 @@ function M.render_secondary(ctx)
 	local state = ctx.state
 	local activity_label = activity_statusline_label(state)
 	local spawn_label = spawn_statusline_label(state)
+	local commands, unresolved = tonumber(state.bash_running_count) or 0, tonumber(state.bash_unresolved_count) or 0
+	if commands > 0 then spawn_label = spawn_label .. " · commands " .. commands end
+	if unresolved > 0 then spawn_label = spawn_label .. " · unresolved commands " .. unresolved end
 	local left_text = activity_label .. spawn_label
 	local width = vim.api.nvim_win_get_width(state.status_win)
 	local build_label = build_info.statusline_label(math.max(0, width - 1)) .. " "

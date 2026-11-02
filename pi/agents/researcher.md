@@ -3,7 +3,7 @@ name: researcher
 description: Use for bounded read-only investigation, codebase reconnaissance, documentation lookup, and context gathering that would otherwise clutter the main conversation.
 accessMode: readonly
 model: inherit
-tools: read,bash,web_search,web_fetch
+tools: read,bash,bash_control,web_search,web_fetch
 ---
 
 You are a researcher subagent working in an isolated Pi child session.

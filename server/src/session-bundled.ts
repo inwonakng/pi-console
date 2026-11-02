@@ -1,4 +1,10 @@
 import { object } from "./pi-records.js";
+import { validBashResult, type BashServiceResult } from "./session-bash.js";
+
+// Private owner handshake: deliberately excluded from public BundledOperation
+// and BUNDLED_SOURCES, so clients cannot acquire an indefinite reservation.
+export type BashTransitionPayload = { action: "acquire" | "release"; token: string };
+export const BASH_TRANSITION_COMMAND = "pi-console-bash-transition";
 
 // Keep payload validation in step with pi/extensions/shared/service-operation.ts.
 export type BundledOperation =
@@ -20,6 +26,9 @@ export type BundledOperation =
   | { operation: "side.draft"; payload: { text: string } }
   | { operation: "side.reset"; payload: Record<string, never> }
   | { operation: "side.abort"; payload: Record<string, never> }
+  | { operation: "bash.list"; payload: { offset?: number } }
+  | { operation: "bash.status" | "bash.join" | "bash.stop"; payload: { jobId: string } }
+  | { operation: "bash.cancel-wait"; payload: { invocationId: string } }
   | { operation: "spawn.join"; payload: { id: string } }
   | { operation: "spawn.stop"; payload: { id: string } }
   | { operation: "title.generate"; payload: Record<string, never> }
@@ -31,6 +40,7 @@ export const BUNDLED_SOURCES = {
   "history.navigate": "tree.ts", "history.clone": "tree.ts", "history.fork": "tree.ts", "history.delete": "tree.ts",
   "workspace.enter": "workspace.ts", "workspace.integrate": "workspace.ts", "workspace.discard": "workspace.ts", "workspace.revert": "workspace.ts", "workspace.undo": "workspace.ts",
   "side.open": "side.ts", "side.prompt": "side.ts", "side.draft": "side.ts", "side.reset": "side.ts", "side.abort": "side.ts",
+  "bash.list": "access-mode.ts", "bash.status": "access-mode.ts", "bash.join": "access-mode.ts", "bash.stop": "access-mode.ts", "bash.cancel-wait": "access-mode.ts",
   "spawn.join": "spawn.ts", "spawn.stop": "spawn.ts", "title.generate": "auto-title.ts",
   "notifications.set": "notifications.ts", "usage.refresh": "codex-usage.ts",
 } as const;
@@ -60,13 +70,16 @@ export function validBundled(operation: unknown, p: Record<string, unknown>): bo
     case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";
     case "side.prompt": return exact(p, ["text"]) && typeof p.text === "string" && !!p.text.trim() && Buffer.byteLength(p.text) <= 1024 * 1024;
     case "side.draft": return exact(p, ["text"]) && typeof p.text === "string" && Buffer.byteLength(p.text) <= 1024 * 1024;
+    case "bash.list": return Object.keys(p).every(key => key === "offset") && (p.offset === undefined || Number.isSafeInteger(p.offset) && Number(p.offset) >= 0);
+    case "bash.status": case "bash.join": case "bash.stop": return exact(p, ["jobId"]) && typeof p.jobId === "string" && /^[A-Za-z0-9_-]{22}$/.test(p.jobId);
+    case "bash.cancel-wait": return exact(p, ["invocationId"]) && typeof p.invocationId === "string" && /^[\w-]{1,128}$/.test(p.invocationId);
     case "spawn.join": case "spawn.stop": return exact(p, ["id"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id);
     default: return false;
   }
 }
 export function isBundled(value: { operation: string }): value is BundledOperation { return Object.hasOwn(BUNDLED_SOURCES, value.operation); }
 export type OperationResult = { version: 1; invocationId: string; runtimeId: string; sessionId: string; sessionFile: string;
-  status: "completed" | "failed" | "uncertain"; data?: { mode?: string; changed?: boolean; sessionFile?: string; cwd?: string; workspaceId?: string;
+  status: "completed" | "failed" | "uncertain"; data?: { bash?: BashServiceResult; mode?: string; changed?: boolean; sessionFile?: string; cwd?: string; workspaceId?: string;
     lifecycle?: string; integration?: string; commit?: string; reverts?: string; disposition?: "accepted"; status?: string; title?: string; enabled?: boolean; editorText?: string }; code?: string; diagnostic?: string };
 export function operationResult(text: string | undefined): OperationResult {
   const v: unknown = JSON.parse(text ?? "null");
@@ -77,9 +90,10 @@ export function operationResult(text: string | undefined): OperationResult {
     || (v.diagnostic !== undefined && (typeof v.diagnostic !== "string" || Buffer.byteLength(v.diagnostic) > 8192))
     || (v.code !== undefined && (typeof v.code !== "string" || !/^[\w-]{1,128}$/.test(v.code)))) throw new Error("Invalid managed operation result");
   if (v.data !== undefined) {
-    if (!object(v.data) || Object.keys(v.data).some((key) => !["mode", "changed", "sessionFile", "cwd", "workspaceId", "lifecycle", "integration", "commit", "reverts", "disposition", "status", "title", "enabled", "editorText"].includes(key))
+    if (!object(v.data) || Object.keys(v.data).some((key) => !["bash", "mode", "changed", "sessionFile", "cwd", "workspaceId", "lifecycle", "integration", "commit", "reverts", "disposition", "status", "title", "enabled", "editorText"].includes(key))
       || ["changed", "enabled"].some((key) => v.data && object(v.data) && v.data[key] !== undefined && typeof v.data[key] !== "boolean")
-      || Object.entries(v.data).some(([key, value]) => !["changed", "enabled"].includes(key) && (typeof value !== "string" || Buffer.byteLength(value) > (key === "editorText" ? 16 * 1024 * 1024 : 4096)))) {
+      || (v.data.bash !== undefined && !validBashResult(v.data.bash))
+      || Object.entries(v.data).some(([key, value]) => !["bash", "changed", "enabled"].includes(key) && (typeof value !== "string" || Buffer.byteLength(value) > (key === "editorText" ? 16 * 1024 * 1024 : 4096)))) {
       throw new Error("Invalid managed operation result data");
     }
   }

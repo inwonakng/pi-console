@@ -1,12 +1,12 @@
 # Async Bash improvement
 
-Status: Approved implementation plan; implementation not started
+Status: Implementation complete across all six phases; targeted Linux/RPC/Neovim verification and reviewer corrections complete. Pending final integration.
 
 ## Purpose
 
 Add explicit background Bash execution without weakening per-command permissions, changing ordinary foreground results, or tying command lifetime to a frontend connection. Implement this in this repository's `pi/` package alongside its sandbox integration, not in sibling `../pi-extensions`. The tools must work in general Pi TUI, RPC, and headless use; pi-console adds job controls and live status.
 
-This document records approved behavior, not an implementation. Revalidate repository state and dependency APIs before editing. Technical choices such as patch delivery and worker synchronization transport remain implementation details within these constraints, not unresolved product decisions.
+This document records approved behavior and the implementation sequence. Revalidate repository state and dependency APIs before editing. Technical choices such as patch delivery and worker synchronization transport remain implementation details within these constraints, not unresolved product decisions.
 
 ## Approved behavior
 
@@ -157,6 +157,16 @@ Integrate active/unresolved job guards with rollback, workspace changes, runtime
 Expose typed job status/control and session-scoped output resources, then add Neovim list/details, paging/refresh, join/stop, and running counts. Ensure control requests can progress while another request waits in join.
 
 Wire generic RPC confirmation for the interrupt flow across service frontends, including web compatibility, and basic native TUI access. Publish idle completions through existing status mechanisms without transcript chatter.
+
+Phase 6 contract clarification: frontend/native user joins and stops are observational;
+only agent collection consumes a completion or releases its interrupt hold. Public
+`bash.list/status/join/stop/cancel-wait` use bounded, invocation-correlated operation
+flights separate from the mutation lane. Cancel-wait targets the join's returned
+`waitId` and produces a typed cancellation, not session uncertainty. Durable output
+uses `kind: "bash-job"`, opaque `jobId`, and `stdout`/`stderr` only. Retired side
+logs are inspectable by known ID through their parent's immutable owner manifests;
+the main live list/control UI remains scoped to its own session. Append-only log
+paging preserves identity versions across growth; refresh starts at offset zero.
 
 ## Verification and acceptance
 

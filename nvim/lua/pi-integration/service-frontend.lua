@@ -675,6 +675,8 @@ local function update_status_state()
 		if conversation and conversation.stats then initial.sessionStats = nil end
 	end
 	state.codex_usage = status_data("pi-codex-usage")
+	state.bash_running_count = tonumber(owner and owner.runningCommands) or 0
+	state.bash_unresolved_count = tonumber(owner and owner.unresolvedCommands) or 0
 	state.spawn_running_count = 0
 	for _, run in ipairs(owner and owner.subagentRuns or {}) do
 		if run.status == "running" then state.spawn_running_count = state.spawn_running_count + 1 end
@@ -2394,6 +2396,13 @@ function M.new_side()
 	end)
 end
 function M.abort_side() command("side.abort", {}) end
+function M.pick_jobs()
+	if not snapshot or not attachment then notify("Attach to a session first."); return end
+	local captured = stamp()
+	require("pi-integration.bash-jobs").open({ state = state, resources = owner_resources(), notify = notify,
+		current = function() return current(captured) end,
+		command = function(operation, payload, accepted, terminal) return command(operation, payload, accepted, captured, terminal) end })
+end
 function M.pick_spawn()
 	-- Keep subagent metadata compact, with task text and paths on separate lines.
 	local function fields(lines, data, names)
@@ -2906,7 +2915,7 @@ function M.open(restore)
 	if restore then
 		layout.set_buffer_lines(ctx, state.input_buf, restore.input_lines or { "" }, true)
 	end
-	for name, fn in pairs({ PiControl = M.take_control, PiPending = M.restore_pending_action, PiQueue = M.pick_queue,
+	for name, fn in pairs({ PiControl = M.take_control, PiPending = M.restore_pending_action, PiQueue = M.pick_queue, PiJobs = M.pick_jobs,
 		PiOffers = M.show_offers, PiDrafts = M.show_drafts, PiDetach = M.detach, PiReconnect = M.reconnect,
 		PiFollowUp = M.follow_up, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
 		PiSavedOperations = require("pi-integration.service-hosts").saved_operations,
@@ -3006,7 +3015,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 for _, name in ipairs({ "submit_prompt", "take_control", "change_cwd", "restart", "kill_session", "abort",
 	"rename_session", "pick_queue", "restore_pending_action", "show_offers", "show_host_request", "refresh_options",
 	"pick_model", "pick_thinking", "steer", "follow_up", "side_prompt", "toggle_side", "new_side", "abort_side",
-	"pick_spawn", "retitle", "pick_workspace", "show_workspace_diff", "pick_workspace_reviews", "show_usage",
+	"pick_spawn", "pick_jobs", "retitle", "pick_workspace", "show_workspace_diff", "pick_workspace_reviews", "show_usage",
 	"show_tree", "pick_command", "refresh_messages", "show_owner_transcript", "set_access_mode", "pick_access_mode",
 	"cycle_access_mode", "set_integration_mode", "pick_integration_mode", "cycle_integration_mode", "toggle_notifications" }) do
 	local fn = M[name]

@@ -18,13 +18,13 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { accessRevision, getAccessMode, onAccessInvalidated } from "./shared/access-state";
+import { accessGeneration, accessRevision, effectiveWorkerMode, getAccessMode, onAccessChanged } from "./shared/access-state";
 import { canonicalPath, getSessionGrants, hasPermission, requestPermission, validPermissionAttempt, permissionWasDenied, type PermissionAuthorization, type PermissionPreview } from "./shared/permissions";
 import { loadExtensionSettings, type SubagentModelSetting } from "./shared/extension-settings";
 import { saveSessionSetting } from "./shared/session-settings";
 import { assertRepositoryIdle, registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
 import { spawnRunIds } from "./shared/session-deletion";
-import { agentContext, newAssignment, registerWorkerProtocol, SPAWN_PROTOCOL_TITLE, SPAWN_PERMISSION_CANCEL, SPAWN_PERMISSION_FINISH, WORKER_TOOLS, type Assignment, type WorkerExecution, type WorkerLifetime, type WorkerOperation, type WorkerRequest, type WorkerPermissionOperation, type WorkerPermissionRequest } from "./shared/spawn-protocol";
+import { agentContext, newAssignment, registerWorkerProtocol, SPAWN_PROTOCOL_TITLE, SPAWN_PERMISSION_CANCEL, SPAWN_PERMISSION_FINISH, SPAWN_AUTHORITY_ACK, WORKER_TOOLS, type Assignment, type WorkerExecution, type WorkerLifetime, type WorkerOperation, type WorkerRequest, type WorkerPermissionOperation, type WorkerPermissionRequest, type WorkerAdmissionOperation } from "./shared/spawn-protocol";
 import {
   createWorkspace,
   findGitRoot,
@@ -111,6 +111,8 @@ type SpawnRun = {
   requests: WorkerRequest[];
   permissionRequests: WorkerPermissionRequest[];
   runtimeId?: string;
+  authorityRevision?: number;
+  authoritySync?: { id: string; revision: number; mode: AccessMode; acknowledged: boolean; finished?: Promise<void> };
   deliveredEvents: string[];
   pendingDialog?: string;
   changed: Set<() => void>;
@@ -241,11 +243,16 @@ class PiRpcChild {
     if (this.closing) return this.closing;
     this.closing = (async () => {
       if (!this.ended) {
+        // EOF lets the child's session_shutdown stop owned Bash jobs, persist
+        // final metadata and release leases before its supervisor seals the tree.
         this.proc.stdin.end();
-        if (!stopManaged(this.proc)) {
-          this.proc.kill("SIGTERM");
-          this.killTimer = setTimeout(() => { if (!this.ended) this.proc.kill("SIGKILL"); }, 5000);
-        }
+        this.killTimer = setTimeout(() => {
+          if (this.ended) return;
+          if (!stopManaged(this.proc)) {
+            this.proc.kill("SIGTERM");
+            this.killTimer = setTimeout(() => { if (!this.ended) this.proc.kill("SIGKILL"); }, 5000);
+          }
+        }, 20000);
       }
       try { await this.closed; }
       finally { if (this.killTimer) clearTimeout(this.killTimer); }
@@ -1296,9 +1303,28 @@ export default function spawnExtension(pi: ExtensionAPI) {
     retired = false;
     runtimeCancellation = new AbortController();
     parentRuntimeId = randomUUID();
-    unsubscribeAuthority ??= onAccessInvalidated(() => {
+    unsubscribeAuthority ??= onAccessChanged((reason) => {
       if (retired) return;
-      for (const run of runs.values()) if (!run.settled) stopRun(run, "authority_changed");
+      if (reason === "runtime") {
+        // Branch/session replacement still cancels workers, unlike mode changes.
+        for (const run of runs.values()) if (!run.settled) stopRun(run, "authority_changed");
+        return;
+      }
+      // Fence synchronously, before a child can submit a stale local/full/grant
+      // admission. Synchronization never interrupts an admitted execution.
+      for (const run of runs.values()) if (!run.settled && run.child && !run.closing) {
+        run.authorityRevision = undefined;
+        void synchronizeAuthority(run).catch(() => { /* Failed sync leaves future admission fenced. */ });
+      }
+      for (const [id, wait] of permissionRecords()) if (wait.revision !== accessGeneration()) {
+        permissionWaits.delete(id);
+        permissionExecutions.delete(id);
+        eventQueue.delete(wait.request.id);
+        wait.request.state = "cancelled";
+        wait.request.decision = { actor: "parent", outcome: "cancelled", reason: "Permission authority changed." };
+        wait.cancellation.abort();
+        if (!wait.run.closing) permissionResponse(wait, false);
+      }
     });
     permissionWaits.clear();
     permissionExecutions.clear();
@@ -1777,10 +1803,63 @@ export default function spawnExtension(pi: ExtensionAPI) {
     return run;
   };
 
+  const synchronizeAuthority = (run: SpawnRun): Promise<void> => {
+    const child = run.child;
+    if (!child || run.closing || run.settled) return Promise.reject(new Error("Worker runtime unavailable"));
+    const revision = accessRevision();
+    const runtimeId = run.runtimeId;
+    if (run.authoritySync?.revision === revision && run.authoritySync.finished) return run.authoritySync.finished;
+    run.authorityRevision = undefined;
+    const sync: NonNullable<SpawnRun["authoritySync"]> = { id: randomUUID(), revision,
+      mode: effectiveWorkerMode(getAccessMode(), run.accessMode), acknowledged: false };
+    run.authoritySync = sync;
+    sync.finished = child.send({ type: "prompt", message: `/spawn-authority ${JSON.stringify({
+      workerId: run.id, parentId: run.parentId, runtimeId, parentRuntimeId, syncId: sync.id, revision, mode: getAccessMode(),
+    })}` }).then(response => {
+      assertSuccess(response, "synchronize worker authority");
+      if (retired || run.child !== child || run.runtimeId !== runtimeId || accessRevision() !== revision
+        || run.authoritySync !== sync || run.closing || run.settled) return;
+      if (!sync.acknowledged) throw new Error("Worker did not acknowledge authority synchronization");
+      run.authorityRevision = revision;
+    }).finally(() => {
+      if (run.authoritySync === sync) run.authoritySync = undefined;
+    });
+    return sync.finished;
+  };
+
+  const acknowledgeAuthority = (run: SpawnRun, event: RpcEvent) => {
+    if (event.type !== "extension_ui_request" || event.method !== "setStatus"
+      || event.statusKey !== SPAWN_AUTHORITY_ACK || typeof event.statusText !== "string") return;
+    let ack: Record<string, unknown>;
+    try { ack = JSON.parse(event.statusText); } catch { return; }
+    const sync = run.authoritySync;
+    if (sync && !retired && !run.closing && !run.settled && ack?.version === 1
+      && ack.workerId === run.id && ack.parentId === run.parentId && ack.runtimeId === run.runtimeId
+      && ack.parentRuntimeId === parentRuntimeId && ack.syncId === sync.id
+      && ack.revision === sync.revision && ack.mode === sync.mode && accessRevision() === sync.revision) sync.acknowledged = true;
+  };
+
+  const handleAdmissionDialog = (run: SpawnRun, event: RpcEvent, operation: WorkerAdmissionOperation): boolean => {
+    const snapshot = operation.snapshot;
+    const assignment = run.assignments.at(-1);
+    // This synchronous decision, not push delivery or the child's local check,
+    // is the admission linearization point. No permission prompts occur here.
+    const allowed = !retired && !run.closing && !run.settled && !!run.child
+      && operation.version === 1 && operation.workerId === run.id && operation.assignmentId === assignment?.id
+      && assignment.outcome === "pending" && operation.runtimeId === run.runtimeId && operation.parentRuntimeId === parentRuntimeId
+      && run.authorityRevision === accessRevision() && snapshot?.parentRevision === accessRevision()
+      && snapshot.mode === effectiveWorkerMode(getAccessMode(), run.accessMode)
+      && Number.isSafeInteger(snapshot.revision) && Number.isSafeInteger(snapshot.generation) && Array.isArray(snapshot.grants);
+    run.child?.respond(event.id as string, JSON.stringify({ version: 1, sender: { kind: "parent", id: run.parentId },
+      workerId: run.id, assignmentId: assignment?.id, runtimeId: run.runtimeId, parentRuntimeId,
+      revision: snapshot?.parentRevision, allowed }));
+    return true;
+  };
+
   const permissionCurrent = (wait: NonNullable<ReturnType<typeof permissionWaits.get>>) => {
     const { run, request } = wait;
     if (retired || run.closing || run.settled || !run.child || wait.cancellation.signal.aborted
-      || wait.revision !== accessRevision() || request.parentRuntimeId !== parentRuntimeId
+      || wait.revision !== accessGeneration() || request.parentRuntimeId !== parentRuntimeId
       || request.runtimeId !== run.runtimeId || request.assignmentId !== run.assignments.at(-1)?.id
       || run.assignments.at(-1)?.outcome !== "pending" || canonicalPath(run.childCwd) !== request.cwd
       || run.accessMode === "readonly" || (wait.executionId && permissionExecutions.get(wait.executionId) !== wait)) throw new Error("Worker permission authority expired or request context changed");
@@ -1890,7 +1969,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       workspaceId: run.worktree?.workspaceId ?? workspaceForContext(run.childCwd, run.parentSessionFile)?.id,
       authorityRevision: accessRevision(), state: "pending", createdAt: new Date().toISOString() };
     run.permissionRequests.push(request);
-    permissionWaits.set(request.id, { run, request, userPreview: operation.userPreview, dialog: event.id as string, revision: accessRevision(), cancellation: new AbortController() });
+    permissionWaits.set(request.id, { run, request, userPreview: operation.userPreview, dialog: event.id as string, revision: accessGeneration(), cancellation: new AbortController() });
     run.execution = "waiting_parent";
     writeStatus(run);
     publishSpawnStatus();
@@ -1902,9 +1981,10 @@ export default function spawnExtension(pi: ExtensionAPI) {
   const handleWorkerDialog = (run: SpawnRun, event: RpcEvent): boolean => {
     if (event.method !== "input" || typeof event.title !== "string" || !event.title.startsWith(SPAWN_PROTOCOL_TITLE) || typeof event.id !== "string") return false;
     const reject = () => { run.child?.respond(event.id as string); return true; };
-    let operation: WorkerOperation | WorkerPermissionOperation;
-    try { operation = JSON.parse(event.title.slice(SPAWN_PROTOCOL_TITLE.length)) as WorkerOperation | WorkerPermissionOperation; }
+    let operation: WorkerOperation | WorkerPermissionOperation | WorkerAdmissionOperation;
+    try { operation = JSON.parse(event.title.slice(SPAWN_PROTOCOL_TITLE.length)) as WorkerOperation | WorkerPermissionOperation | WorkerAdmissionOperation; }
     catch { return reject(); }
+    if (operation.operation === "admission") return handleAdmissionDialog(run, event, operation);
     if (operation.operation === "permission" || operation.operation === "permission_execute" || operation.operation === "permission_recheck") return handlePermissionDialog(run, event, operation);
     const assignment = run.assignments.at(-1);
     if (retired || run.closing || operation.version !== 1 || operation.workerId !== run.id || operation.assignmentId !== assignment?.id
@@ -1948,7 +2028,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
     }
     if (run.childSessionFile) argv.push("--session", run.childSessionFile);
     if (run.profile?.tools && run.profile.tools.length > 0) {
-      argv.push("--tools", [...new Set([...run.profile.tools.filter((name) => name !== "spawn" && name !== "spawn_control"), ...WORKER_TOOLS])].join(","));
+      argv.push("--tools", [...new Set([...run.profile.tools.filter((name) => name !== "spawn" && name !== "spawn_control"), ...(run.profile.tools.includes("bash") ? ["bash_control"] : []), ...WORKER_TOOLS])].join(","));
     }
     if (run.agentPromptPath) {
       argv.push("--append-system-prompt", run.agentPromptPath);
@@ -2079,8 +2159,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
         onEvent: (event) => {
           try {
             transcript(event);
+            acknowledgeAuthority(run, event);
             cancelWorkerPermission(run, event);
-            if (event.type === "extension_error" && !run.closing) {
+            // Failed authority synchronization fences admission; it must not
+            // cancel the worker or an execution admitted under an older mode.
+            if (event.type === "extension_error" && event.extensionPath !== "command:spawn-authority" && !run.closing) {
               run.error = `Worker extension failed: ${String(event.error ?? event.message ?? "unknown error")}`;
               stopRun(run, "process_failure");
             }
@@ -2129,6 +2212,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       return;
     }
     run.child = child;
+    run.authorityRevision = undefined;
     // Cancellation can arrive before the child handle exists.
     if (run.stopReason || run.abortSignal?.aborted) stopRun(run, run.stopReason ?? "parent_abort");
 
@@ -2142,6 +2226,11 @@ export default function spawnExtension(pi: ExtensionAPI) {
     void (async () => {
       try {
         while (!run.closing) {
+          // A newer revision can overtake an in-flight synchronization. Wait
+          // for that revision instead of treating a mode race as worker failure.
+          do { await synchronizeAuthority(run); }
+          while (!run.closing && run.authorityRevision !== accessRevision());
+          if (run.closing) break;
           const assignment = run.assignments.at(-1)!;
           const state = await child.send({ type: "get_state" });
           assertSuccess(state, "get selected subagent model");
@@ -2642,6 +2731,12 @@ export default function spawnExtension(pi: ExtensionAPI) {
             permissionCurrent(wait);
             await wait.authorization.validate();
             permissionCurrent(wait);
+            // A session grant advances the parent revision. Acknowledge that
+            // revision before releasing its own granting operation, rather
+            // than racing its final admission against the authority push.
+            await synchronizeAuthority(run);
+            permissionCurrent(wait);
+            if (run.authorityRevision !== accessRevision()) throw new Error("Worker authority synchronization changed during approval");
             request.state = "approved";
             request.decision = { actor: covered ? "parent" : "user", outcome: "approved" };
           }

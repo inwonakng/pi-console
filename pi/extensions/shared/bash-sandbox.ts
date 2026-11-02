@@ -1,15 +1,16 @@
-import { SandboxManager, getDefaultWritePaths, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { type BashOperations, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { managedBash } from "./managed-bash";
+import { createManagedBash, type ManagedBashHooks } from "./managed-bash";
+import { shutdownBashJobs } from "./bash-jobs";
 import { withRepositoryMutation, subagentProtectedRoots } from "./subagent-state";
 import { childWorkspaceWriteBlock } from "./workspace-policy";
-import { accessRevision, getAccessMode, getScratchDirectory, setScratchDirectory } from "./access-state";
+import { accessGeneration, accessRuntimeGeneration, getAccessMode, getScratchDirectory, setScratchDirectory } from "./access-state";
 import { loadExtensionSettings } from "./extension-settings";
-import { baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, hasPermission, pathInside, requestPermission, resolveToolPath, type PermissionAuthorization } from "./permissions";
+import { admitPermissionSnapshot, assertPermissionSnapshot, capturePermissionSnapshot, baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, hasPermission, pathInside, requestPermission, resolveToolPath, type PermissionAuthorization, type PermissionSnapshot } from "./permissions";
 
 export type BashAccessRequest = {
   readPaths?: string[];
@@ -32,41 +33,92 @@ const sandboxEnvironment = [
 ].map((name) => `export ${name}="\${${name}//localhost:/127.0.0.1:}";`).join(" ")
   + " export CLOUDSDK_PROXY_ADDRESS=127.0.0.1 NO_PROXY= no_proxy=;";
 
-const localBash = managedBash;
-let sandboxConfig: SandboxRuntimeConfig | undefined;
-let sandboxError: string | undefined;
-let macosDenialMonitor = false;
-// Extension entrypoints may evaluate shared imports independently. Status and
-// command execution must still share one queue and observe the same cleanup.
-const QUEUE_KEY = Symbol.for("pi.agent.extensions.bash-command-queue");
-const globalObject = globalThis as typeof globalThis & Record<symbol, { current: Promise<void> } | undefined>;
-const commandQueue = globalObject[QUEUE_KEY] ??= { current: Promise.resolve() };
-let commandNetworkAccess = false;
-let commandUnixSocketPaths: string[] = [];
+export type BashLifetime = { signal: AbortSignal; hooks: ManagedBashHooks };
+type ExecutionOptions = Parameters<BashOperations["exec"]>[2] & { lifetime?: BashLifetime };
+type FilesystemPolicy = Omit<SandboxRuntimeConfig["filesystem"], "denyRead" | "allowRead" | "allowWrite" | "denyWrite"> & {
+  denyRead: string[]; allowRead: string[]; allowWrite: string[]; denyWrite: string[];
+};
+type SandboxRuntime = typeof import("@anthropic-ai/sandbox-runtime");
+type ExecutionLease = { unresolved: boolean };
+type BashState = {
+  admission: Promise<void>;
+  preparation: Promise<void>;
+  leases: Set<ExecutionLease>;
+  changed: Set<() => void>;
+  config?: SandboxRuntimeConfig;
+  runtime?: SandboxRuntime;
+  macosDenialMonitor: boolean;
+};
+// Cache-disabled extension entrypoints must share admission, preparation AND
+// lifetime ownership. A preparation mutex is not an execution-idle barrier.
+const STATE_KEY = Symbol.for("pi.agent.extensions.bash-state");
+const globalObject = globalThis as typeof globalThis & { [STATE_KEY]?: BashState };
+const state = globalObject[STATE_KEY] ??= {
+  admission: Promise.resolve(), preparation: Promise.resolve(), leases: new Set(), changed: new Set(), macosDenialMonitor: false,
+};
+
+function manager(): SandboxRuntime["SandboxManager"] { return state.runtime!.SandboxManager; }
+
+function enqueueAdmission<T>(operation: () => T | Promise<T>): Promise<T> {
+  const current = state.admission.then(operation);
+  state.admission = current.then(() => undefined, () => undefined);
+  return current;
+}
+
+function withPreparation<T>(operation: () => T | Promise<T>): Promise<T> {
+  const current = state.preparation.then(operation);
+  state.preparation = current.then(() => undefined, () => undefined);
+  return current;
+}
+
+/** Start under the preparation lock too: managedBash snapshots process.env
+ * synchronously, and must not inherit another wrap's temporary environment. */
+async function launchManaged(
+  command: string, cwd: string, options: ExecutionOptions,
+  assertAuthority: () => void,
+  authorize: () => void | Promise<void> = () => {},
+): Promise<{ exitCode: number | null }> {
+  const { execution } = await withPreparation(async () => {
+    await authorize();
+    // No await may separate this final revision/path check from process start.
+    assertAuthority();
+    if (options.signal?.aborted) throw new Error("aborted");
+    // Do not return the execution promise directly: the mutex ends at start,
+    // while the execution lease and repository mutation last through cleanup.
+    const executionOptions = options.lifetime ? { ...options, signal: options.lifetime.signal } : options;
+    return { execution: createManagedBash(options.lifetime?.hooks).exec(command, cwd, executionOptions) };
+  });
+  return execution;
+}
+
+function managedUnresolved(error: unknown): boolean {
+  return !!error && typeof error === "object" && "managedUnresolved" in error && error.managedUnresolved === true;
+}
+
+async function withExecutionLease<T>(operation: () => Promise<T>): Promise<T> {
+  const lease = await enqueueAdmission(() => {
+    const lease = { unresolved: false };
+    state.leases.add(lease);
+    return lease;
+  });
+  try { return await operation(); }
+  catch (error) { lease.unresolved = managedUnresolved(error); throw error; }
+  finally {
+    if (!lease.unresolved) state.leases.delete(lease);
+    for (const notify of state.changed) notify();
+  }
+}
 
 function networkConfig(): SandboxRuntimeConfig["network"] {
   return {
-    allowedDomains: getGrantedScopes("network").filter((scope) => scope !== "*"),
-    deniedDomains: [],
-    // The runtime rejects an allowedDomains "*". Its callback checks the
-    // command's upfront or session grant instead; it never prompts at runtime.
-    strictAllowlist: !commandNetworkAccess || getAccessMode() === "readonly",
-    allowLocalBinding: false,
-    allowUnixSockets: getAccessMode() === "readonly" ? [] : commandUnixSocketPaths,
+    // Never put grants in shared proxy policy. Only launch registrations may
+    // widen this default deny, and no runtime ask callback can widen it.
+    allowedDomains: [], deniedDomains: [], strictAllowlist: false,
+    allowLocalBinding: false, allowUnixSockets: [],
   };
 }
 
-function updateNetworkConfig(): void {
-  if (!sandboxConfig || !SandboxManager.isSandboxingEnabled()) return;
-  sandboxConfig = { ...sandboxConfig, network: networkConfig() };
-  SandboxManager.updateConfig(sandboxConfig);
-}
-
-async function allowApprovedNetwork(): Promise<boolean> {
-  return commandNetworkAccess && getAccessMode() !== "readonly";
-}
-
-function filesystemConfig(cwd: string, reads: string[], writes: string[]): SandboxRuntimeConfig["filesystem"] {
+function filesystemConfig(cwd: string, reads: string[], writes: string[]): FilesystemPolicy {
   const protectedRoots = subagentProtectedRoots();
   const allowWrite = [...new Set([...baselineWritePaths(cwd), ...writes].map(canonicalPath))]
     .filter((path) => !protectedRoots.some((root) => pathInside(root, path)));
@@ -77,26 +129,25 @@ function filesystemConfig(cwd: string, reads: string[], writes: string[]): Sandb
     allowWrite,
     // Suppress the runtime's implicit writable caches unless covered by an
     // actual write grant. These are enforcement carve-outs, not ungrantable paths.
-    denyWrite: [...protectedRoots, ...getDefaultWritePaths().filter((path) => !path.startsWith("/dev/")).map(canonicalPath)
+    denyWrite: [...protectedRoots, ...state.runtime!.getDefaultWritePaths().filter((path) => !path.startsWith("/dev/")).map(canonicalPath)
       .filter((path) => !allowWrite.some((allowed) => pathInside(allowed, path)))],
   };
 }
 
-async function collectViolations(commandId: string, filesystem: SandboxRuntimeConfig["filesystem"]): Promise<string[]> {
+async function collectViolations(violations: Set<string>, filesystem: FilesystemPolicy): Promise<string[]> {
   // Only the optional macOS log reader needs a delivery delay. Proxy denials
   // are still collected when that reader is disabled.
-  if (macosDenialMonitor) await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
-  return [...new Set(SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId)
-    .map((violation) => violation.line).filter((line) => {
-      if (process.platform === "darwin") return /\b(?:file-(?:read|write)|network-)|^deny http-request\b/.test(line);
-      // Linux's observer uses the initial profile rather than the per-command
-      // grants. Do not report granted writes as denied merely from that hint.
-      const attempted = /^deny \S+ (\/.*)$/.exec(line)?.[1];
-      if (!attempted) return true;
-      const path = canonicalPath(attempted);
-      return filesystem.denyWrite.some((denied) => pathInside(denied, path))
-        || !filesystem.allowWrite.some((allowed) => pathInside(allowed, path));
-    }))];
+  if (state.macosDenialMonitor) await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
+  return [...violations].filter((line) => {
+    if (process.platform === "darwin") return /\b(?:file-(?:read|write)|network-)|^deny http-request\b/.test(line);
+    // Linux's observer uses the initial profile rather than the per-command
+    // grants. Do not report granted writes as denied merely from that hint.
+    const attempted = /^deny \S+ (\/.*)$/.exec(line)?.[1];
+    if (!attempted) return true;
+    const path = canonicalPath(attempted);
+    return filesystem.denyWrite.some((denied) => pathInside(denied, path))
+      || !filesystem.allowWrite.some((allowed) => pathInside(allowed, path));
+  });
 }
 
 function reportBlockedCommand(lines: string[], onData: (data: Buffer) => void): void {
@@ -116,66 +167,98 @@ function reportBlockedCommand(lines: string[], onData: (data: Buffer) => void): 
 async function runUnsandboxed(
   command: string,
   cwd: string,
-  options: Parameters<BashOperations["exec"]>[2],
+  options: ExecutionOptions,
   ctx: ExtensionContext,
   onSessionGrant: () => void,
   assertAuthority: () => void,
+  sealAuthority: () => void,
+  admit: () => Promise<void>,
 ): Promise<{ exitCode: number | null }> {
   assertAuthority();
   if (subagentProtectedRoots().length) throw new Error("Unsandboxed Bash is blocked while a child owns an unresolved contribution.");
   const authorization = await requestPermission(ctx, { kind: "unsandboxed", scope: command, cwd }, "bash",
     { text: command, filetype: "sh" }, onSessionGrant, true, { modelPreview: { text: command, filetype: "sh" } });
-  await authorization.validate();
-  assertAuthority();
-  if (options.signal?.aborted) throw new Error("aborted");
-  return withRepositoryMutation(["/"], [], () => localBash.exec(command, cwd, options));
+  sealAuthority();
+  return withRepositoryMutation(["/"], [], () => launchManaged(command, cwd, options, assertAuthority, async () => {
+    await authorization.validate();
+    assertAuthority();
+    await admit();
+  }));
 }
 
 async function runSandboxed(
   command: string,
   cwd: string,
-  options: Parameters<BashOperations["exec"]>[2],
+  options: ExecutionOptions,
   ctx: ExtensionContext,
-  filesystem: SandboxRuntimeConfig["filesystem"],
-  networkAccess: boolean,
+  filesystem: FilesystemPolicy,
+  allowedDomains: string[],
   unixSocketPaths: string[],
   authorizations: PermissionAuthorization[],
   assertAuthority: () => void,
+  sealAuthority: () => void,
+  admit: () => Promise<void>,
   onSessionGrant: () => void,
   onBlocked: () => void,
 ): Promise<{ exitCode: number | null }> {
-  const commandId = randomUUID();
+  const commandId = randomBytes(16).toString("base64url");
+  const encodedCommand = Buffer.from(commandId).toString("base64");
   const scratch = getScratchDirectory();
   let wrappedCommand = false;
-  commandNetworkAccess = networkAccess;
-  commandUnixSocketPaths = unixSocketPaths;
+  let unresolved = false;
+  let registered = false;
+  const violations = new Set<string>();
+  // Subscribe before wrapping: another command can evict this command's first
+  // denial from the shared last-100 tail long before this execution finishes.
+  const unsubscribe = manager().getSandboxViolationStore().subscribe((events) => {
+    for (const event of events) if (event.encodedCommand === encodedCommand) violations.add(event.line);
+  });
+  const release = () => {
+    unsubscribe();
+    if (registered) { manager().unregisterCommandNetworkLists(commandId); registered = false; }
+  };
   try {
-    updateNetworkConfig();
-    const previousTempDir = process.env.CLAUDE_CODE_TMPDIR;
-    if (scratch) process.env.CLAUDE_CODE_TMPDIR = scratch;
-    let wrapped: string;
-    try {
-      wrapped = await SandboxManager.wrapWithSandbox(`${sandboxEnvironment} ${command}`, undefined,
-        { filesystem }, options.signal, { commandId, commandText: command });
-    } catch (error) {
+    const prepared = await withPreparation(async () => {
+      assertAuthority();
       if (options.signal?.aborted) throw new Error("aborted");
-      // Preparation failed before any process was started. It is safe to offer
-      // the explicit one-command fallback here, but never after partial execution.
-      commandNetworkAccess = false;
-      commandUnixSocketPaths = [];
-      updateNetworkConfig();
+      manager().registerCommandNetworkLists(commandId, { allowedDomains });
+      registered = true;
+      const previousTempDir = process.env.CLAUDE_CODE_TMPDIR;
+      const previousConfig = state.config!;
+      if (scratch) process.env.CLAUDE_CODE_TMPDIR = scratch;
+      try {
+        // macOS reads socket rules from manager state, not the per-wrap
+        // override. Save/set/wrap/restore atomically with scratch env changes.
+        if (process.platform === "darwin") manager().updateConfig({ ...previousConfig,
+          network: { ...previousConfig.network, allowUnixSockets: [...unixSocketPaths] } });
+        try {
+          const wrapped = await manager().wrapWithSandbox(`${sandboxEnvironment} ${command}`, undefined,
+            { filesystem }, options.signal, { commandId, commandText: command });
+          wrappedCommand = true;
+          return { wrapped };
+        } catch (error) { return { error }; }
+      } finally {
+        if (previousTempDir === undefined) delete process.env.CLAUDE_CODE_TMPDIR;
+        else process.env.CLAUDE_CODE_TMPDIR = previousTempDir;
+        if (process.platform === "darwin") manager().updateConfig(previousConfig);
+      }
+    });
+    if ("error" in prepared) {
+      release();
+      assertAuthority();
+      if (options.signal?.aborted) throw new Error("aborted");
+      // A failed wrap unwinds its own count. No process has started; only here
+      // may we offer the explicit unrestricted fallback.
+      const error = prepared.error;
       options.onData(Buffer.from(`Sandbox could not prepare this command: ${error instanceof Error ? error.message : String(error)}. No command was started.\n`));
-      return await runUnsandboxed(command, cwd, options, ctx, onSessionGrant, assertAuthority);
-    } finally {
-      if (previousTempDir === undefined) delete process.env.CLAUDE_CODE_TMPDIR;
-      else process.env.CLAUDE_CODE_TMPDIR = previousTempDir;
+      return await runUnsandboxed(command, cwd, options, ctx, onSessionGrant, assertAuthority, sealAuthority, admit);
     }
-    wrappedCommand = true;
+    const wrapped = prepared.wrapped;
     const env = { ...options.env,
       ...(scratch ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : {}) };
     const report = async () => {
       // Command output can quote denial messages; only runtime diagnostics prove a block.
-      const lines = await collectViolations(commandId, filesystem);
+      const lines = await collectViolations(violations, filesystem);
       if (lines.length) {
         reportBlockedCommand(lines, options.onData);
         onBlocked();
@@ -184,26 +267,29 @@ async function runSandboxed(
     try {
       // Preparation may await proxy/sandbox setup. Consume delegated one-use
       // authority only at the actual process boundary, never while prompting.
-      assertAuthority();
-      for (const authorization of authorizations) await authorization.validate();
-      assertAuthority();
-      if (options.signal?.aborted) throw new Error("aborted");
-      const result = await withRepositoryMutation(filesystem.allowWrite, filesystem.denyWrite,
-        () => localBash.exec(wrapped, cwd, { ...options, env }));
+      const result = await launchManaged(wrapped, cwd, { ...options, env }, assertAuthority, async () => {
+        assertAuthority();
+        for (const authorization of authorizations) await authorization.validate();
+        await admit();
+      });
       await report();
       return result;
     } catch (error) {
-      // The built-in tool retains streamed output for aborts and timeouts.
-      await report();
-      throw error;
+      // Never let reporting mask unresolved managed ownership.
+      try { await report(); } finally { throw error; }
     }
+  } catch (error) {
+    unresolved = managedUnresolved(error);
+    throw error;
   } finally {
-    commandNetworkAccess = false;
-    commandUnixSocketPaths = [];
-    try {
-      updateNetworkConfig();
-    } finally {
-      if (wrappedCommand) SandboxManager.cleanupAfterCommand();
+    // Keep registration, diagnostics, mount points and the execution lease if
+    // descendant cleanup could not be proven. A reset is not reconciliation.
+    if (!unresolved) {
+      try { if (wrappedCommand) manager().cleanupAfterCommand(); }
+      catch (error) {
+        throw Object.assign(new Error(`Bash sandbox cleanup remains unresolved: ${error instanceof Error ? error.message : String(error)}`), { managedUnresolved: true });
+      }
+      release();
     }
   }
 }
@@ -211,7 +297,7 @@ async function runSandboxed(
 async function executeRestricted(
   command: string,
   cwd: string,
-  options: Parameters<BashOperations["exec"]>[2],
+  options: ExecutionOptions,
   ctx: ExtensionContext,
   request: BashAccessRequest,
   onSessionGrant: () => void,
@@ -220,20 +306,39 @@ async function executeRestricted(
   const childBlock = childWorkspaceWriteBlock(ctx);
   if (childBlock) throw new Error(childBlock);
   const protectedRoots = JSON.stringify(subagentProtectedRoots());
-  if (getAccessMode() === "full" && !subagentProtectedRoots().length) {
-    return withRepositoryMutation(["/"], [], () => localBash.exec(command, cwd, options));
-  }
   const root = canonicalPath(cwd);
-  const revision = accessRevision();
+  const generation = accessGeneration();
+  const runtimeGeneration = accessRuntimeGeneration();
+  let snapshot: PermissionSnapshot | undefined;
+  let policyPaths: string[] = [];
+  let parentAdmitted = false;
   const baseline = () => JSON.stringify([baselineReadPaths(root).map(canonicalPath), baselineWritePaths(root).map(canonicalPath)]);
   const initialBaseline = baseline();
   const assertAuthority = () => {
-    if (accessRevision() !== revision || baseline() !== initialBaseline || canonicalPath(cwd) !== root
+    if ((!parentAdmitted && (accessGeneration() !== generation || baseline() !== initialBaseline))
+      || accessRuntimeGeneration() !== runtimeGeneration || canonicalPath(cwd) !== root
+      || policyPaths.some(path => canonicalPath(path) !== path)
       || JSON.stringify(subagentProtectedRoots()) !== protectedRoots || childWorkspaceWriteBlock(ctx)) {
       throw new Error("Command permission authority changed before execution. No command was started.");
     }
+    if (snapshot && !parentAdmitted) assertPermissionSnapshot(snapshot);
   };
   const context = { ...ctx, cwd: root, signal: options.signal ?? ctx.signal };
+  const sealAuthority = () => {
+    // A fallback may have obtained its own new session grant. Refresh only
+    // after approval; epoch/path checks still reject a changed mode/runtime.
+    snapshot = undefined;
+    assertAuthority();
+    snapshot = capturePermissionSnapshot();
+  };
+  const admit = async () => {
+    assertAuthority();
+    parentAdmitted = await admitPermissionSnapshot(context, snapshot!);
+  };
+  if (getAccessMode() === "full" && !subagentProtectedRoots().length) {
+    sealAuthority();
+    return withRepositoryMutation(["/"], [], () => launchManaged(command, cwd, options, assertAuthority, admit));
+  }
   const paths = (values: string[] = []) => [...new Set(values.map((path) => canonicalPath(resolveToolPath(path, root))))];
   const reads = paths(request.readPaths);
   const writes = paths([...(request.writePaths ?? []), ...(request.workspaceWriteAccess ? [root] : [])]);
@@ -247,9 +352,9 @@ async function executeRestricted(
     }
     if (sockets.some(globShaped)) throw new Error("unixSocketPaths must be literal paths without sandbox wildcard characters. No command was started.");
   }
-  if (request.unsandboxed || !sandboxConfig || !SandboxManager.isSandboxingEnabled()
+  if (request.unsandboxed || !state.config || !manager().isSandboxingEnabled()
     || [...baselinePaths, ...reads, ...writes].some(globShaped)) {
-    return runUnsandboxed(command, root, options, context, onSessionGrant, assertAuthority);
+    return runUnsandboxed(command, root, options, context, onSessionGrant, assertAuthority, sealAuthority, admit);
   }
   const preview = { text: command, filetype: "sh" };
   const authorizations: PermissionAuthorization[] = [];
@@ -265,34 +370,54 @@ async function executeRestricted(
     authorizations.push(await requestPermission(context, { kind: "read", scope: "/" }, "bash", preview, onSessionGrant, false, { modelPreview: preview }));
     reads.push("/");
   }
-  reads.push(...getGrantedScopes("read").filter((path) => !globShaped(path)));
-  writes.push(...getGrantedScopes("write").filter((path) => !globShaped(path)));
-  if (options.signal?.aborted) throw new Error("aborted");
-  const filesystem = filesystemConfig(root, reads, writes);
-  // The runtime's default write roots cannot be narrowed to an approved child
-  // without a parent deny overriding that child. Offer the explicit fallback
-  // before execution rather than silently widening or blocking the grant.
-  if (filesystem.allowWrite.some((write) => filesystem.denyWrite.some((denied) => !subagentProtectedRoots().includes(denied) && pathInside(denied, write)))) {
-    return runUnsandboxed(command, root, options, context, onSessionGrant, assertAuthority);
-  }
   for (const scope of sockets) {
     authorizations.push(await requestPermission(context, { kind: "unix-socket", scope }, "bash", preview, onSessionGrant, true, { modelPreview: preview }));
   }
-  sockets.push(...getGrantedScopes("unix-socket"));
   if (request.networkAccess) {
     authorizations.push(await requestPermission(context, { kind: "network", scope: "*" }, "bash", preview, onSessionGrant, true, { modelPreview: preview }));
   }
   if (options.signal?.aborted) throw new Error("aborted");
-  const networkAccess = request.networkAccess === true || hasPermission({ kind: "network", scope: "*" }, root);
-  return runSandboxed(command, root, options, context, filesystem, networkAccess,
-    [...new Set(sockets)], authorizations, assertAuthority, onSessionGrant, onBlocked);
+  reads.push(...getGrantedScopes("read").filter((path) => !globShaped(path)));
+  writes.push(...getGrantedScopes("write").filter((path) => !globShaped(path)));
+  sockets.push(...getGrantedScopes("unix-socket"));
+  const filesystem = filesystemConfig(root, reads, writes);
+  // The runtime's implicit roots cannot be narrowed to an approved child.
+  if (filesystem.allowWrite.some((write) => filesystem.denyWrite.some((denied) => !subagentProtectedRoots().includes(denied) && pathInside(denied, write)))) {
+    return runUnsandboxed(command, root, options, context, onSessionGrant, assertAuthority, sealAuthority, admit);
+  }
+  // Copy effective authority once. Later session grants or mode changes must
+  // not alter this execution's proxy registration or filesystem/socket rules.
+  const allowedDomains = getAccessMode() === "readonly" ? []
+    : request.networkAccess === true || hasPermission({ kind: "network", scope: "*" }, root)
+      ? ["*"] : [...getGrantedScopes("network")];
+  // Recheck the frozen policy's paths even after parent admission. Implicit
+  // session grants have no individual authorization handle to catch retargeting.
+  policyPaths = [...filesystem.allowRead, ...filesystem.allowWrite, ...filesystem.denyRead, ...filesystem.denyWrite, ...sockets];
+  // All approvals precede the immutable snapshot and preparation lock. A grant
+  // made by this launch does not invalidate its own approval; later changes
+  // during preparation must reject/revalidate rather than widen the policy.
+  sealAuthority();
+  // Writer exclusion includes preparation, asynchronous diagnostics and sandbox
+  // cleanup, not just process execution. Cleanup uncertainty retains this scope.
+  return withRepositoryMutation(filesystem.allowWrite, filesystem.denyWrite,
+    () => runSandboxed(command, root, options, context, filesystem, allowedDomains,
+      [...new Set(sockets)], authorizations, assertAuthority, sealAuthority, admit, onSessionGrant, onBlocked));
 }
 
-/** Serialize host-side repository inspection after sandbox mount-point cleanup. */
+/** Fence new admission while waiting for execution AND descendant cleanup. */
 export function withBashIdle<T>(operation: () => T | Promise<T>): Promise<T> {
-  const current = commandQueue.current.then(operation, operation);
-  commandQueue.current = current.then(() => undefined, () => undefined);
-  return current;
+  return enqueueAdmission(async () => {
+    while (state.leases.size) {
+      if ([...state.leases].some((lease) => lease.unresolved)) {
+        throw new Error("Bash managed cleanup remains unresolved; sandbox reset and host inspection are blocked.");
+      }
+      await new Promise<void>((resolve) => {
+        const changed = () => { state.changed.delete(changed); resolve(); };
+        state.changed.add(changed);
+      });
+    }
+    return operation();
+  });
 }
 
 export function createAccessControlledBashOperations(
@@ -300,10 +425,11 @@ export function createAccessControlledBashOperations(
   request: BashAccessRequest = {},
   onSessionGrant: () => void = () => {},
   onBlocked: () => void = () => {},
+  lifetime?: BashLifetime,
 ): BashOperations {
   return {
     exec(command, cwd, options) {
-      return withBashIdle(() => executeRestricted(command, cwd, options, ctx, request, onSessionGrant, onBlocked));
+      return withExecutionLease(() => executeRestricted(command, cwd, { ...options, lifetime }, ctx, request, onSessionGrant, onBlocked));
     },
   };
 }
@@ -312,41 +438,47 @@ export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void
   const settings = loadExtensionSettings()["access-mode"];
   const prefix = resolveToolPath(settings?.["temp-dir-prefix"]
     ?? join(tmpdir(), "pi-console-sandbox-"), ctx.cwd);
-  sandboxError = undefined;
-  sandboxConfig = undefined;
-  try {
-    await shutdownBashSandbox();
-    if (process.platform !== "darwin" && process.platform !== "linux") throw new Error(`unsupported platform ${process.platform}`);
-    mkdirSync(dirname(prefix), { recursive: true });
-    setScratchDirectory(canonicalPath(mkdtempSync(prefix)));
-    sandboxConfig = { network: networkConfig(), filesystem: filesystemConfig(canonicalPath(ctx.cwd), [], []) };
-    // The reader only supplies diagnostics; macOS enforces the profile without it.
-    // Keep Linux monitoring unchanged and read this setting once per session.
-    macosDenialMonitor = process.platform === "darwin" && settings?.["macos-denial-monitor"] === true;
-    await SandboxManager.initialize(sandboxConfig, allowApprovedNetwork, process.platform !== "darwin" || macosDenialMonitor);
-    if (macosDenialMonitor) await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
-  } catch (error) {
-    sandboxError = error instanceof Error ? error.message : String(error);
-    sandboxConfig = undefined;
-    macosDenialMonitor = false;
-    if (SandboxManager.isSandboxingEnabled()) {
-      try { await SandboxManager.reset(); } catch { /* Keep the initialization error. */ }
+  // Let an unresolved idle barrier reject outside the fallback handler. It is
+  // not safe to reset that manager, remove its scratch, or claim it unavailable.
+  await withBashIdle(async () => {
+    await resetIdleSandbox();
+    try {
+      // Check the actual Pi runtime, including custom PI_BINARY launchers.
+      const [major, minor] = process.versions.node.split(".").map(Number);
+      if (major < 22 || major === 22 && minor < 12) throw new Error("The Bash sandbox requires Pi to run on Node >=22.12.0 (including custom PI_BINARY launchers)");
+      const { patchSandboxRuntime } = await import("../../scripts/patch-sandbox-runtime.mjs");
+      patchSandboxRuntime(undefined, true);
+      // Load only after the actual runtime check, so an incompatible dependency
+      // cannot obscure the actionable version error with a module-load failure.
+      state.runtime ??= await import("@anthropic-ai/sandbox-runtime");
+      if (process.platform !== "darwin" && process.platform !== "linux") throw new Error(`unsupported platform ${process.platform}`);
+      mkdirSync(dirname(prefix), { recursive: true });
+      setScratchDirectory(canonicalPath(mkdtempSync(prefix)));
+      state.config = { network: networkConfig(), filesystem: filesystemConfig(canonicalPath(ctx.cwd), [], []) };
+      // The initial-policy filesystem monitor is diagnostic, not enforcement.
+      state.macosDenialMonitor = process.platform === "darwin" && settings?.["macos-denial-monitor"] === true;
+      await manager().initialize(state.config, undefined, process.platform !== "darwin" || state.macosDenialMonitor);
+      if (state.macosDenialMonitor) await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    } catch (error) {
+      const sandboxError = error instanceof Error ? error.message : String(error);
+      await resetIdleSandbox();
+      ctx.ui.notify(`Sandbox unavailable: ${sandboxError}. Shell commands require unrestricted approval (once, or for this session covering the exact command/CWD, any command from this CWD, or any command from any CWD); readonly mode cannot grant it.`, "warning");
     }
-    ctx.ui.notify(`Sandbox unavailable: ${sandboxError}. Shell commands require unrestricted approval (once, or for this session covering the exact command/CWD, any command from this CWD, or any command from any CWD); readonly mode cannot grant it.`, "warning");
-  }
+  });
+}
+
+/** Caller holds the true-idle barrier, never just the preparation mutex. */
+async function resetIdleSandbox(): Promise<void> {
+  if (state.runtime?.SandboxManager.isSandboxingEnabled()) await state.runtime.SandboxManager.reset();
+  const scratch = getScratchDirectory();
+  if (scratch) rmSync(scratch, { recursive: true, force: true });
+  setScratchDirectory(undefined);
+  state.config = undefined;
+  state.macosDenialMonitor = false;
 }
 
 export async function shutdownBashSandbox(): Promise<void> {
-  await commandQueue.current;
-  try {
-    if (SandboxManager.isSandboxingEnabled()) await SandboxManager.reset();
-  } finally {
-    const scratch = getScratchDirectory();
-    setScratchDirectory(undefined);
-    sandboxConfig = undefined;
-    macosDenialMonitor = false;
-    commandNetworkAccess = false;
-    commandUnixSocketPaths = [];
-    if (scratch) rmSync(scratch, { recursive: true, force: true });
-  }
+  // Final job metadata and descendant cleanup precede reset. Uncertainty retains resources.
+  await shutdownBashJobs();
+  await withBashIdle(resetIdleSandbox);
 }

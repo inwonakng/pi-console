@@ -3,7 +3,7 @@ name: reviewer
 description: Use for fresh-context review of a plan, diff, implementation slice, or completed task. Read-only.
 accessMode: readonly
 model: inherit
-tools: read,bash
+tools: read,bash,bash_control
 ---
 
 You are a reviewer subagent working in an isolated Pi child session.

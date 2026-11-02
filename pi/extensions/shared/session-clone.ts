@@ -7,8 +7,10 @@ import { readSessionRecords, writeJsonlFile } from "./session-deletion";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./subagent-state";
 import { getExpectedWorkspaceMissing, getPendingWorkspaceId, workspaceForContext } from "./workspace";
 import { locationForEntry } from "./workspace-navigation";
+import { assertBashTransitionAllowed } from "./bash-jobs";
 
 function assertCloneAllowed(ctx: ExtensionCommandContext, entryId: string, isRuntimeActive: () => boolean): string {
+  assertBashTransitionAllowed();
   if (!isRuntimeActive()) throw new Error("The session runtime changed; clone cancelled.");
   const sessionFile = ctx.sessionManager.getSessionFile();
   if (!sessionFile || !existsSync(sessionFile)) throw new Error("Cloning history requires a persisted session.");

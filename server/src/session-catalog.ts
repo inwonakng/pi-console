@@ -20,7 +20,7 @@ const MiB = 1024 * 1024;
 const ORDINARY_HEADROOM = 64 * MiB;
 const CONTROL_HEADROOM = 16 * MiB;
 const essential = new Set<CommandReceipt["operation"]>(["control.acquire", "control.takeover", "control.release",
-  "interaction.respond", "interaction.cancel", "turn.abort", "shell.abort", "retry.abort", "side.abort", "spawn.stop", "session.kill", "queue.remove", "queue.release"]);
+  "interaction.respond", "interaction.cancel", "turn.abort", "shell.abort", "retry.abort", "side.abort", "spawn.stop", "bash.stop", "bash.cancel-wait", "session.kill", "queue.remove", "queue.release"]);
 
 /** One private profile owner. History stays indexed on disk, never in a ledger cache. */
 export class SessionCatalog {

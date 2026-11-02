@@ -201,6 +201,17 @@ export function managedSpawn(command, args, options) {
     if (!ancestorsOpen(db, job)) throw new Error('Managed launch admission is sealed');
     db.prepare("INSERT INTO jobs VALUES(?,?,?,?,'intent',1,NULL)").run(id, epoch, job.parent, command);
   }); } finally { db.close(); }
+  // A helper that never obtained a PID cannot have received the launch IPC
+  // message. Record that failed start as proven, not as unresolved workload.
+  const failedStart = error => {
+    const db = registry(path);
+    try {
+      // Sealing may cancel the intent before Node delivers its no-PID error.
+      // That does not invalidate proof that this supervisor never started.
+      db.prepare("UPDATE jobs SET status='done',launch_open=0,result=? WHERE id=? AND status IN ('intent','cancelled') AND result IS NULL")
+        .run(JSON.stringify({ code: null, signal: null, error: error.message, managedUnresolved: false }), id);
+    } finally { db.close(); }
+  };
   let child;
   try {
     child = spawn(process.execPath, [script, 'supervise', path, id], {
@@ -209,17 +220,37 @@ export function managedSpawn(command, args, options) {
       cwd: options.cwd, env: { ...env, PI_CONSOLE_PROCESS_JOB: id, NODE_NO_WARNINGS: '1' }, detached: true,
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     });
-    contexts.set(child, { path, id });
-    child.on('error', () => {});
+    let resolveStarted, rejectStarted;
+    const started = new Promise((resolve, reject) => { resolveStarted = resolve; rejectStarted = reject; });
+    // A foreground caller need not observe admission separately.
+    void started.catch(() => {});
+    contexts.set(child, { path, id, started });
+    child.once('close', () => rejectStarted(new Error('Managed workload did not start')));
+    child.on('message', message => {
+      if (message?.type === 'managed_started' && message.id === id) resolveStarted(id);
+    });
+    child.on('error', error => {
+      if (!child.pid) {
+        try { failedStart(error); }
+        catch { /* Missing terminal evidence remains unresolved in managedResult. */ }
+      }
+    });
     child.on('message', () => {});
     child.on('spawn', () => {
       if (child.connected) child.send({ type: 'launch', command, args, env: { ...env, PI_CONSOLE_PROCESS_JOB: id } }, () => {});
     });
     return child;
   } catch (e) {
-    // Intent has not received a launch grant. Reconciliation can cancel it.
+    if (!child?.pid) failedStart(e);
     throw e;
   }
+}
+
+/** Resolves only after the actual workload's spawn acknowledgment, not helper fork. */
+export function managedStarted(child) {
+  const context = contexts.get(child);
+  if (!context) return Promise.reject(new Error('Process has no managed admission identity'));
+  return context.started;
 }
 
 export function managedResult(child) {
@@ -295,6 +326,7 @@ async function supervise(path, id) {
       anchor = spawn(process.execPath, [script, 'anchor'], { detached: true, stdio: ['inherit', 'inherit', 'inherit', 'ipc'], env: message.env });
       anchor.on('error', error => { exit = { code: null, signal: null, error: error.message }; stop(); });
       anchor.on('message', record => {
+        if (record?.type === 'workload_started' && process.connected) process.send({ type: 'managed_started', id }, () => {});
         if (record?.type === 'workload_exit') { exit = record.exit; stop(); }
       });
       anchor.on('exit', () => { if (!finished) {
@@ -419,6 +451,7 @@ async function anchor() {
     started = true;
     try {
       const child = spawn(message.command, message.args, { env: message.env, stdio: 'inherit' });
+      child.on('spawn', () => process.send?.({ type: 'workload_started' }));
       child.on('error', error => process.send?.({ type: 'workload_exit', exit: { code: null, signal: null, error: error.message } }));
       child.on('exit', (code, signal) => process.send?.({ type: 'workload_exit', exit: { code, signal } }));
     } catch (e) { process.send?.({ type: 'workload_exit', exit: { code: null, signal: null, error: e.message } }); }

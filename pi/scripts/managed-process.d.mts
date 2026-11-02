@@ -25,5 +25,6 @@ export function assertManagedLaunchAllowed(path: string, epoch: string): void;
 export function sealEpoch(path: string, epoch: string): void;
 export function inspectEpoch(path: string, epoch: string): ManagedJob[];
 export function managedSpawn(command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"] }): ChildProcessWithoutNullStreams;
+export function managedStarted(child: ChildProcess): Promise<string>;
 export function managedResult(child: ChildProcess): ManagedExit | undefined;
 export function stopManaged(child: ChildProcess): boolean;

@@ -59,10 +59,10 @@ export class SideRpc {
     this.process.stdin.on("error", (error) => this.fail(error));
     this.closed = new Promise((resolve, reject) => {
       this.process.once("error", (error) => {
-        this.ended = true;
         this.fail(error);
         if (!this.stopping) onExit(error);
-        resolve();
+        // Only close plus managed terminal evidence proves owned cleanup. An
+        // error alone must not let retirement erase unresolved recovery files.
       });
       this.process.once("close", (code, signal) => {
         this.ended = true;
@@ -107,14 +107,20 @@ export class SideRpc {
     if (this.stopping || this.ended) return this.closed;
     this.stopping = true;
     this.process.stdin.end();
-    if (stopManaged(this.process)) return this.closed;
-    // These are shutdown escalation timers, never generation deadlines.
-    const terminate = setTimeout(() => this.process.kill("SIGTERM"), 2000);
-    const kill = setTimeout(() => this.process.kill("SIGKILL"), 5000);
+    // Let session_shutdown stop owned Bash jobs and persist final cleanup
+    // before outer supervision seals the tree. Escalate only the live handle.
+    let kill: NodeJS.Timeout | undefined;
+    const terminate = setTimeout(() => {
+      if (this.ended) return;
+      if (!stopManaged(this.process)) {
+        this.process.kill("SIGTERM");
+        kill = setTimeout(() => { if (!this.ended) this.process.kill("SIGKILL"); }, 5000);
+      }
+    }, 20000);
     try { await this.closed; }
     finally {
       clearTimeout(terminate);
-      clearTimeout(kill);
+      if (kill) clearTimeout(kill);
     }
   }
 

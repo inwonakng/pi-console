@@ -5,6 +5,7 @@ import { beginWorkspaceContinuation, clearWorkspaceContinuation, getWorkspaceCon
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./subagent-state";
 import { prepareProjectTrust, projectTrustReady } from "./project-trust";
 import { modelReady, preserveModelForSwitch } from "./model-readiness";
+import { assertBashTransitionAllowed, withBashTransition } from "./bash-jobs";
 
 const LOCATION_ENTRY = "pi-workspace-location";
 const CURSOR_ENTRY = "pi-workspace-cursor";
@@ -61,6 +62,7 @@ export async function moveToLocation(
   leafId: string | null,
   options: { workspaceId?: string; workspaceLabel?: string; markLocation?: boolean; navigateTo?: string; reload?: boolean; saveCursor?: boolean; continueWith?: string; beforeSwitch?: () => void | Promise<void>; onArrival?: (ctx: ExtensionCommandContext) => void | Promise<void> } = {},
 ): Promise<boolean> {
+  assertBashTransitionAllowed();
   const file = ctx.sessionManager.getSessionFile();
   if (!file) throw new Error("Workspace switching requires a persisted session.");
   const pendingWorkspaceId = getPendingWorkspaceId();
@@ -69,6 +71,7 @@ export async function moveToLocation(
   const previousModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
   const continuation = options.continueWith ? getWorkspaceContinuation(file) ?? beginWorkspaceContinuation(file) : undefined;
   let currentCtx = ctx;
+  let continueArrival: (() => Promise<void>) | undefined;
   // Captured UI methods can report closure even if runtime creation leaves no live ctx.
   const rpcUi = ctx.mode === "rpc" ? ctx.ui : undefined;
   const releaseContinuation = () => {
@@ -128,9 +131,12 @@ export async function moveToLocation(
       if (!sendMessage) throw new Error("The switched session cannot resume the agent.");
       continuation.phase = "starting";
       publishWorkspaceState(nextCtx);
-      await sendMessage({ customType: "workspace-continuation", content: options.continueWith, display: false }, { triggerTurn: true });
-      // A pre-start abort can finish without agent_start. Never clear a newer handoff.
-      releaseContinuation();
+      const content = options.continueWith;
+      continueArrival = async () => {
+        await sendMessage({ customType: "workspace-continuation", content, display: false }, { triggerTurn: true });
+        // A pre-start abort can finish without agent_start. Never clear a newer handoff.
+        releaseContinuation();
+      };
     }
   };
   // Pi's runtime supports cwdOverride in RPC mode; the extension-context type omits it.
@@ -159,28 +165,36 @@ export async function moveToLocation(
     }
     if (!projectTrustReady()) throw new Error("Resolve project trust before switching workspaces");
     if (ctx.cwd !== cwd || options.reload) await prepareProjectTrust(ctx, cwd);
-    publishWorkspaceState(ctx);
-    if (ctx.cwd === cwd && !options.reload) {
-      await arrival(ctx);
-      return true;
-    }
-    await options.beforeSwitch?.();
-    assertManagedResources();
-    releaseSelection = preserveModelForSwitch(ctx);
-    const result = await switchWithCwd(file, {
-      cwdOverride: cwd,
-      withSession: async (nextCtx) => {
-        arrived = true;
-        await arrival(nextCtx, nextCtx.sendMessage.bind(nextCtx));
-      },
-    });
-    if (result.cancelled) {
-      if (ownsPending) setPendingWorkspace(undefined);
-      releaseContinuation();
-      setWorkspaceTransitionError(file, "Workspace switch was cancelled. Resolve the cause, then restart the session to retry.");
+    assertBashTransitionAllowed();
+    const moved = await withBashTransition(async () => {
       publishWorkspaceState(ctx);
-    }
-    return !result.cancelled;
+      if (ctx.cwd === cwd && !options.reload) {
+        await arrival(ctx);
+        return true;
+      }
+      await options.beforeSwitch?.();
+      assertBashTransitionAllowed();
+      assertManagedResources();
+      releaseSelection = preserveModelForSwitch(ctx);
+      const result = await switchWithCwd(file, {
+        cwdOverride: cwd,
+        withSession: async (nextCtx) => {
+          arrived = true;
+          await arrival(nextCtx, nextCtx.sendMessage.bind(nextCtx));
+        },
+      });
+      if (result.cancelled) {
+        if (ownsPending) setPendingWorkspace(undefined);
+        releaseContinuation();
+        setWorkspaceTransitionError(file, "Workspace switch was cancelled. Resolve the cause, then restart the session to retry.");
+        publishWorkspaceState(ctx);
+      }
+      return !result.cancelled;
+    });
+    // A continuation can execute tools for a full turn. It starts only after
+    // destructive work has released its job-admission reservation.
+    if (moved) await continueArrival?.();
+    return moved;
   } catch (error) {
     const pendingContinuation = getWorkspaceContinuation(file);
     if (!pendingContinuation || pendingContinuation === continuation) {

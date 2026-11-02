@@ -6,7 +6,7 @@ import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathInside, resolveToolPath } from "./paths";
 export { pathInside, resolveToolPath } from "./paths";
-import { accessRevision, getAccessMode, getScratchDirectory, invalidateAccessAuthority, onAccessInvalidated } from "./access-state";
+import { accessGeneration, accessRevision, advanceAccessRevision, getAccessMode, getScratchDirectory, invalidateAccessAuthority, onAccessInvalidated, parentAccessRevision, type AccessMode } from "./access-state";
 import { loadExtensionSettings } from "./extension-settings";
 import { getInteractionMode } from "./interaction-mode";
 import { notifyPiToolApproval } from "./notifications";
@@ -44,6 +44,41 @@ export type PermissionAttempt = {
 };
 type PermissionRouter = (ctx: ExtensionContext, attempt: PermissionAttempt, userPreview: PermissionPreview) => Promise<PermissionAuthorization>;
 
+export type PermissionSnapshot = Readonly<{
+  revision: number;
+  generation: number;
+  mode: AccessMode;
+  parentRevision?: number;
+  grants: readonly Readonly<Permission>[];
+}>;
+
+export function capturePermissionSnapshot(): PermissionSnapshot {
+  return Object.freeze({ revision: accessRevision(), generation: accessGeneration(), mode: getAccessMode(),
+    parentRevision: parentAccessRevision(),
+    grants: Object.freeze((getAccessMode() === "readonly" ? [] : getSessionGrants())
+      .filter(grant => !["read", "write", "unix-socket"].includes(grant.kind) || canonicalPath(grant.scope) === grant.scope)
+      .map(grant => Object.freeze(grant))),
+  });
+}
+
+export function assertPermissionSnapshot(snapshot: PermissionSnapshot): void {
+  if (snapshot.revision !== accessRevision() || snapshot.generation !== accessGeneration()
+    || snapshot.parentRevision !== parentAccessRevision()) throw new Error("Permission authority changed before admission");
+}
+
+type AdmissionRouter = (ctx: ExtensionContext, snapshot: PermissionSnapshot) => Promise<void>;
+export function registerAdmissionRouter(router: AdmissionRouter): void { state.admissionRouter = router; }
+
+/** In workers the parent's response is the admission linearization point.
+ * Do not revalidate live mode after it: subsequent changes are future-only. */
+export async function admitPermissionSnapshot(ctx: ExtensionContext, snapshot: PermissionSnapshot): Promise<boolean> {
+  assertPermissionSnapshot(snapshot);
+  if (!process.env.PI_SPAWN_WORKER_ID) return false;
+  if (!state.admissionRouter) throw new Error("Worker admission transport is unavailable");
+  await state.admissionRouter(ctx, snapshot);
+  return true;
+}
+
 type Decision = "allowed" | "denied" | "cancelled";
 type HistoryRuntime = {
   pi: ExtensionAPI;
@@ -57,6 +92,7 @@ type PermissionState = {
   lifetime: AbortController;
   history?: HistoryRuntime;
   router?: PermissionRouter;
+  admissionRouter?: AdmissionRouter;
   invalidationRegistered?: boolean;
 };
 const globals = globalThis as typeof globalThis & { [key]?: PermissionState };
@@ -265,7 +301,7 @@ export function requestPermission(
   remember = true,
   options?: { authorityCwd?: string; provenance?: Record<string, unknown>; modelPreview?: PermissionPreview },
 ): Promise<PermissionAuthorization> {
-  const requestedGeneration = accessRevision();
+  const requestedGeneration = accessGeneration();
   const scopeLabel = permission.kind === "network" && permission.scope === "*"
     ? "outbound network access to any host" : permission.scope;
   const signal = ctx.signal ? AbortSignal.any([ctx.signal, state.lifetime.signal]) : state.lifetime.signal;
@@ -273,7 +309,7 @@ export function requestPermission(
   const modelPreview = options?.modelPreview ?? { text: `${tool}: ${permission.kind} ${permission.scope}`, filetype: "text" };
   const run = async () => {
     const assertCurrent = () => {
-      if (accessRevision() !== requestedGeneration) throw new Error("Permission request cancelled because the active session or branch changed.");
+      if (accessGeneration() !== requestedGeneration) throw new Error("Permission request cancelled because the active session or branch changed.");
       if (signal.aborted) throw new Error("aborted");
     };
     assertCurrent();
@@ -357,6 +393,7 @@ export function requestPermission(
       }
       if (grant) {
         sessionGrants.push(grant);
+        advanceAccessRevision();
         if (grant.kind !== "unsandboxed" && grant.kind !== "unix-socket") onSessionGrant();
       }
       finish("allowed", choice);

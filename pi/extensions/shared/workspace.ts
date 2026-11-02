@@ -21,6 +21,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathInside as lexicalPathInside } from "./paths";
+import { assertBashTransitionAllowed, withBashTransition } from "./bash-jobs";
 import { commitDestination, prepareWorkspaceCommit, publishWorkspaceCommit, previewCommitUndo, prepareCommitUndo,
   type WorkspaceCommit, type WorkspaceUndoPreview } from "./workspace-commits";
 
@@ -757,8 +758,9 @@ function checkCancellation(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error("Workspace operation aborted before application.");
 }
 
-async function withWorkspaceLock<T>(id: string, fn: (record: WorkspaceRecord) => Promise<T>, signal?: AbortSignal): Promise<T> {
+async function withWorkspaceLock<T>(id: string, fn: (record: WorkspaceRecord) => Promise<T>, signal?: AbortSignal, destructive = false): Promise<T> {
   checkCancellation(signal);
+  if (destructive) assertBashTransitionAllowed();
   const initial = loadWorkspace(id);
   if (!initial) throw new Error(`Unknown workspace: ${id}`);
   return withDestinationQueue(initial.destinationRoot, async () => {
@@ -768,7 +770,7 @@ async function withWorkspaceLock<T>(id: string, fn: (record: WorkspaceRecord) =>
       checkCancellation(signal);
       const record = loadWorkspace(id);
       if (!record) throw new Error(`Workspace record disappeared: ${id}`);
-      return await fn(record);
+      return destructive ? await withBashTransition(() => fn(record)) : await fn(record);
     } finally {
       releaseLock();
     }
@@ -1156,7 +1158,7 @@ export async function integrateWorkspace(id: string, signal?: AbortSignal, optio
     } finally {
       deleteRef(record.destinationRoot, destinationRef);
     }
-  }, signal);
+  }, signal, true);
 }
 
 function assertCommitSettled(record: WorkspaceRecord): void {
@@ -1266,7 +1268,7 @@ export async function undoWorkspaceIntegration(input: {
       saveWorkspace(record);
       return record;
     });
-  }, signal);
+  }, signal, true);
 }
 
 function assertRevertTarget(root: string, workspaceId: string, exceptId?: string): WorkspaceRecord {
@@ -1329,7 +1331,7 @@ export async function createRevertWorkspace(input: {
     record.reverts.prepared = true;
     snapshotWorkspaceResult(record);
     return record;
-  }, signal);
+  }, signal, true);
 }
 
 function cleanupGitDirectory(record: WorkspaceRecord): string {
@@ -1373,7 +1375,7 @@ export async function removeWorkspace(id: string, finalLifecycle: "integrated" |
       throw new Error(`Workspace ${id} has not been integrated.`);
     }
     return removeWorkspaceLocked(record, lifecycle);
-  });
+  }, undefined, true);
 }
 
 function removeWorkspaceLocked(record: WorkspaceRecord, finalLifecycle: "integrated" | "discarded"): WorkspaceRecord {

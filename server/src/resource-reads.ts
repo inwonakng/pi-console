@@ -9,6 +9,8 @@ import { CommandError } from "./session-commands.js";
 
 export type ResourceContext = {
   sessionFile: string;
+  /** Catalog-bound identity, required for durable job resources. */
+  sessionId?: string;
   cwd: string;
   workspaceRoot: string;
   workspaceId?: string;
@@ -21,7 +23,9 @@ export type ResourceContext = {
 
 type Artifact = "brief" | "result" | "transcript" | "status" | "agent_prompt" | "patch";
 type ReadInput = {
-  kind: "history" | "file" | "skill" | "output" | "spawn";
+  kind: "history" | "file" | "skill" | "output" | "spawn" | "bash-job";
+  jobId?: string;
+  stream?: "stdout" | "stderr";
   path?: string;
   runId?: string;
   artifact?: Artifact;
@@ -31,7 +35,7 @@ type ReadInput = {
 };
 type TextChunk = { text: string; path: string; offset: number; nextOffset: number | null; version: string; size: number };
 type FileEntry = { path: string; kind: "file" | "directory" };
-type Target = { root: string; path: string; owned?: boolean; followSymlinks?: boolean };
+type Target = { root: string; path: string; owned?: boolean; private?: boolean; followSymlinks?: boolean; deferUtf8Tail?: boolean };
 type Opened = Target & { file: FileHandle; stamp: BigIntStats; canonical: string };
 
 const CHUNK_BYTES = 64 * 1024;
@@ -67,15 +71,20 @@ function exact(value: unknown, keys: readonly string[]): value is Record<string,
   return object(value) && Object.keys(value).every((key) => keys.includes(key));
 }
 function readInput(value: unknown): ReadInput {
-  if (!exact(value, ["kind", "path", "runId", "artifact", "offset", "version", "view"])
-    || typeof value.kind !== "string" || !["history", "file", "skill", "output", "spawn"].includes(value.kind)
+  if (!exact(value, ["kind", "path", "runId", "artifact", "offset", "version", "view", "jobId", "stream"])
+    || typeof value.kind !== "string" || !["history", "file", "skill", "output", "spawn", "bash-job"].includes(value.kind)
     || (value.path !== undefined && !pathString(value.path)) || !offset(value.offset)
     || (value.version !== undefined && (typeof value.version !== "string" || !/^[a-f0-9]{64}$/.test(value.version)))
     || (value.view !== undefined && (value.view !== "transcript" || value.kind !== "spawn" || value.artifact !== "transcript"))
     || ((value.offset as number | undefined) ?? 0) > 0 && value.version === undefined) {
     refuse("resource_payload", "Invalid read payload or missing continuation version");
   }
-  if (value.kind === "spawn") {
+  if (value.kind !== "bash-job" && (value.jobId !== undefined || value.stream !== undefined)) refuse("resource_payload", "Job fields require a Bash job resource");
+  if (value.kind === "bash-job") {
+    if (value.path !== undefined || value.runId !== undefined || value.artifact !== undefined || value.view !== undefined
+      || typeof value.jobId !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(value.jobId)
+      || !["stdout", "stderr"].includes(String(value.stream))) refuse("resource_payload", "Bash reads need jobId and stream only");
+  } else if (value.kind === "spawn") {
     if (value.path !== undefined || !identifier(value.runId)
       || typeof value.artifact !== "string" || ![...Object.keys(ARTIFACTS), "patch"].includes(value.artifact)) refuse("resource_payload", "Spawn reads need runId and artifact only");
   } else if (value.runId !== undefined || value.artifact !== undefined || (value.kind !== "history" && value.path === undefined)) {
@@ -152,6 +161,7 @@ async function openTarget(target: Target, check: () => void, appendOnly = false)
     if (target.owned && (process.getuid === undefined || stamp.uid !== BigInt(process.getuid()) || stamp.nlink !== 1n)) {
       refuse("resource_denied", "Resource must be single-linked and owned by the service user");
     }
+    if (target.private && (stamp.mode & 0o077n)) refuse("resource_denied", "Bash job files must be private");
     const opened = { ...target, file, stamp, canonical: path };
     if (appendOnly) await appended(opened, check);
     else await unchanged(opened, check);
@@ -195,29 +205,42 @@ async function readBytes(opened: Opened, start: number, length: number, check: (
   return bytes;
 }
 async function chunk(target: Target, input: ReadInput, check: () => void): Promise<TextChunk> {
-  const opened = await openTarget(target, check);
+  const growing = input.kind === "bash-job";
+  const opened = await openTarget(target, check, growing);
   try {
     const size = Number(opened.stamp.size);
-    const version = fingerprint(opened.stamp);
+    // Job logs are append-only. Identity, permissions and links are stable across
+    // growth; refreshing/paging a running command must not use stale mtime/size.
+    const version = growing ? createHash("sha256").update([opened.stamp.dev, opened.stamp.ino, opened.stamp.mode, opened.stamp.uid, opened.stamp.nlink].join(":")).digest("hex") : fingerprint(opened.stamp);
     if (input.version !== undefined && input.version !== version) changed();
     const start = input.offset ?? 0;
     if (start > size) refuse("resource_offset", "Offset is beyond end of file");
     const bytes = await readBytes(opened, start, Math.min(CHUNK_BYTES, size - start), check);
     let length = bytes.length;
-    if (start + length < size && length) {
-      // Remove only an incomplete trailing sequence; never mask malformed bytes.
+    const atEnd = start + length === size;
+    let pendingTail = false;
+    if (length && (!atEnd || growing && target.deferUtf8Tail)) {
+      // A running log can end between writes of one codepoint. Defer only a
+      // valid incomplete suffix; malformed prefixes must still fail decoding.
       let lead = length - 1;
       while (lead >= length - 3 && lead >= 0 && (bytes[lead] & 0xc0) === 0x80) lead--;
       if (lead >= 0) {
         const first = bytes[lead];
         const expected = first >= 0xc2 && first <= 0xdf ? 2 : first >= 0xe0 && first <= 0xef ? 3 : first >= 0xf0 && first <= 0xf4 ? 4 : 1;
-        if (expected > length - lead) length = lead;
+        if (expected > length - lead) {
+          try { new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes.subarray(lead), { stream: true }); }
+          catch { refuse("resource_binary", "Resource is not valid UTF-8 text"); }
+          length = lead;
+          pendingTail = atEnd;
+        }
       }
     }
     const text = decode(bytes.subarray(0, length));
-    await unchanged(opened, check);
-    return { text, path: target.followSymlinks ? resolve(target.path) : opened.canonical,
-      offset: start, nextOffset: start + length < size ? start + length : null, version, size };
+    if (growing) await appended(opened, check); else await unchanged(opened, check);
+    return { text, path: growing ? `bash-job/${input.jobId}/${input.stream}` : target.followSymlinks ? resolve(target.path) : opened.canonical,
+      // No continuation into an all-partial tail: automatic document readers
+      // would otherwise repeat the same offset. Refresh retries those bytes.
+      offset: start, nextOffset: !pendingTail && start + length < size ? start + length : null, version, size };
   } finally { await opened.file.close(); }
 }
 // Match spawn-transcript.read_messages: streaming message snapshots and protocol
@@ -518,6 +541,70 @@ async function authorizeOutput(context: ResourceContext, path: string, provenanc
   refuse("resource_denied", "Output has no managed fullOutputPath reference");
 }
 
+/** Fixed-layout durable logs, authorized from the managed session header and
+ * immutable side-owner manifests. No requested filesystem path is accepted. */
+async function bashJobTarget(context: ResourceContext, jobId: string, stream: "stdout" | "stderr"): Promise<Target> {
+  const check = context.check;
+  const session = await openTarget({ root: dirname(context.sessionFile), path: context.sessionFile, owned: true }, check, true);
+  let sessionId: string;
+  try {
+    const bytes = await readBytes(session, 0, Math.min(64 * 1024, Number(session.stamp.size)), check);
+    const newline = bytes.indexOf(10);
+    if (newline < 0) refuse("resource_metadata", "Missing managed session header");
+    const header: unknown = JSON.parse(decode(bytes.subarray(0, newline)));
+    if (!object(header) || header.type !== "session" || typeof header.id !== "string" || !header.id) refuse("resource_metadata", "Invalid managed session identity");
+    if (header.id !== context.sessionId) refuse("resource_denied", "Managed Bash session identity changed");
+    sessionId = header.id;
+    await appended(session, check);
+  } finally { await session.file.close(); }
+  const base = dirname(session.canonical);
+  const budget = { bytes: 0 };
+  const privateDir = async (path: string) => {
+    await canonical({ root: base, path }, check);
+    const stamp = await lstat(path);
+    if (!stamp.isDirectory() || stamp.uid !== process.getuid?.() || (stamp.mode & 0o077)) refuse("resource_denied", "Bash job directories must be private and service-owned");
+  };
+  const candidates: Target[] = [];
+  const candidate = async (root: string, ownerId: string) => {
+    const path = join(root, `${jobId}.json`);
+    try {
+      let meta: Record<string, unknown>;
+      try { meta = await metadata({ root: base, path, private: true }, check, budget); }
+      catch (error) {
+        if (!(error instanceof CommandError) || error.code !== "resource_conflict") throw error;
+        meta = await metadata({ root: base, path, private: true }, check, budget);
+      }
+      if (meta.version !== 1 || meta.sessionId !== ownerId || meta.jobId !== jobId) refuse("resource_denied", "Bash job metadata owner mismatch");
+      candidates.push({ root: base, path: join(root, `${jobId}.${stream}`), owned: true, private: true,
+        deferUtf8Tail: meta.state === "starting" || meta.state === "running" });
+    } catch (error) {
+      if (!(error instanceof CommandError && error.code === "resource_unavailable" && error.message.startsWith("resource_missing:")) && !missing(error)) throw error;
+    }
+  };
+  const mainContainer = join(base, ".bash-jobs");
+  const main = join(mainContainer, createHash("sha256").update(sessionId).digest("hex"));
+  try { await privateDir(mainContainer); await privateDir(main); await candidate(main, sessionId); }
+  catch (error) { if (!missing(error)) throw error; }
+  const sides = `${session.canonical}.side-jobs`;
+  try {
+    await privateDir(sides);
+    const entries = await directoryEntries({ root: base, path: sides }, check);
+    if (entries.entries.length > 256) refuse("resource_oversize", "Too many retained side owners");
+    for (const entry of entries.entries) {
+      if (!/^[a-f0-9]{64}$/.test(entry.name)) refuse("resource_denied", "Invalid retained side owner directory");
+      const root = join(sides, entry.name);
+      await privateDir(root);
+      const manifest = await metadata({ root: base, path: join(root, "owner.json"), private: true }, check, budget);
+      if (manifest.version !== 1 || manifest.parentSessionFile !== session.canonical || manifest.parentSessionId !== sessionId
+        || typeof manifest.sessionId !== "string" || !manifest.sessionId
+        || createHash("sha256").update(manifest.sessionId).digest("hex") !== entry.name) refuse("resource_denied", "Retained side owner does not belong to this parent");
+      await candidate(root, manifest.sessionId);
+    }
+  } catch (error) { if (!missing(error)) throw error; }
+  if (candidates.length !== 1) refuse("resource_denied", candidates.length ? "Ambiguous Bash job identity" : "Bash job does not belong to this session");
+  return candidates[0];
+}
+
 export async function readResource(context: ResourceContext, input: unknown): Promise<TextChunk> {
   return limited(context.check, async () => {
     const request = readInput(input);
@@ -536,6 +623,7 @@ export async function readResource(context: ResourceContext, input: unknown): Pr
         target = { root: dirname(request.path!), path: request.path! };
         break;
       case "output": target = await authorizeOutput(context, request.path!, provenance); break;
+      case "bash-job": target = await bashJobTarget(context, request.jobId!, request.stream!); break;
       case "spawn": {
         const status = await provenance.run(request.runId!);
         if (!status) refuse("resource_denied", "Run does not belong to the managed conversation");

@@ -415,6 +415,48 @@ Every Pi process also has a writable scratch directory, exposed to Bash as
 `$TMPDIR` and removed on shutdown. The example config includes an optional
 `temp-dir-prefix` for changing its location.
 
+## Background commands
+
+The agent can explicitly launch `bash` with `background: true` and use
+`bash_control` to list, inspect, read, join, or stop its jobs. Foreground Bash is
+unchanged. Jobs have independent stdout/stderr logs, survive replies and frontend
+detach, and stop when their owning runtime ends. No interactive stdin or PTY is
+provided. Permission-mode changes affect subsequent admissions, not running jobs.
+
+In Neovim, use `:PiJobs` or `<leader>pj`. Select a job for details:
+
+- `j`: wait for completion; `s`: stop (also works while waiting).
+- `c`: cancel only the join wait, leaving the command running.
+- `o` / `e`: stdout / stderr. Output is read remotely in bounded pages:
+  `n` next, `p` first, `r` refresh from the beginning, `q` close.
+- `r`: refresh details; `l`: return to the list; `q` / Escape: close.
+
+Job controls require session control (`:PiControl`). Running commands have their
+own count in the statusline and overview/session list, separate from subagents.
+Unresolved cleanup is shown separately and continues to block destructive actions.
+Viewing, UI joins/stops, and native user commands never collect an agent result or
+release an interrupt delivery hold. A successful agent join/stop does collect it.
+
+Native Pi offers `/pi-jobs list [offset]`, `status <jobId>`,
+`output <jobId> [stdout|stderr] [byteOffset]`, `join <jobId>`, `stop <jobId>`, and
+`cancel-wait <waitId>` (all prefixed with `/pi-jobs`). Join prints its wait ID and
+leaves commands available. These commands use notifications, not transcript entries.
+
+Interrupt stops the agent before asking whether to stop its background commands.
+No/dismissal leaves jobs running; headless operation does not wait for an answer.
+Automatic completion delivery stays held until an explicit user prompt or agent
+collection. Output and live counts remain available meanwhile. Logs and metadata
+remain inspectable after resume without restarting commands, adopting old PIDs, or
+replaying notifications. A retained side job's output is authorized through its
+parent session and immutable owner manifest; it is not a cross-owner live control.
+
+Rollback checkpoints enroll only explicit `edit`/`write` paths within the task
+workspace, including no-diff edits. Bash-only paths are not enrolled. Checkpoints
+restore whole files: later changes by another actor to an enrolled file may be
+captured and restored too. Existing after-state conflict checks still apply. Active
+or unresolved jobs block rollback and destructive workspace/runtime transitions;
+terminal unread results do not.
+
 ## Access modes
 
 **Reads are unrestricted by default, including credentials and private files.**

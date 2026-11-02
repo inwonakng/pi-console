@@ -49,8 +49,17 @@ function M.session_prefix(node)
 	return pin .. arrow
 end
 
+function M.command_suffix(entry)
+	local suffix = ""
+	local commands, unresolved = tonumber(entry.running_commands) or 0, tonumber(entry.unresolved_commands) or 0
+	if commands > 0 then suffix = suffix .. " · commands " .. commands end
+	if unresolved > 0 then suffix = suffix .. " · unresolved commands " .. unresolved end
+	return suffix
+end
+
 function M.session_suffix(node)
-	return node.running > 0 and not node.expanded and (" · " .. icons.subagent_icon .. " " .. node.running) or ""
+	local suffix = node.running > 0 and not node.expanded and (" · " .. icons.subagent_icon .. " " .. node.running) or ""
+	return suffix .. M.command_suffix(node.entry)
 end
 
 function M.subagent_label(node)

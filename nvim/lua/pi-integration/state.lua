@@ -77,6 +77,8 @@ function M.new()
 		spawn_runs = {},
 		spawn_runs_session_file = nil,
 		spawn_running_count = 0,
+		bash_running_count = 0,
+		bash_unresolved_count = 0,
 		last_updated = nil,
 		transcript_refresh_scheduled = false,
 		pending_transcript_scroll = nil,
