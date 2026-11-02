@@ -7,15 +7,6 @@ function M.completion_context()
 	if active and (vim.fn.getcmdtype() == "@" or vim.fn.getcmdwintype() == "@") then return active end
 end
 
-function M.browse_input(cmp)
-	local context = M.completion_context()
-	if not context or vim.fn.getcmdtype() ~= "@" then return false end
-	context.browse = true
-	cmp.hide()
-	vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "n", false)
-	return true
-end
-
 local function add_recent(directories, path)
 	if type(path) ~= "string" or path:sub(1, 1) ~= "/" or path:find("[%z\r\n]") then return end
 	for i = #directories, 1, -1 do
@@ -56,6 +47,13 @@ function M.owner_input(opts, on_choice)
 	input = function(default)
 		local context = { request = opts.request, current = opts.current }
 		active = context
+		local buf = vim.api.nvim_get_current_buf()
+		local previous = vim.fn.maparg("<C-o>", "c", false, true)
+		local function browse_key()
+			if active ~= context or vim.fn.getcmdtype() ~= "@" then return "<C-o>" end
+			context.browse = true
+			return "<CR>"
+		end
 		local autocmd = vim.api.nvim_create_autocmd("CmdwinEnter", {
 			pattern = "@",
 			callback = function(event)
@@ -75,7 +73,18 @@ function M.owner_input(opts, on_choice)
 		local function cleanup()
 			if active == context then active = nil end
 			if autocmd then vim.api.nvim_del_autocmd(autocmd); autocmd = nil end
+			if vim.api.nvim_buf_is_valid(buf) then
+				vim.api.nvim_buf_call(buf, function()
+					local mapping = vim.fn.maparg("<C-o>", "c", false, true)
+					if mapping.buffer == 1 and mapping.callback == browse_key then
+						vim.keymap.del("c", "<C-o>", { buffer = buf })
+						if previous.buffer == 1 then vim.fn.mapset("c", false, previous) end
+					end
+				end)
+			end
 		end
+		-- Browsing belongs to the prompt, independent of completion's mode hooks.
+		vim.keymap.set("c", "<C-o>", browse_key, { buffer = buf, expr = true, desc = "Browse host directories" })
 		-- The preceding fzf picker can leave insertion pending across native input().
 		vim.cmd("stopinsert")
 		local ok, err = pcall(vim.ui.input, {

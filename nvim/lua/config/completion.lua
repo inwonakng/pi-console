@@ -51,7 +51,6 @@ cmp.setup({
 		enabled = true,
 		keymap = {
 			["<CR>"] = { function(cmp) if is_owner_directory_prompt() then return cmp.accept() end end, "fallback" },
-			["<C-o>"] = { function(cmp) return require("pi-integration.directory-history").browse_input(cmp) end, "fallback" },
 		},
 		sources = {
 			default = function()
