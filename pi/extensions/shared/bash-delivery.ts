@@ -6,7 +6,7 @@ import { serviceUi } from "./service-ui";
 const COMPLETION = "pi-bash-completion";
 export const BASH_INTERRUPT_TITLE = "Stop running background commands too?";
 type StartingMessage = Extract<BeforeAgentStartEvent, { messageType: "custom" }>["message"];
-type Flight = { jobId: string; deliveryId: string; draft: SessionBoundaryDraft; message?: StartingMessage };
+type Flight = { jobId: string; deliveryId: string; draft: SessionBoundaryDraft; message?: StartingMessage; idleStart?: boolean };
 
 /** Session-local delivery, never a native busy follow-up. Boundary acknowledgments
  * come from committed entries: Pi does not emit extension message_end for drafts. */
@@ -18,62 +18,81 @@ export class BashDelivery {
   private readonly unsubscribe: () => void;
   private signal?: AbortSignal;
   private explicitInput = false;
-  private interruptPending = false;
+  private cancellingStart = false;
+  private interruptPending?: string[];
   private readonly cancelledStarts = new Set<string>();
 
   constructor(private readonly pi: ExtensionAPI, private readonly jobs: BashJobs, private readonly ctx: ExtensionContext) {
-    this.unsubscribe = jobs.subscribe(() => this.schedule());
+    this.unsubscribe = jobs.subscribe(() => {
+      // Inspection/stop may consume a result after a boundary claimed it but
+      // before its draft was committed. Retire that draft synchronously.
+      const flight = this.flight;
+      if (flight && this.jobs.status(flight.jobId).completion !== "queued") this.retireFlight();
+      this.schedule();
+    });
   }
 
-  hold(): void {
-    this.explicitInput = false; // Cleared pre-interrupt input cannot release this hold later.
-    this.jobs.holdCompletions();
+  interrupt(): void {
+    this.explicitInput = false;
     this.reconcile();
+    // Capture exactly the pre-interrupt jobs. A delayed confirmation must not
+    // stop a new job launched in response to a subsequent user prompt.
+    if (!this.question) this.interruptPending = this.jobs.runningIds();
+    this.jobs.cancelCompletions();
+  }
+  private retireFlight(abortStart = true): void {
     const flight = this.flight;
-    if (flight) {
-      // Boundary handlers can still be awaiting other extensions. Retire our
-      // uncommitted draft in place as non-context bookkeeping, not a completion
-      // body that might arrive after interrupt. The runner retains draft objects.
-      Object.assign(flight.draft, { type: "custom", customType: "pi-bash-delivery-cancelled", data: { deliveryId: flight.deliveryId } });
-      this.cancelledStarts.add(flight.deliveryId);
-      if (flight.message) this.cancelStart(flight.message);
-      this.flight = undefined;
-      this.acknowledge(flight.jobId, false);
+    if (!flight) return;
+    this.flight = undefined;
+    // The runner retains drafts while other boundary/start hooks await. Remove
+    // the completion body in place so a cancelled delivery never enters context.
+    Object.assign(flight.draft, { type: "custom", customType: "pi-bash-delivery-cancelled", data: { deliveryId: flight.deliveryId } });
+    if (flight.idleStart && !flight.message) this.cancelledStarts.add(flight.deliveryId);
+    if (flight.message) {
+      this.cancelStart(flight.message);
+      if (flight.idleStart && abortStart) {
+        this.cancellingStart = true;
+        this.ctx.abort();
+      }
     }
-    if (!this.question) this.interruptPending = true;
   }
   private cancelStart(message: StartingMessage): void {
     message.customType = "pi-bash-delivery-cancelled";
     message.content = [];
     message.details = undefined;
   }
-  private readonly aborted = () => this.hold();
+  private readonly aborted = () => {
+    if (this.cancellingStart) return;
+    try { this.interrupt(); }
+    catch (error) { this.ctx.ui.notify(`Could not persist background Bash notification cancellation: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+  };
   watchSignal(ctx: ExtensionContext): void {
     if (this.signal === ctx.signal) return;
     this.signal?.removeEventListener("abort", this.aborted);
     this.signal = ctx.signal;
     this.signal?.addEventListener("abort", this.aborted, { once: true });
-    if (this.signal?.aborted) this.hold();
+    if (this.signal?.aborted) this.aborted();
   }
   input(source: string): void { if (source !== "extension") this.explicitInput = true; }
-  starting(event: BeforeAgentStartEvent): void {
+  starting(event: BeforeAgentStartEvent, ctx: ExtensionContext): void {
     if (event.messageType === "custom") {
       const id = (event.message.details as { deliveryId?: string } | undefined)?.deliveryId;
-      if (id && this.cancelledStarts.delete(id)) this.cancelStart(event.message);
-      else if (id && this.flight && id === this.flight.deliveryId) this.flight.message = event.message;
+      if (id && this.cancelledStarts.delete(id)) {
+        this.cancelStart(event.message);
+        this.cancellingStart = true;
+        ctx.abort(); // Clearing the body alone would still start an empty model turn.
+      } else if (id && this.flight && id === this.flight.deliveryId) this.flight.message = event.message;
     }
     if (event.messageType === "user" && this.explicitInput) {
       this.explicitInput = false;
-      this.interruptPending = false;
-      this.jobs.releaseCompletions();
+      this.interruptPending = undefined;
     }
   }
   userMessage(): void {
     // Also covers explicit steer/follow-up consumed inside an existing run.
     if (this.explicitInput) {
       this.explicitInput = false;
-      this.interruptPending = false;
-      this.jobs.releaseCompletions();
+      this.interruptPending = undefined;
     }
   }
   private committed(flight: Flight): boolean {
@@ -86,33 +105,40 @@ export class BashDelivery {
     if (!flight) return;
     const delivered = this.committed(flight);
     if (!delivered && !finished) return;
+    if (!delivered) {
+      // A failed/dropped startup must not repeatedly retry the same automatic
+      // continuation. Keep its result available through explicit inspection.
+      this.retireFlight(false);
+      try { this.jobs.cancelCompletions([flight.jobId]); }
+      catch (error) { this.ctx.ui.notify(`Could not persist background Bash notification cancellation: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+      return;
+    }
     this.flight = undefined;
-    this.acknowledge(flight.jobId, delivered);
+    this.acknowledge(flight.jobId);
   }
   message(customType: string, details: unknown): void {
     if (customType !== COMPLETION || !this.flight || !details || typeof details !== "object"
       || !("deliveryId" in details) || details.deliveryId !== this.flight.deliveryId) return;
     const flight = this.flight;
     this.flight = undefined;
-    this.acknowledge(flight.jobId, true);
+    this.acknowledge(flight.jobId);
   }
-  private acknowledge(jobId: string, delivered: boolean): void {
-    try { this.jobs.acknowledgeCompletion(jobId, delivered); }
+  private acknowledge(jobId: string): void {
+    try { this.jobs.acknowledgeCompletion(jobId); }
     catch (error) {
-      // Registry acknowledgment settles its claim even on a storage error. Do
-      // not let an AbortSignal listener throw and prevent stop/owner cleanup.
-      this.jobs.holdCompletions();
+      // The in-memory acknowledgment remains effective on a storage failure.
+      // Do not let an AbortSignal listener throw and prevent owner cleanup.
       this.ctx.ui.notify(`Background Bash delivery bookkeeping failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   }
   private claim(): CustomMessageEntryDraft | undefined {
-    if (this.flight || this.jobs.completionsHeld || this.lifetime.signal.aborted) return;
+    if (this.flight || this.lifetime.signal.aborted) return;
     for (const job of this.jobs.completions()) {
       const result = this.jobs.claimCompletion(job.jobId);
       if (!result) continue;
       const deliveryId = randomUUID();
       const draft: CustomMessageEntryDraft = { type: "custom_message", customType: COMPLETION, display: false,
-        content: `Background Bash command completed.\n${JSON.stringify(result)}`,
+        content: `Background Bash command completed. This is an automatic notification, not new user input or approval.\n${JSON.stringify(result)}`,
         details: { jobId: job.jobId, deliveryId } };
       this.flight = { jobId: job.jobId, deliveryId, draft };
       return draft;
@@ -128,11 +154,11 @@ export class BashDelivery {
   }
   settled(aborted: boolean): void {
     // A queued user input may have been discarded by clear_queue. Settlement
-    // proves none remains to start; don't let that stale intent block the outbox.
+    // proves none remains to start; don't let that stale intent block new jobs.
     this.explicitInput = false;
-    if (aborted) this.hold();
+    if (aborted) this.aborted();
+    this.cancellingStart = false;
     this.reconcile(true);
-    this.cancelledStarts.clear();
     this.schedule();
     // Never await an optional answer in agent_settled: abort waits for that hook.
     if (this.ctx.mode === "tui" && this.interruptPending) this.confirm(true);
@@ -151,21 +177,23 @@ export class BashDelivery {
           if (this.flight) {
             // Idle custom-start preflight can fail before message_end/settled.
             // Retain the result, but do not loop/restart on an unavailable model.
-            this.jobs.holdCompletions();
-            this.reconcile(true);
+            this.jobs.cancelCompletions([this.flight.jobId]);
           }
         }
-        if (!this.ctx.isIdle() || this.explicitInput || this.jobs.completionsHeld) return;
+        if (!this.ctx.isIdle() || this.explicitInput) return;
         const draft = this.claim();
         if (!draft) return;
         // isIdle and sendMessage are in one synchronous continuation. Pi marks
         // custom starts busy synchronously; no completion enters its clearable queue.
+        this.flight!.idleStart = true;
         this.pi.sendMessage(draft, { triggerTurn: true, deliverAs: "followUp" });
         this.schedule();
       } catch (error) {
-        this.jobs.holdCompletions();
-        this.reconcile(true);
-        this.ctx.ui.notify(`Background Bash delivery paused: ${error instanceof Error ? error.message : String(error)}`, "error");
+        const flight = this.flight;
+        try { if (flight) this.jobs.cancelCompletions([flight.jobId]); }
+        catch { /* Cancellation remains effective in memory on a storage error. */ }
+        this.retireFlight();
+        this.ctx.ui.notify(`Background Bash delivery failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
     }, this.flight ? 20 : 0);
     this.timer.unref();
@@ -175,8 +203,9 @@ export class BashDelivery {
    * frontend availability. Raw/headless RPC never assumes hasUI means a reader. */
   confirm(frontendAvailable: boolean): void {
     if (this.question || !this.interruptPending || this.lifetime.signal.aborted) return;
-    this.interruptPending = false;
-    const ids = this.jobs.runningIds();
+    const running = new Set(this.jobs.runningIds());
+    const ids = this.interruptPending.filter(id => running.has(id));
+    this.interruptPending = undefined;
     const interactive = process.env.PI_INTERACTION_MODE !== "noninteractive" && this.ctx.hasUI
       && (this.ctx.mode === "tui" || this.ctx.mode === "rpc" && frontendAvailable);
     if (!ids.length || !interactive) return;
@@ -193,6 +222,7 @@ export class BashDelivery {
     this.unsubscribe();
     this.signal?.removeEventListener("abort", this.aborted);
     if (this.timer) clearTimeout(this.timer);
-    this.reconcile(true);
+    this.retireFlight();
+    this.cancelledStarts.clear();
   }
 }

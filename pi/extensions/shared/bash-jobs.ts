@@ -29,7 +29,9 @@ export type BashJobLaunch = { kind: "bash_job_started"; jobId: string; managedId
 export type BashJobOutput = { jobId: string; stream: "stdout" | "stderr"; text: string; offset: number; nextOffset: number; totalBytes: number; eof: boolean };
 export type BashJobResult = { kind: "bash_job_result"; job: BashJobSummary; stdout: BashJobOutput; stderr: BashJobOutput };
 export type BashJoinCancelled = { kind: "bash_join_cancelled"; jobId: string };
-export type BashControlResult = BashJobResult | BashJoinCancelled
+export type BashInspectionCancelled = { kind: "bash_inspect_cancelled"; jobId: string };
+export type BashInspectOptions = { wait?: boolean; stdoutOffset?: number; stderrOffset?: number; limit?: number };
+export type BashControlResult = BashJobResult | BashJoinCancelled | BashInspectionCancelled
   | { kind: "bash_job_list"; jobs: BashJobSummary[]; nextOffset: number | null }
   | { kind: "bash_job_status"; job: BashJobSummary }
   | { kind: "bash_job_output"; output: BashJobOutput };
@@ -59,9 +61,8 @@ const OutputSchema = Type.Object({
 export const BashJobResultSchema = Type.Object({ kind: Type.Literal("bash_job_result"), job: SummarySchema, stdout: OutputSchema, stderr: OutputSchema });
 export const BashControlResultSchema = Type.Union([
   Type.Object({ kind: Type.Literal("bash_job_list"), jobs: Type.Array(SummarySchema), nextOffset: Type.Union([Type.Integer(), Type.Null()]) }),
-  Type.Object({ kind: Type.Literal("bash_job_status"), job: SummarySchema }),
-  Type.Object({ kind: Type.Literal("bash_job_output"), output: OutputSchema }), BashJobResultSchema,
-  Type.Object({ kind: Type.Literal("bash_join_cancelled"), jobId: Type.String() }),
+  BashJobResultSchema,
+  Type.Object({ kind: Type.Literal("bash_inspect_cancelled"), jobId: Type.String() }),
 ]);
 
 type Job = {
@@ -144,9 +145,7 @@ export class BashJobs {
   private closing = false;
   private transition = false;
   private shutdownFlight?: Promise<void>;
-  private completionHold = false;
   private readonly collectors = new Map<string, number>();
-  private readonly deliveries = new Map<string, { done: Promise<void>; resolve: () => void }>();
 
   constructor(readonly sessionId: string, private readonly root: string) {
     privateDirectory(root);
@@ -215,7 +214,7 @@ export class BashJobs {
       unresolved: jobs.filter(job => job.meta.state === "unresolved").length };
   }
   assertTransitionAllowed(): void {
-    if (this.activeOrUnresolved()) throw new BashTransitionBlocked("Active or unresolved Bash jobs block this transition. Join or explicitly stop them first.");
+    if (this.activeOrUnresolved()) throw new BashTransitionBlocked("Active or unresolved Bash jobs block this transition. Wait for completion with inspect or explicitly stop them first.");
   }
   /** Synchronous exclusion held across the caller's destructive asynchronous work. */
   beginTransition(): () => void {
@@ -344,8 +343,10 @@ export class BashJobs {
       return { jobId, stream, text: buffer.subarray(0, length).toString("utf8"), offset, nextOffset: offset + length, totalBytes, eof: offset + length === totalBytes };
     } finally { closeSync(fd); }
   }
-  private terminalResult(jobId: string): BashJobResult {
-    return { kind: "bash_job_result", job: this.status(jobId), stdout: this.output(jobId, "stdout"), stderr: this.output(jobId, "stderr") };
+  private result(jobId: string, options: BashInspectOptions = {}): BashJobResult {
+    return { kind: "bash_job_result", job: this.status(jobId),
+      stdout: this.output(jobId, "stdout", options.stdoutOffset, options.limit),
+      stderr: this.output(jobId, "stderr", options.stderrOffset, options.limit) };
   }
   private async wait(jobId: string, signal?: AbortSignal): Promise<BashJobResult | BashJoinCancelled> {
     const job = this.get(jobId);
@@ -355,36 +356,26 @@ export class BashJobs {
     try {
       const outcome = await Promise.race([job.done, cancelled]);
       if (outcome === "cancelled" || signal?.aborted) return { kind: "bash_join_cancelled", jobId };
-      return this.terminalResult(jobId);
+      return this.result(jobId);
     } finally { signal?.removeEventListener("abort", abort); }
   }
-  /** Agent collection reserves before waiting. Automatic delivery and collection
-   * cannot both claim a pending result. A prior delivery must acknowledge (or
-   * abandon) its claim first; cancellation still stops only this wait. */
-  async joinForAgent(jobId: string, signal?: AbortSignal): Promise<BashJobResult | BashJoinCancelled> {
-    this.get(jobId);
+  /** Inspect and, optionally, wait. Returning a terminal result consumes its
+   * notification in the same synchronous step. Subscribers retire an uncommitted
+   * delivery draft before it can become a second completion message. */
+  async inspectForAgent(jobId: string, options: BashInspectOptions = {}, signal?: AbortSignal): Promise<BashJobResult | BashInspectionCancelled> {
+    const job = this.get(jobId);
     this.collectors.set(jobId, (this.collectors.get(jobId) ?? 0) + 1);
     try {
-      const result = await this.wait(jobId, signal);
-      if (result.kind !== "bash_job_result") return result;
-      const delivery = this.deliveries.get(jobId);
-      if (delivery) {
-        let abort!: () => void;
-        const cancelled = new Promise<void>(resolve => { abort = resolve; signal?.addEventListener("abort", abort, { once: true }); });
-        try { if (!signal?.aborted) await Promise.race([delivery.done, cancelled]); }
-        finally { signal?.removeEventListener("abort", abort); }
-      }
-      if (signal?.aborted) return { kind: "bash_join_cancelled", jobId };
-      const job = this.get(jobId);
-      if (!job.restored && !["delivered", "collected"].includes(job.meta.completion)) {
+      if (options.wait) await this.wait(jobId, signal);
+      if (signal?.aborted) return { kind: "bash_inspect_cancelled", jobId };
+      const result = this.result(jobId, options);
+      if (!job.restored && ["terminal", "unresolved"].includes(job.meta.state)
+        && !["delivered", "collected"].includes(job.meta.completion)) {
         const previous = job.meta.completion;
         job.meta.completion = "collected";
         try { this.persist(job); } catch (error) { job.meta.completion = previous; throw error; }
+        result.job.completion = job.meta.completion;
       }
-      // Only a successful agent collection releases the interrupt hold. UI
-      // observation, including observeJoin, never comes through this path.
-      this.completionHold = false;
-      result.job.completion = job.meta.completion;
       return result;
     } finally {
       const remaining = this.collectors.get(jobId)! - 1;
@@ -395,30 +386,45 @@ export class BashJobs {
   /** Frontend viewing/waiting is always observational. No caller-supplied consumer flag. */
   observeJoin(jobId: string, signal?: AbortSignal): Promise<BashJobResult | BashJoinCancelled> { return this.wait(jobId, signal); }
   private async stopOwned(job: Job, reason: "stop" | "owner_shutdown"): Promise<void> {
-    if (!job.restored && (job.meta.state === "starting" || job.meta.state === "running")) {
-      job.meta.stopReason ??= reason;
-      // Stop remains effective even if durable bookkeeping fails.
-      job.admission.abort(); job.lifetime.abort();
-      await job.done;
+    try { this.cancelCompletions([job.meta.jobId]); }
+    finally {
+      if (!job.restored && (job.meta.state === "starting" || job.meta.state === "running")) {
+        job.meta.stopReason ??= reason;
+        // Stop remains effective even if durable bookkeeping fails.
+        job.admission.abort(); job.lifetime.abort();
+        await job.done;
+      }
     }
   }
   async stop(jobId: string): Promise<BashJobResult> {
     await this.stopOwned(this.get(jobId), "stop");
-    return this.terminalResult(jobId);
+    return this.result(jobId);
   }
-  /** Reserve agent collection before requesting stop. Cancellation never revokes
-   * the independently owned cleanup, and cannot consume an unavailable result. */
-  async stopForAgent(jobId: string, signal?: AbortSignal): Promise<BashJobResult | BashJoinCancelled> {
+  /** Cancellation stops only result retrieval; the stop owns its cleanup and
+   * has already cancelled automatic delivery, even if the caller goes away. */
+  async stopForAgent(jobId: string, signal?: AbortSignal): Promise<BashJobResult | BashInspectionCancelled> {
     const job = this.get(jobId);
-    const [result] = await Promise.all([this.joinForAgent(jobId, signal), this.stopOwned(job, "stop")]);
+    const [result] = await Promise.all([this.inspectForAgent(jobId, { wait: true }, signal), this.stopOwned(job, "stop")]);
     return result;
   }
   runningIds(): string[] {
     return [...this.jobs.values()].filter(job => !job.restored && ["starting", "running"].includes(job.meta.state)).map(job => job.meta.jobId);
   }
-  holdCompletions(): void { this.completionHold = true; }
-  releaseCompletions(): void { this.completionHold = false; this.changed(); }
-  get completionsHeld(): boolean { return this.completionHold || this.closing; }
+  /** Cancel notification rights, not execution or stored output. New jobs start
+   * pending as usual; neither user input nor later inspection re-arms old jobs. */
+  cancelCompletions(jobIds = [...this.jobs.keys()]): void {
+    let failure: unknown;
+    for (const id of jobIds) {
+      const job = this.get(id);
+      if (job.restored || !["pending", "queued"].includes(job.meta.completion)) continue;
+      job.meta.completion = "suppressed";
+      // Keep cancellation effective in memory even if storage fails, and fence
+      // every selected job before reporting the error to the caller.
+      try { this.persist(job); } catch (error) { failure ??= error; }
+    }
+    this.changed();
+    if (failure) throw failure;
+  }
   /** The owned outbox is independent of Pi's clearable message queues. */
   completions(): BashJobSummary[] {
     return [...this.jobs.values()].filter(job => !job.restored && ["terminal", "unresolved"].includes(job.meta.state)
@@ -426,27 +432,24 @@ export class BashJobs {
   }
   claimCompletion(jobId: string): BashJobResult | undefined {
     const job = this.get(jobId);
-    if (this.completionsHeld || this.collectors.has(jobId) || job.restored || job.meta.completion !== "pending"
+    if (this.closing || this.collectors.has(jobId) || job.restored || job.meta.completion !== "pending"
       || !["terminal", "unresolved"].includes(job.meta.state)) return;
-    const result = this.terminalResult(jobId); // Obtain output before reserving.
+    const result = this.result(jobId); // Obtain output before reserving.
     job.meta.completion = "queued";
     try { this.persist(job); } catch (error) { job.meta.completion = "pending"; throw error; }
-    let resolve!: () => void;
-    const done = new Promise<void>(finish => { resolve = finish; });
-    this.deliveries.set(jobId, { done, resolve });
     result.job.completion = "queued";
     this.changed();
     return result;
   }
-  acknowledgeCompletion(jobId: string, delivered: boolean): void {
+  acknowledgeCompletion(jobId: string): void {
     const job = this.get(jobId);
-    const delivery = this.deliveries.get(jobId);
-    if (!delivery) return;
-    job.meta.completion = delivered ? "delivered" : "pending";
+    // A late acknowledgment cannot undo inspection, stop, or interruption.
+    if (job.meta.completion !== "queued") return;
+    job.meta.completion = "delivered";
     // A real acknowledgment must never be rolled back in memory on a disk
     // failure: resume suppresses all old notifications regardless of metadata.
     try { this.persist(job); }
-    finally { this.deliveries.delete(jobId); delivery.resolve(); this.changed(); }
+    finally { this.changed(); }
   }
   shutdown(): Promise<void> {
     if (this.shutdownFlight) return this.shutdownFlight;

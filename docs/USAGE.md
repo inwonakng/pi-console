@@ -418,8 +418,11 @@ Every Pi process also has a writable scratch directory, exposed to Bash as
 ## Background commands
 
 The agent can explicitly launch `bash` with `background: true` and use
-`bash_control` to list, inspect, read, join, or stop its jobs. Foreground Bash is
-unchanged. Jobs have independent stdout/stderr logs, survive replies and frontend
+`bash_control` to list, inspect, or stop its jobs. Inspection returns status and
+bounded stdout/stderr together; `wait: true` waits for completion. Reading a
+finished result consumes its pending notification, without a separate join or
+acknowledgment. Otherwise completion automatically notifies the agent once.
+Foreground Bash is unchanged. Jobs have independent stdout/stderr logs, survive replies and frontend
 detach, and stop when their owning runtime ends. No interactive stdin or PTY is
 provided. Permission-mode changes affect subsequent admissions, not running jobs.
 
@@ -434,8 +437,9 @@ In Neovim, use `:PiJobs` or `<leader>pj`. Select a job for details:
 Job controls require session control (`:PiControl`). Running commands have their
 own count in the statusline and overview/session list, separate from subagents.
 Unresolved cleanup is shown separately and continues to block destructive actions.
-Viewing, UI joins/stops, and native user commands never collect an agent result or
-release an interrupt delivery hold. A successful agent join/stop does collect it.
+Viewing and UI/native waits do not consume an agent notification. Explicit stops
+cancel automatic notification, including when the caller cancels its wait for
+cleanup. The agent's inspection of a finished job consumes its notification.
 
 Native Pi offers `/pi-jobs list [offset]`, `status <jobId>`,
 `output <jobId> [stdout|stderr] [byteOffset]`, `join <jobId>`, `stop <jobId>`, and
@@ -444,9 +448,13 @@ leaves commands available. These commands use notifications, not transcript entr
 
 Interrupt stops the agent before asking whether to stop its background commands.
 No/dismissal leaves jobs running; headless operation does not wait for an answer.
-Automatic completion delivery stays held until an explicit user prompt or agent
-collection. Output and live counts remain available meanwhile. Logs and metadata
-remain inspectable after resume without restarting commands, adopting old PIDs, or
+Interrupt permanently cancels automatic continuations for jobs already started,
+including notifications that are pending or whose jobs finish later. New user
+input does not re-enable them; newly launched jobs notify normally. Jobs, output,
+and live counts remain inspectable. A job with `completion: suppressed` has its
+notification cancelled, not necessarily its process stopped: its execution state
+still reports whether it is running or finished. Logs and metadata remain
+inspectable after resume without restarting commands, adopting old PIDs, or
 replaying notifications. A retained side job's output is authorized through its
 parent session and immutable owner manifest; it is not a cross-owner live control.
 

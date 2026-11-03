@@ -216,8 +216,8 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     if (cancelled) wait!.controller.abort();
     return { bash: { kind: "bash_wait_cancelled", invocationId, cancelled } };
   });
-  // User commands are observational, even in the native TUI: they must not
-  // collect agent completions or release an interrupt delivery hold.
+  // User viewing/waiting is observational: it does not consume the agent's
+  // notification. Explicit stops cancel delivery as well as stopping the job.
   pi.registerCommand("pi-jobs", { description: "Bash jobs: list [offset], status/output/join/stop <jobId>, cancel-wait <waitId>", handler: async (args, ctx) => {
     const [action = "list", jobId, stream = "stdout", offset = "0"] = args.trim().split(/\s+/).filter(Boolean);
     try {
@@ -247,7 +247,7 @@ export default function accessModeExtension(pi: ExtensionAPI) {
   } });
   registerPermissionHistory(pi);
   pi.on("input", (event) => { delivery?.input(event.source); });
-  pi.on("before_agent_start", (event) => { delivery?.starting(event); });
+  pi.on("before_agent_start", (event, ctx) => { delivery?.starting(event, ctx); delivery?.watchSignal(ctx); });
   pi.on("agent_start", (_event, ctx) => { delivery?.watchSignal(ctx); });
   pi.on("message_start", (event) => { if (event.message.role === "user") delivery?.userMessage(); });
   pi.on("message_end", (event) => {
@@ -260,7 +260,7 @@ export default function accessModeExtension(pi: ExtensionAPI) {
   registerServiceOperation(pi, "bash.interrupt", async ({ phase, frontendAvailable }, ctx) => {
     if (!delivery) return;
     if (phase === "hold") {
-      try { delivery.hold(); } finally { ctx.abort(); }
+      try { delivery.interrupt(); } finally { ctx.abort(); }
     } else delivery.confirm(frontendAvailable);
     return { changed: true };
   });
@@ -354,13 +354,13 @@ export default function accessModeExtension(pi: ExtensionAPI) {
     ...defaultBash,
     label: "bash (sandboxed)",
     executionMode: "sequential",
-    description: `${defaultBash.description} With background=true, returns an owned job launch receipt instead of command output; use bash_control to inspect or collect it. Reads are unrestricted by default. Temporary space and configured write paths are writable without approval; edit mode also allows workspace writes. Request additional writePaths before execution, and narrow readPaths only when read access is configured to be restricted. networkAccess requests outbound access to any host, approved once or for this conversation without lifting filesystem restrictions. workspaceWriteAccess requests writing the current directory. unixSocketPaths requests path-scoped Unix-socket binding and connections on macOS while retaining other sandbox restrictions. If granular sandbox permissions cannot support the operation, request unsandboxed for unrestricted access, approved once or for this session: the exact command/CWD, any command from this CWD, or any command from any CWD. Normally sandboxed commands remain sandboxed. Use timeout for short diagnostic probes or a user-requested execution deadline; omit it otherwise. Execution deadlines start after approvals. When Git SSH fails because of sandbox proxy authentication, request one-time unsandboxed execution of the exact Git command.`,
+    description: `${defaultBash.description} With background=true, returns an owned job launch receipt instead of command output. Completion notifies the agent automatically; bash_control inspect returns status/output and consumes a finished result. Reads are unrestricted by default. Temporary space and configured write paths are writable without approval; edit mode also allows workspace writes. Request additional writePaths before execution, and narrow readPaths only when read access is configured to be restricted. networkAccess requests outbound access to any host, approved once or for this conversation without lifting filesystem restrictions. workspaceWriteAccess requests writing the current directory. unixSocketPaths requests path-scoped Unix-socket binding and connections on macOS while retaining other sandbox restrictions. If granular sandbox permissions cannot support the operation, request unsandboxed for unrestricted access, approved once or for this session: the exact command/CWD, any command from this CWD, or any command from any CWD. Normally sandboxed commands remain sandboxed. Use timeout for short diagnostic probes or a user-requested execution deadline; omit it otherwise. Execution deadlines start after approvals. When Git SSH fails because of sandbox proxy authentication, request one-time unsandboxed execution of the exact Git command.`,
     outputSchema: Type.Union([Type.Intersect([defaultBash.outputSchema!, Type.Object({
       sandbox_blocked: Type.Optional(Type.Boolean({ description: "The sandbox detected denied access; output may be partial even when exit_code is zero." })),
     })]), BashJobLaunchSchema]),
     parameters: Type.Object({
       ...defaultBash.parameters.properties,
-      background: Type.Optional(Type.Boolean({ description: "Start an owned background command after approval. Returns a job identity, not an exit code. Use bash_control to inspect, join, or explicitly stop it. No stdin or PTY; the job survives turn cancellation and frontend detach until its owner ends." })),
+      background: Type.Optional(Type.Boolean({ description: "Start an owned background command after approval. Returns a job identity, not an exit code. Use bash_control inspect to read status/output or wait, and stop to terminate it. No stdin or PTY; the job survives turn cancellation and frontend detach until its owner ends." })),
       timeout: Type.Optional(Type.Number({
         description: "Harness-enforced execution deadline in seconds, starting after approvals. Set for diagnostic probes expected to finish quickly or when the user requests a deadline; omit otherwise.",
       })),
@@ -430,12 +430,14 @@ export default function accessModeExtension(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "bash_control", label: "Bash jobs", executionMode: "parallel",
-    description: "Control this session's owned background Bash commands. list/status/output are observational. join waits without stopping the command; cancellation stops only that wait. An agent join or stop collects its completion. stop waits for managed descendant cleanup and reports unresolved ownership truthfully. Supervision is best-effort, not containment of arbitrary escaped descendants. Output uses bounded byte-offset pages (at most 16 KiB/2000 lines); full stdout and stderr remain in owned durable logs. Restored jobs are inspection-only: no PID adoption or restart.",
+    description: "Control this session's owned background Bash commands. list shows running and historical jobs. inspect returns status plus bounded stdout/stderr; wait=true waits for completion without stopping the command. Reading a terminal result consumes its pending notification; no separate acknowledgment is needed. Completion otherwise notifies the agent automatically once. Interrupt cancels automatic notifications for existing jobs, not the jobs or their logs; later user input does not re-enable them. New jobs notify normally. completion=suppressed means automatic notification is cancelled, not that the process stopped. Cancelling inspection stops only its wait. stop terminates the job, waits for managed descendant cleanup, and prevents a later completion notification. Supervision is best-effort, not containment of arbitrary escaped descendants. Output uses independent stdoutOffset/stderrOffset byte-offset pages (at most 16 KiB/2000 lines each); full logs remain available. Restored jobs are inspection-only: no PID adoption or restart.",
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("list"), Type.Literal("status"), Type.Literal("output"), Type.Literal("join"), Type.Literal("stop")]),
+      action: Type.Union([Type.Literal("list"), Type.Literal("inspect"), Type.Literal("stop")]),
       jobId: Type.Optional(Type.String()),
-      stream: Type.Optional(Type.Union([Type.Literal("stdout"), Type.Literal("stderr")])),
-      offset: Type.Optional(Type.Integer({ minimum: 0 })),
+      wait: Type.Optional(Type.Boolean({ description: "inspect only: wait for completion. Cancellation leaves the job running." })),
+      stdoutOffset: Type.Optional(Type.Integer({ minimum: 0 })),
+      stderrOffset: Type.Optional(Type.Integer({ minimum: 0 })),
+      offset: Type.Optional(Type.Integer({ minimum: 0, description: "list pagination offset" })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16384 })),
     }),
     outputSchema: BashControlResultSchema,
@@ -443,12 +445,13 @@ export default function accessModeExtension(pi: ExtensionAPI) {
       const jobs = bashJobs(ctx);
       if (params.action !== "list" && !params.jobId) throw new Error("jobId is required");
       const result: BashControlResult = params.action === "list" ? jobs.list(params.offset, params.limit)
-        : params.action === "status" ? { kind: "bash_job_status" as const, job: jobs.status(params.jobId!) }
-        : params.action === "output" ? { kind: "bash_job_output" as const, output: jobs.output(params.jobId!, params.stream ?? "stdout", params.offset, params.limit) }
-        : params.action === "join" ? await jobs.joinForAgent(params.jobId!, signal)
+        : params.action === "inspect" ? await jobs.inspectForAgent(params.jobId!, {
+          wait: params.wait, stdoutOffset: params.stdoutOffset, stderrOffset: params.stderrOffset, limit: params.limit,
+        }, signal)
         : await jobs.stopForAgent(params.jobId!, signal);
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, structuredContent: result,
-        isError: result.kind === "bash_job_result" && (result.job.cleanup === "unresolved" || result.job.sandboxBlocked || result.job.error !== undefined || result.job.signal !== null || result.job.exitCode !== 0) };
+        isError: result.kind === "bash_job_result" && ["terminal", "unresolved"].includes(result.job.state)
+          && (result.job.cleanup === "unresolved" || result.job.sandboxBlocked || result.job.error !== undefined || result.job.signal !== null || result.job.exitCode !== 0) };
     },
   });
 
