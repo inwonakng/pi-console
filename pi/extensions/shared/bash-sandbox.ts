@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createManagedBash, type ManagedBashHooks } from "./managed-bash";
+import { LinuxSessionNetwork } from "../../scripts/linux-session-network.mjs";
 import { shutdownBashJobs } from "./bash-jobs";
 import { withRepositoryMutation, subagentProtectedRoots } from "./subagent-state";
 import { childWorkspaceWriteBlock } from "./workspace-policy";
@@ -31,7 +32,9 @@ const sandboxEnvironment = [
   "GRPC_PROXY", "grpc_proxy", "FTP_PROXY", "ftp_proxy", "RSYNC_PROXY",
   "DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "GIT_SSH_COMMAND",
 ].map((name) => `export ${name}="\${${name}//localhost:/127.0.0.1:}";`).join(" ")
-  + " export CLOUDSDK_PROXY_ADDRESS=127.0.0.1 NO_PROXY= no_proxy=;";
+  + (process.platform === "linux"
+    ? " export CLOUDSDK_PROXY_ADDRESS=127.0.0.1 NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1;"
+    : " export CLOUDSDK_PROXY_ADDRESS=127.0.0.1 NO_PROXY= no_proxy=;");
 
 export type BashLifetime = { signal: AbortSignal; hooks: ManagedBashHooks };
 type ExecutionOptions = Parameters<BashOperations["exec"]>[2] & { lifetime?: BashLifetime };
@@ -48,6 +51,7 @@ type BashState = {
   config?: SandboxRuntimeConfig;
   runtime?: SandboxRuntime;
   macosDenialMonitor: boolean;
+  network?: LinuxSessionNetwork;
 };
 // Cache-disabled extension entrypoints must share admission, preparation AND
 // lifetime ownership. A preparation mutex is not an execution-idle barrier.
@@ -220,6 +224,7 @@ async function runSandboxed(
   try {
     const prepared = await withPreparation(async () => {
       assertAuthority();
+      state.network?.assertAlive();
       if (options.signal?.aborted) throw new Error("aborted");
       manager().registerCommandNetworkLists(commandId, { allowedDomains });
       registered = true;
@@ -232,8 +237,9 @@ async function runSandboxed(
         if (process.platform === "darwin") manager().updateConfig({ ...previousConfig,
           network: { ...previousConfig.network, allowUnixSockets: [...unixSocketPaths] } });
         try {
+          const config = { filesystem, ...(state.network ? { linuxSessionNetwork: state.network.namespace } : {}) };
           const wrapped = await manager().wrapWithSandbox(`${sandboxEnvironment} ${command}`, undefined,
-            { filesystem }, options.signal, { commandId, commandText: command });
+            config, options.signal, { commandId, commandText: command });
           wrappedCommand = true;
           return { wrapped };
         } catch (error) { return { error }; }
@@ -267,7 +273,10 @@ async function runSandboxed(
     try {
       // Preparation may await proxy/sandbox setup. Consume delegated one-use
       // authority only at the actual process boundary, never while prompting.
-      const result = await launchManaged(wrapped, cwd, { ...options, env }, assertAuthority, async () => {
+      const result = await launchManaged(wrapped, cwd, { ...options, env }, () => {
+        assertAuthority();
+        state.network?.assertAlive();
+      }, async () => {
         assertAuthority();
         for (const authorization of authorizations) await authorization.validate();
         await admit();
@@ -458,6 +467,16 @@ export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void
       // The initial-policy filesystem monitor is diagnostic, not enforcement.
       state.macosDenialMonitor = process.platform === "darwin" && settings?.["macos-denial-monitor"] === true;
       await manager().initialize(state.config, undefined, process.platform !== "darwin" || state.macosDenialMonitor);
+      if (process.platform === "linux") {
+        if (!await manager().waitForNetworkInitialization()) throw new Error("Sandbox proxy initialization failed");
+        try {
+          state.network = await LinuxSessionNetwork.start(manager().getLinuxHttpSocketPath(), manager().getLinuxSocksSocketPath());
+        } catch (error) {
+          // Retain a failed-start owner too if its managed cleanup is unresolved.
+          if (error instanceof Error && "network" in error && error.network instanceof LinuxSessionNetwork) state.network = error.network;
+          throw error;
+        }
+      }
       if (state.macosDenialMonitor) await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
     } catch (error) {
       const sandboxError = error instanceof Error ? error.message : String(error);
@@ -469,6 +488,10 @@ export async function initializeBashSandbox(ctx: ExtensionContext): Promise<void
 
 /** Caller holds the true-idle barrier, never just the preparation mutex. */
 async function resetIdleSandbox(): Promise<void> {
+  // Workloads are already quiescent. Stop their shared bridges before resetting
+  // the host-side proxy sockets; retain ownership if cleanup cannot be proved.
+  await state.network?.close();
+  state.network = undefined;
   if (state.runtime?.SandboxManager.isSandboxingEnabled()) await state.runtime.SandboxManager.reset();
   const scratch = getScratchDirectory();
   if (scratch) rmSync(scratch, { recursive: true, force: true });
