@@ -1203,7 +1203,6 @@ export default function spawnExtension(pi: ExtensionAPI) {
   const eventQueue = new Map<string, { run: SpawnRun; content: string; details: Record<string, unknown> }>();
   let runtimeContext: ExtensionContext | undefined;
   let compacting = false;
-  let parentActive = false;
 
   // Runtime records are authoritative. Reconcile at every model boundary,
   // including automatic compaction retries, without a new turn or transcript row.
@@ -1252,22 +1251,36 @@ export default function spawnExtension(pi: ExtensionAPI) {
   const signalChange = (run: SpawnRun) => {
     for (const changed of [...run.changed]) changed();
   };
-  const flushEvents = () => {
-    if (retired || compacting || !runtimeContext || (!runtimeContext.isIdle() && !parentActive)) return;
+  const consumeEvents = (run: SpawnRun) => {
     for (const [key, event] of eventQueue) {
-      // Model-tool joins deliver these events in their result. Commands only
-      // display a summary, so their events must still wake an idle parent.
-      if ([...pendingJoins].some((join) => join.delivery === "tool" && join.runIds.has(event.run.id))) continue;
+      if (event.run !== run) continue;
       eventQueue.delete(key);
-      if (event.run.cancellationRequested || event.run.deliveredEvents.includes(key)) continue;
-      event.run.deliveredEvents.push(key);
-      writeStatus(event.run);
-      // Pi queues followUp while busy and starts a custom (not user) run while
-      // idle. No poll, reminder, sendUserMessage, or overlapping prompt.
-      pi.sendMessage({ customType: "spawn_event", content: event.content, display: false,
-        details: { ...event.details, eventId: key, version: 1, sender: { kind: "worker", id: event.run.id } },
-      }, { triggerTurn: true, deliverAs: "followUp" });
+      run.deliveredEvents.push(key);
     }
+    writeStatus(run);
+  };
+  const flushEvents = () => {
+    // Leave busy notifications retractable here, not in Pi's follow-up queue.
+    // Defer past agent_settled: Pi defers custom starts inside that hook, so an
+    // idle check there cannot prevent several stale starts from being queued.
+    setImmediate(() => {
+      if (retired || compacting || !runtimeContext?.isIdle()) return;
+      for (const [key, event] of eventQueue) {
+        // Model-tool joins deliver these events in their result. Commands only
+        // display a summary, so their events must still wake an idle parent.
+        if ([...pendingJoins].some((join) => join.delivery === "tool" && join.runIds.has(event.run.id))) continue;
+        eventQueue.delete(key);
+        if (event.run.cancellationRequested || event.run.closing || event.run.deliveredEvents.includes(key)) continue;
+        event.run.deliveredEvents.push(key);
+        writeStatus(event.run);
+        // An idle custom start marks Pi busy synchronously. Deliver only one;
+        // the parent can consume the remaining events through its tools.
+        pi.sendMessage({ customType: "spawn_event", content: event.content, display: false,
+          details: { ...event.details, eventId: key, version: 1, sender: { kind: "worker", id: event.run.id } },
+        }, { triggerTurn: true, deliverAs: "followUp" });
+        return;
+      }
+    });
   };
   const queueEvent = (run: SpawnRun, key: string, content: string) => {
     signalChange(run);
@@ -1294,8 +1307,6 @@ export default function spawnExtension(pi: ExtensionAPI) {
       ? pi.getAllTools().find((tool) => tool.name === "spawn")?.promptGuidelines ?? []
       : [];
     runtimeContext = ctx;
-    parentActive = true;
-    flushEvents();
   });
 
   pi.on("session_start", (_event, ctx) => {
@@ -1334,7 +1345,6 @@ export default function spawnExtension(pi: ExtensionAPI) {
     runs.clear();
     runtimeContext = ctx;
     compacting = false;
-    parentActive = false;
     eventQueue.clear();
     registerSubagentRuntime(owner, () => Array.from(runs.values()).some((run) => !run.settled || run.status === "running" || run.joinRequested || run.cleanupError || ownsWriter(run)), historyBlockReason,
       () => [...new Set([...runs.values()].filter(ownsWriter).flatMap((run) => run.protectedRoots ?? [run.childCwd]))]);
@@ -1367,7 +1377,6 @@ export default function spawnExtension(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async (event) => {
-    parentActive = false;
     if (!retired && event.aborted) await cancelRuns();
     else flushEvents();
   });
@@ -1588,12 +1597,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       if (delivery === "tool") {
         // Consume only after collection succeeds. Failed joins leave events
         // queued for automatic delivery once the tool stops owning them.
-        for (const [key, event] of eventQueue) {
-          if (!join.runIds.has(event.run.id)) continue;
-          eventQueue.delete(key);
-          event.run.deliveredEvents.push(key);
-          writeStatus(event.run);
-        }
+        for (const run of selected) consumeEvents(run);
       }
       publishSpawnStatus();
       return result;
@@ -2771,6 +2775,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
           // Resolve durably before releasing the child; never retry an ambiguous
           // transport write and deliver the same answer twice.
           request.state = "answered";
+          eventQueue.delete(request.id);
           request.resolvedAt = new Date().toISOString();
           request.reply = { sender: { kind: "parent", id: run.parentId }, text: params.message };
           const dialog = run.pendingDialog;
@@ -2797,6 +2802,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
             || (writer ? !run.settled || !!run.cleanupError || !run.childSessionFile || !run.launch || !record?.retained || isWorkspaceFinalized(record) || !!record.managedCleanupPending
               : run.settled || !run.resume)) throw new Error("Followup requires an idle, unaccepted conversational worker and its current assignment ID. Later implementation tasks require a new worker.");
           if (writer && getAccessMode() !== "edit" && getAccessMode() !== "full") throw new Error("Corrections require parent edit or full access mode");
+          consumeEvents(run);
           run.assignments.push(newAssignment(params.message));
           run.execution = "working";
           run.joined = false;
@@ -2866,8 +2872,10 @@ export default function spawnExtension(pi: ExtensionAPI) {
           const patch = run.settled && !run.cleanupError ? worktreeInfo(run)?.patchPath : undefined;
           return { content: [{ type: "text", text: patch && existsSync(patch) ? truncateText(readFileSync(patch, "utf8"), 24000) : "No prepared recovery patch. Inspection does not snapshot or integrate live workers." }], details: artifactDetails(run) };
         }
+        const summary = resultSummary(run);
+        consumeEvents(run);
         publishSpawnStatus();
-        return { content: [{ type: "text", text: resultSummary(run) }], details: artifactDetails(run) };
+        return { content: [{ type: "text", text: summary }], details: artifactDetails(run) };
       }
 
       if (params.action === "stop") {
