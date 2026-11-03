@@ -36,13 +36,20 @@ local function add_message_separator(lines, has_body)
 end
 
 local function remove_trailing_blank(lines)
-	if lines[#lines] == "" then
+	while lines[#lines] and lines[#lines]:match("^%s*$") do
 		table.remove(lines)
 	end
 end
 
 local function is_trace_like(kind)
 	return kind == "tool" or kind == "thinking" or kind == "skill"
+end
+
+local function ensure_trace_gap(lines, previous_kind)
+	remove_trailing_blank(lines)
+	if not is_trace_like(previous_kind) then
+		table.insert(lines, "")
+	end
 end
 
 local function format_integer(value)
@@ -212,8 +219,8 @@ local function append_assistant_blocks(ctx, lines, items, message, has_body, opt
 		if not previous_kind and not appended and options.continue_trace then
 			previous_kind = options.previous_kind
 		end
-		if is_trace_like(kind) and is_trace_like(previous_kind) then
-			remove_trailing_blank(lines)
+		if is_trace_like(kind) and previous_kind then
+			ensure_trace_gap(lines, previous_kind)
 		elseif previous_kind and lines[#lines] ~= "" then
 			table.insert(lines, "")
 		end
@@ -456,10 +463,8 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 
 	local function ensure_assistant_block()
 		if assistant_block_open then
-			if has_body and is_trace_like(last_rendered_kind) then
-				remove_trailing_blank(lines)
-			elseif last_rendered_kind and lines[#lines] ~= "" then
-				table.insert(lines, "")
+			if last_rendered_kind then
+				ensure_trace_gap(lines, last_rendered_kind)
 			end
 			return false
 		end
