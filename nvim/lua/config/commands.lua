@@ -117,4 +117,4 @@ end, { desc = "Show pi-console client log" })
 
 vim.api.nvim_create_user_command("PiUsage", function()
 	require("pi-integration").show_usage()
-end, { desc = "Show Claude or OpenAI Codex usage limits" })
+end, { desc = "Show OpenAI Codex usage limits" })

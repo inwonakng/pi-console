@@ -42,7 +42,7 @@ export const BUNDLED_SOURCES = {
   "side.open": "side.ts", "side.prompt": "side.ts", "side.draft": "side.ts", "side.reset": "side.ts", "side.abort": "side.ts",
   "bash.list": "access-mode.ts", "bash.status": "access-mode.ts", "bash.join": "access-mode.ts", "bash.stop": "access-mode.ts", "bash.cancel-wait": "access-mode.ts",
   "spawn.join": "spawn.ts", "spawn.stop": "spawn.ts", "title.generate": "auto-title.ts",
-  "notifications.set": "notifications.ts", "usage.refresh": "provider-usage.ts",
+  "notifications.set": "notifications.ts", "usage.refresh": "codex-usage.ts",
 } as const;
 export const OPERATION_RESULT = "pi-console-operation-result";
 export const operationCommand = (operation: BundledOperation["operation"]): string => `pi-console-${operation.replaceAll(".", "-")}`;

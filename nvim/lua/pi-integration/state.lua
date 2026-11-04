@@ -110,7 +110,7 @@ function M.new()
 		todo_status = nil,
 		todo_tool_output_id = nil,
 		notification_status = nil,
-		provider_usage = nil,
+		codex_usage = nil,
 	}
 end
 

@@ -674,7 +674,7 @@ local function update_status_state()
 		if pi_state.thinkingLevel then initial.thinkingLevel = nil end
 		if conversation and conversation.stats then initial.sessionStats = nil end
 	end
-	state.provider_usage = status_data("pi-provider-usage")
+	state.codex_usage = status_data("pi-codex-usage")
 	state.bash_running_count = tonumber(owner and owner.runningCommands) or 0
 	state.bash_unresolved_count = tonumber(owner and owner.unresolvedCommands) or 0
 	state.spawn_running_count = 0
@@ -2539,11 +2539,9 @@ function M.show_usage()
 		fields(lines, data.tokens, { { "input", "Input tokens" }, { "output", "Output tokens" },
 			{ "cacheRead", "Cache read tokens" }, { "cacheWrite", "Cache write tokens" }, { "total", "Total tokens" } })
 		fields(lines, data.contextUsage, { { "tokens", "Context tokens" }, { "contextWindow", "Context window" }, { "percent", "Context used (%)" } })
-		local usage = state.provider_usage
-		if usage and usage.provider ~= state.provider then usage = nil end
-		local label = state.provider == "anthropic" and "Claude" or "Codex"
-		fields(lines, usage, { { "stale", label .. " usage stale" }, { "error", label .. " usage error" } })
-		if usage and usage.updatedAt then table.insert(lines, label .. " updated: " .. os.date("%Y-%m-%d %H:%M:%S", usage.updatedAt)) end
+		local usage = status_data("pi-codex-usage")
+		fields(lines, usage, { { "stale", "Codex usage stale" }, { "error", "Codex usage error" } })
+		if usage and usage.updatedAt then table.insert(lines, "Codex updated: " .. os.date("%Y-%m-%d %H:%M:%S", usage.updatedAt)) end
 		for _, window in ipairs({ { "fiveHour", "Five-hour" }, { "weekly", "Weekly" } }) do
 			local value = usage and usage.windows and usage.windows[window[1]]
 			if value then

@@ -196,12 +196,11 @@ local function current_model_statusline_label(ctx)
 	return model
 end
 
-local function provider_limits_statusline_label(state)
-	local usage = state.provider_usage
-	if type(usage) ~= "table" or usage.provider ~= state.provider then
+local function codex_limits_statusline_label(state)
+	if state.provider ~= "openai-codex" or type(state.codex_usage) ~= "table" then
 		return ""
 	end
-	local windows = usage.windows
+	local windows = state.codex_usage.windows
 	if type(windows) ~= "table" then
 		return ""
 	end
@@ -374,7 +373,7 @@ function M.render(ctx)
 	local model_label = status_delimiter .. current_model_statusline_label(ctx)
 	local thinking_level = current_thinking_level_label(state)
 	local thinking_label = thinking_level and (" [" .. thinking_level .. "]") or ""
-	local limits_text = provider_limits_statusline_label(state)
+	local limits_text = codex_limits_statusline_label(state)
 	local stats_text, stats_statusline = format_session_stats(state)
 	local width = vim.api.nvim_win_get_width(state.status_win)
 	local mode_width = vim.fn.strdisplaywidth(mode_label)

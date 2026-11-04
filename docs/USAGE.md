@@ -259,16 +259,11 @@ separately installed extension.
 </details>
 
 <details>
-<summary>Claude and OpenAI Codex usage</summary>
+<summary>OpenAI Codex usage</summary>
 
-The statusline shows remaining five-hour and weekly subscription quotas for the
-active provider. Usage refreshes on startup/reload, model changes, after agent
-responses, and every minute. Use `<leader>pu` to refresh and inspect usage and
-reset times.
-
-Claude usage requires a Pro/Max OAuth login through Pi, not an API key. Its usage
-endpoint is undocumented; failures appear in the usage view, and rate-limited
-requests wait before retrying.
+A quick way to check how much Codex quota is left before starting another task.
+It shows the remaining five-hour and weekly quotas, when they reset, and how
+long until then.
 
 ![OpenAI Codex usage view showing remaining quotas and reset times](../assets/codex-usage.png)
 
@@ -554,7 +549,7 @@ project's decision. Trust setup errors leave agent work blocked.
 ## Bundled Pi extensions
 
 The console includes access controls, session history and branching, automatic
-titles, notifications, and Claude/Codex usage. It also includes subagent and workspace
+titles, notifications, and Codex usage. It also includes subagent and workspace
 tools, but those tools are disabled by default.
 
 To enable them, merge this into `~/.pi/agent/settings.json` and restart:
