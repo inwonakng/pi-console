@@ -23,7 +23,7 @@ M.specs = {
 		{ lhs = "<leader>pR", action = "restart", desc = "Restart conversation worker" },
 		{ lhs = "<leader>pt", action = "show_transcript", desc = "Show Pi transcript" },
 		{ lhs = "<leader>pl", action = "show_logs", desc = "Show Pi logs" },
-		{ lhs = "<leader>pu", action = "show_usage", desc = "Show Codex usage" },
+		{ lhs = "<leader>pu", action = "show_usage", desc = "Show provider usage" },
 		{ lhs = "<leader>ps", action = "pick_spawn", desc = "Show subagents" },
 		{ lhs = "<leader>pj", action = "pick_jobs", desc = "Show Bash jobs" },
 		{ lhs = "<leader>pS", action = "steer", desc = "Steer active Pi run" },
