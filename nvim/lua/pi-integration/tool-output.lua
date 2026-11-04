@@ -920,7 +920,9 @@ function M.summary_highlight(state, output_id)
 	if not output then
 		return "PiToolQuote"
 	end
-	if output.name == "edit" or output.name == "write" then
+	if output.name == "bash" then
+		return "PiToolBashQuote"
+	elseif output.name == "edit" or output.name == "write" then
 		return "PiToolEditQuote"
 	elseif output.name == "workspace" then
 		return "PiToolWorkspaceQuote"
@@ -1046,6 +1048,20 @@ local function highlight_codemode(buf, source_end, output_start, text)
 	end)
 end
 
+local function highlight_bash(buf, first, last, column)
+	-- Mixed command/output syntax must use Vim regions rather than a whole-buffer parser.
+	vim.treesitter.stop(buf)
+	vim.api.nvim_buf_call(buf, function()
+		vim.b[buf].current_syntax = nil
+		vim.b[buf].is_bash = true
+		vim.cmd("syntax include @PiBashCommand syntax/sh.vim")
+		vim.cmd("syntax region PiBashCommand start=/\\%" .. first .. "l\\%" .. column
+			.. "c/ end=/\\%" .. (last + 1) .. "l/ contains=@PiBashCommand keepend")
+		vim.cmd("syntax sync fromstart")
+		vim.b[buf].current_syntax = "pi_bash"
+	end)
+end
+
 local function historical_workspace_review(output)
 	if output.name ~= "workspace" or output.is_error then
 		return nil
@@ -1120,6 +1136,7 @@ function M.open_float(ctx, output_id, resolved)
 		rendered_text, full_output_note = codemode_output(output)
 		rendered_filetype = "text"
 	end
+	local bash = output.display and output.display.kind == "bash" and output.display.command
 	local workspace_review = not pending and historical_workspace_review(output) or nil
 	vim.api.nvim_set_option_value("filetype", rendered_filetype or output.filetype or "text", { buf = buf })
 	local content_lines = vim.split(rendered_text or "", "\n", { plain = true })
@@ -1130,6 +1147,7 @@ function M.open_float(ctx, output_id, resolved)
 	end
 	local path = output_path(output)
 	local source_end, output_start
+	local command_start, command_end, command_column
 	if output.name == "codemode" then
 		local args = type(output.args) == "table" and output.args or {}
 		local code = type(args.code) == "string" and args.code or "Source unavailable."
@@ -1148,14 +1166,16 @@ function M.open_float(ctx, output_id, resolved)
 		local rendered = { "Path: " .. path_for_display(state, path), "" }
 		vim.list_extend(rendered, content_lines)
 		content_lines = rendered
-	elseif output.display and output.display.kind == "bash" and output.display.command then
-		local command_lines = vim.split(output.display.command, "\n", { plain = true })
+	elseif bash then
+		local command_lines = vim.split(bash, "\n", { plain = true })
 		local rendered = {}
 		if #command_lines == 1 then
 			table.insert(rendered, "$ " .. command_lines[1])
+			command_start, command_end, command_column = 1, 1, 3
 		else
 			table.insert(rendered, "$ <<'COMMAND'")
 			vim.list_extend(rendered, command_lines)
+			command_start, command_end, command_column = 2, #rendered, 1
 			table.insert(rendered, "COMMAND")
 		end
 		table.insert(rendered, "")
@@ -1165,12 +1185,16 @@ function M.open_float(ctx, output_id, resolved)
 	if output.owner_full_error and output.name ~= "codemode" then
 		local fallback = vim.split(output.owner_full_error, "\n", { plain = true })
 		table.insert(fallback, "")
+		if command_start then
+			command_start, command_end = command_start + #fallback, command_end + #fallback
+		end
 		vim.list_extend(fallback, content_lines)
 		content_lines = fallback
 	end
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, content_lines)
 	if workspace_review then require("pi-integration.workspace-summary").highlight(buf) end
 	if source_end then highlight_codemode(buf, source_end, output_start, rendered_text) end
+	if command_start then highlight_bash(buf, command_start, command_end, command_column) end
 	if permission then
 		require("pi-integration.permission-output").highlight(buf, permission)
 		width = 48
