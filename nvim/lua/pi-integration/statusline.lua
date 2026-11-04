@@ -602,21 +602,45 @@ local function single_line(value)
 	return tostring(value or ""):gsub("[%c]", " ")
 end
 
+local connection_highlights = { connected = "PiStatusGood", connecting = "PiStatusPending", disconnected = "PiStatusError" }
+local client_highlights = {
+	active = "PiStatusGood", ["view only"] = "PiStatusViewOnly",
+	starting = "PiStatusPending", ["session checking"] = "PiStatusPending", ["session attaching"] = "PiStatusPending",
+	["session restoring"] = "PiStatusPending", Reconnecting = "PiStatusPending", ["Stopping session..."] = "PiStatusPending",
+	["session failed"] = "PiStatusError", ["session unavailable"] = "PiStatusError", ["stop outcome unknown"] = "PiStatusError",
+}
+
+local function project_name(state)
+	local project = state.workspace and state.workspace.project
+	if type(project) ~= "string" or project == "" then project = state.session_cwd end
+	if type(project) ~= "string" or project == "" then return "--" end
+	return vim.fs.basename((project:gsub("/+$", ""))) or project
+end
+
 local function header_formats(state, width)
 	local title = single_line(state.session_name or "Untitled session")
 	local connection = state.connection_status or "disconnected"
 	local client = state.client_status or "view only"
-	local right = connection .. " · " .. client
-	local host_width = width - vim.fn.strdisplaywidth(right) - 5
-	if host_width > 0 then
-		local host = truncate_plain_to_width(single_line(state.host_name), host_width)
-		if host ~= "" then right = host .. " · " .. right end
+	local status_plain = connection .. " · " .. client
+	local host = ""
+	local host_width = width - vim.fn.strdisplaywidth(status_plain) - 5
+	if host_width > 0 then host = truncate_plain_to_width(single_line(state.host_name), host_width) end
+	local right_plain = (host ~= "" and (host .. " · ") or "") .. status_plain
+	local right_width = math.max(0, width - 2)
+	local right
+	if vim.fn.strdisplaywidth(right_plain) <= right_width then
+		right = (host ~= "" and (statusline_text(host, "PiUsageStats") .. "%#PiStatusSeparator# · ") or "")
+			.. statusline_text(connection, connection_highlights[connection] or "PiStatusIdle")
+			.. "%#PiStatusSeparator# · "
+			.. statusline_text(client, client_highlights[client] or "PiStatusIdle")
+	else
+		right_plain = truncate_plain_to_width(right_plain, right_width)
+		right = statusline_text(right_plain, "PiUsageStats")
 	end
-	right = truncate_plain_to_width(right, math.max(0, width - 2))
-	local cwd_width = math.max(0, width - vim.fn.strdisplaywidth(right) - 4)
-	local cwd = truncate_plain_to_width(single_line(state.session_cwd or "--"), cwd_width)
+	local cwd_width = math.max(0, width - vim.fn.strdisplaywidth(right_plain) - 4)
+	local cwd = truncate_plain_to_width(single_line(project_name(state)), cwd_width)
 	local details = statusline_text(" " .. cwd, "PiUsageStats")
-		.. "%=" .. statusline_text(right .. " ", "PiUsageStats") .. "%*"
+		.. "%=" .. right .. "%#PiUsageStats# %*"
 	return statusline_text(" " .. truncate_plain_to_width(title, math.max(0, width - 2)), "PiSessionTitle") .. "%*", details
 end
 
