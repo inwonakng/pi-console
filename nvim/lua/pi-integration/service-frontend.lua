@@ -617,9 +617,9 @@ local function update_status_state()
 	local terminal = owner and (owner.phase == "stopped" or owner.phase == "failed") and owner.phase
 	state.client_status = attachment and (terminal and ("session " .. terminal) or control_current() and "active"
 		or owner and owner.phase == "initializing" and "starting" or "view only")
-		or (session_id and ("session " .. (session_status or "unattached")) or starting and "starting" or "unstarted")
-	if action_connection and action_connection.status then state.client_status = action_connection.status end
-	if kill_pending and kill_pending.status == "stopping" then state.client_status = "Stopping session..."
+		or (session_id and ("session " .. (session_status or "unattached"):lower()) or starting and "starting" or "unstarted")
+	if action_connection and action_connection.status then state.client_status = action_connection.status:lower() end
+	if kill_pending and kill_pending.status == "stopping" then state.client_status = "stopping"
 	elseif kill_pending and kill_pending.status == "unknown" then state.client_status = "stop outcome unknown" end
 	state.can_kill_session = not kill_pending and not not can_kill_session()
 	require("pi-integration.keymaps").update_kill({ state = state, actions = M, buffer = ctx.buffer })

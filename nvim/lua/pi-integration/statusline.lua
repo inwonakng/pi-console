@@ -606,7 +606,7 @@ local connection_highlights = { connected = "PiStatusGood", connecting = "PiStat
 local client_highlights = {
 	active = "PiStatusGood", ["view only"] = "PiStatusViewOnly",
 	starting = "PiStatusPending", ["session checking"] = "PiStatusPending", ["session attaching"] = "PiStatusPending",
-	["session restoring"] = "PiStatusPending", Reconnecting = "PiStatusPending", ["Stopping session..."] = "PiStatusPending",
+	["session restoring"] = "PiStatusPending", reconnecting = "PiStatusPending", stopping = "PiStatusPending",
 	["session failed"] = "PiStatusError", ["session unavailable"] = "PiStatusError", ["stop outcome unknown"] = "PiStatusError",
 }
 
