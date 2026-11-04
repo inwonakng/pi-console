@@ -164,7 +164,12 @@ function M.timeline_messages(entries, session, snapshot)
 		table.insert(visible, message)
 		vim.list_extend(visible, buckets[index] or {})
 	end
-	if conversation.partialAssistant then table.insert(visible, conversation.partialAssistant.message) end
+	local partial = conversation.partialAssistant
+	if partial then
+		-- Marks the still-generating message so its last block stays outside the activity fold.
+		table.insert(visible, partial.interrupted and partial.message
+			or vim.tbl_extend("force", partial.message, { streaming = true }))
+	end
 	vim.list_extend(visible, partial_diagnostics)
 	-- Unknown chronology stays out of the transcript; request details remain in :PiLogs.
 	return visible, unmatched

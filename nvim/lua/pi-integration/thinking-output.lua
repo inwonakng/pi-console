@@ -78,7 +78,7 @@ function M.summary_lines(state, output_id, streaming)
 	local titles = thinking_titles(output.text)
 	if #titles > 0 then
 		return {
-			"> 󰔛 " .. table.concat(titles, " · "),
+			"> 󱌽 " .. table.concat(titles, " · "),
 		}
 	end
 	local line_label
@@ -89,7 +89,7 @@ function M.summary_lines(state, output_id, streaming)
 		line_label = lines == 1 and "1 line" or (tostring(lines) .. " lines")
 	end
 	return {
-		"> 󰔛 Thinking · " .. line_label,
+		"> 󱌽 Thinking · " .. line_label,
 	}
 end
 

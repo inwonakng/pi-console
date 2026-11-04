@@ -7,7 +7,7 @@ local pi_tool_output = require("pi-integration.tool-output")
 local pi_thinking_output = require("pi-integration.thinking-output")
 local pi_skills = require("pi-integration.skills")
 local pi_transcript = require("pi-integration.transcript")
-local tool_groups = require("pi-integration.tool-groups")
+local activity = require("pi-integration.activity")
 
 local M = {}
 
@@ -93,7 +93,7 @@ end
 
 local function open_item(ctx, state, parent_win)
 	local cursor = vim.api.nvim_win_get_cursor(0)
-	local item = tool_groups.item_at_line(state.transcript_items, cursor[1])
+	local item = activity.item_at_line(state.transcript_items, cursor[1])
 	if not item then
 		return false
 	end
@@ -107,8 +107,8 @@ local function open_item(ctx, state, parent_win)
 			parent = parent_win,
 		},
 	}
-	if item.kind == "tool_group" then
-		tool_groups.toggle(transcript_ctx(state), item)
+	if item.kind == "activity" then
+		activity.toggle(transcript_ctx(state), item)
 		render_transcript_ui(state)
 		return true
 	elseif item.kind == "tool" then

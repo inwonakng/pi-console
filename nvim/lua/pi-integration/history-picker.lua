@@ -1,7 +1,7 @@
 local json = require("pi-integration.utils.json")
 local messages = require("pi-integration.messages")
 local transcript = require("pi-integration.transcript")
-local tool_groups = require("pi-integration.tool-groups")
+local activity = require("pi-integration.activity")
 local M = {}
 local MAX_PREVIEW_BYTES = 4 * 1024 * 1024
 
@@ -74,7 +74,7 @@ local function render(row, contents, more, limited)
 	local state = require("pi-integration.state").new()
 	local lines, items = messages.collect_message_lines({ state = state, notices = { empty_session = "No messages yet." },
 		transcript = { metadata_lines = function() return {} end } }, visible)
-	lines, items = tool_groups.preview_lines(lines, items)
+	lines, items = activity.preview_lines(lines, items)
 	state.transcript_items = items
 	if more then
 		vim.list_extend(lines, { "", limited and "> Preview limited to the first 4 MiB of session history."

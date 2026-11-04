@@ -57,9 +57,11 @@ Submitting a prompt while Pi is working adds it to a queue. Open the queue with
 current turn finishes. In the message editor, Ctrl+Enter saves; `:q` or `:q!`
 closes without submitting further changes.
 
-Press Enter on a tool group in the transcript to expand it, or on an individual
-call to inspect its output. Tool groups expand while running and collapse when
-finished unless you toggle them yourself.
+Consecutive thinking, tool, skill, and permission rows form one activity whose
+header summarizes changed files, subagents, failures, and steps. Press Enter on
+the header to expand or collapse it, or on an individual row to inspect its
+output. Activities stay collapsed unless you toggle them; a running item stays
+visible below the fold until it finishes.
 
 For workspace changes, the orange statusline shows the change totals. Open a
 workspace integration result and press `d` to review its saved diff in Diffview,

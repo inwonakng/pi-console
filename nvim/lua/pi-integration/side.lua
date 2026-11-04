@@ -72,7 +72,7 @@ function M.open(transcript_buf, input_buf, resources)
 	render_state.transcript_win = transcript_win
 	vim.keymap.set("n", "<CR>", function()
 		transcript.open_item_under_cursor(render_context(), resources)
-	end, { buffer = transcript_buf, desc = "Follow link, toggle tool group or open output" })
+	end, { buffer = transcript_buf, desc = "Follow link, toggle activity or open output" })
 	vim.api.nvim_clear_autocmds({ group = window_group, event = "WinClosed" })
 	for _, win in ipairs({ transcript_win, input_win }) do
 		vim.wo[win].wrap, vim.wo[win].linebreak, vim.wo[win].conceallevel = true, true, 2
@@ -91,7 +91,7 @@ function M.open(transcript_buf, input_buf, resources)
 					"- `<C-k>` / `<C-w>k` focuses the transcript (normal mode).",
 					"- `<C-j>` / `<C-w>j` focuses the input (normal mode).",
 					"- Moving past either window with `<C-h/j/k/l>` / `<C-w>h/j/k/l` hides the side conversation.",
-					"- `<CR>` in the transcript follows a link, toggles a tool group, or opens output.",
+					"- `<CR>` in the transcript follows a link, toggles an activity, or opens output.",
 					"- `q` / `<leader>pb` / `:q` hides both windows, preserving the draft and conversation.",
 					"- `<leader>n` / `:PiSideNew` starts a new side conversation (normal mode).",
 					"- `:PiSideAbort` stops only side work.",

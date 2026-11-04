@@ -46,7 +46,7 @@ M.specs = {
 		{
 			lhs = "<CR>",
 			action = "open_transcript_item",
-			desc = "Follow link, toggle tool group or open output",
+			desc = "Follow link, toggle activity or open output",
 		},
 	},
 }
@@ -149,7 +149,7 @@ function M.help_key_lines()
 		table.insert(lines, "- `" .. spec.lhs .. "` " .. spec.desc .. ".")
 	end
 	vim.list_extend(lines, {
-		"- `<CR>` follow a Markdown link; otherwise expand/collapse a tool group or open a tool/thinking/skill/compaction output.",
+		"- `<CR>` follow a Markdown link; otherwise expand/collapse an activity or open a tool/thinking/skill/compaction output.",
 		"- Relative transcript links resolve against the active workspace cwd.",
 		"- `<Esc><Esc>` abort Pi.",
 		"- `q` or `<Esc>` close this help.",

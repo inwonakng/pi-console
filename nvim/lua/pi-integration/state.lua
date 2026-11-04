@@ -96,7 +96,7 @@ function M.new()
 		tool_calls = {},
 		live_tool_output_by_call = {},
 		tool_items_by_output = {},
-		tool_group_expanded = {},
+		activity_expanded = {},
 		spawn_run_output_by_id = {},
 		thinking_outputs = {},
 		next_thinking_output_id = 0,

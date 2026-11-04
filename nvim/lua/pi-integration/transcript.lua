@@ -1,5 +1,5 @@
 local markdown_render = require("pi-integration.markdown-render")
-local tool_groups = require("pi-integration.tool-groups")
+local activity = require("pi-integration.activity")
 local tool_output = require("pi-integration.tool-output")
 local buffer = require("pi-integration.utils.buffer")
 
@@ -165,16 +165,15 @@ local function tool_summary_rows(state, preview)
 			edit_stats = stats and output and output.name == "edit" or false,
 		}
 	end
-	for _, group in ipairs(state.transcript_items or {}) do
-		if group.kind == "tool_group" then
-			add(group.start_line, group.children[1].output_id, false)
+	for _, item in ipairs(state.transcript_items or {}) do
+		if item.kind == "activity" then
+			rows[item.start_line] = { highlight = "PiActivityQuote", segments = item.segments,
+				chevron = item.folded == false and activity.open_icon or activity.closed_icon }
 			if not preview then
-				for _, child in ipairs(group.children) do
-					add(child.start_line, child.output_id, true)
+				for _, child in ipairs(item.children) do
+					if child.kind == "tool" then add(child.start_line, child.output_id, true) end
 				end
 			end
-		elseif group.kind == "tool" then
-			add(group.start_line, group.output_id, true)
 		end
 	end
 	return rows
@@ -226,7 +225,7 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 	for index, line in ipairs(lines) do
 		local row = rows[index]
 		local highlight = row and row.highlight
-		if not highlight and line:find("> 󰔛 ", 1, true) == 1 then
+		if not highlight and line:find("> 󱌽 ", 1, true) == 1 then
 			highlight = "PiThinkingQuote"
 		elseif not highlight and line:find("> 󰗨 Session compacted here", 1, true) == 1 then
 			highlight = "PiThinkingQuote"
@@ -246,6 +245,23 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 			})
 			if row and row.edit_stats then
 				apply_edit_stat_highlights(buf, index, line)
+			end
+			if row and row.chevron then
+				vim.api.nvim_buf_set_extmark(buf, quote_ns, index - 1, 2, {
+					virt_text = { { row.chevron .. " ", highlight } },
+					virt_text_pos = "inline",
+					priority = 300,
+				})
+			end
+			for _, segment in ipairs(row and row.segments or {}) do
+				local first, last, group = unpack(segment)
+				if group then
+					vim.api.nvim_buf_set_extmark(buf, quote_ns, index - 1, first, {
+						end_col = last,
+						hl_group = group,
+						priority = 325,
+					})
+				end
 			end
 			local failure_start = line:find("✗ failed", 1, true)
 				or line:find("✗ exited ", 1, true)
@@ -366,7 +382,7 @@ function M.render(ctx)
 			M.preserve_view(ctx, function()
 				for _, win in ipairs(vim.api.nvim_list_wins()) do
 					if buffer.window_matches(win, buf) then
-						tool_groups.apply_folds(state, win)
+						activity.apply_folds(state, win)
 					end
 				end
 				markdown_render.render(buf, state.transcript_win, { latex = true, event = "PiNvim" })
@@ -627,7 +643,7 @@ end
 function M.clear_transcript_items(ctx)
 	ctx.state.transcript_items = {}
 	ctx.state.tool_items_by_output = {}
-	ctx.state.tool_group_expanded = {}
+	ctx.state.activity_expanded = {}
 end
 
 function M.apply_collected_transcript_items(ctx, items)
@@ -647,7 +663,7 @@ function M.register_transcript_item(ctx, item)
 end
 
 function M.transcript_item_at_line(ctx, line)
-	return tool_groups.item_at_line(ctx.state.transcript_items, line)
+	return activity.item_at_line(ctx.state.transcript_items, line)
 end
 
 function M.open_item_under_cursor(ctx, resources)
@@ -656,7 +672,7 @@ function M.open_item_under_cursor(ctx, resources)
 	if not item then return end
 	local inspect = { state = ctx.state, ui = ctx.ui, resources = resources,
 		window = { parent = vim.api.nvim_get_current_win() } }
-	if item.kind == "tool_group" then tool_groups.toggle(ctx, item); M.render(ctx)
+	if item.kind == "activity" then activity.toggle(ctx, item); M.render(ctx)
 	elseif item.kind == "tool" then tool_output.open_float(inspect, item.output_id)
 	elseif item.kind == "thinking" then require("pi-integration.thinking-output").open_float(inspect, item.output_id)
 	elseif item.kind == "compaction" then require("pi-integration.compaction-output").open_float(inspect, item)
@@ -672,14 +688,14 @@ function M.write_tool_output(ctx, output_id)
 	if not existing then
 		M.ensure_assistant_turn_started(ctx, "Assistant")
 		local previous = state.transcript_items[#state.transcript_items]
-		if previous and previous.kind == "tool_group" then
+		if previous and previous.kind == "activity" then
 			M.remove_pending_transcript_item_separator(ctx)
 		end
-		if not previous or previous.kind ~= "tool_group" or previous.end_line ~= M.line_count(ctx) then
+		if not previous or previous.kind ~= "activity" or previous.end_line ~= M.line_count(ctx) then
 			M.begin_trace_item(ctx)
 		end
 	end
-	tool_groups.write_output(state, state.transcript_items, output_id, M.line_count(ctx) + 1, function(line, text)
+	activity.write_tool(state, state.transcript_items, output_id, M.line_count(ctx) + 1, function(line, text)
 		if line <= M.line_count(ctx) then
 			M.set_line(ctx, line, text)
 		else

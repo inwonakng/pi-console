@@ -5,7 +5,7 @@ local pi_tool_output = require("pi-integration.tool-output")
 local pi_thinking_output = require("pi-integration.thinking-output")
 local message_utils = require("pi-integration.utils.message")
 local time_utils = require("pi-integration.utils.time")
-local tool_groups = require("pi-integration.tool-groups")
+local activity = require("pi-integration.activity")
 
 local function message_role_title(message, state)
 	local role = message.role or message.type or "message"
@@ -91,10 +91,12 @@ local function has_tool_item(state, tool_call_id)
 	return output_id and state.tool_items_by_output[output_id] ~= nil
 end
 
+local function line_writer(lines)
+	return function(line, text) lines[line] = text end
+end
+
 local function write_tool_output(ctx, lines, items, output_id)
-	return tool_groups.write_output(ctx.state, items, output_id, #lines + 1, function(line, text)
-		lines[line] = text
-	end)
+	return activity.write_tool(ctx.state, items, output_id, #lines + 1, line_writer(lines))
 end
 
 local function update_existing_spawn_output(ctx, lines, items, message, text)
@@ -128,20 +130,16 @@ local function render_tool_summary(ctx, lines, items, message, ensure_assistant_
 	return added
 end
 
-local function append_thinking_summary(ctx, lines, items, text)
+local function append_thinking_summary(ctx, lines, items, text, key, streaming)
 	if type(text) ~= "string" or text == "" then
 		return false
 	end
 	local output_id = pi_thinking_output.store(ctx.state, text)
-	vim.list_extend(lines, pi_thinking_output.summary_lines(ctx.state, output_id, false))
-	local line = #lines
+	local child = { kind = "thinking", output_id = output_id, key = key or ("thinking:" .. output_id),
+		streaming = streaming or nil }
+	local summary = pi_thinking_output.summary_lines(ctx.state, output_id, streaming)[1]
+	activity.append(ctx.state, items, child, summary, #lines + 1, line_writer(lines))
 	table.insert(lines, "")
-	table.insert(items, {
-		kind = "thinking",
-		start_line = line,
-		end_line = line,
-		output_id = output_id,
-	})
 	return true
 end
 
@@ -159,14 +157,9 @@ local function append_skill_load_summaries(ctx, lines, items, loads, has_body, p
 	end
 	for _, load in ipairs(loads) do
 		local output_id = pi_skills.store_load(ctx.state, load)
-		vim.list_extend(lines, pi_skills.summary_lines(ctx.state, output_id))
-		local line = #lines
-		table.insert(items, {
-			kind = "skill",
-			start_line = line,
-			end_line = line,
-			output_id = output_id,
-		})
+		local child = { kind = "skill", output_id = output_id, key = load.tool_call_id or ("skill:" .. output_id) }
+		activity.append(ctx.state, items, child, pi_skills.summary_lines(ctx.state, output_id)[1], #lines + 1,
+			line_writer(lines))
 	end
 	table.insert(lines, "")
 	return true
@@ -239,7 +232,7 @@ local function append_assistant_blocks(ctx, lines, items, message, has_body, opt
 		last_rendered_kind = "message"
 	end
 
-	for _, item in ipairs(content) do
+	for index, item in ipairs(content) do
 		if type(item) == "string" then
 			table.insert(pending_text, item)
 		elseif type(item) == "table" then
@@ -249,7 +242,9 @@ local function append_assistant_blocks(ctx, lines, items, message, has_body, opt
 				if thinking ~= "" then
 					ensure_assistant_message()
 					ensure_inline_gap("thinking")
-					if append_thinking_summary(ctx, lines, items, thinking) then
+					-- Only the last block of a streaming partial message is still being written.
+					local key = message.timestamp and ("thinking:" .. tostring(message.timestamp) .. ":" .. index)
+					if append_thinking_summary(ctx, lines, items, thinking, key, message.streaming and index == #content) then
 						appended = true
 						last_rendered_kind = "thinking"
 					end
@@ -559,10 +554,9 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 			pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed", message.parentToolCallId, message.startedAt)
 			if pi_skills.tool_result_skill_name(ctx.state, message) then
 				local output_id = pi_skills.apply_tool_result(ctx.state, message, text)
-				for _, item in ipairs(items) do
-					if item.kind == "skill" and item.output_id == output_id then
-						lines[item.start_line] = pi_skills.summary_lines(ctx.state, output_id)[1]
-					end
+				if output_id then
+					activity.update_row(ctx.state, items, "skill", output_id,
+						pi_skills.summary_lines(ctx.state, output_id)[1], line_writer(lines))
 				end
 				appended = false
 				if message.isError then
