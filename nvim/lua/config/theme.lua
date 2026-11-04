@@ -98,7 +98,7 @@ require("catppuccin").setup({
 			PiActivityQuote = { fg = colors.mauve, bg = "#1a1626", bold = false },
 			PiActivityFiles = { fg = colors.peach, bold = false },
 			PiActivityAgents = { fg = colors.sapphire, bold = false },
-			PiSkillQuote = { fg = colors.green, bg = "#102418", bold = false },
+			PiSkillQuote = { fg = colors.pink, bg = "#281b27", bold = false },
 			PiModeFull = { fg = colors.green, bg = M.status_bg, bold = true },
 			PiModeEdit = { fg = colors.blue, bg = M.status_bg, bold = true },
 			PiModeAsk = { fg = colors.peach, bg = M.status_bg, bold = true },
