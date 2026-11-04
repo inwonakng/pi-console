@@ -95,7 +95,8 @@ function source:get_completions(ctx, callback)
 
 	local reference = file_reference_range(ctx)
 	if not reference then
-		callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = {} })
+		-- Batched typing can skip the @ trigger; recheck instead of caching an empty result.
+		callback({ is_incomplete_forward = true, is_incomplete_backward = true, items = {} })
 		return
 	end
 
