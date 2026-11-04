@@ -1,3 +1,4 @@
+export const LINUX_SESSION_NETWORK_LABEL: "pi-console:linux-session-network";
 export type LinuxNetworkNamespace = { user: string; net: string };
 export class LinuxSessionNetwork {
   static start(httpSocketPath: string | undefined, socksSocketPath: string | undefined, env?: NodeJS.ProcessEnv): Promise<LinuxSessionNetwork>;

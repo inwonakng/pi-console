@@ -8,6 +8,7 @@ import { WorkspaceReviews, type ReviewMutation } from "./workspace-reviews.js";
 import { fingerprint, readResource, completeFiles, completeDirectory, type ResourceContext } from "./resource-reads.js";
 import { hostCommand, hostFingerprint, type HostReceipt } from "./host-commands.js";
 import { inspectEpoch } from "../../pi/scripts/managed-process.mjs";
+import { LINUX_SESSION_NETWORK_LABEL } from "../../pi/scripts/linux-session-network.mjs";
 import type { RecoveryOptions } from "./service-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { SavedHelperUnresolved, savedSessionHelper, withSavedSessionHelper, type SavedPreview, type SavedSessionRequest } from "./saved-sessions.js";
@@ -580,7 +581,11 @@ export class HostOwner {
       if (this.catalog.list().some((session) => session.acceptedQueue?.some((item) => item.status !== "failed"))) {
         throw new CommandError("session_busy", "Accepted queued work would be interrupted");
       }
-      if (inspectEpoch(this.catalog.processRegistry, this.serviceEpoch).some((job) => job.parent !== null && !["done", "cancelled", "interrupted"].includes(job.status))) {
+      // The session-local network keeper is idle infrastructure, stopped by
+      // normal session cleanup. Unresolved keepers still block shutdown.
+      if (inspectEpoch(this.catalog.processRegistry, this.serviceEpoch).some((job) => job.parent !== null
+        && !["done", "cancelled", "interrupted"].includes(job.status)
+        && !(job.label === LINUX_SESSION_NETWORK_LABEL && job.status === "running"))) {
         throw new CommandError("session_busy", "Known managed child work remains; use an intentional force stop to interrupt it");
       }
     }

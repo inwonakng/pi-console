@@ -199,7 +199,7 @@ export function managedSpawn(command, args, options) {
     const job = { epoch, parent: env.PI_CONSOLE_PROCESS_JOB || null };
     assertLaunchAllowed(db, epoch);
     if (!ancestorsOpen(db, job)) throw new Error('Managed launch admission is sealed');
-    db.prepare("INSERT INTO jobs VALUES(?,?,?,?,'intent',1,NULL)").run(id, epoch, job.parent, command);
+    db.prepare("INSERT INTO jobs VALUES(?,?,?,?,'intent',1,NULL)").run(id, epoch, job.parent, options.label ?? command);
   }); } finally { db.close(); }
   // A helper that never obtained a PID cannot have received the launch IPC
   // message. Record that failed start as proven, not as unresolved workload.

@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { beginEpoch, managedSpawn, managedStarted, managedResult, stopManaged } from "./managed-process.mjs";
 
 const script = fileURLToPath(import.meta.url);
+export const LINUX_SESSION_NETWORK_LABEL = "pi-console:linux-session-network";
 
 /** Owns only networking. Each workload still gets its own bwrap/seccomp sandbox. */
 export class LinuxSessionNetwork {
@@ -38,7 +39,7 @@ export class LinuxSessionNetwork {
       // holder keeps capabilities, to bring up lo; workloads still drop them.
       child = managedSpawn("unshare", ["--user", "--map-current-user", "--keep-caps", "--net",
         process.execPath, script, "keeper", httpSocketPath, socksSocketPath], {
-        env, stdio: ["pipe", "pipe", "pipe"],
+        env, label: LINUX_SESSION_NETWORK_LABEL, stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error) {
       if (registryRoot) rmSync(registryRoot, { recursive: true, force: true });
