@@ -263,7 +263,8 @@ function M.open(options, workspace_id, pinned)
 		if present(review.notice) then table.insert(help_lines, review.notice) end
 		if review.partial then table.insert(help_lines, "Partial integration: comparison is the intended Git merge, not a captured post-failure tree.") end
 		vim.list_extend(help_lines, {
-			"", "## Files", "Enter opens a file diff. The highlighted file is the displayed comparison.",
+			"", "## Files", "The first file opens automatically. Enter opens another file diff.",
+			"The highlighted file is the displayed comparison. q closes the entire review.",
 			"S stages reviewed working files; U resets the entire workspace index to HEAD.",
 			"r opens a fresh review without replacing drafts; gS looks up the original review action.",
 			"= denotes an index-only difference against HEAD.",
@@ -312,6 +313,7 @@ function M.open(options, workspace_id, pinned)
 		vim.api.nvim_set_current_win(list_win)
 		require("pi-integration.workspace-summary").highlight(buf)
 		vim.keymap.set("n", "<CR>", function() local path = entries[vim.api.nvim_win_get_cursor(0)[1]]; if path then show_file(review, path) end end, { buffer = buf, desc = "Open workspace review file" })
+		vim.keymap.set("n", "q", function() vim.cmd("tabclose") end, { buffer = buf, desc = "Close workspace review" })
 		vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel
 		if not review.historical then
 			vim.keymap.set("n", "S", function() mutate(buf, review.stageId, "stage") end, { buffer = buf, desc = "Stage all reviewed workspace files" })
@@ -322,6 +324,13 @@ function M.open(options, workspace_id, pinned)
 			if not alive() then options.notify("Review context changed; use :PiWorkspaceReview for the current selection. Drafts are unchanged."); return end
 			M.open(options, workspace_id, pinned)
 		end, { buffer = buf, desc = "Open fresh review (preserve drafts)" })
+		for row = 1, #output do
+			if entries[row] then
+				vim.api.nvim_win_set_cursor(list_win, { row, 0 })
+				show_file(review, entries[row])
+				break
+			end
+		end
 	end)
 end
 return M
