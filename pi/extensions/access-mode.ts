@@ -39,7 +39,8 @@ import { loadExtensionSettings } from "./shared/extension-settings";
 import { workspaceToolBlock } from "./shared/workspace-policy";
 import { bashJobs, initializeBashJobs, shutdownBashJobs, BashJobLaunchSchema, BashControlResultSchema, assertBashTransitionAllowed, reserveBashTransition, releaseBashTransition, type BashControlResult } from "./shared/bash-jobs";
 import { BashDelivery } from "./shared/bash-delivery";
-import { enrollCheckpointPath } from "./shared/checkpoint-enrollment";
+import { enrollCheckpointPath, reportBashFileChanges } from "./shared/checkpoint-enrollment";
+import { captureBashFileSnapshot, cleanupBashFileChanges, collectBashFileChanges, type BashFileChanges, type BashFileSnapshot } from "./shared/bash-file-changes";
 import { serviceRuntimeId } from "./shared/service-ui";
 
 const READONLY_TOOLS = new Set(["web_search", "web_fetch", "todowrite", "question", "bash_control"]);
@@ -412,20 +413,33 @@ export default function accessModeExtension(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: JSON.stringify(launch) }], details: { background: launch, truncation: undefined }, structuredContent: launch };
       }
       let sandboxBlocked = false;
+      let before: BashFileSnapshot | undefined;
+      let fileChanges: BashFileChanges | undefined;
       const sandboxedBash = createBashToolDefinition(ctx.cwd, {
         operations: createAccessControlledBashOperations(ctx, params, () => saveAccessState(pi), () => {
           sandboxBlocked = true;
-        }),
+        }, undefined, (broadRead) => { before = captureBashFileSnapshot(ctx.cwd, broadRead); }),
       });
-      const result = await sandboxedBash.execute(id, params, signal, onUpdate, ctx);
+      let result: Awaited<ReturnType<typeof sandboxedBash.execute>>;
+      try {
+        result = await sandboxedBash.execute(id, params, signal, onUpdate, ctx);
+      } finally {
+        // Partial writes count even after timeout, abort, denial or failed cleanup.
+        const changes = collectBashFileChanges(before);
+        if (changes) {
+          fileChanges = changes.fileChanges;
+          try { reportBashFileChanges(ctx, changes.checkpoints); } catch { /* Observation must not change the bash result. */ }
+        }
+      }
+      const observedResult = fileChanges ? { ...result, details: { ...result.details, fileChanges } } : result;
       return sandboxBlocked ? {
-        ...result,
+        ...observedResult,
         isError: true,
-        details: { ...result.details, sandboxBlocked: true },
-        structuredContent: result.structuredContent && typeof result.structuredContent === "object" && !Array.isArray(result.structuredContent)
-          ? { ...result.structuredContent, sandbox_blocked: true }
-          : result.structuredContent,
-      } : result;
+        details: { ...observedResult.details, sandboxBlocked: true },
+        structuredContent: observedResult.structuredContent && typeof observedResult.structuredContent === "object" && !Array.isArray(observedResult.structuredContent)
+          ? { ...observedResult.structuredContent, sandbox_blocked: true }
+          : observedResult.structuredContent,
+      } : observedResult;
     },
   });
 
@@ -474,7 +488,8 @@ export default function accessModeExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     delivery?.dispose();
     delivery = undefined;
-    await shutdownBashSandbox();
+    try { await shutdownBashSandbox(); }
+    finally { cleanupBashFileChanges(); }
   });
 
   const authorizeTool = async (event: ToolCallEvent, ctx: ExtensionContext) => {

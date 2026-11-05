@@ -72,6 +72,47 @@ local function edit_change_label(args)
 	return "+" .. tostring(stats.additions) .. "/-" .. tostring(stats.removals) .. " · " .. block_label
 end
 
+local function bash_file_changes(output)
+	local details = type(output.details) == "table" and output.details or {}
+	return output.name == "bash" and type(details.fileChanges) == "table" and details.fileChanges or nil
+end
+
+local function file_change_stats(changes)
+	local added, removed = 0, 0
+	for _, file in ipairs(changes.files) do
+		added = added + file.added
+		removed = removed + file.removed
+	end
+	return #changes.files + (changes.moreFiles or 0), "+" .. added .. " −" .. removed
+end
+
+local function file_change_suffix(output)
+	local changes = bash_file_changes(output)
+	if not changes then return "" end
+	local count, stats = file_change_stats(changes)
+	return " · " .. count .. (count == 1 and " file" or " files") .. " · " .. stats
+end
+
+local function append_file_changes(lines, changes)
+	local count, stats = file_change_stats(changes)
+	vim.list_extend(lines, { "", "Files changed (" .. count .. " · " .. stats .. ")" })
+	local path_width = 0
+	for _, file in ipairs(changes.files) do
+		path_width = math.max(path_width, vim.fn.strdisplaywidth(file.path))
+	end
+	local rows = {}
+	for _, file in ipairs(changes.files) do
+		local padding = string.rep(" ", path_width - vim.fn.strdisplaywidth(file.path) + 2)
+		table.insert(lines, "  " .. file.status .. " " .. file.path .. padding
+			.. (file.binary and "binary" or ("+" .. file.added .. " −" .. file.removed)))
+		rows[#lines] = file
+	end
+	if changes.moreFiles then table.insert(lines, "  … " .. changes.moreFiles .. " more files") end
+	if changes.truncated then table.insert(lines, "  Some diffs omitted (too large).") end
+	table.insert(lines, "[<CR>] open diff")
+	return rows
+end
+
 local function looks_like_json(text)
 	if type(text) ~= "string" then
 		return false
@@ -592,15 +633,12 @@ local function execution_start_label(state, output)
 	return call and call.started_at and ("Started: " .. time_utils.format_timestamp(call.started_at)) or "Time unavailable"
 end
 
-local function open_edit_diff_float(ctx, output)
-	local args = type(output.args) == "table" and output.args or {}
-	local path = path_from_args(args)
+local function open_edit_diff_float(ctx, output, path, patch, title)
 	if type(path) ~= "string" or path == "" then
 		return false
 	end
 
-	local details = type(output.details) == "table" and output.details or {}
-	local left_lines, right_lines, left_lnums, right_lnums = patch_to_side_by_side(details.patch)
+	local left_lines, right_lines, left_lnums, right_lnums = patch_to_side_by_side(patch)
 	if not left_lines or not right_lines then
 		return false
 	end
@@ -615,6 +653,7 @@ local function open_edit_diff_float(ctx, output)
 	local left_col = math.floor((vim.o.columns - width) / 2)
 	local right_col = left_col + left_width + 1
 	local filetype = filetype_from_path(path)
+	title = title or vim.fn.fnamemodify(path, ":t")
 
 	local left_buf = vim.api.nvim_create_buf(false, true)
 	local right_buf = vim.api.nvim_create_buf(false, true)
@@ -645,7 +684,7 @@ local function open_edit_diff_float(ctx, output)
 		col = left_col,
 		style = "minimal",
 		border = "rounded",
-		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "Before: " .. vim.fn.fnamemodify(path, ":t") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "Before: " .. title .. " ",
 		title_pos = "left",
 	})
 	local right_win = vim.api.nvim_open_win(right_buf, false, {
@@ -656,7 +695,7 @@ local function open_edit_diff_float(ctx, output)
 		col = right_col,
 		style = "minimal",
 		border = "rounded",
-		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "After: " .. vim.fn.fnamemodify(path, ":t") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. "After: " .. title .. " ",
 		title_pos = "left",
 	})
 
@@ -730,9 +769,8 @@ local function open_edit_diff_float(ctx, output)
 		vim.keymap.set("n", "q", close_diff, { buffer = buf, silent = true, desc = "Close edit diff" })
 		vim.keymap.set("n", "<Esc>", close_diff, { buffer = buf, silent = true, desc = "Close edit diff" })
 		vim.keymap.set("n", "y", function()
-			local rendered_text = rendered_output(output)
-			vim.fn.setreg("+", rendered_text or "")
-			ctx.ui.notify("Yanked edit patch")
+			vim.fn.setreg("+", patch)
+			ctx.ui.notify(output.name == "edit" and "Yanked edit patch" or "Yanked diff patch")
 		end, { buffer = buf, silent = true, desc = "Yank edit patch" })
 	end
 	return true
@@ -1016,10 +1054,11 @@ function M.summary_text(state, output_id)
 		local status, diagnostic = failure_summary(output)
 		local reason = truncate_spawn_text(diagnostic, 120)
 		return label .. " · " .. status .. (reason ~= "" and (" · " .. markdown_code_span(reason)) or "")
+			.. file_change_suffix(output)
 	end
 	local artifact_label = output.spawn and " · artifacts" or ""
 	local edit_label = output.name == "edit" and edit_change_label(output.args) or nil
-	return label .. " · " .. (edit_label or line_label) .. artifact_label
+	return label .. " · " .. (edit_label or line_label) .. artifact_label .. file_change_suffix(output)
 end
 
 local function codemode_output(output)
@@ -1111,8 +1150,9 @@ function M.open_float(ctx, output_id, resolved)
 	if not pending and not agent_exchange_title(output) and output.spawn and pi_spawn_artifacts.open_output(ctx, output, execution_start_label(state, output)) then
 		return true
 	end
-	if not pending and output.name == "edit" and not output.is_error and open_edit_diff_float(ctx, output) then
-		return true
+	if not pending and output.name == "edit" and not output.is_error then
+		local details = type(output.details) == "table" and output.details or {}
+		if open_edit_diff_float(ctx, output, output_path(output), details.patch) then return true end
 	end
 
 	local width = math.max(40, math.floor(vim.o.columns * 0.85))
@@ -1191,7 +1231,13 @@ function M.open_float(ctx, output_id, resolved)
 		vim.list_extend(fallback, content_lines)
 		content_lines = fallback
 	end
+	local changes = bash_file_changes(output)
+	local file_rows = changes and append_file_changes(content_lines, changes) or {}
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, content_lines)
+	for row, file in pairs(file_rows) do
+		local group = file.status == "A" and "DiffAdd" or file.status == "D" and "DiffDelete" or "DiffChange"
+		vim.api.nvim_buf_add_highlight(buf, -1, group, row - 1, 2, 3)
+	end
 	if workspace_review then require("pi-integration.workspace-summary").highlight(buf) end
 	if source_end then highlight_codemode(buf, source_end, output_start, rendered_text) end
 	if command_start then highlight_bash(buf, command_start, command_end, command_column) end
@@ -1205,7 +1251,6 @@ function M.open_float(ctx, output_id, resolved)
 	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
 	if ctx.resources then
 		ctx.resources.qualify(buf, "tool-" .. tostring(output.name))
-		vim.keymap.set("n", "<CR>", function() require("pi-integration.utils.markdown-links").follow(nil, ctx.resources) end, { buffer = buf, desc = "Follow link" })
 	end
 
 	local title = permission and ("Permission · " .. permission.status_label)
@@ -1248,6 +1293,23 @@ function M.open_float(ctx, output_id, resolved)
 		floats.close_window(win)
 	end
 	floats.close_on_win_leave(buf, close_tool_win, { win = win, parent = ctx.window.parent })
+	if changes or ctx.resources then
+		vim.keymap.set("n", "<CR>", function()
+			local file = file_rows[vim.api.nvim_win_get_cursor(win)[1]]
+			if not file then
+				if ctx.resources then require("pi-integration.utils.markdown-links").follow(nil, ctx.resources) end
+				return
+			end
+			if type(file.patch) ~= "string" or file.patch == "" then
+				ctx.ui.notify(file.binary and "Diff unavailable (binary)" or "Diff unavailable (too large or submodule)")
+				return
+			end
+			local diff_ctx = vim.tbl_extend("force", ctx, { window = { parent = win } })
+			if not open_edit_diff_float(diff_ctx, output, changes.root .. "/" .. file.path, file.patch, file.path) then
+				ctx.ui.notify("Diff unavailable (no text hunks)")
+			end
+		end, { buffer = buf, silent = true, desc = "Open file diff or follow link" })
+	end
 	if workspace_review or owner_review then
 		vim.keymap.set("n", "d", function()
 			close_tool_win()

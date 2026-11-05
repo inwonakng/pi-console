@@ -37,7 +37,7 @@ const sandboxEnvironment = [
     : " export CLOUDSDK_PROXY_ADDRESS=127.0.0.1 NO_PROXY= no_proxy=;");
 
 export type BashLifetime = { signal: AbortSignal; hooks: ManagedBashHooks };
-type ExecutionOptions = Parameters<BashOperations["exec"]>[2] & { lifetime?: BashLifetime };
+type ExecutionOptions = Parameters<BashOperations["exec"]>[2] & { lifetime?: BashLifetime; beforeSpawn?: (broadRead: boolean) => void };
 type FilesystemPolicy = Omit<SandboxRuntimeConfig["filesystem"], "denyRead" | "allowRead" | "allowWrite" | "denyWrite"> & {
   denyRead: string[]; allowRead: string[]; allowWrite: string[]; denyWrite: string[];
 };
@@ -81,9 +81,12 @@ async function launchManaged(
   command: string, cwd: string, options: ExecutionOptions,
   assertAuthority: () => void,
   authorize: () => void | Promise<void> = () => {},
+  broadRead = true,
 ): Promise<{ exitCode: number | null }> {
   const { execution } = await withPreparation(async () => {
     await authorize();
+    // Foreground file observation runs only after approval, never while prompting.
+    options.beforeSpawn?.(broadRead);
     // No await may separate this final revision/path check from process start.
     assertAuthority();
     if (options.signal?.aborted) throw new Error("aborted");
@@ -280,7 +283,7 @@ async function runSandboxed(
         assertAuthority();
         for (const authorization of authorizations) await authorization.validate();
         await admit();
-      });
+      }, filesystem.denyRead.length === 0);
       await report();
       return result;
     } catch (error) {
@@ -435,10 +438,11 @@ export function createAccessControlledBashOperations(
   onSessionGrant: () => void = () => {},
   onBlocked: () => void = () => {},
   lifetime?: BashLifetime,
+  beforeSpawn?: (broadRead: boolean) => void,
 ): BashOperations {
   return {
     exec(command, cwd, options) {
-      return withExecutionLease(() => executeRestricted(command, cwd, { ...options, lifetime }, ctx, request, onSessionGrant, onBlocked));
+      return withExecutionLease(() => executeRestricted(command, cwd, { ...options, lifetime, beforeSpawn }, ctx, request, onSessionGrant, onBlocked));
     },
   };
 }

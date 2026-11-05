@@ -16,21 +16,16 @@ import {
   writeFileSync,
 } from "fs";
 import { appendFile } from "fs/promises";
-import { dirname, join, relative, resolve } from "path";
+import { dirname, join, relative, resolve, sep } from "path";
 import { createHash } from "crypto";
 import { loadWorkspace, prepareWorkspaceDiscard, removeWorkspace, sameSessionFile, workspaceDiscardWarning, workspaceForContext } from "./shared/workspace";
 import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
 import { collectDeletedIds, locationWorkspaceId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import { pathInside, resolveToolPath } from "./shared/paths";
-import { registerCheckpointEnrollment } from "./shared/checkpoint-enrollment";
+import { hasPermission } from "./shared/permissions";
+import { registerBashFileChanges, registerCheckpointEnrollment, type SnapshotState } from "./shared/checkpoint-enrollment";
 import { assertBashTransitionAllowed, withBashTransition } from "./shared/bash-jobs";
-
-type SnapshotState =
-  | { kind: "missing" }
-  | { kind: "file"; blob: string; mode: number }
-  | { kind: "symlink"; target: string }
-  | { kind: "unsupported"; reason: string };
 
 type FileRecord = {
 	path: string;
@@ -50,6 +45,8 @@ type TurnRecord = {
 
 type FileState = {
 	before: SnapshotState;
+	unavailable?: string;
+	bash?: true;
 };
 
 type TurnState = {
@@ -76,7 +73,11 @@ function markHistoryChanged(ctx: ExtensionCommandContext) {
 }
 
 function runGit(args: string[], options: { cwd?: string; input?: Buffer; binary?: boolean } = {}) {
-	const result = spawnSync("git", args, {
+	const env = { ...process.env };
+	for (const name of Object.keys(env)) if (name.startsWith("GIT_")) delete env[name];
+	const result = spawnSync("git", ["--no-optional-locks", "--no-pager", "-c", "core.hooksPath=/dev/null",
+		"-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", ...args], {
+		env: { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", GIT_NO_REPLACE_OBJECTS: "1" },
 		cwd: options.cwd,
 		input: options.input,
 		encoding: options.binary || options.input ? undefined : "utf-8",
@@ -91,7 +92,7 @@ function runGit(args: string[], options: { cwd?: string; input?: Buffer; binary?
 function ensureSnapshotStore() {
 	mkdirSync(HISTORY_DIR, { recursive: true });
 	if (!existsSync(SNAPSHOT_GIT_DIR)) {
-		runGit(["init", "--bare", SNAPSHOT_GIT_DIR]);
+		runGit(["init", "--bare", "--template=", "--object-format=sha1", SNAPSHOT_GIT_DIR]);
 	}
 }
 
@@ -137,6 +138,25 @@ function isSafeWorkspacePath(root: string, path: string): boolean {
 	}
 }
 
+function hasBashSymlinkAncestor(root: string, path: string): boolean {
+	let ancestor = root;
+	// Check from the root down, without first traversing a possible alias. Raw
+	// Bash trees omit descendants under any symlink, even an in-root one.
+	for (const part of dirname(path).split(sep)) {
+		if (part === ".") continue;
+		ancestor = join(ancestor, part);
+		try {
+			const stats = lstatSync(ancestor);
+			if (stats.isSymbolicLink()) return true;
+			if (!stats.isDirectory()) return false;
+		} catch (error) {
+			if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+			throw error;
+		}
+	}
+	return false;
+}
+
 function normalizePath(root: string, cwd: string, path: string): string | undefined {
 	const absolute = resolveToolPath(path, cwd);
 	// History observes worktree changes; access-mode authorizes external writes.
@@ -144,6 +164,18 @@ function normalizePath(root: string, cwd: string, path: string): string | undefi
 		return undefined;
 	}
 	return relative(root, absolute) || ".";
+}
+
+// Git paths and persisted enrollment paths are already literal filesystem
+// names, not tool input. In particular, Unicode spaces must not be rewritten.
+function normalizeLiteralPath(root: string, cwd: string, path: string): string | undefined {
+	const absolute = resolve(cwd, path);
+	return pathInside(root, absolute) ? relative(root, absolute) || "." : undefined;
+}
+
+function canReadHistoryRoot(root: string, cwd: string): boolean {
+	try { return hasPermission({ kind: "read", scope: root }, cwd); }
+	catch { return false; }
 }
 
 function absolutePath(root: string, path: string) {
@@ -159,8 +191,9 @@ function snapshotCurrentFile(root: string, path: string): SnapshotState {
 	let stats;
 	try {
 		stats = lstatSync(filePath);
-	} catch {
-		return { kind: "missing" };
+	} catch (error) {
+		if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return { kind: "missing" };
+		throw error;
 	}
 	if (stats.isSymbolicLink()) {
 		return { kind: "symlink", target: readlinkSync(filePath) };
@@ -168,7 +201,7 @@ function snapshotCurrentFile(root: string, path: string): SnapshotState {
 	if (!stats.isFile()) {
 		return { kind: "unsupported", reason: stats.isDirectory() ? "directory" : "special file" };
 	}
-	const output = runGit(["--git-dir", SNAPSHOT_GIT_DIR, "hash-object", "-w", filePath]);
+	const output = runGit(["--git-dir", SNAPSHOT_GIT_DIR, "hash-object", "--no-filters", "-w", filePath]);
 	return { kind: "file", blob: String(output).trim(), mode: stats.mode & 0o777 };
 }
 
@@ -275,8 +308,10 @@ function restorePlan(records: TurnRecord[]) {
 				continue;
 			}
 			// Check every record before folding, including gaps between supported states.
-			assertOk(file.before.kind !== "unsupported" && file.after.kind !== "unsupported",
-				`Revert blocked; rollback was not recorded for ${file.path} (unsupported path type). History was not changed.`);
+			const unsupported = file.before.kind === "unsupported" ? file.before
+				: file.after.kind === "unsupported" ? file.after : undefined;
+			assertOk(!unsupported,
+				`Revert blocked; rollback was not recorded for ${file.path} (${unsupported?.reason}). History was not changed.`);
 			const existing = planned.get(file.path);
 			planned.set(file.path, {
 				path: file.path,
@@ -540,7 +575,47 @@ export default function historyExtension(pi: ExtensionAPI) {
 			pi.appendEntry(ENROLLMENT, { version: 1, workspaceId: workspace.id, path });
 		}
 	});
-	pi.on("session_shutdown", () => { unsubscribe(); turn = undefined; });
+	const unsubscribeBash = registerBashFileChanges((ctx, changes) => {
+		if (!runtimeActive || !turn) return;
+		try {
+			const workspace = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile());
+			if (workspace?.kind !== "task" || workspace.id !== turn.workspaceId
+				|| !sameSessionFile(workspace.sourceSessionFile, ctx.sessionManager.getSessionFile())) return;
+			const enrolled = enrolledPaths(ctx, workspace.id);
+			for (const change of changes) {
+				const normalized = normalizeLiteralPath(turn.root, ctx.cwd, change.canonicalPath);
+				// A Bash repository can contain the task workspace, rather than being
+				// rooted at it. An unavailable-coverage marker must still block this turn.
+				if (normalized === undefined) {
+					if (change.before.kind === "unsupported") {
+						turn.files.set(".", { before: change.before, unavailable: change.before.reason });
+					}
+					continue;
+				}
+				if (isHistoryIgnoredPath(normalized)) continue;
+				const unavailable = change.before.kind === "unsupported" ? change.before.reason
+					: hasBashSymlinkAncestor(turn.root, normalized) ? "symlink ancestor after Bash change"
+					: !isSafeWorkspacePath(turn.root, resolve(turn.root, normalized)) ? "unsafe ancestor after Bash change" : undefined;
+				// Earlier edit/write/bash calls own the original before-state this turn,
+				// but never erase evidence of incomplete coverage or an unsafe ancestor.
+				const state: FileState = turn.files.get(normalized) ?? { before: change.before };
+				state.bash = true;
+				if (unavailable) state.unavailable = unavailable;
+				turn.files.set(normalized, state);
+				if (state.unavailable) continue;
+				if (!enrolled.has(change.canonicalPath)) {
+					pi.appendEntry(ENROLLMENT, { version: 1, workspaceId: workspace.id, path: change.canonicalPath });
+					enrolled.add(change.canonicalPath);
+				}
+			}
+		} catch (error) {
+			// Observation cannot fail the Bash result, nor may a partial enrollment
+			// be mistaken for complete rollback coverage.
+			const reason = `Bash checkpoint enrollment failed: ${error instanceof Error ? error.message : String(error)}`;
+			turn.files.set(".", { before: { kind: "unsupported", reason }, unavailable: reason });
+		}
+	});
+	pi.on("session_shutdown", () => { unsubscribe(); unsubscribeBash(); turn = undefined; });
 
 	pi.on("turn_start", (_event, ctx) => {
 		turn = undefined;
@@ -551,11 +626,19 @@ export default function historyExtension(pi: ExtensionAPI) {
 			baseEntryId: ctx.sessionManager.getLeafId(), workspaceId: workspace.id,
 			cwd: ctx.cwd, root: workspace.worktreePath, files: new Map(),
 		};
+		// Old Bash enrollment can cover paths above cwd. Do not re-read them
+		// after authority narrows; a partial baseline cannot support a rewind.
+		if (!canReadHistoryRoot(turn.root, ctx.cwd)) {
+			const reason = "workspace root is not readable under the current history observation policy";
+			turn.files.set(".", { before: { kind: "unsupported", reason }, unavailable: reason });
+			return;
+		}
 		// Enrollment follows only the active branch. Legacy rollback FileRecords
 		// are intentionally never enrollment evidence.
 		for (const path of enrolledPaths(ctx, workspace.id)) {
-			const normalized = normalizePath(turn.root, turn.cwd, path);
-			if (normalized !== undefined && !isHistoryIgnoredPath(normalized)) {
+			const normalized = normalizeLiteralPath(turn.root, turn.cwd, path);
+			if (normalized !== undefined && !isHistoryIgnoredPath(normalized)
+				&& isSafeWorkspacePath(turn.root, resolve(turn.root, normalized))) {
 				turn.files.set(normalized, { before: snapshotCurrentFile(turn.root, normalized) });
 			}
 		}
@@ -565,13 +648,29 @@ export default function historyExtension(pi: ExtensionAPI) {
 		if (!turn) {
 			return;
 		}
+		const rootReadable = canReadHistoryRoot(turn.root, ctx.cwd);
+		const readFailure = "workspace root is no longer readable under the current history observation policy";
+		if (!rootReadable) {
+			turn.files.set(".", { before: { kind: "unsupported", reason: readFailure }, unavailable: readFailure });
+		}
 		const files: FileRecord[] = [];
 		const unsupportedPaths: string[] = [];
 		for (const [path, state] of turn.files) {
 			if (isHistoryIgnoredPath(path)) {
 				continue;
 			}
-			const after = snapshotCurrentFile(turn.root, path);
+			let after: SnapshotState;
+			try {
+				// A replaced ancestor can alias another in-root path as well as escape
+				// the workspace. Never follow it for Bash coverage, including when a
+				// later call introduced the symlink after this path was enrolled.
+				after = !rootReadable ? { kind: "unsupported", reason: readFailure }
+					: state.unavailable ? { kind: "unsupported", reason: state.unavailable }
+					: state.bash && hasBashSymlinkAncestor(turn.root, path) ? { kind: "unsupported", reason: "symlink ancestor after Bash change" }
+					: snapshotCurrentFile(turn.root, path);
+			} catch (error) {
+				after = { kind: "unsupported", reason: `snapshot failed: ${error instanceof Error ? error.message : String(error)}` };
+			}
 			const unsupported = state.before.kind === "unsupported" ? state.before
 				: after.kind === "unsupported" ? after : undefined;
 			if (unsupported) unsupportedPaths.push(`${path} (${unsupported.reason})`);
