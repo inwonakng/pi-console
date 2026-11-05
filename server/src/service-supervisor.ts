@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, rename, rmdir, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -75,22 +76,36 @@ async function publish(path: string, text: string): Promise<void> {
   }
 }
 
-/** Serializes local management, not execution. A stale lock is never auto-removed. */
+/** Serializes management until close/process death, independently of service ownership. */
 export async function managementLock(root: string): Promise<() => Promise<void>> {
   await privateDirectory(root);
+  // Keep the old path: old managers refuse this file, and new managers refuse
+  // old directory locks. Never bypass a possibly live manager during upgrade.
   const path = join(root, "management.lock");
-  for (let attempt = 0; ; attempt++) {
-    try { await mkdir(path, { mode: 0o700 }); break; }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (attempt >= 600) throw new Error(`Management is busy or its lock is stale: ${path}. Remove only after confirming no management command is running.`);
-      await new Promise((done) => setTimeout(done, 100));
-    }
+  try { await (await open(path, "wx", 0o600)).close(); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  const stat = await lstat(path);
+  if (stat.isDirectory()) throw new Error(`Legacy management lock: ${path}. Stop using older management commands and confirm none is running, then remove only this empty directory with rmdir and retry. No lock was removed.`);
+  if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || stat.mode & 0o077) {
+    throw new Error(`Management lock must be a private same-user regular file (0600): ${path}`);
   }
-  return () => rmdir(path);
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("PRAGMA busy_timeout=0");
+    for (let attempt = 0; ; attempt++) {
+      try { db.exec("BEGIN EXCLUSIVE"); break; }
+      catch (error) {
+        if ((error as { errcode?: number }).errcode !== 5) throw error; // SQLITE_BUSY only.
+        if (attempt >= 600) throw new Error(`Another management command holds ${path}. Wait for it to finish; do not remove the lock file.`);
+        await new Promise((done) => setTimeout(done, 100));
+      }
+    }
+  } catch (error) { db.close(); throw error; }
+  return async () => { db.close(); }; // Keep the file: unlinking it would split the lock domain.
 }
 
 export class ServiceSupervisor {
+  private launchdRuns: number | undefined;
   private constructor(readonly config: Startup) {}
   static async load(root: string, channel: Channel, appRoot: string, directory?: string): Promise<ServiceSupervisor | undefined> {
     let value: unknown;
@@ -124,8 +139,9 @@ export class ServiceSupervisor {
     }
     if (Object.values(environment).some((v) => /[\0\r\n]/.test(v))) throw new Error("Service environment must not contain NUL/newline characters");
     const supervisor = new ServiceSupervisor({ version: 1, platform: process.platform, root: options.root, channel: options.channel,
-      owner: await managementIdentity(options.appRoot, options.channel), directory, label, node: await realpath(process.execPath), application,
+      owner: await managementIdentity(options.appRoot, options.channel), directory, label, node: "node", application,
       args: ["--channel", options.channel, "--root", options.root, ...options.extraArgs], environment });
+    await supervisor.validateRuntime();
     await mkdir(directory, { recursive: true });
     const stat = await lstat(directory);
     if (!stat.isDirectory() || stat.uid !== process.getuid?.() || stat.mode & 0o022) throw new Error("Supervisor directory must be owned by this user and not writable by others");
@@ -160,19 +176,34 @@ export class ServiceSupervisor {
       return join(await realpath(dirname(path)), basename(path));
     }
   }
+  /** Use the saved PATH/environment, not the managing shell or a resolved Cellar path. */
+  async validateRuntime(): Promise<void> {
+    const launcher = this.config.channel === "dev" ? "pi-console-dev" : "pi-console";
+    try {
+      const { stdout } = await exec("/usr/bin/env", ["-i", ...Object.entries(this.config.environment).map(([key, value]) => `${key}=${value}`),
+        this.config.node, "--version"], { cwd: homedir() });
+      const version = /^v(\d+)\.(\d+)\./.exec(stdout.trim());
+      if (!version || Number(version[1]) < 22 || Number(version[1]) === 22 && Number(version[2]) < 19) {
+        throw new Error(`Node >=22.19.0 required; found ${stdout.trim() || "no version"}`);
+      }
+    } catch (cause) {
+      throw new Error(`Startup Node (${this.config.node}) is unavailable or unsupported with the saved PATH (${this.config.environment.PATH}). ${(cause as Error).message}\nRestore Node or explicitly recreate startup registration with ${launcher} server disable followed by server enable (use the same --root ${shellQuote(this.config.root)}). Saved history is preserved; disable refuses active work unless explicitly forced.`, { cause });
+    }
+  }
+  private async launchdStatus(): Promise<string | undefined> {
+    let stdout: string;
+    try { ({ stdout } = await exec("launchctl", ["print", `${domain()}/${this.config.label}`])); }
+    catch (error) {
+      if (/Could not find service|service not found/i.test(String((error as { stderr?: string }).stderr))) return;
+      throw error;
+    }
+    const loadedPath = stdout.split("\n").map((line) => line.trim()).find((line) => line.startsWith("path = "))?.slice(7);
+    if (!loadedPath || await this.canonicalDefinition(loadedPath) !== await this.canonicalDefinition()) throw new Error("Loaded launchd label belongs to another definition; refusing management");
+    return stdout;
+  }
   async loaded(): Promise<boolean> {
     const { config } = this;
-    if (config.platform === "darwin") {
-      let stdout: string;
-      try { ({ stdout } = await exec("launchctl", ["print", `${domain()}/${config.label}`])); }
-      catch (error) {
-        if (/Could not find service|service not found/i.test(String((error as { stderr?: string }).stderr))) return false;
-        throw error;
-      }
-      const loadedPath = stdout.split("\n").map((line) => line.trim()).find((line) => line.startsWith("path = "))?.slice(7);
-      if (!loadedPath || await this.canonicalDefinition(loadedPath) !== await this.canonicalDefinition()) throw new Error("Loaded launchd label belongs to another definition; refusing management");
-      return true;
-    }
+    if (config.platform === "darwin") return await this.launchdStatus() !== undefined;
     const { stdout } = await systemctl(["show", `${config.label}.service`, "--property=FragmentPath", "--value"]);
     if (!stdout.trim()) return false;
     if (await this.canonicalDefinition(stdout.trim()) !== await this.canonicalDefinition()) throw new Error("Loaded systemd unit belongs to another definition; refusing management");
@@ -190,9 +221,21 @@ export class ServiceSupervisor {
       ? `journalctl --user -u ${shellQuote(this.config.label + ".service")} -b -n 60 --no-pager`
       : join(this.config.root, "service.log");
   }
-  /** Type=exec start can succeed before application initialization fails. */
+  /** Supervisor start can succeed before application initialization fails. */
   async startupFailure(): Promise<string | undefined> {
-    if (this.config.platform !== "linux") return;
+    if (this.config.platform === "darwin") {
+      // A kickstart can return before launchd schedules the new process. Do not
+      // mistake the previous invocation's exit status for this launch failing.
+      if (this.launchdRuns === undefined) return;
+      const status = await this.launchdStatus();
+      if (!status || /^\s*pid = \d+/m.test(status)) return;
+      const runs = /^\s*runs = (\d+)/m.exec(status);
+      const state = /^\s*state = (.+)$/m.exec(status)?.[1];
+      const exit = /^\s*last exit code = (-?\d+)/m.exec(status);
+      const signal = /^\s*last terminating signal = (.+)$/m.exec(status);
+      if (!runs || Number(runs[1]) <= this.launchdRuns || !["not running", "exited"].includes(state ?? "") || !exit && !signal) return;
+      return `Service exited during startup (launchd ${exit ? `exit status ${exit[1]}` : `signal ${signal![1]}`}).`;
+    }
     const unit = `${this.config.label}.service`;
     const { stdout } = await systemctl(["show", unit, "--property=ActiveState,Result,ExecMainStatus,InvocationID"]);
     const fields = new Map(stdout.trim().split("\n").map((line) => {
@@ -238,7 +281,9 @@ export class ServiceSupervisor {
     await this.ensureDefinition();
     const { config } = this;
     if (config.platform === "darwin") {
-      if (!await this.loaded()) await exec("launchctl", ["bootstrap", domain(), definitionPath(config)]);
+      const previous = await this.launchdStatus();
+      this.launchdRuns = previous ? Number(/^\s*runs = (\d+)/m.exec(previous)?.[1] ?? 0) : 0;
+      if (previous === undefined) await exec("launchctl", ["bootstrap", domain(), definitionPath(config)]);
       else await exec("launchctl", ["kickstart", `${domain()}/${config.label}`]); // no -k: never kill a running owner
     } else {
       await this.loaded();

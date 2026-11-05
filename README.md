@@ -120,7 +120,8 @@ Normal stop/restart/disable refuses active work, queued prompts and approvals;
 `--force` intentionally interrupts owned work. Idle conversations are stopped and
 saved. Disable preserves histories, workspaces and credentials. Updates leave the
 running release pinned; status reports running/selected builds and restart needs.
-Startup captures PATH and the discovered Pi/Node paths, without shell initialization.
+Startup captures PATH and the discovered Pi path, and finds Node through that saved
+PATH without shell initialization.
 LaunchAgents require login; Linux execution after logout requires user lingering.
 Sleep suspends execution. See [service environment and startup](server/README.md#service-environment-and-startup).
 

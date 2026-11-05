@@ -139,7 +139,9 @@ the service. `start` uses that supervisor when configured, or a detached process
 otherwise. Linux service output is in the user journal; `status` and startup
 errors show the exact `journalctl` command. Failed systemd startup reports its exit
 state and current-invocation journal excerpt rather than waiting for the readiness
-timeout. Detached startup errors include only the new launch's log excerpt.
+timeout. macOS startup detects a new launchd invocation exiting and reports its exit
+status with the new launch's log excerpt; an older invocation's status is ignored.
+Detached startup errors also include only the new launch's log excerpt.
 Neither policy automatically restarts after exit/crash: retained claims
 must be inspected, never automatically reconciled. `stop` leaves startup enabled;
 `disable` performs guarded IPC shutdown before unregistering startup. Normal
@@ -187,9 +189,13 @@ Enabling while a detached owner is live writes future-startup registration witho
 launching a competing owner. Labels include the channel and profile path hash.
 Exact definitions, loaded-definition paths and installation/checkout ownership
 are checked before management. Changed/unrelated definitions refuse rather than
-being overwritten or unloaded. Management commands serialize through
-`<profile>/management.lock`; remove a stale lock only after confirming no manager
-is running. A retained owner claim with no reachable service refuses enable before
+being overwritten or unloaded. Management commands serialize through a process-held
+SQLite lock at `<profile>/management.lock`. Process exit, including a crash, releases
+the lock; the file remains and must not be removed. Older management commands refuse
+that file rather than run concurrently. A legacy directory at the same path refuses
+management immediately: stop using older management commands, confirm none is running,
+then remove only the empty directory with `rmdir` and retry. New commands never remove
+legacy locks automatically. A retained owner claim with no reachable service refuses enable before
 any startup registration, including from the original checkout; inspect/reconcile
 explicitly first. A live owner must belong to the same installation/checkout.
 
@@ -200,7 +206,7 @@ definition: status reports `definitionPresent: false` and `enabled: false`; retr
 Failed writes never publish partial JSON/definitions; temporary `.tmp` files are
 not startup definitions. Disable removes registration last and can be retried after
 interrupted definition removal. Changed/unowned definitions still refuse management.
-A stale management lock still requires the inspection described above.
+A legacy directory management lock still requires the inspection described above.
 
 Startup definitions reference the installation's `current` selection for the next
 process; a running owner resolves and pins its release. Updates change neither
@@ -220,8 +226,15 @@ are also captured. Desktop notifications run on the execution host without requi
 an open frontend or overview; Linux requires `notify-send` and access to the user's
 notification service, and macOS requires `alerter`.
 `--path` overrides PATH and must include Node (for Pi's shebang) and required tool
-executables. Pi is discovered from the invoking PATH, and Pi/Node paths are resolved
-and saved internally for startup. Provider, model and TLS configuration paths
+executables. Pi is discovered from the invoking PATH and its resolved path is saved
+for startup. New registrations launch `node` through the captured PATH, following
+package-manager symlinks on subsequent starts instead of pinning a Homebrew Cellar
+version. Node >=22.19.0 is checked using the saved environment before registration
+and supervised start/restart; a failed check does not stop a healthy owner. Existing
+registrations are not rewritten automatically. If an old registration pins a missing
+Node executable, restore it or explicitly run `server disable` then `server enable`
+for the same channel/profile with a working Node/PATH. Disable preserves saved
+history and refuses active work unless forced. Provider, model and TLS configuration paths
 supplied at enable are retained. Shell rc files,
 frontend tmux variables, shell-exported API keys, SSH agent sockets and unrelated
 environment variables are not inherited. Store provider credentials/settings on

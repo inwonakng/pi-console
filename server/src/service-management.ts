@@ -79,8 +79,12 @@ export async function manageService(action: ManagementAction, options: HostOwner
     }
     let startupExit: string | undefined;
     let startupLogOffset = 0;
-    const startupError = async (summary: string): Promise<Error> => {
-      if (supervisor) return new Error(await supervisor.startupFailure() ?? `${summary}\nInspect: ${supervisor.logLocation()}`);
+    const startupError = async (summary: string, failure?: string): Promise<Error> => {
+      if (supervisor) {
+        const diagnostic = failure ?? await supervisor.startupFailure();
+        if (supervisor.config.platform === "linux") return new Error(diagnostic ?? `${summary}\nInspect: ${supervisor.logLocation()}`);
+        summary = diagnostic ?? summary;
+      }
       let details = "";
       try {
         const log = await open(join(root, "service.log"), constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -109,6 +113,15 @@ export async function manageService(action: ManagementAction, options: HostOwner
           && typeof existing.hello.network.port === "number") extraArgs.push("--port", String(listenerPort(existing.hello.network.port)));
       }
       catch (error) { existing.client.close(); throw error; }
+    }
+    // Check the saved Node/PATH before stopping a healthy supervised owner.
+    // Disable/stop and discovery of an already-running owner remain possible
+    // even if the registered runtime has disappeared.
+    if (supervisor && (action === "enable" || action === "restart" || action === "start" && !existing)) {
+      try {
+        progress?.("Checking registered Node runtime and saved PATH");
+        await supervisor.validateRuntime();
+      } catch (error) { existing?.client.close(); throw error; }
     }
     // Check start configuration before stopping a healthy owner.
     if ((action === "enable" || action === "restart" || action === "start" && !existing) && !supervisor) {
@@ -209,7 +222,7 @@ export async function manageService(action: ManagementAction, options: HostOwner
       }
       if (supervisor && n % 5 === 0) {
         const failure = await supervisor.startupFailure();
-        if (failure) throw new Error(failure);
+        if (failure) throw await startupError(failure, failure);
       }
       await delay(100);
     }
