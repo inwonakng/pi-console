@@ -62,11 +62,13 @@ end
 
 function M.apply_input_window_options(ctx, win)
 	M.apply_window_padding(ctx, win)
+	vim.api.nvim_set_option_value("winfixheight", true, { win = win })
 	M.update_input_sidebar(ctx)
 end
 
 function M.apply_transcript_window_options(ctx, win)
 	M.apply_window_padding(ctx, win)
+	vim.api.nvim_set_option_value("winfixheight", false, { win = win })
 	vim.api.nvim_set_option_value("scrolloff", 4, { win = win })
 end
 
