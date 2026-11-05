@@ -160,6 +160,21 @@ function M.apply_folds(state, win)
 	if not win or not vim.api.nvim_win_is_valid(win) then
 		return
 	end
+	local buf = vim.api.nvim_win_get_buf(win)
+	local previous = vim.w[win].pi_transcript_folds
+	-- Native z commands change window folds, not activity_expanded. Read those
+	-- choices before rebuilding so transcript updates do not undo them.
+	if previous and previous.buf == buf and vim.wo[win].foldmethod == "manual" then
+		state.activity_expanded = state.activity_expanded or {}
+		vim.api.nvim_win_call(win, function()
+			for _, fold in ipairs(previous.folds) do
+				if vim.fn.foldlevel(fold[1]) > 0 then
+					fold[3] = vim.fn.foldclosed(fold[1]) == -1
+					state.activity_expanded[fold[4]] = fold[3]
+				end
+			end
+		end)
+	end
 	local folds = {}
 	for _, activity in ipairs(state.transcript_items or {}) do
 		if activity.kind == "activity" then
@@ -173,15 +188,16 @@ function M.apply_folds(state, win)
 			end
 			activity.folded = last > activity.start_line and not activity.expanded
 			if last > activity.start_line then
-				table.insert(folds, { activity.start_line, last, activity.expanded })
+				table.insert(folds, { activity.start_line, last, activity.expanded, activity.key })
 			end
 		end
 	end
-	local buf = vim.api.nvim_win_get_buf(win)
-	local previous = vim.w[win].pi_transcript_folds
 	local tick = vim.api.nvim_buf_get_changedtick(buf)
 	if previous and previous.buf == buf and previous.tick == tick and vim.deep_equal(previous.folds, folds)
-		and vim.wo[win].foldmethod == "manual" and vim.wo[win].foldenable then return end
+		and vim.wo[win].foldmethod == "manual" then
+		vim.w[win].pi_transcript_folds = previous
+		return
+	end
 	vim.api.nvim_win_call(win, function()
 		local view = vim.fn.winsaveview()
 		vim.wo.foldmethod = "manual"
@@ -206,9 +222,15 @@ function M.apply_folds(state, win)
 end
 
 function M.toggle(ctx, activity)
-	ctx.state.activity_expanded = ctx.state.activity_expanded or {}
-	ctx.state.activity_expanded[activity.key] = not activity.expanded
 	M.apply_folds(ctx.state, vim.api.nvim_get_current_win())
+	local expanded = not activity.expanded
+	if vim.fn.foldlevel(activity.start_line) > 0 then
+		expanded = vim.fn.foldclosed(activity.start_line) ~= -1
+		vim.cmd(tostring(activity.start_line) .. (expanded and "foldopen" or "foldclose"))
+	end
+	ctx.state.activity_expanded = ctx.state.activity_expanded or {}
+	ctx.state.activity_expanded[activity.key] = expanded
+	activity.expanded = expanded
 	return true
 end
 

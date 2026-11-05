@@ -6,6 +6,7 @@ local buffer = require("pi-integration.utils.buffer")
 local M = {}
 
 local quote_ns = vim.api.nvim_create_namespace("pi-console-transcript-quotes")
+local interactive_transcripts = {}
 
 local function yaml_value(value)
 	if value == nil or value == vim.NIL or value == "" then
@@ -84,6 +85,10 @@ function M.preserve_view(ctx, callback)
 		if buffer.window_matches(win, buf) then
 			view.lnum = math.min(view.lnum, vim.api.nvim_buf_line_count(buf))
 			vim.api.nvim_win_call(win, function()
+				local header = vim.fn.foldclosed(view.lnum)
+				if header ~= -1 and header ~= view.lnum then
+					view.lnum, view.col, view.curswant = header, 0, 0
+				end
 				vim.api.nvim_win_set_cursor(win, { view.lnum, view.col })
 				vim.fn.winrestview(view)
 			end)
@@ -168,7 +173,8 @@ local function tool_summary_rows(state, preview)
 	for _, item in ipairs(state.transcript_items or {}) do
 		if item.kind == "activity" then
 			rows[item.start_line] = { highlight = "PiActivityQuote", segments = item.segments,
-				chevron = item.folded == false and activity.open_icon or activity.closed_icon }
+				chevron = not preview and vim.fn.foldclosed(item.start_line) == -1
+					and activity.open_icon or activity.closed_icon }
 			if not preview then
 				for _, child in ipairs(item.children) do
 					if child.kind == "tool" then add(child.start_line, child.output_id, true) end
@@ -216,7 +222,19 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 	end
 
 	local tick = vim.api.nvim_buf_get_changedtick(buf)
-	local rows = state and tool_summary_rows(state, opts and opts.preview) or {}
+	local preview = opts and opts.preview
+	interactive_transcripts[buf] = not preview and state or nil
+	local rows = {}
+	if state then
+		local win = not preview and buffer.find_window(buf, opts and opts.win or state.transcript_win)
+		if win == vim.api.nvim_get_current_win() then
+			rows = tool_summary_rows(state, false)
+		elseif win then
+			rows = vim.api.nvim_win_call(win, function() return tool_summary_rows(state, false) end)
+		else
+			rows = tool_summary_rows(state, true)
+		end
+	end
 	local previous = state and state.transcript_quote_cache
 	if previous and previous.buf == buf and previous.tick == tick
 		and vim.deep_equal(previous.rows, rows) then return end
@@ -278,6 +296,26 @@ function M.apply_quote_highlights_to_buffer(buf, state, opts)
 	end
 	if state then state.transcript_quote_cache = { buf = buf, tick = tick, rows = rows } end
 end
+
+-- Native fold commands can leave the cursor in place, so CursorMoved is not
+-- enough. SafeState runs after the complete command, before waiting for input.
+vim.api.nvim_create_autocmd("SafeState", {
+	callback = function()
+		local win = vim.api.nvim_get_current_win()
+		local buf = vim.api.nvim_win_get_buf(win)
+		local state = interactive_transcripts[buf]
+		if not state then return end
+		local cursor = vim.api.nvim_win_get_cursor(win)
+		local header = vim.fn.foldclosed(cursor[1])
+		if header ~= -1 and header ~= cursor[1] then
+			vim.api.nvim_win_set_cursor(win, { header, 0 })
+		end
+		M.apply_quote_highlights_to_buffer(buf, state, { win = win })
+	end,
+})
+vim.api.nvim_create_autocmd("BufWipeout", {
+	callback = function(event) interactive_transcripts[event.buf] = nil end,
+})
 
 function M.apply_quote_highlights(ctx)
 	local state = ctx.state
