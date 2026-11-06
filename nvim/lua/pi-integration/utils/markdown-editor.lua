@@ -2,7 +2,7 @@ local floats = require("pi-integration.floats")
 
 local M = {}
 
--- Ctrl+Enter submits the current text. Closing without submitting returns nil;
+-- Ctrl+Enter or Ctrl+S submits the current text. Closing without submitting returns nil;
 -- nofile lets both :q and :q! dismiss even a modified scratch buffer.
 function M.open(opts, on_close)
 	local buf = vim.api.nvim_create_buf(false, true)
@@ -46,16 +46,18 @@ function M.open(opts, on_close)
 			on_close(text)
 		end)
 	end
-	vim.keymap.set({ "n", "i" }, "<C-CR>", function()
-		local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
-		if opts.prepare_text then
-			text = opts.prepare_text(text)
-		end
-		if text ~= nil then
-			vim.cmd("stopinsert")
-			finish(text)
-		end
-	end, { buffer = buf, desc = "Submit editor text" })
+	for _, key in ipairs({ "<C-CR>", "<C-s>" }) do
+		vim.keymap.set({ "n", "i" }, key, function()
+			local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+			if opts.prepare_text then
+				text = opts.prepare_text(text)
+			end
+			if text ~= nil then
+				vim.cmd("stopinsert")
+				finish(text)
+			end
+		end, { buffer = buf, desc = "Submit editor text" })
+	end
 	local function cancel() finish(nil) end
 	vim.api.nvim_create_autocmd("WinClosed", { pattern = tostring(win), once = true, callback = cancel })
 	vim.api.nvim_create_autocmd({ "BufHidden", "BufWipeout" }, { buffer = buf, once = true, callback = cancel })

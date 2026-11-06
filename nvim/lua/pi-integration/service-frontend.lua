@@ -503,10 +503,12 @@ local function draft_buffer(name, contents, on_save, on_hide, target_win)
 	end
 	vim.api.nvim_create_autocmd("BufWriteCmd", { buffer = buf, callback = save })
 	if on_save then
-		vim.keymap.set({ "n", "i" }, "<C-CR>", function()
-			vim.cmd("stopinsert")
-			save()
-		end, { buffer = buf, desc = "Submit editor text" })
+		for _, key in ipairs({ "<C-CR>", "<C-s>" }) do
+			vim.keymap.set({ "n", "i" }, key, function()
+				vim.cmd("stopinsert")
+				save()
+			end, { buffer = buf, desc = "Submit editor text" })
+		end
 	end
 	if on_hide then
 		local hidden = false
@@ -2356,9 +2358,11 @@ function M.side_prompt()
 				if current(captured) and input == side_input_buf then submit_draft("side.prompt", input, captured, submitted, tick) end
 			end, true)
 		end
-		vim.keymap.set({ "n", "i" }, "<C-CR>", function()
-			action_connection.run(submit)
-		end, { buffer = input, desc = "Send side message" })
+		for _, key in ipairs({ "<C-CR>", "<C-s>" }) do
+			vim.keymap.set({ "n", "i" }, key, function()
+				action_connection.run(submit)
+			end, { buffer = input, desc = "Send side message" })
+		end
 		vim.api.nvim_create_autocmd("BufHidden", { buffer = input, callback = function() save_side_draft() end })
 		local resource = owner_resources()
 		for _, buf in ipairs({ side_buf, side_input_buf }) do

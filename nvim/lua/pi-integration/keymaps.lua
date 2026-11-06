@@ -6,6 +6,7 @@ local kill_spec = { lhs = "<leader>pk", action = "kill_session", desc = "Stop se
 M.specs = {
 	input = {
 		{ modes = { "n", "i" }, lhs = "<C-CR>", action = "submit_prompt", desc = "Submit prompt" },
+		{ modes = { "n", "i" }, lhs = "<C-s>", action = "submit_prompt", desc = "Submit prompt" },
 	},
 	shared = {
 		{ lhs = "<leader>a", action = "cycle_access_mode", desc = "Cycle access mode" },
@@ -141,7 +142,7 @@ end
 
 function M.help_key_lines()
 	local lines = {
-		"- `<C-CR>` submit the input buffer.",
+		"- `<C-CR>` or `<C-s>` submit the input buffer.",
 		"- `<leader>qq` choose Detach, Stop or Cancel.",
 		"- `" .. kill_spec.lhs .. "` " .. kill_spec.desc .. " (requires control of a live session).",
 	}

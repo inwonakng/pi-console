@@ -87,7 +87,7 @@ function M.open(transcript_buf, input_buf, resources)
 				name = "pi://side-help", title = "Side conversation keys", parent = vim.api.nvim_get_current_win(),
 				lines = {
 					"# Side conversation keys", "",
-					"- `<C-CR>` sends from the input (normal or insert mode).",
+					"- `<C-CR>` or `<C-s>` sends from the input (normal or insert mode).",
 					"- `<C-k>` / `<C-w>k` focuses the transcript (normal mode).",
 					"- `<C-j>` / `<C-w>j` focuses the input (normal mode).",
 					"- Moving past either window with `<C-h/j/k/l>` / `<C-w>h/j/k/l` hides the side conversation.",
