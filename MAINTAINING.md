@@ -50,6 +50,36 @@ unrelated wrappers and stable services are left untouched.
 | `tmux/` | Popup, overview, and sidebar integration |
 | `scripts/` | Installation and release scripts |
 
+## Update screenshots
+
+`scripts/screenshots/screenshots.sh` regenerates `assets/overview.png`,
+`assets/regular.png`, `assets/webui-overview.png` and `assets/webui-conversation.png`.
+It runs real frontends against a private service under a throwaway `HOME`
+(`/tmp/pi-demo`), with a scripted model endpoint instead of a provider, and
+leaves your own service, sessions, settings and tmux alone. Requirements are
+the usual full-client tools plus a Nerd Font. Install the renderer once:
+
+```sh
+npm ci --prefix scripts/screenshots
+npx --prefix scripts/screenshots playwright install chromium
+```
+
+Run it against an installed release so the frontend shows no `DEV` badges, or
+against a built checkout (the default):
+
+```sh
+PI_CONSOLE_APP=~/.local/share/pi-console/current scripts/screenshots/screenshots.sh
+```
+
+Sessions, groups, titles and replies come from `scripts/screenshots/scenario.json`.
+A session's `turn` is `reply`, `working` (stays busy) or `approval` (waits on a
+file write). Useful variables: `SCREENSHOT_OUT` (output directory),
+`SCREENSHOT_FONT` (font family, default `JetBrainsMono Nerd Font`),
+`SCREENSHOT_COLS`/`SCREENSHOT_ROWS`, `SCREENSHOT_TMUX_CONF` (use your own tmux
+look), and `SCREENSHOT_KEEP=1` to leave the demo running for inspection with
+`tmux -L pi-console-demo attach`. Ports 18443 and 18490 must be free
+(`SCREENSHOT_SERVICE_PORT`, `SCREENSHOT_MODEL_PORT`).
+
 ## Publish a release
 
 Start from a clean `main` checkout that has been pushed to origin. The release

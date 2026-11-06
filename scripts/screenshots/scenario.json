@@ -1,0 +1,59 @@
+{
+  "model": { "provider": "demo", "id": "demo-model", "name": "Demo model" },
+  "groups": ["Website", "Thesis"],
+  "conversation": "Related work on retrieval-augmented agents",
+  "sessions": [
+    {
+      "dir": "homepage",
+      "group": "Website",
+      "title": "Landing page hero redesign",
+      "slug": "hero-redesign",
+      "prompt": "The hero section on the landing page feels cramped on mobile. Can you rework the layout so the headline and call to action have more room?",
+      "turn": "working",
+      "reasoning": "The hero uses a fixed height and a two-column grid down to 320px. I should check the breakpoints in styles/hero.css first, then switch to a single column below 720px. "
+    },
+    {
+      "dir": "homepage",
+      "group": "Website",
+      "title": "Broken links in blog footer",
+      "slug": "footer-links",
+      "prompt": "Some links in the blog footer return 404. Find them and tell me what they should point to.",
+      "turn": "reply",
+      "reply": "Three footer links are broken:\n\n- `/blog/archive` moved to `/blog/all`\n- `/rss` should be `/feed.xml`\n- `/about-me` was renamed to `/about`\n\nThe footer template is `templates/footer.html`. Want me to update it?"
+    },
+    {
+      "dir": "thesis",
+      "group": "Thesis",
+      "title": "Plotting ablation results",
+      "slug": "ablation-plots",
+      "prompt": "Write a script that plots the ablation results in results/ablation.csv as grouped bar charts.",
+      "turn": "approval",
+      "tool": {
+        "name": "write",
+        "arguments": {
+          "path": "scripts/plot_ablation.py",
+          "content": "import pandas as pd\nimport matplotlib.pyplot as plt\n\nresults = pd.read_csv(\"results/ablation.csv\")\nresults.pivot(index=\"dataset\", columns=\"variant\", values=\"accuracy\").plot.bar()\nplt.ylabel(\"Accuracy\")\nplt.tight_layout()\nplt.savefig(\"figures/ablation.pdf\")\n"
+        }
+      },
+      "reply": "Saved `scripts/plot_ablation.py`."
+    },
+    {
+      "dir": "thesis",
+      "group": "Thesis",
+      "title": "Related work on retrieval-augmented agents",
+      "slug": "related-work",
+      "prompt": "Summarize the related work section in chapters/related.tex and point out any gaps.",
+      "turn": "reply",
+      "reasoning": "The section covers retrieval augmentation and tool use, but not evaluation. ",
+      "reply": "The section groups prior work into retrieval-augmented generation and tool-using agents. Two gaps stand out:\n\n1. No discussion of how agents are evaluated over long horizons.\n2. The memory subsection cites only work before 2024."
+    },
+    {
+      "dir": "dotfiles",
+      "title": "Tidy tmux key bindings",
+      "slug": "tmux-bindings",
+      "prompt": "My tmux.conf has a lot of duplicated bindings. Which ones can I remove?",
+      "turn": "reply",
+      "reply": "`bind r source-file` and `bind | split-window -h` are each defined twice. The later definitions win, so you can remove lines 12 and 31."
+    }
+  ]
+}
