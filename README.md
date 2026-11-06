@@ -23,6 +23,8 @@ setups. Future maintenance and support are not guaranteed.
 - Track multiple conversations in a tmux popup, overview, or sidebar.
 - Open tool output, reasoning traces, and subagent transcripts when needed.
 - Review permissions and changes before approving them.
+- Supports multi-device setup, allowing for attaching/detaching to sessions on different devices.
+- PWA compatible web UI for simplified experience.
 
 ![Session overview showing working, idle, and waiting conversations](assets/overview.png)
 
@@ -133,14 +135,14 @@ press **Ctrl+Enter** to send. Prompts submitted while Pi is working are queued.
 `<leader>` means Space; for example, `<leader>s` means Space followed by `s`
 in normal mode.
 
-| Key | Action |
-|---|---|
-| `<leader>?` | Show help and the full key list |
-| `<leader>s` | Resume a saved conversation |
-| `<leader>h` | Open the searchable conversation history tree |
-| `<leader>m` / `<leader>t` | Choose the model / thinking level |
-| `<leader>pq` | Review queued prompts |
-| `<leader>pa` | Reopen a pending question or approval |
+| Key                       | Action                                        |
+| ------------------------- | --------------------------------------------- |
+| `<leader>?`               | Show help and the full key list               |
+| `<leader>s`               | Resume a saved conversation                   |
+| `<leader>h`               | Open the searchable conversation history tree |
+| `<leader>m` / `<leader>t` | Choose the model / thinking level             |
+| `<leader>pq`              | Review queued prompts                         |
+| `<leader>pa`              | Reopen a pending question or approval         |
 
 The [user guide](docs/USAGE.md) covers conversation controls, screenshots, and
 optional features.
@@ -161,12 +163,12 @@ popup. Intentional session switches keep it open, and normal clients retain
 your `detach-on-destroy` policy. Older servers still support launching popups,
 but do not automatically close their attachments after session destruction.
 
-| Key | Action |
-|---|---|
-| `<prefix>g` | Toggle the conversation popup |
+| Key         | Action                                                                         |
+| ----------- | ------------------------------------------------------------------------------ |
+| `<prefix>g` | Toggle the conversation popup                                                  |
 | `<prefix>G` | Start a conversation in the agents session, using the current pane's directory |
-| `<prefix>o` | Open or focus the overview |
-| `<prefix>O` | Toggle the sidebar |
+| `<prefix>o` | Open or focus the overview                                                     |
+| `<prefix>O` | Toggle the sidebar                                                             |
 
 `<prefix>` is your tmux prefix key. In the overview or sidebar, use `j`/`k` and
 Enter to select a conversation. See [tmux integration](docs/USAGE.md#tmux-integration)
