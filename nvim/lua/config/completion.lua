@@ -159,6 +159,11 @@ cmp.setup({
 		},
 	},
 })
--- else
--- 	vim.notify("blink.cmp unavailable; completion disabled", vim.log.levels.WARN)
--- end
+-- Host pickers enter the command line from terminal mode, which Blink's
+-- ModeChanged hooks miss. Wait for the prompt to open before repairing mappings.
+vim.api.nvim_create_autocmd("CmdlineEnter", {
+	group = vim.api.nvim_create_augroup("PiCompletionKeymaps", { clear = true }),
+	callback = vim.schedule_wrap(function()
+		require("blink.cmp.keymap").ensure_mappings()
+	end),
+})
