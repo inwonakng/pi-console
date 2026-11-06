@@ -72,6 +72,7 @@ local function summary(state, activity)
 		table.insert(segments, { #text, #text + #part, highlight })
 		text = text .. part
 	end
+	add(plural(#activity.children, "step"), nil)
 	if #paths > 0 then
 		local names = {}
 		for index = 1, math.min(#paths, 2) do
@@ -86,7 +87,6 @@ local function summary(state, activity)
 	if failures > 0 then
 		add("✗ " .. failures .. " failed", "DiagnosticError")
 	end
-	add(plural(#activity.children, "step"), nil)
 	return text, segments
 end
 
