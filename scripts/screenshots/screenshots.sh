@@ -73,6 +73,20 @@ wait_for() {
     done
 }
 pane_has() { demo_tmux capture-pane -p -t "$1" | grep -qF -- "$2"; }
+show_pane() {
+    printf -- '--- Screen of the waiting pane:\n' >&2
+    demo_tmux capture-pane -p -t "$1" | grep -v '^[[:space:]]*$' >&2 || true
+}
+# Neovim installs the frontend's plugins on first launch after asking for
+# confirmation. Do not answer for the user; they live in the real data dir.
+conversation_ready() {
+    if pane_has "$1" "These plugins will be installed"; then
+        printf 'This pi-console build has not installed its Neovim plugins yet. Launch it once\n(%s), accept the plugin installation, quit, then rerun this script.\n' \
+            "$app/bin/pi-console" >&2
+        exit 1
+    fi
+    pane_has "$1" "Send a message to begin."
+}
 screen_has() { shot_tmux capture-pane -p | grep -qF -- "$1"; }
 titled_sessions() { [ "$("${launcher[@]}" server status --json | scenario titled)" -ge "$1" ]; }
 capture() {
@@ -134,7 +148,7 @@ cat > "$demo/projects/homepage/styles/hero.css" <<'EOF'
 EOF
 
 log "Starting scripted model and service"
-node "$here/fake-model.mjs" "$here/scenario.json" "$model_port" &
+node "$here/fake-model.mjs" "$here/scenario.json" "$model_port" > "$demo/fake-model.log" 2>&1 &
 model_pid=$!
 sleep 0.5
 kill -0 "$model_pid" 2>/dev/null || { printf 'Scripted model failed to start; is port %s in use?\n' "$model_port" >&2; exit 1; }
@@ -157,7 +171,7 @@ while IFS=$'\t' read -r dir prompt; do
     fi
     # Same tab metadata as tmux/scripts/open-agents-window.sh.
     demo_tmux set-option -wo -t "$pane" @pi_console_tab "{\"pane\":\"$pane\",\"name\":\"New Session\"}"
-    wait_for "the new conversation in $dir" 60 pane_has "$pane" "Send a message to begin."
+    wait_for "the new conversation in $dir" 60 conversation_ready "$pane" || { show_pane "$pane"; exit 1; }
     demo_tmux send-keys -t "$pane" i
     demo_tmux send-keys -t "$pane" -l -- "$prompt"
     demo_tmux send-keys -t "$pane" Escape C-s
