@@ -665,7 +665,7 @@ function renderOverview() {
     const status = text("span", "", "status");
     setStatus(status, state);
     heading.append(text("span", sessionName(row), "row-title"), status);
-    link.append(heading, text("span", `${host.alias} / ${row.live?.cwd || row.cwd}`, "row-directory"));
+    link.append(heading, text("span", `${host.alias} / ${row.live?.project || row.cwd}`, "row-directory"));
     const group = text("div", "", "session-entry");
     group.dataset.key = key;
     const headingRow = text("div", "", "session-entry-heading");
