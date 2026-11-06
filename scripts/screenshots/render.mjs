@@ -1,6 +1,7 @@
 // Render captured tmux screens and the web UI to PNG files with Playwright.
 //   node render.mjs terminal SCREEN.ansi OUT.png COLS ROWS
 //   node render.mjs web URL OUT_DIR SESSION_COUNT CONVERSATION_TITLE
+//   node render.mjs check   (only verify that Chromium starts)
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -69,9 +70,37 @@ async function web(browser, [url, outDir, count, title]) {
 	await page.close();
 }
 
-const browser = await chromium.launch();
+let browser;
 try {
-	if (mode === "terminal") await terminal(browser, args);
+	browser = await chromium.launch();
+} catch (error) {
+	console.error(error.message.split("\n").find((line) => line.includes("error while loading shared libraries")) ?? error.message);
+	console.error("Chromium cannot start. Install its system libraries, for example:\n  sudo npx --prefix scripts/screenshots playwright install-deps chromium");
+	process.exit(1);
+}
+// A missing font silently falls back and draws Nerd Font icons as boxes.
+async function check(browser) {
+	const page = await browser.newPage();
+	const found = await page.evaluate((font) => {
+		const draw = (family) => {
+			const canvas = document.createElement("canvas");
+			const context = canvas.getContext("2d");
+			context.font = `32px ${family}`;
+			context.fillText("\uf07b\ue0b6", 4, 36);
+			return canvas.toDataURL();
+		};
+		return draw(`"${font}", monospace`) !== draw("monospace");
+	}, font);
+	await page.close();
+	if (!found) {
+		console.error(`Font "${font}" with Nerd Font icons is not installed. Install it (for example from\nhttps://www.nerdfonts.com) or set SCREENSHOT_FONT to an installed Nerd Font family.`);
+		process.exitCode = 1;
+	}
+}
+
+try {
+	if (mode === "check") await check(browser);
+	else if (mode === "terminal") await terminal(browser, args);
 	else if (mode === "web") await web(browser, args);
 	else throw new Error(`Unknown mode: ${mode}`);
 } finally {

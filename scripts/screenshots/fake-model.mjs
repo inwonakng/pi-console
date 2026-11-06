@@ -57,6 +57,7 @@ createServer((req, res) => {
 	let raw = "";
 	req.on("data", (data) => { raw += data; });
 	req.on("end", () => {
+		console.log(`${req.method} ${req.url}`);
 		if (req.method !== "POST" || !req.url.endsWith("/chat/completions")) {
 			res.writeHead(404).end();
 			return;

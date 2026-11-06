@@ -42,7 +42,10 @@ export XDG_DATA_HOME=${XDG_DATA_HOME:-$real_home/.local/share}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$real_home/.cache}
 export HOME=$demo XDG_CONFIG_HOME=$demo/.config XDG_STATE_HOME=$demo/.local/state
 export COLORTERM=truecolor TERM=xterm-256color
-unset TMUX TMUX_PANE PI_CODING_AGENT_DIR PI_CODING_AGENT_SESSION_DIR
+# Running from inside Pi or pi-console exports PI_* variables. The service CLI
+# reads PI_PROVIDER/PI_MODEL as the worker model, which does not exist in the
+# demo and makes every session fail, so drop them all.
+unset TMUX TMUX_PANE NVIM $(compgen -e | grep '^PI_' || true)
 
 launcher=(bash "$app/bin/pi-console")
 demo_tmux() { tmux -L pi-console-demo -f "$tmux_conf" "$@"; }
@@ -87,12 +90,29 @@ conversation_ready() {
     fi
     pane_has "$1" "Send a message to begin."
 }
+# The frontend refuses a submit while the session is still starting and keeps
+# the text in the input; an empty input makes C-s a no-op, so retrying is safe.
+# Hidden windows do not redraw, so ask the service whether the prompt arrived.
+accepted() { [ "$("${launcher[@]}" server status --json | scenario accepted)" -ge "$1" ]; }
+submit() {
+    local attempt
+    for attempt in 1 2 3 4 5 6; do
+        demo_tmux send-keys -t "$1" C-s
+        if wait_for "the prompt in $2" 5 accepted "$3" 2>/dev/null; then return; fi
+        log "Session in $2 did not accept the prompt yet; submitting again"
+    done
+    printf 'The prompt in %s was never accepted.\n' "$2" >&2
+    show_pane "$1"
+    exit 1
+}
 screen_has() { shot_tmux capture-pane -p | grep -qF -- "$1"; }
 titled_sessions() { [ "$("${launcher[@]}" server status --json | scenario titled)" -ge "$1" ]; }
 capture() {
     shot_tmux capture-pane -p -e -N > "$work/$1.ansi"
     render terminal "$work/$1.ansi" "$out/$1.png" "$cols" "$rows"
 }
+
+render check
 
 # A previous run may have been interrupted or kept; stop it before reuse.
 if [ -d "$demo" ]; then cleanup; fi
@@ -174,12 +194,18 @@ while IFS=$'\t' read -r dir prompt; do
     wait_for "the new conversation in $dir" 60 conversation_ready "$pane" || { show_pane "$pane"; exit 1; }
     demo_tmux send-keys -t "$pane" i
     demo_tmux send-keys -t "$pane" -l -- "$prompt"
-    demo_tmux send-keys -t "$pane" Escape C-s
+    demo_tmux send-keys -t "$pane" Escape
     count=$((count + 1))
+    submit "$pane" "$dir" "$count"
 done < <(scenario prompts)
 
 log "Waiting for $count conversations to get titles"
-wait_for "conversation titles" 120 titled_sessions "$count"
+wait_for "conversation titles" 120 titled_sessions "$count" || {
+    "${launcher[@]}" server status --json | scenario diagnose >&2
+    printf 'Model requests received: %s. Service log: %s\n' "$(grep -c . "$demo/fake-model.log" || true)" \
+        "$XDG_STATE_HOME/pi-console/service/$channel/service.log" >&2
+    exit 1
+}
 
 # Groups live in the frontend's organization store; write them directly.
 organization_dir="$XDG_STATE_HOME/pi-console/frontend/$channel"

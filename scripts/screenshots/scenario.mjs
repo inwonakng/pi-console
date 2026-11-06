@@ -3,6 +3,8 @@
 //   titled < status.json    print how many scenario sessions have their title
 //   organization < status   print the frontend organization (groups) as JSON
 //   conversation            print "index<TAB>title" of the conversation to show
+//   accepted < status       print how many sessions accepted a prompt
+//   diagnose < status       print each session's state, for timeouts
 import { readFileSync } from "node:fs";
 
 const [mode] = process.argv.slice(2);
@@ -29,6 +31,13 @@ if (mode === "prompts") {
 		groups: scenario.groups.map((name, index) => ({ id: `group:demo:${index + 1}`, name, keys: members(name) })),
 		ungrouped: members(undefined),
 	}));
+} else if (mode === "accepted") {
+	console.log(status().state.sessions.filter((row) => !row.provisional).length);
+} else if (mode === "diagnose") {
+	for (const row of status().state.sessions) {
+		const state = row.live?.status ?? (row.stopReason ? `stopped (${row.stopReason})` : "not running");
+		console.log(`${row.cwd}: ${titleOf(row) ?? "untitled"}, ${state}`);
+	}
 } else if (mode === "conversation") {
 	const index = scenario.sessions.findIndex((session) => session.title === scenario.conversation);
 	if (index < 0) throw new Error(`No session titled ${scenario.conversation}`);

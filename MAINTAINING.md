@@ -18,10 +18,10 @@ this checkout, including current source edits, and selects it through the dev
 `scripts/install-dev.sh --server-only` for a headless host; use `--full` to switch
 back. Omitting a mode flag preserves the selected mode (initially full).
 
-| Interface | Installed release | Development checkout |
-|---|---|---|
-| Neovim frontend | `pi-console` | `pi-console-dev` |
-| Pi terminal UI | `pi-stable` | `pi-dev` |
+| Interface       | Installed release | Development checkout |
+| --------------- | ----------------- | -------------------- |
+| Neovim frontend | `pi-console`      | `pi-console-dev`     |
+| Pi terminal UI  | `pi-stable`       | `pi-dev`             |
 
 Rerun the dev installer after source or dependency changes, then relaunch the
 frontend/TUI or explicitly restart the service when appropriate. Existing processes
@@ -42,13 +42,13 @@ unrelated wrappers and stable services are left untouched.
 
 ### Repository layout
 
-| Path | Purpose |
-|---|---|
-| `bin/` | Launchers and release/development selection |
-| `nvim/` | Dedicated Neovim configuration and Pi RPC client |
-| `pi/` | Bundled extensions and subagent profiles |
-| `tmux/` | Popup, overview, and sidebar integration |
-| `scripts/` | Installation and release scripts |
+| Path       | Purpose                                          |
+| ---------- | ------------------------------------------------ |
+| `bin/`     | Launchers and release/development selection      |
+| `nvim/`    | Dedicated Neovim configuration and Pi RPC client |
+| `pi/`      | Bundled extensions and subagent profiles         |
+| `tmux/`    | Popup, overview, and sidebar integration         |
+| `scripts/` | Installation and release scripts                 |
 
 ## Update screenshots
 
@@ -63,6 +63,11 @@ the usual full-client tools plus a Nerd Font. Install the renderer once:
 npm ci --prefix scripts/screenshots
 npx --prefix scripts/screenshots playwright install chromium
 ```
+
+On Linux, Chromium also needs system libraries such as `libnss3`; install them
+with `sudo npx --prefix scripts/screenshots playwright install-deps chromium`.
+The script checks Chromium and the font before starting, and ignores `PI_*`
+variables inherited from a Pi session.
 
 Run it against an installed release so the frontend shows no `DEV` badges, or
 against a built checkout (the default):
