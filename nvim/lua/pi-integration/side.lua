@@ -27,7 +27,7 @@ local function geometry()
 	local bottom = vim.o.cmdheight + (vim.o.laststatus > 0 and 1 or 0) + 1
 	local usable = math.max(6, vim.o.lines - top - bottom)
 	local total = math.max(6, math.floor(usable * 0.85))
-	local input_height = math.max(1, math.min(8, math.floor(total * 0.25)))
+	local input_height = math.max(1, math.min(4, math.floor(total * 0.25)))
 	return width, math.max(1, total - input_height - 4), input_height,
 		top + math.floor((usable - total) / 2), math.max(0, math.floor((vim.o.columns - width) / 2))
 end
