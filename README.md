@@ -26,7 +26,20 @@ setups. Future maintenance and support are not guaranteed.
 - Supports multi-device setup, allowing for attaching/detaching to sessions on different devices.
 - PWA compatible web UI for simplified experience.
 
-![Session overview showing working, idle, and waiting conversations](assets/overview.png)
+![Session overview showing working, waiting, and completed conversations](assets/overview.png)
+
+The Neovim overview groups conversations by project and shows their current status.
+
+<p>
+  <img src="assets/webui-overview.png" alt="Mobile web UI session overview with filters and conversation statuses" width="300">
+  <img src="assets/webui-conversation.png" alt="Mobile web UI conversation with a prompt, response, and collapsed activity" width="300">
+</p>
+
+**Web overview (left):** Filter sessions by title, directory, or host and see each
+conversation's status.
+
+**Web conversation (right):** Read prompts and responses, expand activity, and
+compose a new prompt.
 
 ## Requirements
 
