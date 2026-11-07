@@ -30,7 +30,7 @@ setups. Future maintenance and support are not guaranteed.
 
 The Neovim overview groups conversations by project and shows their current status.
 
-<p>
+<p align="center">
   <img src="assets/webui-overview.png" alt="Mobile web UI session overview with filters and conversation statuses" width="300">
   <img src="assets/webui-conversation.png" alt="Mobile web UI conversation with a prompt, response, and collapsed activity" width="300">
 </p>
