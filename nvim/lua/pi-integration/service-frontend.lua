@@ -269,14 +269,14 @@ local function object_payload(payload)
 	return payload
 end
 local record_command
-local function request(method, payload, callback)
+local function request(method, payload, callback, background)
 	if not job then notify("Disconnected. Use :PiReconnect; no mutation was retried.", vim.log.levels.WARN); return end
 	local id = uid()
 	local done = callback or function() end
 	callbacks[id] = { callback = function(ok, result)
 		if ok then snapshots.load(result, request, done) else done(false, result) end
 	end, quiet = method == "heartbeat" or method == "response.viewed", method = method,
-		background = method == "resource.read" and payload and payload.kind == "workspaceStats",
+		background = background or (method == "resource.read" and payload and payload.kind == "workspaceStats"),
 		operation = payload and payload.operation, started = vim.uv.hrtime() / 1e6 }
 	local ok, sent = pcall(vim.fn.chansend, job, vim.json.encode({ id = id, method = method, payload = object_payload(payload) }) .. "\n")
 	if not ok or sent == 0 then

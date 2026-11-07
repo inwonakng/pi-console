@@ -379,8 +379,9 @@ arguments, confirmations and what completion means.
 - E1 resource buffers are host/channel/session/context-qualified, non-writing views.
   Large text uses 64-KiB pages: `n` next, `p` first, `r` reload. Complete rendered
   documents are limited to 4 MiB; larger documents explicitly open as paged text.
-  Subagent transcripts stay rendered across pages (`n` next, `p` first, `r` reload,
-  `gR` explicit raw text). Pages contain complete JSONL records with a 4-MiB target;
+  Subagent transcripts load every page of a snapshot taken at open (`r` reload keeps
+  the scroll position, `gR` explicit raw text); the footer reports newer records.
+  Pages contain complete JSONL records with a 4-MiB target;
   a single record may exceed that target up to the existing 16-MiB record limit.
   Reads need authentication and a live attachment/context, but no control grant.
   Context/selection changes, disconnect and revocation fence pending reads; reconnect
@@ -439,11 +440,12 @@ type/ownership and path/stat identity are checked before and after reads.
 Continuations carry a stat-based version; changed files return `resource_conflict`,
 never mixed-version content. UTF-8 chunks are at most 64 KiB;
 binary/invalid UTF-8 content refuses. Spawn transcript reads with `view: "transcript"`
-accept record-boundary `offset` and continuation `version`, returning filtered,
-complete records and `nextOffset`. Each page scans at most 256 MiB, rather than
-limiting total transcript size. Normal appends during a fresh first-page read are
-allowed; continuations require unchanged content. If the file changes between
-pages, reload to obtain a fresh version. These checks are not isolation from hostile
+accept record-boundary `offset`, continuation `version` and an optional snapshot
+`end`, returning filtered, complete records, `nextOffset` and the record boundary
+`end` where the page stopped. Each page scans at most 256 MiB, rather than
+limiting total transcript size. The transcript version pins file identity, not
+size: appends are allowed between pages, and `end` excludes records written after
+the snapshot. A replaced or truncated file refuses; reload to start again. These checks are not isolation from hostile
 same-user filesystem mutation.
 
 Directory pages contain at most 128 entries, with a 10,000-entry scan limit. Output

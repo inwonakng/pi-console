@@ -121,24 +121,47 @@ local function open_item(ctx, state, parent_win)
 	return false
 end
 
-function M.open(ctx, path, title, query, contents, subagent, page)
+-- Read every page up to the file size seen by the first page. Records appended
+-- while loading stay out of this snapshot.
+local function load_snapshot(ctx, query, callback)
+	local parts, snapshot = {}, nil
+	local function fetch(offset)
+		local payload = vim.tbl_extend("force", query, { view = "transcript", offset = offset })
+		if snapshot then payload.version, payload["end"] = snapshot.version, snapshot.size end
+		ctx.resources.read(payload, function(page)
+			snapshot = snapshot or { version = page.version, size = page.size, path = page.path }
+			table.insert(parts, page.text)
+			if page.nextOffset ~= nil and page.nextOffset ~= vim.NIL then
+				fetch(page.nextOffset)
+			else
+				snapshot.boundary = page["end"]
+				callback(snapshot, table.concat(parts))
+			end
+		end, function(error)
+			ctx.ui.notify(error.message or "Could not read transcript")
+		end)
+	end
+	fetch(0)
+end
+
+function M.open(ctx, path, title, query, contents, subagent, opts)
 	assert(ctx.resources, "Session resources required")
+	opts = opts or {}
 	query = query or { kind = "spawn", runId = path and path:match("/runs/([^/]+)/"), artifact = "transcript" }
 	local raw_title = (title or "Transcript") .. " (raw)"
 	if not contents then
 		if query.kind == "spawn" and query.artifact == "transcript" then
-			ctx.resources.read(vim.tbl_extend("force", query, { view = "transcript" }), function(result)
-				M.open(ctx, result.path, title, query, result.text, subagent, result)
-			end, function(error)
-				ctx.ui.notify(error.message or "Could not read transcript")
+			load_snapshot(ctx, query, function(snapshot, text)
+				M.open(ctx, snapshot.path, title, query, text, subagent, { snapshot = snapshot, view = opts.view })
 			end)
 		else
 			ctx.resources.document(query, function(text, page)
-				M.open(ctx, page.path, title, query, text, subagent)
+				M.open(ctx, page.path, title, query, text, subagent, { view = opts.view })
 			end)
 		end
 		return
 	end
+	local snapshot = opts.snapshot
 
 	local owner = ctx.state
 	floats.close_window(owner.spawn_win)
@@ -179,7 +202,7 @@ function M.open(ctx, path, title, query, contents, subagent, page)
 	refresh()
 
 	local width = math.min(math.max(72, math.floor(vim.o.columns * 0.82)), vim.o.columns - 4)
-	local height = math.min(math.max(16, math.floor(vim.o.lines * 0.75)), vim.o.lines - 4)
+	local height = math.min(math.max(16, math.floor(vim.o.lines * 0.70)), vim.o.lines - 4)
 	local row = math.max(1, math.floor((vim.o.lines - height) / 2))
 	local col = math.max(0, math.floor((vim.o.columns - width) / 2))
 	local win = vim.api.nvim_open_win(buf, true, {
@@ -190,10 +213,9 @@ function M.open(ctx, path, title, query, contents, subagent, page)
 		col = col,
 		style = "minimal",
 		border = "rounded",
-		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. (title or "Spawn transcript")
-			.. (page and (" [bytes " .. page.offset .. ".." .. (page.nextOffset ~= vim.NIL and page.nextOffset or page.size) .. "/" .. page.size .. "]") or "") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. (title or "Spawn transcript") .. " ",
 		title_pos = "left",
-		footer = query.kind == "spawn" and " n next page | p first page | r reload | gR raw | q back " or " r reload | gR raw | q close ",
+		footer = query.kind == "spawn" and " r reload | gR raw | q back " or " r reload | gR raw | q close ",
 	})
 	state.transcript_win = win
 	owner.spawn_buf = buf
@@ -203,6 +225,14 @@ function M.open(ctx, path, title, query, contents, subagent, page)
 	vim.api.nvim_set_option_value("relativenumber", false, { win = win })
 	vim.api.nvim_set_option_value("signcolumn", "no", { win = win })
 	render_transcript_ui(state)
+	if opts.view then
+		-- Rendering applies folds on the next tick; restore after it.
+		vim.schedule(function()
+			if not buffer_utils.window_matches(win, buf) then return end
+			if opts.view.at_bottom then pi_transcript.scroll_to_bottom(transcript_ctx(state))
+			else vim.api.nvim_win_call(win, function() vim.fn.winrestview(opts.view.saved) end) end
+		end)
+	end
 
 	local close_win = function()
 		if buffer_utils.window_matches(win, buf) then floats.close_window(win) end
@@ -227,18 +257,36 @@ function M.open(ctx, path, title, query, contents, subagent, page)
 		ctx.resources.open(query, raw_title, "json", nil, ctx.on_dismiss)
 	end, { buffer = buf, silent = true, desc = "Open raw paged transcript" })
 	vim.keymap.set("n", "r", function()
-		local fresh = vim.tbl_extend("force", query, { offset = 0 }); fresh.version = nil
-		M.open(ctx, path, title, fresh, nil, subagent)
-	end, { buffer = buf, silent = true, desc = "Refresh spawn transcript" })
-	if page and query.kind == "spawn" then
-		local function navigate(offset)
-			M.open(ctx, path, title, vim.tbl_extend("force", query, { offset = offset, version = page.version }), nil, subagent)
+		local view = {
+			at_bottom = pi_transcript.is_at_bottom(transcript_ctx(state)),
+			saved = vim.api.nvim_win_call(win, vim.fn.winsaveview),
+		}
+		M.open(ctx, path, title, query, nil, subagent, { view = view })
+	end, { buffer = buf, silent = true, desc = "Reload transcript, keeping the scroll position" })
+	if snapshot and snapshot.boundary ~= nil and snapshot.boundary ~= vim.NIL then
+		-- Check for records written after the snapshot until some appear or the float closes.
+		local timer, busy = vim.uv.new_timer(), false
+		local function stop()
+			if not timer:is_closing() then timer:stop(); timer:close() end
 		end
-		vim.keymap.set("n", "n", function()
-			if page.nextOffset and page.nextOffset ~= vim.NIL then navigate(page.nextOffset)
-			else ctx.ui.notify("End of transcript") end
-		end, { buffer = buf, silent = true, desc = "Next rendered transcript page" })
-		vim.keymap.set("n", "p", function() navigate(0) end, { buffer = buf, silent = true, desc = "First rendered transcript page" })
+		vim.api.nvim_create_autocmd("WinClosed", { pattern = tostring(win), once = true, callback = stop })
+		local probe = vim.tbl_extend("force", query, { view = "transcript", offset = snapshot.boundary, version = snapshot.version })
+		timer:start(3000, 3000, vim.schedule_wrap(function()
+			if busy or timer:is_closing() then return end
+			if not buffer_utils.window_matches(win, buf) then stop(); return end
+			busy = true
+			ctx.resources.peek(probe, function(ok, page)
+				busy = false
+				if not ok then stop(); return end
+				if page.text == "" then return end
+				stop()
+				if buffer_utils.window_matches(win, buf) then
+					vim.api.nvim_win_set_config(win, { footer = {
+						{ " New activity: r to reload ", "WarningMsg" }, { "| gR raw | q back ", "FloatFooter" },
+					} })
+				end
+			end)
+		end))
 	end
 	vim.keymap.set("n", "<CR>", function()
 		if not require("pi-integration.utils.markdown-links").follow((owner.workspace or {}).cwd, ctx.resources) then

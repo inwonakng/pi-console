@@ -59,6 +59,14 @@ function M.new(options)
 		end
 		fetch(query)
 	end
+	-- Background read for change detection; it does not supersede the active viewer.
+	function resource.peek(query, callback)
+		if not alive() then callback(false); return end
+		options.request("resource.read", vim.tbl_extend("force", query, { runtimeRevision = captured.revision }), function(ok, result)
+			if not alive() then callback(false); return end
+			callback(ok, ok and result.data or result)
+		end, true)
+	end
 	-- Small complete documents preserve existing renderers. Large text uses explicit pages.
 	function resource.document(query, callback, on_error)
 		if not alive() then options.notify("Session context changed; reopen the resource."); return end

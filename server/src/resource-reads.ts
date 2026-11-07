@@ -32,8 +32,9 @@ type ReadInput = {
   offset?: number;
   version?: string;
   view?: "transcript";
+  end?: number;
 };
-type TextChunk = { text: string; path: string; offset: number; nextOffset: number | null; version: string; size: number };
+type TextChunk = { text: string; path: string; offset: number; nextOffset: number | null; version: string; size: number; end?: number };
 type FileEntry = { path: string; kind: "file" | "directory" };
 type Target = { root: string; path: string; owned?: boolean; private?: boolean; followSymlinks?: boolean; deferUtf8Tail?: boolean };
 type Opened = Target & { file: FileHandle; stamp: BigIntStats; canonical: string };
@@ -71,11 +72,12 @@ function exact(value: unknown, keys: readonly string[]): value is Record<string,
   return object(value) && Object.keys(value).every((key) => keys.includes(key));
 }
 function readInput(value: unknown): ReadInput {
-  if (!exact(value, ["kind", "path", "runId", "artifact", "offset", "version", "view", "jobId", "stream"])
+  if (!exact(value, ["kind", "path", "runId", "artifact", "offset", "version", "view", "end", "jobId", "stream"])
     || typeof value.kind !== "string" || !["history", "file", "skill", "output", "spawn", "bash-job"].includes(value.kind)
     || (value.path !== undefined && !pathString(value.path)) || !offset(value.offset)
     || (value.version !== undefined && (typeof value.version !== "string" || !/^[a-f0-9]{64}$/.test(value.version)))
     || (value.view !== undefined && (value.view !== "transcript" || value.kind !== "spawn" || value.artifact !== "transcript"))
+    || !offset(value.end) || (value.end !== undefined && value.view !== "transcript")
     || ((value.offset as number | undefined) ?? 0) > 0 && value.version === undefined) {
     refuse("resource_payload", "Invalid read payload or missing continuation version");
   }
@@ -256,10 +258,15 @@ function transcriptRecord(record: unknown): boolean {
 async function transcriptView(target: Target, input: ReadInput, check: () => void): Promise<TextChunk> {
   const opened = await openTarget(target, check, true);
   try {
-    const size = Number(opened.stamp.size), version = fingerprint(opened.stamp);
+    // Transcripts are append-only. The version pins file identity, not size, so a
+    // snapshot can be paged while the worker keeps appending; `end` bounds it.
+    const size = Number(opened.stamp.size);
+    const version = createHash("sha256").update([opened.stamp.dev, opened.stamp.ino, opened.stamp.mode, opened.stamp.uid, opened.stamp.nlink].join(":")).digest("hex");
     if (input.version !== undefined && input.version !== version) changed();
+    if (input.end !== undefined && input.end > size) changed();
+    const limit = input.end ?? size;
     const offset = input.offset ?? 0;
-    if (offset > size) refuse("resource_offset", "Offset is beyond end of transcript");
+    if (offset > limit) refuse("resource_offset", "Offset is beyond end of transcript");
     if (offset > 0 && (await readBytes(opened, offset - 1, 1, check))[0] !== 10) {
       refuse("resource_offset", "Transcript pages must start at a JSONL record boundary");
     }
@@ -269,9 +276,9 @@ async function transcriptView(target: Target, input: ReadInput, check: () => voi
     const captured = createHash("sha256");
     // Bound each scan, not the transcript's total size. Never split a record;
     // one record may exceed the 4 MiB page target, up to the 16 MiB record cap.
-    const scanEnd = Math.min(size, offset + SCAN_BYTES);
+    const scanEnd = Math.min(limit, offset + SCAN_BYTES);
     scan: for (let position = offset; position < scanEnd; position += CHUNK_BYTES) {
-      const block = await readBytes(opened, position, Math.min(CHUNK_BYTES, size - position), check);
+      const block = await readBytes(opened, position, Math.min(CHUNK_BYTES, limit - position), check);
       captured.update(block);
       capturedEnd = position + block.length;
       let start = 0;
@@ -301,25 +308,24 @@ async function transcriptView(target: Target, input: ReadInput, check: () => voi
         start = end + 1;
         recordStart = position + start;
         if (viewSize >= VIEW_BYTES) {
-          nextOffset = recordStart < size ? recordStart : null;
+          nextOffset = recordStart < limit ? recordStart : null;
           break scan;
         }
       }
       await yieldTurn(); check();
     }
-    if (nextOffset === null && capturedEnd < size) nextOffset = recordStart;
-    // An unfinished EOF tail (including split UTF-8) is not yet a record.
-    // Verify the captured page extent. Only a fresh first-page read permits
-    // normal appends; pinned continuations must not mix versions across pages.
+    if (nextOffset === null && capturedEnd < limit) nextOffset = recordStart;
+    // An unfinished EOF tail (including split UTF-8) is not yet a record; `end`
+    // reports the record boundary where this page stopped.
+    // Verify the captured page extent was not rewritten during this read.
     const verified = createHash("sha256");
     for (let position = offset; position < capturedEnd; position += CHUNK_BYTES) {
       verified.update(await readBytes(opened, position, Math.min(CHUNK_BYTES, capturedEnd - position), check));
       await yieldTurn(); check();
     }
     if (captured.digest("hex") !== verified.digest("hex")) changed();
-    if (input.version === undefined) await appended(opened, check);
-    else await unchanged(opened, check);
-    return { text: parts.join(""), path: opened.canonical, offset, nextOffset, version, size };
+    await appended(opened, check);
+    return { text: parts.join(""), path: opened.canonical, offset, nextOffset, version, size, end: recordStart };
   } finally { await opened.file.close(); }
 }
 export async function metadata(target: Target, check: () => void, budget: { bytes: number }): Promise<Record<string, unknown>> {
