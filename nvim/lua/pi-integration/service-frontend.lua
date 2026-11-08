@@ -1654,7 +1654,11 @@ function M.submit_prompt(original)
 		end
 	end
 	if ctx.ui.window_id and hello and job then ctx.ui.submit_window(original); return end
-	if session_id and (not snapshot or snapshot.phase ~= "ready" or not snapshot.conversation.hydrated
+	-- A runtime change defers history reload until the turn settles; the service
+	-- still queues prompts during the running turn, so only idle sends need history.
+	local conversation = snapshot and snapshot.conversation
+	if session_id and (not snapshot or snapshot.phase ~= "ready"
+		or not (conversation.hydrated or conversation.execution and conversation.execution.running)
 		or snapshot.runtimeRevision ~= current_revision()) then
 		notify("Session is not ready; input remains local."); return
 	end
