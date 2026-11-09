@@ -1346,7 +1346,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
     runtimeContext = ctx;
     compacting = false;
     eventQueue.clear();
-    registerSubagentRuntime(owner, () => Array.from(runs.values()).some((run) => !run.settled || run.status === "running" || run.joinRequested || run.cleanupError || ownsWriter(run)), historyBlockReason,
+    // Only live activity counts as running; cleanup errors and unresolved
+    // contributions are reported by historyBlockReason.
+    registerSubagentRuntime(owner, () => Array.from(runs.values()).some((run) => !run.settled || run.status === "running" || run.joinRequested), historyBlockReason,
       () => [...new Set([...runs.values()].filter(ownsWriter).flatMap((run) => run.protectedRoots ?? [run.childCwd]))]);
     const references = new Map<string, string>();
     for (const entry of ctx.sessionManager.getEntries()) {
