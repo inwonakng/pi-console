@@ -169,11 +169,14 @@ export function readExtensionSettings(channel = process.env.PI_CONSOLE_CHANNEL) 
 			const parsedAutoTitle = {};
 			if (Object.hasOwn(autoTitle, "provider-models")) {
 				const providerModels = requireMapping(autoTitle["provider-models"], "auto-title.provider-models");
-				const entries = Object.entries(providerModels).map(([provider, model]) => {
-					if (!provider.trim() || provider !== provider.trim() || typeof model !== "string" || !model.trim()) {
-						throw new Error(`auto-title.provider-models.${provider} must map a provider ID to a non-empty model ID`);
+				// A single model ID or an ordered list of fallbacks; normalized to a list.
+				const entries = Object.entries(providerModels).map(([provider, value]) => {
+					const models = Array.isArray(value) ? value : [value];
+					if (!provider.trim() || provider !== provider.trim() || models.length === 0
+						|| !models.every((model) => typeof model === "string" && model.trim())) {
+						throw new Error(`auto-title.provider-models.${provider} must map a provider ID to a non-empty model ID or list of model IDs`);
 					}
-					return [provider, model.trim()];
+					return [provider, models.map((model) => model.trim())];
 				});
 				parsedAutoTitle["provider-models"] = Object.fromEntries(entries);
 			}

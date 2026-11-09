@@ -47,22 +47,26 @@ const TITLE_SYSTEM_PROMPT = [
 	"\"@App.tsx add dark mode toggle\" → Dark mode toggle in App",
 ].join("\n");
 
-function titleModel(ctx: ExtensionContext) {
+type TitleModel = ReturnType<ExtensionContext["modelRegistry"]["getAvailable"]>[number];
+
+// Ordered candidates plus failures already known for skipped configured models.
+function titleModels(ctx: ExtensionContext): { models: TitleModel[]; failures: string[] } {
 	const provider = ctx.model?.provider;
 	if (!provider) throw new Error("No active provider for title generation");
 
 	const providerModels = loadExtensionSettings()["auto-title"]?.["provider-models"];
-	const configuredId = providerModels && Object.hasOwn(providerModels, provider) ? providerModels[provider] : undefined;
+	const configuredIds = providerModels && Object.hasOwn(providerModels, provider) ? providerModels[provider] : undefined;
 	const available = ctx.modelRegistry.getAvailable()
 		.filter((model) => model.provider === provider && model.input.includes("text"));
-	if (configuredId) {
-		const model = available.find((candidate) => candidate.id === configuredId);
-		if (!model) {
-			throw new Error(
-				`Configured title model ${provider}/${configuredId} is not an available text model; check auto-title.provider-models in your pi-console config file`,
-			);
+	if (configuredIds) {
+		const models: TitleModel[] = [];
+		const failures: string[] = [];
+		for (const id of configuredIds) {
+			const model = available.find((candidate) => candidate.id === id);
+			if (model) models.push(model);
+			else failures.push(`configured title model ${provider}/${id} is not an available text model (check auto-title.provider-models in your pi-console config file)`);
 		}
-		return model;
+		return { models, failures };
 	}
 
 	// Equal input/output token weighting. Catalog prices may not reflect subscription quotas.
@@ -79,7 +83,7 @@ function titleModel(ctx: ExtensionContext) {
 			`No available text model with catalog pricing for ${provider}; configure auto-title.provider-models in your pi-console config file`,
 		);
 	}
-	return model;
+	return { models: [model], failures: [] };
 }
 
 function isPromptTitleCandidate(text: string) {
@@ -203,9 +207,26 @@ function branchUserMessagesWithEvent(ctx: ExtensionContext, message: unknown) {
 	return messages;
 }
 
+// Tries candidates in order within one shared timeout; reports only when all fail.
 async function modelTitle(prompt: string, ctx: ExtensionContext, sessionSignal: AbortSignal) {
-	const model = titleModel(ctx);
+	const { models, failures } = titleModels(ctx);
 	const signal = AbortSignal.any([sessionSignal, AbortSignal.timeout(TITLE_TIMEOUT_MS)]);
+	for (const model of models) {
+		try {
+			return await requestTitle(model, prompt, ctx, signal);
+		} catch (error) {
+			if (sessionSignal.aborted) throw error;
+			if (signal.aborted) {
+				failures.push(`title request to ${model.provider}/${model.id} timed out (${TITLE_TIMEOUT_MS / 1000}s budget shared by all title models)`);
+				break;
+			}
+			failures.push(error instanceof Error ? error.message : String(error));
+		}
+	}
+	throw new Error(failures.join("; "));
+}
+
+async function requestTitle(model: TitleModel, prompt: string, ctx: ExtensionContext, signal: AbortSignal) {
 	const response = await ctx.modelRegistry.complete(
 		model,
 		{

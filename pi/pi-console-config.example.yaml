@@ -57,6 +57,9 @@ session-picker:
 #       provider: exact-provider-id
 #       model: exact-model-id
 
+# Title model per provider of the active session model. A list is tried in
+# order; unavailable or failing models fall through to the next one.
 # auto-title:
 #   provider-models:
 #     provider-id: model-id
+#     other-provider-id: [first-model-id, fallback-model-id]

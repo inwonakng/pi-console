@@ -28,7 +28,7 @@ export interface ExtensionSettings {
 		"macos-denial-monitor"?: boolean;
 	};
 	"auto-title"?: {
-		"provider-models"?: Record<string, string>;
+		"provider-models"?: Record<string, string[]>;
 	};
 	"session-picker"?: {
 		"archive-after-days"?: number;
