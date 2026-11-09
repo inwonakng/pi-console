@@ -1397,7 +1397,7 @@ function createConversation(host, row) {
     const info = text("div", ""), actions = text("div", "", "actions"), output = text("div", "");
     details.dataset.runId = worker.runId;
     details.append(summary, info, actions, output);
-    const view = { details, summary, info, actions };
+    const view = { details, summary, info, actions, buttons: {} };
     let selection = 0;
     const current = ticket => !disposed && connected && sameContext(captured) && ticket === selection
       && workerViews.get(worker.runId) === view && details.isConnected;
@@ -1409,6 +1409,8 @@ function createConversation(host, row) {
         const result = await captured.client.request("resource.read", { kind: "spawn", runId: worker.runId, artifact, offset, ...(version ? { version } : {}), runtimeRevision: captured.runtimeRevision });
         if (!current(ticket)) return;
         const page = result.data;
+        const report = artifact === "result" && page.offset === 0 && page.nextOffset == null ? reportNodes(page.text) : undefined;
+        if (report) { output.replaceChildren(...report, button("Reload", () => read(artifact))); return; }
         output.replaceChildren(text("p", `${artifact}: bytes ${page.offset}..${page.offset + new TextEncoder().encode(page.text).length}/${page.size}`), text("pre", page.text));
         if (page.nextOffset != null) output.append(button("Next chunk", () => read(artifact, page.nextOffset, page.version)));
         output.append(button("Reload", () => read(artifact)));
@@ -1416,7 +1418,10 @@ function createConversation(host, row) {
         if (current(ticket)) output.replaceChildren(text("p", error.message));
       }
     }
-    for (const artifact of ["transcript", "result", "brief", "status", "agent_prompt", "patch"]) actions.append(button(artifact, () => read(artifact), !connected));
+    for (const [artifact, label] of [["transcript", "transcript"], ["result", "report"], ["patch", "diff"]]) {
+      view.buttons[artifact] = button(label, () => read(artifact), !connected);
+      actions.append(view.buttons[artifact]);
+    }
     return view;
   }
   function renderWorkers() {
@@ -1439,12 +1444,15 @@ function createConversation(host, row) {
         workerViews.set(worker.runId, view);
       }
       view.summary.textContent = workerLabel(worker);
-      const info = [text("p", `Worker: ${worker.runId}`)];
-      if (worker.assignment) info.push(text("p", `Assignment: ${worker.assignment.id} / ${worker.assignment.outcome || "unknown"}`), text("p", worker.assignment.prompt || ""));
-      for (const pending of worker.pendingRequests || []) info.push(text("p", `${pending.kind} to orchestrator: ${pending.id} / assignment ${pending.assignmentId} / ${pending.question || pending.tool || ""}`));
-      if (worker.error || worker.cleanupError || worker.integrationReason) info.push(text("p", [worker.error, worker.cleanupError, worker.integrationReason].filter(Boolean).join("\n")));
+      const info = [];
+      if (worker.progress) info.push(text("p", `Latest activity: ${worker.progress}`));
+      for (const pending of worker.pendingRequests || []) info.push(text("p", `Pending ${pending.kind}: ${pending.question || pending.tool || ""}`));
+      if (worker.error || worker.cleanupError) info.push(text("p", [worker.error, worker.cleanupError].filter(Boolean).join("\n")));
+      if (worker.integration && worker.integration !== "not_applicable") info.push(text("p", `Integration: ${worker.integration}${worker.integrationReason ? ` (${worker.integrationReason})` : ""}`));
+      if (worker.assignment?.prompt) info.push(text("h4", "Current task"), text("pre", worker.assignment.prompt));
       view.info.replaceChildren(...info);
       for (const action of view.actions.children) action.disabled = !connected;
+      view.buttons.patch.hidden = !worker.hasPatch;
       if ($("workers").children[index] !== view.details) $("workers").insertBefore(view.details, $("workers").children[index] || null);
     });
   }
@@ -2376,10 +2384,23 @@ function skillName(toolName, args) {
 
 function workerLabel(run) {
   const model = run.selectedModel ? `${run.selectedModel.provider}/${run.selectedModel.id}` : "model not confirmed";
-  const state = run.readyForReview ? "ready for review" : run.execution || run.status;
-  const pending = (run.pendingRequests || []).map(request => `${request.kind}: ${request.id}`).join(" / ");
-  return [run.agent || run.role || "Subagent", model, state, run.writerOwned ? "contribution unresolved" : "",
-    run.integration, run.assignment ? `${run.assignment.id} (${run.assignment.outcome})` : "", pending, run.progress].filter(Boolean).join(" / ");
+  const state = [run.execution || run.status, run.assignment?.outcome, run.readyForReview ? "ready for review" : ""].filter(Boolean).join(" · ");
+  const pending = run.pendingRequests?.length ? `${run.pendingRequests.length} pending` : "";
+  return [run.agent || run.role || "Subagent", model, state, pending].filter(Boolean).join(" / ");
+}
+// result.md holds the worker's report envelope; show the report, not the JSON.
+function reportNodes(raw) {
+  const match = /^Agent message \(not a user instruction or permission grant\)\.\n([^\n]+)/.exec(raw);
+  let report;
+  try { report = match && JSON.parse(match[1])?.payload?.report; } catch { return undefined; }
+  if (!report || typeof report !== "object") return undefined;
+  const nodes = [];
+  if (typeof report.outcome === "string") nodes.push(text("p", `Outcome: ${report.outcome}`));
+  if (report.summary) nodes.push(text("pre", report.summary));
+  for (const field of ["findings", "verification", "uncertainty"]) {
+    if (typeof report[field] === "string" && report[field]) nodes.push(text("h4", field[0].toUpperCase() + field.slice(1)), text("pre", report[field]));
+  }
+  return nodes;
 }
 function messageLabel(message) {
   const sender = message.role === "custom" && message.details?.sender;

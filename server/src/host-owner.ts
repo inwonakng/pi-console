@@ -58,7 +58,7 @@ type SessionActivity = {
     agent?: string; role?: string; selectedModel?: { provider: string; id: string }; progress?: string;
     assignment?: { id: string; prompt?: string; outcome?: string };
     pendingRequests: { id: string; assignmentId: string; kind: "question" | "permission"; question?: string; tool?: string }[];
-    integration?: string; integrationReason?: string; error?: string; cleanupError?: string;
+    integration?: string; integrationReason?: string; error?: string; cleanupError?: string; hasPatch: boolean;
   }[];
 };
 export type OwnedSessionState = SessionActivity & {
@@ -1810,6 +1810,7 @@ export class OwnedSession {
             subagentRuns.push({ runId: run.runId, status: run.status,
               execution: typeof run.execution === "string" ? run.execution : undefined,
               writerOwned: run.writerOwned === true, readyForReview: run.readyForReview === true, quiescent: run.quiescent === true,
+              hasPatch: typeof run.patchPath === "string" && run.patchPath !== "",
               assignment: object(assignment) && typeof assignment.id === "string" ? { id: assignment.id,
                 prompt: typeof assignment.prompt === "string" ? assignment.prompt : undefined,
                 outcome: typeof assignment.outcome === "string" ? assignment.outcome : undefined } : undefined,
