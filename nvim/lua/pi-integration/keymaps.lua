@@ -24,6 +24,7 @@ M.specs = {
 		{ lhs = "<leader>pr", action = "restart_console", desc = "Restart frontend" },
 		{ lhs = "<leader>pR", action = "restart", desc = "Restart conversation worker" },
 		{ lhs = "<leader>pt", action = "show_transcript", desc = "Show Pi transcript" },
+		{ lhs = "<leader>pT", action = "retitle", desc = "Generate session title" },
 		{ lhs = "<leader>pl", action = "show_logs", desc = "Show Pi logs" },
 		{ lhs = "<leader>pu", action = "show_usage", desc = "Show Codex usage" },
 		{ lhs = "<leader>ps", action = "pick_spawn", desc = "Show subagents" },
