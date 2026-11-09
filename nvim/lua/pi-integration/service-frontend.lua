@@ -2428,18 +2428,28 @@ function M.pick_spawn()
 	local data, captured = status_data("pi-spawn-runs"), stamp()
 	local function pick_actions(run)
 		if not run or not same_context(captured) then return end
-		local details = { "# Subagent", "", "**Model:** " .. run_model(run), "" }
-		fields(details, run, { { "agent", "Subagent profile" }, { "role", "Role" } })
-		vim.list_extend(details, { "## Assignment", "" })
-		local assignment = (run.assignments or {})[#(run.assignments or {})]
-		fields(details, assignment, { { "id", "Assignment" }, { "prompt", "Current task" }, { "outcome", "Outcome" } })
-		vim.list_extend(details, { "## Execution", "" })
-		fields(details, run, { { "execution", "Execution" }, { "readyForReview", "Ready for review" }, { "writerOwned", "Contribution unresolved" }, { "status", "Status" }, { "progress", "Latest activity" }, { "prompt", "Task" },
-			{ "error", "Error" }, { "cleanupError", "Cleanup error" },
-			{ "startedAt", "Started" }, { "completedAt", "Completed" },
-			{ "joined", "Joined" }, { "cancellationRequested", "Cancelled without joining" }, { "settled", "Cleanup finished" },
-			{ "integration", "Integration" }, { "integrationReason", "Integration details" }, { "worktreePath", "Retained worktree" } })
+		local assignment = (run.assignments or {})[#(run.assignments or {})] or {}
+		local state_line = tostring(run.execution or run.status)
+		if assignment.outcome and assignment.outcome ~= vim.NIL then state_line = state_line .. " · " .. tostring(assignment.outcome) end
+		if run.readyForReview then state_line = state_line .. " · ready for review" end
+		local details = { "# Subagent", "", "**Model:** " .. run_model(run), "", "**State:** " .. state_line, "" }
+		fields(details, run, { { "agent", "Subagent profile" }, { "role", "Role" }, { "progress", "Latest activity" },
+			{ "error", "Error" }, { "cleanupError", "Cleanup error" } })
+		if run.integration ~= nil and run.integration ~= vim.NIL and run.integration ~= "not_applicable" then
+			fields(details, run, { { "integration", "Integration" }, { "integrationReason", "Integration details" } })
+		end
 		fields(details, run.integrationBlock, { { "integration", "Integration blocked" }, { "reason", "Reason" } })
+		for _, pending in ipairs(run.requests or {}) do
+			if pending.state == "pending" then fields(details, pending, { { "question", "Pending question" } }) end
+		end
+		for _, pending in ipairs(run.permissionRequests or {}) do
+			if pending.state == "pending" then
+				local kind = type(pending.permission) == "table" and pending.permission.kind or nil
+				fields(details, { value = tostring(pending.tool) .. (kind and (" · " .. tostring(kind)) or "") }, { { "value", "Pending permission" } })
+			end
+		end
+		vim.list_extend(details, { "## Current task", "" })
+		vim.list_extend(details, vim.split(tostring(assignment.prompt or run.prompt or ""), "\n", { plain = true }))
 		vim.ui.select({ "Artifacts", "Inspect", "Join", "Stop" }, {
 			prompt = run_label(run), preview_title = run_label(run),
 			preview_text = table.concat(details, "\n"), preview_filetype = "markdown",
@@ -2447,7 +2457,7 @@ function M.pick_spawn()
 			if not same_context(captured) then return end
 			local function return_to_actions() pick_actions(run) end
 			if action == "Artifacts" then require("pi-integration.spawn-artifacts").pick_run({ state = state, ui = { notify = notify },
-				resources = owner_resources(), on_dismiss = return_to_actions }, run, function() end)
+				resources = owner_resources(), on_dismiss = return_to_actions }, run)
 			elseif action == "Inspect" then
 				local lines = { "# Subagent", "", "**Model:** " .. run_model(run), "", "## Assignment", "" }
 				fields(lines, assignment, { { "id", "Assignment" }, { "prompt", "Current task" }, { "outcome", "Outcome" } })
@@ -2463,7 +2473,7 @@ function M.pick_spawn()
 				vim.list_extend(lines, { "## Profile and execution", "" })
 				fields(lines, run, { { "agent", "Subagent profile" }, { "role", "Role" }, { "execution", "Execution" },
 					{ "readyForReview", "Ready for review" }, { "writerOwned", "Contribution unresolved" }, { "status", "Status" },
-					{ "prompt", "Task" }, { "startedAt", "Started" }, { "completedAt", "Completed" },
+					{ "startedAt", "Started" }, { "completedAt", "Completed" },
 					{ "accessMode", "Access mode" }, { "isolation", "Isolation" }, { "mode", "Interaction mode" },
 					{ "error", "Error" }, { "cleanupError", "Cleanup error" }, { "progress", "Progress" },
 					{ "joined", "Joined" }, { "joinRequested", "Join requested" }, { "cancellationRequested", "Cancelled without joining" },
@@ -2473,10 +2483,11 @@ function M.pick_spawn()
 					{ "briefPath", "Brief" }, { "resultPath", "Result" }, { "transcriptPath", "Transcript" },
 					{ "agentPromptPath", "Agent prompt" }, { "worktreePath", "Worktree" }, { "patchPath", "Recovery patch" } })
 				fields(lines, run.integrationBlock, { { "integration", "Integration blocked" }, { "reason", "Reason" } })
+				if run.prompt ~= assignment.prompt then fields(lines, run, { { "prompt", "Original task" } }) end
 				for _, path in ipairs(run.changedFiles or {}) do table.insert(lines, "Changed: " .. path) end
-				if (tonumber(run.changedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Changed: %d more files (full list in status artifact)", run.changedFilesOmitted)) end
+				if (tonumber(run.changedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Changed: %d more files (full list in status file)", run.changedFilesOmitted)) end
 				for _, path in ipairs(run.unpreservedFiles or {}) do table.insert(lines, "Not preserved: " .. path) end
-				if (tonumber(run.unpreservedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Not preserved: %d more files (full list in status artifact)", run.unpreservedFilesOmitted)) end
+				if (tonumber(run.unpreservedFilesOmitted) or 0) > 0 then table.insert(lines, string.format("Not preserved: %d more files (full list in status file)", run.unpreservedFilesOmitted)) end
 				local win = logs.detail(table.concat(lines, "\n"), "Subagent", return_to_actions)
 				local buf = vim.api.nvim_win_get_buf(win)
 				local markdown = require("pi-integration.markdown-render")

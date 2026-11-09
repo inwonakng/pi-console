@@ -1,17 +1,34 @@
 local floats = require("pi-integration.floats")
 local buffer_utils = require("pi-integration.utils.buffer")
 local markdown_render = require("pi-integration.markdown-render")
+local message_utils = require("pi-integration.utils.message")
 
 local M = {}
 
+-- text_label matches the "- Label: path" lines in spawn tool output.
 local artifact_types = {
-	{ key = "result", run_key = "resultPath", label = "result", filetype = "markdown" },
-	{ key = "transcript", run_key = "transcriptPath", label = "transcript", filetype = "json" },
-	{ key = "brief", run_key = "briefPath", label = "brief", filetype = "markdown" },
-	{ key = "status", run_key = "statusPath", label = "status", filetype = "json" },
-	{ key = "agent_prompt", run_key = "agentPromptPath", label = "subagent prompt", filetype = "markdown" },
-	{ key = "patch", label = "patch", filetype = "diff" },
+	{ key = "transcript", run_key = "transcriptPath", label = "transcript", text_label = "Transcript", filetype = "json" },
+	{ key = "result", run_key = "resultPath", label = "report", text_label = "Result", filetype = "markdown" },
+	{ key = "patch", label = "diff", text_label = "Patch", filetype = "diff" },
 }
+
+-- result.md holds the worker's report envelope; show the report, not the JSON.
+local function report_markdown(text)
+	local context = message_utils.agent_context(text)
+	if not context then return text end
+	local report = context.payload.report
+	if type(report) ~= "table" then return message_utils.agent_payload_text(context.payload) or text end
+	local lines = {}
+	if type(report.outcome) == "string" then vim.list_extend(lines, { "**Outcome:** " .. report.outcome, "" }) end
+	if type(report.summary) == "string" and report.summary ~= "" then vim.list_extend(lines, { report.summary, "" }) end
+	for _, field in ipairs({ "findings", "verification", "uncertainty" }) do
+		local value = report[field]
+		if type(value) == "string" and value ~= "" then
+			vim.list_extend(lines, { "## " .. field:gsub("^%l", string.upper), "", value, "" })
+		end
+	end
+	return table.concat(lines, "\n")
+end
 
 local function run_label(run)
 	local name = type(run.agent) == "string" and run.agent ~= "" and run.agent
@@ -41,8 +58,7 @@ function M.paths(run, text)
 			path = run.patchPath or (worktree and worktree.patchPath)
 		end
 		if (type(path) ~= "string" or path == "") and type(text) == "string" then
-			local label = artifact.label:gsub("^%l", string.upper)
-			path = text:match("%- " .. label .. ": ([^\n]+)")
+			path = text:match("%- " .. artifact.text_label .. ": ([^\n]+)")
 		end
 		if type(path) == "string" and path ~= "" then
 			artifacts[artifact.key] = path
@@ -55,12 +71,12 @@ function M.paths(run, text)
 	return found and artifacts or nil
 end
 
-local function artifact_choices(artifacts, transcript_first)
+local function artifact_choices(artifacts)
 	local choices = {}
 	if artifacts.runs then
 		for index, run in ipairs(artifacts.runs) do
 			local label = (run.label or "Subagent") .. " " .. index
-			for _, choice in ipairs(artifact_choices(run.artifacts, transcript_first)) do
+			for _, choice in ipairs(artifact_choices(run.artifacts)) do
 				choice.label = choice.label .. " · " .. label
 				table.insert(choices, choice)
 			end
@@ -70,16 +86,11 @@ local function artifact_choices(artifacts, transcript_first)
 	for _, artifact in ipairs(artifact_types) do
 		local path = artifacts[artifact.key]
 		if type(path) == "string" and path ~= "" then
-			local choice = {
+			table.insert(choices, {
 				label = artifact.label, kind = artifact.key, path = path, filetype = artifact.filetype,
 				runId = artifacts.runId or path:match("/runs/([^/]+)/"),
 				subagent = { agent = artifacts.agent, role = artifacts.role },
-			}
-			if transcript_first and artifact.key == "transcript" then
-				table.insert(choices, 1, choice)
-			else
-				table.insert(choices, choice)
-			end
+			})
 		end
 	end
 	return choices
@@ -88,6 +99,10 @@ end
 local function open_text(ctx, title, path, filetype, is_output, page, query, anchor)
 	assert(ctx.resources and page, "Artifact page required")
 	local text = page.text
+	-- Reports are small; render only when this page holds the whole file.
+	local report = query.kind == "spawn" and query.artifact == "result" and page.offset == 0
+		and (page.nextOffset == nil or page.nextOffset == vim.NIL)
+	if report then text = report_markdown(text) end
 	local state = ctx.state
 	floats.close_window(state.spawn_win)
 	state.spawn_win = nil
@@ -113,7 +128,7 @@ local function open_text(ctx, title, path, filetype, is_output, page, query, anc
 		col = col,
 		style = "minimal",
 		border = "rounded",
-		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. title .. (page and (" [bytes " .. page.offset .. ".." .. (page.offset + #page.text) .. "/" .. page.size .. "]") or "") .. " ",
+		title = " " .. (ctx.resources and ("[" .. ctx.resources.label .. "] ") or "") .. title .. (not report and (" [bytes " .. page.offset .. ".." .. (page.offset + #page.text) .. "/" .. page.size .. "]") or "") .. " ",
 		title_pos = "left",
 	})
 	vim.api.nvim_set_option_value("wrap", true, { win = win })
@@ -170,7 +185,7 @@ local function open_text(ctx, title, path, filetype, is_output, page, query, anc
 	end, { buffer = buf, silent = true, desc = "Yank " .. description })
 end
 
-local function select_artifact(ctx, choices, prompt, is_output, send_action)
+local function select_artifact(ctx, choices, prompt, is_output)
 	local ticket = ctx.resources and ctx.resources.select()
 	vim.ui.select(choices, {
 		prompt = prompt,
@@ -185,11 +200,9 @@ local function select_artifact(ctx, choices, prompt, is_output, send_action)
 			return
 		end
 		local function return_to_picker()
-			select_artifact(ctx, choices, prompt, is_output, send_action)
+			select_artifact(ctx, choices, prompt, is_output)
 		end
-		if choice.kind == "send-action" then
-			send_action()
-		elseif choice.kind == "transcript" then
+		if choice.kind == "transcript" then
 			local query = ctx.resources and { kind = "spawn", runId = choice.runId, artifact = choice.kind } or nil
 			require("pi-integration.spawn-transcript").open(vim.tbl_extend("force", ctx, { on_dismiss = return_to_picker }),
 				choice.path, "Spawn transcript", query, nil, choice.subagent)
@@ -204,7 +217,7 @@ function M.open_output(ctx, output, start_label)
 	if not output.spawn then
 		return false
 	end
-	local choices = artifact_choices(output.spawn, false)
+	local choices = artifact_choices(output.spawn)
 	if #choices == 0 then
 		ctx.ui.notify("No spawn artifacts found for this tool call", vim.log.levels.WARN)
 		return true
@@ -213,10 +226,13 @@ function M.open_output(ctx, output, start_label)
 	return true
 end
 
-function M.pick_run(ctx, run, send_action)
-	local artifacts = M.paths(run) or {}
-	local choices = artifact_choices(artifacts, true)
-	table.insert(choices, { label = "send action", kind = "send-action" })
+function M.pick_run(ctx, run)
+	local choices = artifact_choices(M.paths(run) or {})
+	if #choices == 0 then
+		ctx.ui.notify("No artifacts for this subagent yet", vim.log.levels.WARN)
+		if ctx.on_dismiss then ctx.on_dismiss() end
+		return
+	end
 	local artifact_ctx = {
 		state = ctx.state,
 		resources = ctx.resources,
@@ -224,7 +240,7 @@ function M.pick_run(ctx, run, send_action)
 		on_dismiss = ctx.on_dismiss,
 		window = { parent = ctx.state.transcript_win },
 	}
-	select_artifact(artifact_ctx, choices, run_label(run), false, send_action)
+	select_artifact(artifact_ctx, choices, run_label(run), false)
 end
 
 function M.open_resource(ctx, query, title, filetype, page, anchor)
