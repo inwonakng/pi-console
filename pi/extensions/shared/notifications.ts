@@ -127,7 +127,7 @@ export function notifyPiError(ctx: ExtensionContext): boolean {
 	return notifyPiOutcome(ctx, "Pi error", "error");
 }
 
-function notifyPiOutcome(ctx: ExtensionContext, title: string, kind: "completion" | "error", force = false): boolean {
+export function notifyPiOutcome(ctx: ExtensionContext, title: string, kind: "completion" | "error", force = false): boolean {
 	if (!notificationsEnabled() && !force) {
 		return false;
 	}

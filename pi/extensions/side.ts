@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SideRpc, updateSidePartial, type SideRpcEvent } from "./shared/side-rpc";
+import { notifyPiNeedsInput, notifyPiOutcome } from "./shared/notifications";
 
 const JOURNAL = "pi-side-conversation";
 const BOUNDARY = "pi-side-context-boundary";
@@ -72,6 +73,8 @@ type Generation = {
   pendingPrompt?: string;
   pendingAfter?: string;
   running: boolean;
+  /** Stop reason of the latest assistant message in the current run. */
+  stopReason?: string;
   error?: string;
   activity?: string;
   persisted: boolean;
@@ -272,11 +275,12 @@ export default function sideExtension(pi: ExtensionAPI) {
     if (!title || typeof title !== "object" || Array.isArray(title)) {
       title = { kind: "pi_side_dialog", title: `Side: ${request.title}` };
     }
-    // The child owns notifications (including question deduplication and approval
-    // titles). Relaying its dialog must not send a second notification in the parent.
+    // The child cannot publish desktop notifications (PI_SPAWN_AGENT), so the parent
+    // notifies here. notify:false keeps the generic prompt handler from adding another.
     const taggedTitle = JSON.stringify({ ...title, notify: false, sideDialogId: dialogId, sideConversationId: g.id });
     g.dialogIds.add(dialogId);
     publish(g);
+    notifyPiNeedsInput(g.ctx, title.kind === "pi_approval_preview" ? "Pi side chat: Tool Approval" : "Pi side chat needs input");
     try {
       let value: string | boolean | undefined;
       // Managed children publish closure themselves; do not restart their timer
@@ -328,6 +332,7 @@ export default function sideExtension(pi: ExtensionAPI) {
     } else if (data.type === "message_end") {
       const message = data.message as AgentMessage;
       g.partialMessage = undefined;
+      if (message.role === "assistant") g.stopReason = message.stopReason;
       if (message.role !== "system") {
         // The canonical drain replaces this optimistic view after persistence.
         if (g.pendingPrompt && userText(message) === g.pendingPrompt) {
@@ -373,6 +378,12 @@ export default function sideExtension(pi: ExtensionAPI) {
         g.activity = undefined;
         state(g);
         publish(g);
+        // User aborts and stale or replaced side chats need no alert.
+        if (current === g && owns(g) && !g.cancelled && g.stopReason && g.stopReason !== "aborted") {
+          if (g.stopReason === "error") notifyPiOutcome(g.ctx, "Pi side chat error", "error");
+          else notifyPiOutcome(g.ctx, "Pi side chat finished", "completion");
+        }
+        g.stopReason = undefined;
       }, (error) => {
         g.running = false;
         failure(g, error);
@@ -648,6 +659,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       if (typeof request.message !== "string" || !request.message.trim()) { reject("Side prompt must not be empty."); return; }
       const message = request.message;
       g.cancelled = false;
+      g.stopReason = undefined;
       g.dialogs = new AbortController();
       g.error = undefined;
       g.running = true;

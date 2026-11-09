@@ -84,7 +84,8 @@ export default function notificationsExtension(pi: ExtensionAPI) {
 			notifyPiError(ctx);
 			return;
 		}
-		if (!stopReason || getPendingWorkspaceId()) {
+		// A user abort needs no completion alert.
+		if (!stopReason || stopReason === "aborted" || getPendingWorkspaceId()) {
 			return;
 		}
 		notifyPiFinished(ctx);
