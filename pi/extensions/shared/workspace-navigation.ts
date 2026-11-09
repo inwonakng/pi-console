@@ -2,7 +2,7 @@ import type { ExtensionCommandContext, ExtensionContext, SessionEntry, SessionMa
 import { existsSync } from "node:fs";
 import { assertManagedResources } from "../../scripts/managed-process.mjs";
 import { beginWorkspaceContinuation, clearWorkspaceContinuation, getWorkspaceContinuation, getWorkspaceTransitionError, getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, setWorkspaceTransitionError, workspaceDisplayState, WORKSPACE_CONTINUATION_STATUS, type WorkspaceRecord } from "./workspace";
-import { hasRunningSubagents, subagentHistoryBlockReason } from "./subagent-state";
+import { hasRunningSubagents, subagentHistoryBlockReason, withSubagentWorkspaceRestore } from "./subagent-state";
 import { prepareProjectTrust, projectTrustReady } from "./project-trust";
 import { modelReady, preserveModelForSwitch } from "./model-readiness";
 import { assertBashTransitionAllowed, withBashTransition } from "./bash-jobs";
@@ -147,6 +147,13 @@ export async function moveToLocation(
   if (ownsPending) setPendingWorkspace("navigation");
   let arrived = false;
   let releaseSelection: (() => void) | undefined;
+  const validateRestore = () => {
+    if (options.restore && (options.reload || options.navigateTo || options.markLocation
+      || file !== ctx.sessionManager.getSessionFile()
+      || leafId !== ctx.sessionManager.getLeafId() || cwd !== activeLocation(ctx).cwd)) {
+      throw new Error("Workspace restore must preserve the current session, leaf, and recorded workspace.");
+    }
+  };
   try {
     setWorkspaceTransitionError(file, undefined);
     if (ctx.cwd !== cwd || options.reload) assertManagedResources();
@@ -159,10 +166,9 @@ export async function moveToLocation(
     if ((ctx.cwd !== cwd || options.reload) && hasRunningSubagents()) {
       throw new Error("Wait for running subagents before switching workspaces; replacing Pi's runtime would abort them.");
     }
-    // Restore returns the current leaf to its own workspace. Subagent ownership
-    // is persisted per session file, so only live subagents (checked above) matter.
-    if ((ctx.cwd !== cwd || options.reload || options.navigateTo)
-      && !(options.restore && !options.reload && !options.navigateTo && leafId === ctx.sessionManager.getLeafId())) {
+    // Restore preserves history and reloads persisted subagent ownership.
+    validateRestore();
+    if ((ctx.cwd !== cwd || options.reload || options.navigateTo) && !options.restore) {
       const blocked = subagentHistoryBlockReason();
       if (blocked) throw new Error(blocked);
     }
@@ -179,13 +185,19 @@ export async function moveToLocation(
       assertBashTransitionAllowed();
       assertManagedResources();
       releaseSelection = preserveModelForSwitch(ctx);
-      const result = await switchWithCwd(file, {
+      // Revalidate after async trust/beforeSwitch work, then carry the exemption
+      // through Pi's session_before_switch hook for this replacement only.
+      validateRestore();
+      const switchRuntime = () => switchWithCwd(file, {
         cwdOverride: cwd,
         withSession: async (nextCtx) => {
           arrived = true;
           await arrival(nextCtx, nextCtx.sendMessage.bind(nextCtx));
         },
       });
+      const result = options.restore
+        ? await withSubagentWorkspaceRestore(file, leafId, switchRuntime)
+        : await switchRuntime();
       if (result.cancelled) {
         if (ownsPending) setPendingWorkspace(undefined);
         releaseContinuation();

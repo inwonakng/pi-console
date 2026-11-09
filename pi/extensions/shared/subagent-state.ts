@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { pathInside } from "./paths";
 import { assertBashMutationAllowed } from "./bash-jobs";
 
@@ -24,6 +25,24 @@ export function retireSubagentRuntime(owner: symbol): boolean {
 
 export function hasRunningSubagents(): boolean {
   return globalState[STATE_KEY]?.hasRunning() ?? false;
+}
+
+// Share the scope across independently loaded extension entrypoints, but not
+// across unrelated async operations. Only workspace restore establishes it.
+const RESTORE_KEY = Symbol.for("pi.agent.extensions.subagent-workspace-restore");
+type RestoreScope = { sessionFile: string; leafId: string | null; active: boolean };
+const restoreGlobal = globalThis as typeof globalThis & { [RESTORE_KEY]?: AsyncLocalStorage<RestoreScope> };
+const restores = restoreGlobal[RESTORE_KEY] ??= new AsyncLocalStorage<RestoreScope>();
+
+export async function withSubagentWorkspaceRestore<T>(sessionFile: string, leafId: string | null, execute: () => Promise<T>): Promise<T> {
+  const scope = { sessionFile, leafId, active: true };
+  try { return await restores.run(scope, execute); }
+  finally { scope.active = false; }
+}
+
+export function isSubagentWorkspaceRestore(sessionFile: string | undefined, leafId: string | null): boolean {
+  const scope = restores.getStore();
+  return !!scope?.active && scope.sessionFile === sessionFile && scope.leafId === leafId;
 }
 
 export function subagentHistoryBlockReason(): string | undefined {

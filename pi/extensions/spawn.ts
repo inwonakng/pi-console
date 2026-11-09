@@ -22,7 +22,7 @@ import { accessGeneration, accessRevision, effectiveWorkerMode, getAccessMode, o
 import { canonicalPath, getSessionGrants, hasPermission, requestPermission, validPermissionAttempt, permissionWasDenied, type PermissionAuthorization, type PermissionPreview } from "./shared/permissions";
 import { loadExtensionSettings, type SubagentModelSetting } from "./shared/extension-settings";
 import { saveSessionSetting } from "./shared/session-settings";
-import { assertRepositoryIdle, registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
+import { assertRepositoryIdle, hasRunningSubagents, isSubagentWorkspaceRestore, registerSubagentRuntime, retireSubagentRuntime } from "./shared/subagent-state";
 import { spawnRunIds } from "./shared/session-deletion";
 import { agentContext, newAssignment, registerWorkerProtocol, SPAWN_PROTOCOL_TITLE, SPAWN_PERMISSION_CANCEL, SPAWN_PERMISSION_FINISH, SPAWN_AUTHORITY_ACK, WORKER_TOOLS, type Assignment, type WorkerExecution, type WorkerLifetime, type WorkerOperation, type WorkerRequest, type WorkerPermissionOperation, type WorkerPermissionRequest, type WorkerAdmissionOperation } from "./shared/spawn-protocol";
 import {
@@ -1657,6 +1657,16 @@ export default function spawnExtension(pi: ExtensionAPI) {
   pi.on("session_before_fork", blockHistoryChange);
 
   pi.on("session_before_switch", async (event, ctx) => {
+    if (event.reason === "resume" && sameSessionFile(event.targetSessionFile, ctx.sessionManager.getSessionFile())
+      && isSubagentWorkspaceRestore(ctx.sessionManager.getSessionFile(), ctx.sessionManager.getLeafId())) {
+      // This is the current leaf's validated cwd restoration, not a different
+      // session or workspace. Settled contributions survive runtime replacement.
+      if (hasRunningSubagents()) {
+        ctx.ui.notify("Wait for running subagents before restoring the workspace; replacing Pi's runtime would abort them.", "warning");
+        return { cancel: true };
+      }
+      return;
+    }
     if ([...runs.values()].some(ownsWriter)) {
       ctx.ui.notify("Resolve writing contributions with accept or explicit discard before switching sessions. Stop active workers first if cancellation is needed.", "warning");
       return { cancel: true };
