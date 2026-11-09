@@ -2076,6 +2076,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
       }, delay);
     };
     const transcript = (event: RpcEvent) => {
+      // Streaming deltas are ~80% of the bytes and never rendered; message_end
+      // records the complete message. Progress still sees them via onEvent.
+      if (event.type === "message_update") return;
       if (event.type === "extension_ui_request" && event.method === "input"
         && typeof event.title === "string" && event.title.startsWith(SPAWN_PROTOCOL_TITLE)) {
         // The child RPC frame may carry a user-only diff. Never persist it in
