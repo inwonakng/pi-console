@@ -84,15 +84,19 @@ export async function moveToLocation(
     currentCtx = nextCtx;
     const manager = nextCtx.sessionManager as SessionManager;
     try {
-      if (options.navigateTo) {
-        const result = await nextCtx.navigateTree(options.navigateTo);
-        if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
-      } else if (leafId === null) {
-        manager.resetLeaf();
-      } else if (manager.getLeafId() !== leafId) {
-        // Restore finalized transcript context through Pi's navigation API.
-        const result = await nextCtx.navigateTree(leafId);
-        if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
+      // Restore only changes cwd. Replacement startup may append entries, which
+      // must stay on the active branch rather than navigating to the old leaf.
+      if (!options.restore) {
+        if (options.navigateTo) {
+          const result = await nextCtx.navigateTree(options.navigateTo);
+          if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
+        } else if (leafId === null) {
+          manager.resetLeaf();
+        } else if (manager.getLeafId() !== leafId) {
+          // Restore finalized transcript context through Pi's navigation API.
+          const result = await nextCtx.navigateTree(leafId);
+          if (result.cancelled) throw new Error("Workspace navigation was cancelled.");
+        }
       }
       if (options.markLocation) {
         manager.appendCustomEntry(LOCATION_ENTRY, {
