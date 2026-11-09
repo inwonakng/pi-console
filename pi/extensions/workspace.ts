@@ -421,6 +421,7 @@ export default function workspaceExtension(pi: ExtensionAPI) {
         if (location.cwd !== ctx.cwd) {
           const moved = await moveToLocation(ctx, location.cwd, ctx.sessionManager.getLeafId(), {
             saveCursor: false,
+            restore: true,
             onArrival: (nextCtx) => {
               setPendingWorkspace(undefined);
               publishWorkspaceState(nextCtx);

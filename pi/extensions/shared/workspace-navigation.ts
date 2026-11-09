@@ -60,7 +60,7 @@ export async function moveToLocation(
   ctx: ExtensionCommandContext,
   cwd: string,
   leafId: string | null,
-  options: { workspaceId?: string; workspaceLabel?: string; markLocation?: boolean; navigateTo?: string; reload?: boolean; saveCursor?: boolean; continueWith?: string; beforeSwitch?: () => void | Promise<void>; onArrival?: (ctx: ExtensionCommandContext) => void | Promise<void> } = {},
+  options: { workspaceId?: string; workspaceLabel?: string; markLocation?: boolean; navigateTo?: string; reload?: boolean; saveCursor?: boolean; restore?: boolean; continueWith?: string; beforeSwitch?: () => void | Promise<void>; onArrival?: (ctx: ExtensionCommandContext) => void | Promise<void> } = {},
 ): Promise<boolean> {
   assertBashTransitionAllowed();
   const file = ctx.sessionManager.getSessionFile();
@@ -159,7 +159,10 @@ export async function moveToLocation(
     if ((ctx.cwd !== cwd || options.reload) && hasRunningSubagents()) {
       throw new Error("Wait for running subagents before switching workspaces; replacing Pi's runtime would abort them.");
     }
-    if (ctx.cwd !== cwd || options.reload || options.navigateTo) {
+    // Restore returns the current leaf to its own workspace. Subagent ownership
+    // is persisted per session file, so only live subagents (checked above) matter.
+    if ((ctx.cwd !== cwd || options.reload || options.navigateTo)
+      && !(options.restore && !options.reload && !options.navigateTo && leafId === ctx.sessionManager.getLeafId())) {
       const blocked = subagentHistoryBlockReason();
       if (blocked) throw new Error(blocked);
     }
