@@ -604,26 +604,24 @@ and into `webSearch.providers` in Pi's `settings.json`.
 | Workspace diff review | `diffview.nvim` in your regular Neovim configuration |
 | Faster file completion | `fd` or `fdfind` |
 | Send deleted sessions to the OS trash | `trash` or `gio trash`; otherwise deletion is permanent |
-| Zotero completion | Running Zotero with its local API enabled |
+| Zotero completion | [`zotero-tools`](https://github.com/inwonakng/zotero-tools) on `PATH`, logged in with `/zotero-login` |
 | Equation rendering | Tools and terminal support described below |
 
 ## Zotero references
 
-Keep Zotero running and enable **Settings -> Advanced -> Allow other applications
-on this computer to communicate with Zotero**.
+Install `zotero-tools` on the machine running the frontend and run
+`/zotero-login` there once. It saves a Zotero web API key that completion and
+the agent's Zotero skill share.
 
 In the prompt buffer, type `@z:paper:`, `@z:collection:`, or `@z:tag:` followed
 by a search. Queries can contain spaces. Paper searches match titles, citation
 keys, authors, and tags; select a result with the regular completion keys.
 
-Completion reads metadata from your local personal library at
-`127.0.0.1:23119` and inserts a link. It does not read PDFs or notes, change
-your library, or search group libraries. Cached suggestions remain available
-if Zotero disconnects.
-
-For the agent to act on those references, install `zotero-cli` and provide
-instructions for using it. The console does not bundle a Zotero skill.
-Pi's terminal UI needs its own autocomplete extension.
+Completion runs `zotero-tools completions` in the background and inserts a
+link. Cached suggestions appear immediately and refresh at most once a minute;
+they remain available offline. It does not read PDFs or notes or change your
+library. zotero-tools also provides the agent's Zotero skill and Pi's terminal
+UI completion.
 
 ## Optional LaTeX graphics in tmux
 
