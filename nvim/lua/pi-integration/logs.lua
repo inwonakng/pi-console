@@ -4,6 +4,8 @@ local entries, keyed = {}, {}
 local log_buf, log_win, line_entries
 local pending, scheduled
 local max_entries = 1000
+local display_generation = 0
+local display_timeout_ms = { error = 10000, warn = 5000, info = 5000 }
 
 local function valid_win(win)
 	return win and vim.api.nvim_win_is_valid(win)
@@ -128,7 +130,17 @@ function M.display(message, level)
 		local width = math.max(0, math.min(vim.o.columns - 1, vim.v.echospace - 1))
 		if width == 0 then return end
 		local highlight = item.level == "error" and "ErrorMsg" or item.level == "warn" and "WarningMsg" or "None"
-		vim.api.nvim_echo({ { M.truncate(item.message, width), highlight } }, true, {})
+		local text = M.truncate(item.message, width)
+		vim.api.nvim_echo({ { text, highlight } }, true, {})
+		display_generation = display_generation + 1
+		local generation = display_generation
+		-- Clear the preview after a while unless a newer message replaced it.
+		vim.defer_fn(function()
+			if generation ~= display_generation or vim.fn.getcmdtype() ~= "" then return end
+			local ok, last = pcall(vim.api.nvim_exec2, "1messages", { output = true })
+			if not ok or last.output ~= text then return end
+			vim.api.nvim_echo({ { "" } }, false, {})
+		end, display_timeout_ms[item.level] or 5000)
 	end)
 end
 
