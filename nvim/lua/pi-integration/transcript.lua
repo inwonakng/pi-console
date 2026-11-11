@@ -468,11 +468,13 @@ end
 
 local function align_bottom(buf, win)
 	vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
+	-- Inside win_call, redraw paints the window's tab over the visible one.
+	local visible = vim.api.nvim_win_get_tabpage(win) == vim.api.nvim_get_current_tabpage()
 	vim.api.nvim_win_call(win, function()
 		-- Reveal the end even when the last line wraps beyond the window.
 		vim.cmd("noautocmd normal! $zb")
 		-- Resolve wrapped-line skipcol while this window is current.
-		vim.cmd("redraw")
+		if visible then vim.cmd("redraw") end
 	end)
 end
 
