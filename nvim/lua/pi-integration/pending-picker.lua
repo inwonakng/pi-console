@@ -163,8 +163,10 @@ function M.select(ctx, id, items, opts, on_choice)
 		vim.keymap.set({ "t", "n" }, "<C-q>", function()
 			finish(picker, nil, true, true)
 		end, { buffer = picker.buf, desc = "Cancel pending Pi action" })
+		-- fzf-lua re-enters this window while closing; a queued startinsert
+		-- would then apply to whichever window close() refocuses.
 		vim.api.nvim_create_autocmd("BufEnter", { buffer = picker.buf, callback = function()
-			vim.cmd("startinsert")
+			if active == picker then vim.cmd("startinsert") end
 		end })
 	end
 	opts.on_close = function() restore_input(picker) end
