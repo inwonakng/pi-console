@@ -129,6 +129,10 @@ function M.select(ctx, id, items, opts, on_choice)
 	opts.pi_resize_input = picker.side and picker.side.resize_input or nil
 	opts.on_create = function(event)
 		picker.buf = event.bufnr
+		-- Keep the pane separator instead of fzf-lua's split-provider label.
+		require("fzf-lua").win.__SELF().update_statusline = function()
+			vim.wo[picker.win].statusline = picker.statusline
+		end
 		vim.wo[picker.win].statuscolumn = ""
 		if picker.side then
 			picker.side.bind_input()
