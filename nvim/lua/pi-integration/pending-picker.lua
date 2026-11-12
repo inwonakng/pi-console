@@ -24,6 +24,12 @@ local function refresh(picker)
 	picker.ctx.transcript.refresh_ui()
 end
 
+local function stacked_with_transcript(win, transcript)
+	return transcript and vim.api.nvim_win_is_valid(transcript)
+		and vim.api.nvim_win_get_position(win)[2] == vim.api.nvim_win_get_position(transcript)[2]
+		and vim.api.nvim_win_get_width(win) == vim.api.nvim_win_get_width(transcript)
+end
+
 local function restore_input(picker)
 	if picker.restored then return end
 	picker.restored = true
@@ -36,7 +42,11 @@ local function restore_input(picker)
 		picker.side.resize_input(nil)
 		picker.side.bind_input()
 	else
-		vim.api.nvim_win_set_height(picker.win, picker.height)
+		local transcript = picker.ctx.state.transcript_win
+		if picker.restore_height and stacked_with_transcript(picker.win, transcript) then
+			local available = vim.api.nvim_win_get_height(picker.win) + vim.api.nvim_win_get_height(transcript)
+			vim.api.nvim_win_set_height(picker.win, math.min(picker.height, math.max(1, available - vim.o.winminheight)))
+		end
 		picker.ctx.state.input_win = picker.win
 	end
 	vim.api.nvim_win_call(picker.win, function() vim.fn.winrestview(picker.view) end)
@@ -106,6 +116,7 @@ local function open_pane(ctx, id, on_choice)
 	local picker = {
 		ctx = ctx, id = id, request = request, on_choice = on_choice, side = side,
 		win = win, input_buf = vim.api.nvim_win_get_buf(win), height = vim.api.nvim_win_get_height(win),
+		restore_height = not side and stacked_with_transcript(win, state.transcript_win),
 		winbar = vim.wo[win].winbar, statuscolumn = vim.wo[win].statuscolumn, statusline = vim.wo[win].statusline,
 		view = vim.api.nvim_win_call(win, vim.fn.winsaveview),
 	}
@@ -129,8 +140,11 @@ function M.select(ctx, id, items, opts, on_choice)
 	opts.pi_resize_input = picker.side and picker.side.resize_input or nil
 	opts.on_create = function(event)
 		picker.buf = event.bufnr
+		local win = require("fzf-lua").win.__SELF()
+		-- The user may rearrange splits while answering; do not replay fzf's old layout.
+		win.on_closes.winrest = nil
 		-- Keep the pane separator instead of fzf-lua's split-provider label.
-		require("fzf-lua").win.__SELF().update_statusline = function()
+		win.update_statusline = function()
 			vim.wo[picker.win].statusline = picker.statusline
 		end
 		vim.wo[picker.win].statuscolumn = ""

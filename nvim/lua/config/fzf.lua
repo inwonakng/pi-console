@@ -251,7 +251,7 @@ local function option_rows(text, width)
 end
 
 -- Ordinary preview pickers cover the screen. RPC pickers use the input pane.
-local function size_select_picker(select_opts, items, winopts)
+local function size_select_picker(select_opts, items, winopts, fit_pane)
 	local input_win = select_opts.pi_input_win
 	local embedded = input_win and vim.api.nvim_win_is_valid(input_win)
 	local available = embedded and vim.api.nvim_win_get_height(input_win) or math.max(1, vim.o.lines - vim.o.cmdheight)
@@ -273,7 +273,7 @@ local function size_select_picker(select_opts, items, winopts)
 		end
 		local preview_height = preview_rows_needed > 0 and math.min(10, math.max(2, preview_rows_needed)) or 0
 		local transcript_win = select_opts.pi_transcript_win
-		if transcript_win and vim.api.nvim_win_is_valid(transcript_win) then
+		if (fit_pane ~= false or available < 3) and transcript_win and vim.api.nvim_win_is_valid(transcript_win) then
 			local input_pos = vim.api.nvim_win_get_position(input_win)
 			local transcript_pos = vim.api.nvim_win_get_position(transcript_win)
 			-- Only resize vertically stacked panes; preserve side-by-side geometry.
@@ -310,11 +310,11 @@ local function size_select_picker(select_opts, items, winopts)
 	end
 end
 
-local function update_select_layout(win)
+local function update_select_layout(win, fit_pane)
 	if not win or not win._o._ui_select then
 		return
 	end
-	size_select_picker(win._o._ui_select, win._o._items, win._o.winopts)
+	size_select_picker(win._o._ui_select, win._o._items, win._o.winopts, fit_pane)
 	local hidden = win._o.winopts.preview.hidden
 	if hidden ~= win.preview_hidden then
 		win.preview_hidden = hidden
@@ -324,6 +324,7 @@ local function update_select_layout(win)
 			win:redraw_preview()
 		end
 	end
+	if win._o._ui_select.pi_input_win then win:SIGWINCH({ "pi-select-layout" }) end
 end
 
 -- Run before fzf-lua's resize handler so its absolute preview size still fits.
@@ -332,6 +333,18 @@ vim.api.nvim_create_autocmd("VimResized", {
 	group = vim.api.nvim_create_augroup("PiSelectPicker", { clear = true }),
 	callback = function()
 		update_select_layout(fzf.win.__SELF())
+	end,
+})
+
+vim.api.nvim_create_autocmd("WinResized", {
+	group = "PiSelectPicker",
+	callback = function()
+		local win = fzf.win.__SELF()
+		if not win or not win:validate() or not win._o._ui_select or not win._o._ui_select.pi_input_win then return end
+		if not vim.tbl_contains(vim.v.event.windows, win.fzf_winid) then return end
+		-- Preserve manual sizing, except when rearrangement leaves no room for choices.
+		update_select_layout(win, false)
+		win:redraw()
 	end,
 })
 
@@ -376,6 +389,19 @@ fzf.register_ui_select(function(select_opts, items)
 		-- Reused fzf windows inherit the previous picker's preview visibility.
 		-- Restore this select's layout before fzf-lua renders its preview.
 		local win = fzf.win.__SELF()
+		if select_opts.pi_input_win and win then
+			local generate_layout = win.generate_layout
+			win.generate_layout = function(self)
+				local layout = generate_layout(self)
+				if layout.preview then layout.preview.win = self.fzf_winid end
+				return layout
+			end
+			-- Match fzf's reserved preview rows to the Neovim preview overlay.
+			win.on_SIGWINCH(win._o, "pi-select-layout", function()
+				if fzf.win.__SELF() ~= win or not win:validate() or win.closing then return end
+				return "change-preview-window(" .. require("fzf-lua.core").preview_window(win._o, win) .. ")"
+			end)
+		end
 		update_select_layout(win)
 		if win then win:redraw() end
 		if type(select_opts.on_create) == "function" then
