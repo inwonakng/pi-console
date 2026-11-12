@@ -101,7 +101,7 @@ function stripLeadingCommandLanguage(text: string) {
 		.replace(/^(implement|create|build|add|fix|debug|review|explain)\s+(me\s+)?/i, "$1 ");
 }
 
-function deterministicTitle(text: string) {
+export function deterministicTitle(text: string) {
 	const normalized = stripLeadingCommandLanguage(normalizeWhitespace(text))
 		.replace(/[.?!:;,]+$/g, "")
 		.trim();
@@ -208,7 +208,7 @@ function branchUserMessagesWithEvent(ctx: ExtensionContext, message: unknown) {
 }
 
 // Tries candidates in order within one shared timeout; reports only when all fail.
-async function modelTitle(prompt: string, ctx: ExtensionContext, sessionSignal: AbortSignal) {
+export async function modelTitle(prompt: string, ctx: ExtensionContext, sessionSignal: AbortSignal) {
 	const { models, failures } = titleModels(ctx);
 	const signal = AbortSignal.any([sessionSignal, AbortSignal.timeout(TITLE_TIMEOUT_MS)]);
 	for (const model of models) {

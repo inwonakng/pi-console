@@ -17,10 +17,10 @@ export type BundledOperation =
   | { operation: "workspace.undo"; payload: { id: string; reason: string } }
   | { operation: "workspace.discard"; payload: { id?: string } }
   | { operation: "side.open"; payload: Record<string, never> }
-  | { operation: "side.prompt"; payload: { text: string } }
-  | { operation: "side.draft"; payload: { text: string } }
-  | { operation: "side.reset"; payload: Record<string, never> }
-  | { operation: "side.abort"; payload: Record<string, never> }
+  | { operation: "side.prompt" | "side.draft"; payload: { id: string; text: string } }
+  | { operation: "side.reset"; payload: { fromId: string; abort: boolean } }
+  | { operation: "side.select"; payload: { id: string; fromId: string; abort: boolean } }
+  | { operation: "side.delete" | "side.abort"; payload: { id: string } }
   | { operation: "spawn.cancel"; payload: Record<string, never> }
   | { operation: "bash.interrupt"; payload: { phase: "hold" | "confirm"; frontendAvailable: boolean } }
   | { operation: "bash.transition"; payload: { action: "acquire" | "release"; token: string } }
@@ -54,13 +54,17 @@ export function validBundled(operation: unknown, p: Record<string, unknown>): bo
         && (p.ignoredFiles === undefined || Array.isArray(p.ignoredFiles) && p.ignoredFiles.length <= 128 && p.ignoredFiles.every((v) => typeof v === "string" && v.length <= 4096));
     case "workspace.undo": case "workspace.revert": return exact(p, ["id", "reason"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
       && typeof p.reason === "string" && !!p.reason.trim() && !p.reason.includes("\0") && Buffer.byteLength(p.reason) <= 8192;
-    case "usage.refresh": case "title.generate": case "side.open": case "side.reset": case "side.abort": case "spawn.cancel": return exact(p, []);
+    case "usage.refresh": case "title.generate": case "side.open": case "spawn.cancel": return exact(p, []);
     case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";
     case "bash.transition": return exact(p, ["action", "token"]) && ["acquire", "release"].includes(String(p.action))
       && typeof p.token === "string" && /^[\w-]{1,128}$/.test(p.token);
     case "bash.interrupt": return exact(p, ["phase", "frontendAvailable"]) && ["hold", "confirm"].includes(String(p.phase)) && typeof p.frontendAvailable === "boolean";
-    case "side.prompt": return exact(p, ["text"]) && typeof p.text === "string" && !!p.text.trim() && Buffer.byteLength(p.text) <= 1024 * 1024;
-    case "side.draft": return exact(p, ["text"]) && typeof p.text === "string" && Buffer.byteLength(p.text) <= 1024 * 1024;
+    case "side.reset": return exact(p, ["fromId", "abort"]) && typeof p.fromId === "string" && /^[\w-]{1,128}$/.test(p.fromId) && typeof p.abort === "boolean";
+    case "side.select": return exact(p, ["id", "fromId", "abort"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
+      && typeof p.fromId === "string" && /^[\w-]{1,128}$/.test(p.fromId) && typeof p.abort === "boolean";
+    case "side.delete": case "side.abort": return exact(p, ["id"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id);
+    case "side.prompt": return exact(p, ["id", "text"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id) && typeof p.text === "string" && !!p.text.trim() && Buffer.byteLength(p.text) <= 1024 * 1024;
+    case "side.draft": return exact(p, ["id", "text"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id) && typeof p.text === "string" && Buffer.byteLength(p.text) <= 1024 * 1024;
     case "bash.list": return Object.keys(p).every(key => key === "offset") && (p.offset === undefined || Number.isSafeInteger(p.offset) && Number(p.offset) >= 0);
     case "bash.status": case "bash.join": case "bash.stop": return exact(p, ["jobId"]) && typeof p.jobId === "string" && /^[A-Za-z0-9_-]{22}$/.test(p.jobId);
     case "bash.cancel-wait": return exact(p, ["invocationId"]) && typeof p.invocationId === "string" && /^[\w-]{1,128}$/.test(p.invocationId);

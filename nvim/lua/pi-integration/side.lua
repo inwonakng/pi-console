@@ -33,6 +33,13 @@ local function geometry()
 		top + math.floor((usable - total) / 2), math.max(0, math.floor((vim.o.columns - width) / 2))
 end
 
+function M.set_title(title)
+	if valid(transcript_win) then
+		local label = type(title) == "string" and title ~= "" and title:gsub("[%c]", " ") or "Side chat"
+		vim.api.nvim_win_set_config(transcript_win, { title = " " .. label .. " | ask | <leader>s chats " })
+	end
+end
+
 function M.input_window() return valid(input_win) and input_win or nil end
 function M.transcript_window() return valid(transcript_win) and transcript_win or nil end
 
@@ -125,8 +132,10 @@ function M.open(transcript_buf, input_buf, resources)
 					"- `<C-j>` / `<C-w>j` focuses the input (normal mode).",
 					"- Moving past either window with `<C-h/j/k/l>` / `<C-w>h/j/k/l` hides the side conversation.",
 					"- `<CR>` in the transcript follows a link, toggles an activity, or opens output.",
-					"- `q` / `<leader>pb` / `:q` hides both windows, preserving the draft and conversation.",
-					"- `<leader>n` / `:PiSideNew` starts a new side conversation (normal mode).",
+					"- `q` / `<leader>ps` / `:q` hides both windows, preserving the draft and conversation.",
+					"- `<leader>s` / `:PiSides` picks a side chat; Ctrl-x in the picker deletes it.",
+					"- `<leader>n` / `:PiSideNew` starts a new side chat, keeping this chat (normal mode).",
+					"- Switching or creating a chat asks before aborting a running side chat.",
 					"- `:PiSideAbort` stops only side work.",
 					"- Pending questions/approvals use the side input pane and stay visible until answered or cancelled (Ctrl-q).",
 					"- `q` / `<Esc>` closes this help; `<Esc>` keeps native behavior in the side windows.",
@@ -134,7 +143,7 @@ function M.open(transcript_buf, input_buf, resources)
 			})
 			if focus and help_state.help_win then focus:add(help_state.help_win) end
 		end, { buffer = buf, desc = "Side conversation help" })
-		vim.keymap.set("n", "<leader>pb", M.hide, { buffer = buf, desc = "Hide side conversation" })
+		vim.keymap.set("n", "<leader>ps", M.hide, { buffer = buf, desc = "Hide side conversation" })
 		vim.keymap.set("n", "q", M.hide, { buffer = buf, silent = true, desc = "Hide side conversation" })
 		M.setup_navigation(buf)
 	end

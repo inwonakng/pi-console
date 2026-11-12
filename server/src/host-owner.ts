@@ -1075,7 +1075,7 @@ export class OwnedSession {
       else if (isNative(command)) {
         this.nativePending++;
         const task = this.executeNative(command, receipt);
-        if (command.operation === "steering.submit" || command.operation === "followUp.submit") this.nativeQueueCommands.add(task);
+        if (command.operation === "followUp.submit") this.nativeQueueCommands.add(task);
         this.trackCommand(task.finally(() => this.nativeQueueCommands.delete(task)));
       } else if (rename) this.trackCommand(this.executeRename(receipt, rename));
       else this.trackCommand(this.executeCommand(command, receipt));
@@ -1706,12 +1706,6 @@ export class OwnedSession {
     return { runtimeRevision: revision, data };
   }
 
-  private assertSteeringActive(): void {
-    if (!this.queueRunPending && !this.conversation.awaitingSettlement && !this.conversation.snapshot().execution.running) {
-      throw new CommandError("session_busy", "Steering requires an active turn; retain the draft or use the main input");
-    }
-  }
-
   private assertNativeTransitionAllowed(command: NativeOperation): void {
     if (command.operation === "retry.abort" || command.operation === "shell.abort") return;
     if (this.bashTransitionToken || this.lifecyclePending) {
@@ -1724,7 +1718,6 @@ export class OwnedSession {
     this.assertNativeTransitionAllowed(command);
     if (command.operation === "retry.abort" || command.operation === "shell.abort") return;
     if (this.rename || this.bundled || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another session operation is pending");
-    if (command.operation === "steering.submit") this.assertSteeringActive();
     if (command.operation === "compaction.run" && (!this.conversation.settled || this.queueFlight || this.queueRunPending)) {
       throw new CommandError("session_busy", "Manual compaction requires settled execution");
     }
@@ -1738,14 +1731,13 @@ export class OwnedSession {
         this.commandRuntime(command.runtimeRevision, worker);
         this.assertNativeTransitionAllowed(command);
         this.assertReady(command.runtimeRevision);
-        if (command.operation === "steering.submit" || command.operation === "followUp.submit") {
-          if (this.aborting) throw new CommandError("session_busy", "Abort is clearing native queues; text retained in this command receipt");
-          if (command.operation === "steering.submit") this.assertSteeringActive();
+        if (command.operation === "followUp.submit" && this.aborting) {
+          throw new CommandError("session_busy", "Abort is clearing native queues; text retained in this command receipt");
         }
       });
       this.commandRuntime(command.runtimeRevision, worker);
-      if (command.operation === "steering.submit" || command.operation === "followUp.submit") {
-        if ((response.command !== "steer" && response.command !== "follow_up") || !["queued", "handled"].includes(response.data.disposition)) throw new Error("Invalid native queue outcome");
+      if (command.operation === "followUp.submit") {
+        if (response.command !== "follow_up" || !["queued", "handled"].includes(response.data.disposition)) throw new Error("Invalid native queue outcome");
         receipt.result = { ...receipt.result, disposition: response.data.disposition as "queued" | "handled" };
       } else if (command.operation === "shell.run") {
         if (response.command !== "bash") throw new Error("Invalid shell outcome");

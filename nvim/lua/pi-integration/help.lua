@@ -75,7 +75,7 @@ function M.toggle(ctx)
 		"- Pending questions/approvals use the input pane. Ctrl-h/j/k/l navigates; Esc leaves terminal-input mode; Ctrl-q cancels.",
 		"- `:PiPending` focuses the pending action; viewers inspect only. Esc Esc in the transcript aborts Pi and clears its pending action.",
 		"- `:PiQueue` inspect, edit, or remove queued messages. Ctrl+Enter saves an edit; editing pauses dispatch while connected.",
-		"- `:PiSteer` / `:PiFollowUp` send to the separate native steering and follow-up queues.",
+		"- `:PiFollowUp` sends to the native follow-up queue.",
 		"- `:PiCompact` compact the session context with default or custom instructions; requires an idle session.",
 		"- `:PiSide` toggle the side conversation; hiding preserves its draft and conversation.",
 		"- `:PiSidePrompt` / `:PiSideNew` / `:PiSideAbort` prompt, replace, or stop side work.",

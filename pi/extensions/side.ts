@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SideRpc, updateSidePartial, type SideRpcEvent } from "./shared/side-rpc";
 import { notifyPiNeedsInput, notifyPiOutcome } from "./shared/notifications";
+import { deterministicTitle, modelTitle } from "./auto-title";
 
 const JOURNAL = "pi-side-conversation";
 const BOUNDARY = "pi-side-context-boundary";
@@ -59,6 +60,9 @@ type SideTool = Omit<ToolStart, "type"> & {
 
 type Generation = {
   id: string;
+  title?: string;
+  createdAt: string;
+  lastUsedAt: string;
   ctx: ExtensionContext;
   parentSessionFile: string;
   parentSessionId: string;
@@ -142,6 +146,17 @@ function userText(message: AgentMessage | undefined): string | undefined {
     : message.content.filter((block) => block.type === "text").map((block) => block.text).join("");
 }
 
+type SavedGeneration = Pick<Generation, "id" | "title" | "createdAt" | "lastUsedAt" | "reference" | "entries" | "leafId"
+  | "draft" | "running" | "error" | "pendingPrompt" | "pendingAfter">;
+
+function preview(g: Generation): string {
+  return g.messages.filter(message => message.role === "user" || message.role === "assistant").slice(-6).map(message => {
+    const content = typeof message.content === "string" ? message.content
+      : message.content.filter(block => block.type === "text").map(block => block.text).join("");
+    return `${message.role === "user" ? "You" : "Assistant"}: ${content.slice(0, 2000)}`;
+  }).join("\n\n");
+}
+
 function refreshMessages(g: Generation): void {
   g.messages = g.entries.flatMap(sessionEntryToContextMessages).filter((message) => message.role !== "system");
   if (g.pendingPrompt) {
@@ -157,21 +172,53 @@ function refreshMessages(g: Generation): void {
 export default function sideExtension(pi: ExtensionAPI) {
   if (process.env.PI_SIDE_AGENT === "1" || process.env.PI_SPAWN_AGENT === "1") return;
   let current: Generation | undefined;
+  let conversations = new Map<string, Generation>();
   let transition: Promise<void> | undefined;
   let shuttingDown = false;
+  let storageError: string | undefined;
+  let titles = new AbortController();
+
+  function latest(): Generation[] {
+    return [...conversations.values()].sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt)
+      || Number(b === current) - Number(a === current));
+  }
+
+  function generateTitle(g: Generation): void {
+    if (g.title) return;
+    const prompt = g.messages.map(userText).find(text => text?.trim());
+    if (!prompt) return;
+    g.title = deterministicTitle(prompt);
+    state(g);
+    const signal = titles.signal;
+    void modelTitle(prompt, g.ctx, signal).then(label => {
+      if (signal.aborted || conversations.get(g.id) !== g || !owns(g)) return;
+      g.title = label.title;
+      state(g);
+      if (current) publish(current);
+    }).catch(error => {
+      if (!signal.aborted && conversations.get(g.id) === g) {
+        g.ctx.ui.notify(`Could not generate side chat title: ${String(error)}`, "warning");
+      }
+    });
+  }
 
   function owns(g: Generation): boolean {
     return g.ctx.sessionManager.getSessionId() === g.parentSessionId;
   }
 
   function state(g: Generation): void {
-    if (current !== g || !owns(g) || !g.parentSessionFile || !existsSync(g.parentSessionFile)) return;
+    if (storageError || !current || conversations.get(g.id) !== g || !owns(g)
+      || !g.parentSessionFile || !existsSync(g.parentSessionFile)) return;
     const path = `${g.parentSessionFile}.side.json`;
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
-      writeFileSync(temporary, JSON.stringify({ version: 2, parentSessionFile: g.parentSessionFile,
-        parentSessionId: g.parentSessionId, id: g.id, reference: g.reference, entries: g.entries, leafId: g.leafId,
-        draft: g.draft, running: g.running, error: g.error, pendingPrompt: g.pendingPrompt, pendingAfter: g.pendingAfter }),
+      const saved: SavedGeneration[] = [...conversations.values()].map(chat => ({
+        id: chat.id, title: chat.title, createdAt: chat.createdAt, lastUsedAt: chat.lastUsedAt,
+        reference: chat.reference, entries: chat.entries, leafId: chat.leafId, draft: chat.draft,
+        running: chat.running, error: chat.error, pendingPrompt: chat.pendingPrompt, pendingAfter: chat.pendingAfter,
+      }));
+      writeFileSync(temporary, JSON.stringify({ version: 3, parentSessionFile: g.parentSessionFile,
+        parentSessionId: g.parentSessionId, currentId: current.id, conversations: saved }),
         { mode: 0o600, flag: "wx" });
       renameSync(temporary, path);
       g.persisted = true;
@@ -191,6 +238,9 @@ export default function sideExtension(pi: ExtensionAPI) {
     g.ctx.ui.setStatus("pi-side", JSON.stringify({
       parentSessionFile: g.parentSessionFile,
       id: g.id,
+      title: g.title,
+      conversations: latest().map(chat => ({ id: chat.id, title: chat.title || "New side chat",
+        createdAt: chat.createdAt, lastUsedAt: chat.lastUsedAt, running: chat.running, preview: preview(chat) })),
       capturedAt: g.reference?.source.capturedAt,
       messages: g.messages,
       tools: g.tools,
@@ -473,11 +523,21 @@ export default function sideExtension(pi: ExtensionAPI) {
     // Only transcript/prompt materialization is ephemeral. Side Bash artifacts
     // live under the parent-bound durable owner directory, not this directory.
     if (g.directory) rmSync(g.directory, { recursive: true, force: true });
+    g.child = undefined;
+    g.ready = undefined;
+    g.initialized = undefined;
+    g.work = undefined;
+    g.directory = undefined;
+    g.file = undefined;
+    g.tools = [];
+    g.activity = undefined;
+    g.dialogs = new AbortController();
+    g.drain = Promise.resolve();
   }
 
   function fresh(ctx: ExtensionContext, ref?: Reference): Generation {
     return {
-      id: randomUUID(), ctx,
+      id: randomUUID(), ctx, createdAt: new Date().toISOString(), lastUsedAt: new Date().toISOString(),
       parentSessionFile: ctx.sessionManager.getSessionFile() ?? "",
       parentSessionId: ctx.sessionManager.getSessionId(),
       reference: ref, entries: [], leafId: ref?.boundary ?? null,
@@ -491,23 +551,40 @@ export default function sideExtension(pi: ExtensionAPI) {
     const path = g.parentSessionFile && `${g.parentSessionFile}.side.json`;
     if (path && existsSync(path)) {
       try {
-        const saved = JSON.parse(readFileSync(path, "utf8")) as Pick<Generation,
-          "parentSessionId" | "parentSessionFile" | "id" | "reference" | "entries" | "leafId" | "draft" | "running" | "error" | "pendingPrompt" | "pendingAfter"> & { version: number };
-        if (saved.version !== 2 || saved.parentSessionId !== g.parentSessionId || saved.parentSessionFile !== g.parentSessionFile
-          || typeof saved.id !== "string" || !Array.isArray(saved.entries) || typeof saved.draft !== "string"
-          || saved.entries.some(entry => !entry || typeof entry.id !== "string")
-          || saved.reference?.inheritedIds && (!Array.isArray(saved.reference.inheritedIds)
-            || saved.reference.inheritedIds.some(id => typeof id !== "string"))
-          || saved.reference && (typeof saved.reference.boundary !== "string" || !saved.reference.source
-            || typeof saved.reference.source.systemPrompt !== "string"
-            || saved.reference.source.leafId !== null && typeof saved.reference.source.leafId !== "string")) {
+        const saved = JSON.parse(readFileSync(path, "utf8")) as SavedGeneration & {
+          version: number; parentSessionId: string; parentSessionFile: string; currentId?: string; conversations?: SavedGeneration[];
+        };
+        if (![2, 3].includes(saved.version) || saved.parentSessionId !== g.parentSessionId || saved.parentSessionFile !== g.parentSessionFile
+          || saved.version === 3 && (!Array.isArray(saved.conversations) || !saved.conversations.length)) {
           throw new Error("Invalid side conversation state");
         }
-        g = { ...g, id: saved.id, reference: saved.reference, entries: saved.entries, leafId: saved.leafId,
-          draft: saved.draft, running: saved.running, error: saved.error,
-          pendingPrompt: saved.pendingPrompt, pendingAfter: saved.pendingAfter, persisted: true };
+        const restored = new Map<string, Generation>();
+        for (const item of saved.version === 2 ? [saved] : saved.conversations!) {
+          if (!item || typeof item.id !== "string" || !/^[\w-]{1,128}$/.test(item.id) || restored.has(item.id)
+            || !Array.isArray(item.entries) || typeof item.draft !== "string"
+            || item.entries.some(entry => !entry || typeof entry.id !== "string")
+            || item.title !== undefined && typeof item.title !== "string"
+            || item.reference?.inheritedIds && (!Array.isArray(item.reference.inheritedIds)
+              || item.reference.inheritedIds.some(id => typeof id !== "string"))
+            || item.reference && (typeof item.reference.boundary !== "string" || !item.reference.source
+              || typeof item.reference.source.systemPrompt !== "string"
+              || item.reference.source.leafId !== null && typeof item.reference.source.leafId !== "string")) {
+            throw new Error("Invalid saved side chat");
+          }
+          const createdAt = typeof item.createdAt === "string" ? item.createdAt : item.reference?.source.capturedAt || g.createdAt;
+          const chat = { ...fresh(ctx), id: item.id, title: item.title, createdAt,
+            lastUsedAt: typeof item.lastUsedAt === "string" ? item.lastUsedAt : createdAt,
+            reference: item.reference, entries: item.entries, leafId: item.leafId, draft: item.draft,
+            running: false, error: item.running ? "Side conversation was interrupted; no prompt was replayed." : item.error,
+            pendingPrompt: item.pendingPrompt, pendingAfter: item.pendingAfter, persisted: true };
+          refreshMessages(chat);
+          restored.set(chat.id, chat);
+        }
+        conversations = restored;
+        g = conversations.get(saved.version === 2 ? saved.id : saved.currentId ?? "") ?? latest()[0];
       } catch (error) {
-        g.error = `Unable to restore side conversation: ${String(error)}. Use :PiSideNew to reset it.`;
+        storageError = `Unable to restore side chats: ${String(error)}. Saved state was left unchanged: ${path}`;
+        g.error = storageError;
         return g;
       }
     } else {
@@ -546,26 +623,29 @@ export default function sideExtension(pi: ExtensionAPI) {
         }
       }
     }
-    if (g.reference?.source.leafId && !ctx.sessionManager.getEntry(g.reference.source.leafId)) {
-      return fresh(ctx, reference(ctx, pi));
-    }
     if (g.running) {
       g.running = false;
       g.error = "Side conversation was interrupted. Its finalized transcript was restored; no prompt was replayed.";
     }
     refreshMessages(g);
+    conversations.set(g.id, g);
     return g;
   }
 
   pi.on("session_start", (_event, ctx) => {
     shuttingDown = false;
+    storageError = undefined;
+    conversations.clear();
+    titles = new AbortController();
     current = restore(ctx);
     if (current.persisted || current.reference) state(current);
+    generateTitle(current);
     publish(current);
   });
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    titles.abort();
     // Start bounded child shutdown before an in-flight abort/transition can
     // wait indefinitely for an RPC response from that same child.
     const stopping = current?.child?.stop();
@@ -581,12 +661,13 @@ export default function sideExtension(pi: ExtensionAPI) {
         ctx.ui.notify("Side conversations are controlled through the pi-console frontend.", "warning");
         return;
       }
-      let request: { action: string; message?: string; draft?: string; requestId?: string; parentSessionFile?: string };
+      let request: { action: string; id?: string; fromId?: string; abort?: boolean;
+        message?: string; draft?: string; requestId?: string; parentSessionFile?: string };
       try {
         request = JSON.parse(args);
-        if (!request || !["open", "prompt", "reset", "abort", "draft"].includes(request.action)) throw new Error("Invalid action");
+        if (!request || !["open", "prompt", "reset", "abort", "draft", "select", "delete"].includes(request.action)) throw new Error("Invalid action");
       } catch {
-        ctx.ui.notify('Usage: /pi-side {"action":"open|prompt|reset|abort|draft","message":"...","draft":"..."}', "warning");
+        ctx.ui.notify('Usage: /pi-side {"action":"open|prompt|reset|abort|draft|select|delete","message":"...","draft":"..."}', "warning");
         return;
       }
       const reply = (success: boolean, error?: string) => {
@@ -596,28 +677,65 @@ export default function sideExtension(pi: ExtensionAPI) {
         }));
         return success ? { disposition: "accepted" as const } : undefined;
       };
-      const reject = (error: string) => { reply(false, error); };
+      const reject = (error: string) => { ctx.ui.notify(error, "warning"); reply(false, error); };
       if (shuttingDown) { reject("Pi is shutting down."); return; }
+      if (storageError) { reject(storageError); return; }
       if (request.parentSessionFile !== undefined && request.parentSessionFile !== ctx.sessionManager.getSessionFile()) {
         reject("The parent session changed; the side action was not applied.");
         return;
       }
-      let g = current ??= restore(ctx);
+      const g = current ??= restore(ctx);
       g.ctx = ctx;
-      if (g.reference?.source.leafId && !ctx.sessionManager.getEntry(g.reference.source.leafId)) {
-        if (transition) { reject("Side conversation is stopping or starting a new chat."); return; }
-        const next = fresh(ctx, reference(ctx, pi));
-        transition = retire(g).then(() => {
-          current = next;
-          state(next);
-          publish(next);
-        }).finally(() => { transition = undefined; });
-        try { await transition; }
-        catch (error) { failure(current ?? g, error); reject("Could not reset the invalidated side conversation."); return; }
-        g = next;
+      if (transition) { reject("Side conversation is stopping or switching chats."); return; }
+      if (request.action === "open") {
+        g.lastUsedAt = new Date().toISOString();
+        state(g);
+        generateTitle(g);
+        publish(g);
+        return reply(true);
       }
-      if (request.action === "open") { publish(g); return reply(true); }
-      if (transition) { reject("Side conversation is stopping or starting a new chat."); return; }
+      if (["prompt", "draft", "abort"].includes(request.action) && request.id !== g.id
+        || ["reset", "select"].includes(request.action) && request.fromId !== g.id) {
+        reject("The side chat changed; the action was not applied."); return;
+      }
+      if (request.action === "delete") {
+        const target = request.id && conversations.get(request.id);
+        if (!target) { reject("Side chat no longer exists."); return; }
+        if (target.running) { reject("Abort the side chat before deleting it."); return; }
+        transition = (async () => {
+          await retire(target);
+          conversations.delete(target.id);
+          if (current === target) {
+            current = latest()[0] ?? fresh(ctx);
+            conversations.set(current.id, current);
+          }
+          state(current!);
+          publish(current!);
+        })().finally(() => { transition = undefined; });
+        await transition;
+        return reply(true);
+      }
+      if (request.action === "reset" || request.action === "select") {
+        if (request.action === "select" && request.id === g.id) return reply(true);
+        if (g.running && request.abort !== true) { reject("Confirm aborting the running side chat before moving."); return; }
+        if (!existsSync(g.parentSessionFile)) { reject("Send a main prompt first so side chats have a saved parent session."); return; }
+        const next = request.action === "reset" ? fresh(ctx, reference(ctx, pi)) : request.id && conversations.get(request.id);
+        if (!next) { reject("Side chat no longer exists."); return; }
+        // Capture a new chat's main context before waiting for child shutdown.
+        transition = (async () => {
+          await retire(g);
+          if (shuttingDown) return;
+          current = next;
+          next.ctx = ctx;
+          next.lastUsedAt = new Date().toISOString();
+          conversations.set(next.id, next);
+          state(next);
+          generateTitle(next);
+          publish(next);
+        })().finally(() => { transition = undefined; });
+        await transition;
+        return reply(true);
+      }
       if (request.action === "draft") {
         if (typeof request.draft !== "string" || Buffer.byteLength(request.draft) > 1024 * 1024) {
           reject("Side draft must be a string no larger than 1 MiB."); return;
@@ -633,23 +751,14 @@ export default function sideExtension(pi: ExtensionAPI) {
         reject("Send a main prompt first so the side conversation has a saved parent session.");
         return;
       }
-      if (request.action === "reset") {
-        // Capture now, before waiting for the old child, even while main streams.
-        const next = fresh(ctx, reference(ctx, pi));
-        g.activity = "Starting new side conversation";
-        publish(g);
-        transition = retire(g).then(() => {
-          current = next;
-          state(next);
-          publish(next);
-        }).catch((error) => failure(current ?? g, error)).finally(() => { transition = undefined; });
-        return reply(true);
-      }
       if (request.action === "abort") {
         g.activity = "Stopping side conversation";
         publish(g);
         transition = abort(g).catch((error) => failure(g, error)).finally(() => { transition = undefined; });
         return reply(true);
+      }
+      if (g.reference?.source.leafId && !ctx.sessionManager.getEntry(g.reference.source.leafId)) {
+        reject("This side chat's main context was deleted. Start a new side chat; its history is still available here."); return;
       }
       if (g.running) { reject("Side conversation is busy; the prompt was not queued."); return; }
       if (g.pendingPrompt || g.child?.stopped) {
@@ -669,6 +778,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       g.pendingAfter = g.entries.at(-1)?.id ?? g.reference?.boundary;
       state(g);
       refreshMessages(g);
+      generateTitle(g);
       publish(g);
       reply(true);
       // Do not await the independent run in the parent's RPC command handler.
@@ -695,10 +805,11 @@ export default function sideExtension(pi: ExtensionAPI) {
       })();
       return { disposition: "accepted" as const };
   };
-  pi.registerCommand("pi-side", { description: "Control the independent ask-mode side conversation (JSON: open, prompt, reset, abort, draft).",
+  pi.registerCommand("pi-side", { description: "Control ask-mode side chats (JSON: open, prompt, reset, select, delete, abort, draft).",
     handler: async (args, ctx) => { await sideAction(args, ctx); } });
-  for (const operation of ["side.open", "side.prompt", "side.draft", "side.reset", "side.abort"] as const) {
+  for (const operation of ["side.open", "side.prompt", "side.draft", "side.reset", "side.abort", "side.select", "side.delete"] as const) {
     registerServiceOperation(pi, operation, (payload, ctx) => sideAction(JSON.stringify({
+      ...payload,
       action: operation.slice(5),
       message: operation === "side.prompt" && "text" in payload ? payload.text : undefined,
       draft: operation === "side.draft" && "text" in payload ? payload.text : undefined,

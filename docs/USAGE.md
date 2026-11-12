@@ -74,15 +74,11 @@ manually, use `<leader>pC` or `:PiCompact` while the session is idle and choose
 the default summary or custom instructions. Custom instructions open in a
 floating editor: Ctrl+Enter compacts; `:q` cancels.
 
-### Steering and side conversations
+### Side conversations
 
-Use `<leader>pS` or `:PiSteer` while Pi is working to open a steering editor.
-Ctrl+Enter sends the instruction after the current assistant turn's tool calls;
-`:q` or `:q!` closes without submitting. A visual selection followed by
-`:PiSteer` prefills the editor.
-If Pi finishes first, the unsent instruction remains in the steer draft.
-
-Use `<leader>pb` or `:PiSide` to toggle an independent side conversation.
+Use `<leader>ps` or `:PiSide` to open the most recently used side chat for this
+main session, creating one if needed. Use the same key to hide it.
+Use `<leader>pS` to inspect subagents.
 It has a transcript float above an editable input float. Normal Vim editing,
 including Escape and macro recording, remains available. In normal mode,
 Ctrl+K focuses the transcript and Ctrl+J focuses the input. Ctrl+Enter sends.
@@ -95,20 +91,27 @@ agent keeps working; neither side prompts nor answers enter its model context.
 
 The first side prompt references the finalized main-history point. Follow-ups
 retain that context even as the main conversation advances. In either side buffer,
-normal-mode `<leader>n` (or `:PiSideNew`) replaces the current side conversation:
-it cancels side work, discards its history and draft, and references the current
-main-history point. `:PiSideAbort` stops only the side run. Select
-side transcript lines and use `:PiSteer` to explicitly send them to the main run.
+normal-mode `<leader>n` (or `:PiSideNew`) creates another side chat with fresh
+main context, preserving the previous chat's history and draft. Inside either
+side window, `<leader>s` (or `:PiSides`) opens the side-chat picker, with recent
+message previews. Enter switches chats; Ctrl-x deletes the selected chat after
+confirmation. Outside side windows, `<leader>s` still picks main sessions.
 
-Only the current side conversation is saved, in `<parent-session-file>.side.json`,
-and restored on restart. Its main-context reference does not duplicate the main
-transcript; inherited context is materialized only for the side agent's temporary
-session. Older embedded journals are read for migration without rewriting the
-parent history file. Send a main prompt first to create the saved parent session.
-Navigating within the parent's history does not rewind the side conversation.
-Deleting its referenced history point resets it against the current main context.
-Deleting or trashing a saved parent also removes its current side-state file.
-A different parent session has its own side conversation. Stop side work before restarting.
+Only one side chat runs at a time. Switching or starting a new chat while it is
+running asks whether to abort it and move; cancelling leaves it running.
+`:PiSideAbort` stops only the side run. Abort a running chat before deleting it.
+Side chats receive automatic titles using the normal title-model settings.
+
+All side chats are saved in `<parent-session-file>.side.json` and restored on
+restart, including the most recently selected chat. Existing single-chat state
+and older embedded journals are migrated without rewriting the parent history.
+Main-context references do not duplicate the main transcript; inherited context
+is materialized only for the side agent's temporary session. Send a main prompt
+first to create the saved parent session. Navigating within the parent's history
+does not rewind side chats. If a chat's referenced history point is deleted,
+its saved transcript remains readable, but sending requires a new side chat.
+Deleting or trashing a saved parent also removes its side-state file.
+A different main session has its own side chats. Stop side work before restarting.
 
 ### Restarting
 

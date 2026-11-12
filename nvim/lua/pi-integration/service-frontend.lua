@@ -44,7 +44,8 @@ local render, refresh, connect, attach, acquire_control, recover_selection, tree
 local side_buf, side_input_buf, side_context, side_id
 local queue_editor
 local side_draft_saved, side_draft_pending, side_after_draft, restored_side_draft, side_prompt_pending
-local save_side_draft, side_save_scheduled, side_reset_draft
+local save_side_draft, side_save_scheduled
+local side_actions = { drafts = {} }
 local resume_check
 local stats_timer, stats_pending, workspace_stats_key
 local owner_states, pending_settings = {}, {}
@@ -308,7 +309,7 @@ local function acknowledge_viewed_response()
 end
 local action_names = {
 	["prompt.submit"] = "Send message", ["shell.run"] = "Run shell command",
-	["steering.submit"] = "Send steering message", ["followUp.submit"] = "Send follow-up",
+	["followUp.submit"] = "Send follow-up",
 	["side.prompt"] = "Send side message", ["model.set"] = "Change model",
 	["thinking.set"] = "Change thinking level", ["turn.abort"] = "Stop generation",
 	["resource.read"] = "Read resource", ["session.read"] = "Read session data",
@@ -774,19 +775,18 @@ render = function(metadata_only)
 		local side = status_data("pi-side")
 		if side and side.id and side.id ~= side_id then
 			if side_id and valid(side_input_buf) then
-				local reset = side_reset_draft
-				if reset and reset.id == side_id and reset.buf == side_input_buf and current(reset.captured)
-					and vim.api.nvim_buf_get_changedtick(side_input_buf) == reset.tick then
-					layout.set_buffer_lines(ctx, side_input_buf, { "" }, true)
-					vim.bo[side_input_buf].modified = false
-				end
-				side_draft_saved = side.draft or ""
-				side_reset_draft = nil
+				side_actions.drafts[side_id] = text(side_input_buf)
+				local draft = side_actions.drafts[side.id] or side.draft or ""
+				layout.set_buffer_lines(ctx, side_input_buf, vim.split(draft, "\n", { plain = true }), true)
+				vim.bo[side_input_buf].modified = false
 			end
+			side_draft_saved = side.draft or ""
+			side_after_draft = nil
 			side_id = side.id
 		end
 		local visible = feedback_ui.side_timeline_messages(feedback, session_id, side)
 		side_view.render(side_buf, visible, side and side.tools, side and side.id)
+		side_view.set_title(side and side.title)
 	end
 	-- Every snapshot is a pure render; never replay event/effect handlers.
 	if body_changed or metadata_changed then transcript.render(ctx) end
@@ -1426,6 +1426,7 @@ function M.select_owner(target, id, resume, cwd)
 		side_view.hide()
 		side_buf, side_input_buf, side_context, side_id = nil, nil, nil, nil
 		side_draft_saved, side_draft_pending, side_after_draft, restored_side_draft = nil, nil, nil, nil
+		side_actions.drafts, side_actions.pending = {}, nil
 		state.pending_transcript_scroll = nil
 		-- The old selection's input must remain recoverable after new autosaves.
 		recovery_id = nil
@@ -2277,22 +2278,23 @@ function M.pick_thinking()
 	end)
 end
 local function submit_draft(operation, buf, captured, submitted, submitted_tick)
+	local conversation_id = operation == "side.prompt" and side_id or nil
 	submitted = submitted or text(buf)
 	submitted_tick = submitted_tick or vim.api.nvim_buf_get_changedtick(buf)
 	if vim.trim(submitted) == "" then return end
 	local function completed(receipt)
 		if operation ~= "side.prompt" or receipt.status == "accepted" then return end
 		side_prompt_pending = nil
-		if receipt.status == "completed" and current(captured) and buf == side_input_buf then
+		if receipt.status == "completed" and current(captured) and buf == side_input_buf and side_id == conversation_id then
 			side_draft_saved = ""
 			if vim.api.nvim_buf_get_changedtick(buf) == submitted_tick then
 				layout.set_buffer_lines(ctx, buf, { "" }, true)
 				vim.bo[buf].modified = false
 			end
 		end
-		if (receipt.status == "completed" or receipt.status == "failed") and current(captured) and buf == side_input_buf then save_side_draft() end
+		if (receipt.status == "completed" or receipt.status == "failed") and current(captured) and buf == side_input_buf and side_id == conversation_id then save_side_draft() end
 	end
-	local id = command(operation, { text = submitted }, function(ok, receipt)
+	local id = command(operation, { text = submitted, id = conversation_id }, function(ok, receipt)
 		if ok then completed(receipt)
 		elseif operation == "side.prompt" and receipt.delivery == "not_sent" then side_prompt_pending = nil end
 	end, captured, completed, { input_buf = buf })
@@ -2304,10 +2306,6 @@ local function native_draft(operation, initial)
 		submit_draft(operation, buf, captured)
 	end)
 	owner_resources().bind(buf)
-end
-function M.steer(initial)
-	if not snapshot or not snapshot.conversation.execution.running then notify("Steering requires an active turn."); return end
-	native_draft("steering.submit", initial)
 end
 function M.follow_up() native_draft("followUp.submit") end
 function M.compact()
@@ -2337,7 +2335,8 @@ save_side_draft = function(after, skip_save)
 	if not valid(side_input_buf) or not side_context or not current(side_context) then return end
 	if after then side_after_draft = { run = after, skip_save = skip_save } end
 	if side_draft_pending or side_prompt_pending then return end
-	local value, captured, input = text(side_input_buf), side_context, side_input_buf
+	local value, captured, input, id = text(side_input_buf), side_context, side_input_buf, side_id
+	if not id then return end
 	if value == side_draft_saved or side_after_draft and side_after_draft.skip_save then
 		local action = side_after_draft; side_after_draft = nil
 		if action then action.run() end
@@ -2348,14 +2347,14 @@ save_side_draft = function(after, skip_save)
 	local function finished(receipt)
 		if side_draft_pending ~= pending or receipt.status == "accepted" then return end
 		side_draft_pending = nil
-		if receipt.status == "completed" and current(captured) and input == side_input_buf then
+		if receipt.status == "completed" and current(captured) and input == side_input_buf and id == side_id then
 			side_draft_saved = value
 			if text(input) ~= value or side_after_draft then save_side_draft() end
 		else
 			side_after_draft = nil
 		end
 	end
-	pending.id = command("side.draft", { text = value }, function(ok, receipt)
+	pending.id = command("side.draft", { id = id, text = value }, function(ok, receipt)
 		if ok then finished(receipt)
 		elseif receipt.delivery == "not_sent" then side_draft_pending, side_after_draft = nil, nil end
 	end, captured, finished)
@@ -2367,6 +2366,7 @@ ctx.session.open_side = function()
 		or side_context.token ~= (grant and grant.token) then
 		side_view.hide()
 		side_context, side_id = stamp(), nil
+		side_actions.drafts, side_actions.pending = {}, nil
 		side_draft_pending, side_after_draft, side_prompt_pending = nil, nil, nil
 		local side = status_data("pi-side")
 		side_draft_saved = side and side.draft or ""
@@ -2384,7 +2384,7 @@ ctx.session.open_side = function()
 			end
 			local side = status_data("pi-side")
 			if side and side.running then notify("The side conversation is working. Wait or use :PiSideAbort."); return end
-			if side_prompt_pending or side_after_draft then notify("Wait for the pending side message to finish submitting."); return end
+			if side_prompt_pending or side_after_draft or side_actions.pending then notify("Wait for the pending side action to finish."); return end
 			local submitted, tick = text(input), vim.api.nvim_buf_get_changedtick(input)
 			if vim.trim(submitted) == "" then return end
 			-- Sending already backs up the local draft. Wait only for an existing
@@ -2404,37 +2404,89 @@ ctx.session.open_side = function()
 			resource.bind(buf)
 			require("pi-integration.markdown-render").prepare_buffer(buf, { latex = buf == side_buf })
 			vim.keymap.set("n", "<leader>n", M.new_side, { buffer = buf, desc = "New side conversation" })
+			vim.keymap.set("n", "<leader>s", M.pick_side, { buffer = buf, desc = "Pick side chat" })
 		end
 	end
 	side_view.open(side_buf, side_input_buf, owner_resources())
+	side_view.set_title((status_data("pi-side") or {}).title)
 	render()
 end
-function M.side_prompt() ctx.session.open_side() end
+function M.side_prompt()
+	command("side.open", {})
+	ctx.session.open_side()
+end
 function M.toggle_side()
 	if side_view.visible() then side_view.hide() else M.side_prompt() end
 end
-function M.new_side()
-	local captured, focus = stamp(), nil
-	local function release_focus()
-		if focus then focus:release(); focus = nil end
-	end
-	vim.ui.select({ "New side conversation", "Cancel" }, {
-		prompt = "Stop and replace the side conversation?",
+function side_actions.confirm(prompt, choice, done)
+	local focus
+	local function release() if focus then focus:release(); focus = nil end end
+	vim.ui.select({ choice, "Cancel" }, {
+		prompt = prompt, pi_select_layout = "compact",
 		on_create = function(event)
 			if side_view.visible() then focus = require("pi-integration.floats").focus_group({ event.winid }) end
 		end,
-		on_close = release_focus,
-	}, function(choice)
-		release_focus()
-		if choice == "New side conversation" then
-			if valid(side_input_buf) and side_context and current(side_context) then
-				side_reset_draft = { id = side_id, buf = side_input_buf, tick = vim.api.nvim_buf_get_changedtick(side_input_buf), captured = captured }
-				save_side_draft(function() command("side.reset", {}, nil, captured) end)
-			else command("side.reset", {}, nil, captured) end
-		end
-	end)
+		on_close = release,
+	}, function(selected) release(); if selected == choice then done() end end)
 end
-function M.abort_side() command("side.abort", {}) end
+function side_actions.move(id)
+	if side_actions.pending or side_prompt_pending or side_after_draft then notify("Wait for the pending side action to finish."); return end
+	local side, captured = status_data("pi-side"), stamp()
+	if not side or not side.id then notify("Side chat is not available yet."); return end
+	if id == side.id then return end
+	local from_id = side.id
+	local function move(abort)
+		if not current(captured) or (status_data("pi-side") or {}).id ~= from_id then return end
+		local function send()
+			if not current(captured) or (status_data("pi-side") or {}).id ~= from_id then return end
+			side_actions.pending = true
+			local input = side_input_buf
+			if valid(input) then vim.bo[input].modifiable = false end
+			local function unlock()
+				side_actions.pending = nil
+				if valid(input) then vim.bo[input].modifiable = true end
+			end
+			local function finished(receipt)
+				if receipt.status == "accepted" then return end
+				unlock()
+				if receipt.status == "completed" and current(captured) then ctx.session.open_side() end
+			end
+			local sent = command(id and "side.select" or "side.reset", { id = id, fromId = from_id, abort = abort }, function(ok, receipt)
+				if ok then finished(receipt) else unlock() end
+			end, captured, finished)
+			if not sent then unlock() end
+		end
+		if valid(side_input_buf) and side_context and current(side_context) then save_side_draft(send) else send() end
+	end
+	if side.running then
+		side_actions.confirm("Abort this side chat and " .. (id and "switch chats?" or "start a new chat?"), "Abort and move", function() move(true) end)
+	else move(false) end
+end
+function M.new_side() side_actions.move() end
+function M.pick_side()
+	local side, captured = status_data("pi-side"), stamp()
+	if not side then notify("Side chats are not available yet."); return end
+	require("pi-integration.side-picker").open(side, {
+		current = function() return current(captured) end,
+		select = side_actions.move,
+		delete = function(chat)
+			if chat.running then notify("Abort the side chat before deleting it."); return end
+			side_actions.confirm("Delete side chat '" .. chat.title .. "' and its saved history?", "Delete side chat", function()
+				if not current(captured) then return end
+				command("side.delete", { id = chat.id }, nil, captured, function(receipt)
+					if receipt.status == "completed" and current(captured) then
+						side_actions.drafts[chat.id] = nil
+						M.pick_side()
+					end
+				end)
+			end)
+		end,
+	})
+end
+function M.abort_side()
+	local side = status_data("pi-side")
+	if side then command("side.abort", { id = side.id }) end
+end
 function M.pick_jobs()
 	if not snapshot or not attachment then notify("Attach to a session first."); return end
 	local captured = stamp()
@@ -3065,7 +3117,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 -- Transport recovery is passive; refresh/completion paths never replay work.
 for _, name in ipairs({ "submit_prompt", "take_control", "change_cwd", "restart", "kill_session", "abort",
 	"rename_session", "pick_queue", "show_pending_request", "show_offers", "show_host_request", "refresh_options",
-	"pick_model", "pick_thinking", "steer", "follow_up", "compact", "side_prompt", "toggle_side", "new_side", "abort_side",
+	"pick_model", "pick_thinking", "follow_up", "compact", "side_prompt", "toggle_side", "new_side", "pick_side", "abort_side",
 	"pick_spawn", "pick_jobs", "retitle", "pick_workspace", "show_workspace_diff", "pick_workspace_reviews", "show_usage",
 	"show_tree", "pick_command", "refresh_messages", "show_owner_transcript", "set_access_mode", "pick_access_mode",
 	"cycle_access_mode", "set_integration_mode", "pick_integration_mode", "cycle_integration_mode", "toggle_notifications" }) do
