@@ -64,7 +64,9 @@ end
 local function publish_attachment(heartbeat_only)
 	if frontend_leaving then return end
 	local tmux = require("pi-integration.backends.tmux")
-	if M.config.role ~= "conversation" or not tmux.available() then return end
+	if not tmux.available() then return end
+	tmux.publish_restore(M.config, session_id, selected_cwd)
+	if M.config.role ~= "conversation" then return end
 	local pi_state = snapshot and snapshot.piState or {}
 	local name = pi_state.sessionName ~= "" and pi_state.sessionName or "New Session"
 	local label = status_data("pi-session-label")
@@ -2855,6 +2857,7 @@ function M.open(restore)
 	selected_cwd = not M.config.service_remote and vim.fn.getcwd() or nil
 	if restore then assert(restore.role == M.config.role, "Restart cannot change frontend role") end
 	if M.config.role ~= "conversation" then
+		publish_attachment()
 		local hosts = require("pi-integration.service-hosts")
 		for name, fn in pairs({ PiHosts = M.pick_hosts, PiSessions = M.pick_session, PiNew = function() hosts.new_conversation() end,
 			PiManagement = hosts.management_operations, PiSavedOperations = hosts.saved_operations, PiConsoleRestart = M.restart_console }) do

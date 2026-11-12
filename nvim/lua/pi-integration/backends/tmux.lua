@@ -3,6 +3,8 @@ local build_info = require("pi-integration.build-info")
 local M = {}
 local option = "@pi_console"
 local tab_option = "@pi_console_tab"
+local restore_option = "@pi_console_restore"
+local restore_snapshot
 local owner_pane
 local owner_window
 local pending_launches = {}
@@ -378,7 +380,29 @@ function M.publish(snapshot, heartbeat_only)
 	return true
 end
 
+-- Restore state is separate from tab/liveness metadata: overview and sidebar
+-- panes need it too, and only selection changes require a new publication.
+function M.publish_restore(config, session_id, cwd)
+	local snapshot = { version = 1, pid = vim.uv.os_getpid(), launcher = config.launcher,
+		role = config.role, session_id = session_id, cwd = cwd,
+		service_root = config.service_root, service_remote = config.service_remote,
+		expected_host = config.expected_host }
+	if vim.deep_equal(snapshot, restore_snapshot) then return true end
+	local result, err = command({ "set-option", "-p", "-t", vim.env.TMUX_PANE, restore_option, json.encode(snapshot) })
+	if not result then return nil, err end
+	restore_snapshot = snapshot
+	return true
+end
+
 function M.clear()
+	if restore_snapshot then
+		local payload = command({ "show-options", "-pqv", "-t", vim.env.TMUX_PANE, restore_option })
+		local entry = payload and json.decode_object(payload)
+		if entry and entry.pid == vim.uv.os_getpid() then
+			command({ "set-option", "-pu", "-t", vim.env.TMUX_PANE, restore_option })
+		end
+		restore_snapshot = nil
+	end
 	-- Finish the in-flight update before cleanup. Its scheduled callback is
 	-- invalidated first, so it cannot restore metadata after shutdown.
 	local update = publication

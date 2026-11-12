@@ -55,6 +55,7 @@ for i in "${!keys[@]}"; do
 done
 node "$app_root/tmux/scripts/client-enter.mjs" --install "$(tmux display-message -p '#{socket_path}')"
 bash "$app_root/tmux/scripts/popup-client.sh" --install-hooks "$(tmux display-message -p '#{socket_path}')"
+node "$app_root/tmux/scripts/resurrect.mjs" --install "$(tmux display-message -p '#{socket_path}')" "$app_root"
 for i in "${!keys[@]}"; do
     actual=$(tmux list-keys -T prefix "${keys[$i]}")
     if [ "$actual" != "${expected_bindings[$i]}" ]; then
