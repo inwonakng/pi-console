@@ -17,7 +17,7 @@ M.specs = {
 		{ lhs = "<leader>/", action = "pick_command", desc = "Pick Pi command" },
 		{ lhs = "<leader>pi", action = "show_input", desc = "Show Pi input" },
 		{ lhs = "<leader>pc", action = "take_control", desc = "Take control" },
-		{ lhs = "<leader>pC", action = "pick_jobs", desc = "Commands overview (Bash jobs)" },
+		{ lhs = "<leader>pC", action = "compact", desc = "Compact session context" },
 		{ lhs = "<leader>pD", action = "change_cwd", desc = "Choose directory on current host" },
 		{ lhs = "<leader>pd", action = "show_workspace_diff", desc = "Diff" },
 		{ lhs = "<leader>pr", action = "restart_console", desc = "Restart frontend" },

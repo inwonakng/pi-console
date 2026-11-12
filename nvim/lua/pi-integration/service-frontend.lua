@@ -2310,6 +2310,29 @@ function M.steer(initial)
 	native_draft("steering.submit", initial)
 end
 function M.follow_up() native_draft("followUp.submit") end
+function M.compact()
+	if not snapshot or not attachment then notify("Attach to a live session first."); return end
+	if not control_current() then notify("Viewer: use :PiControl first.", vim.log.levels.WARN); return end
+	local captured = stamp()
+	local default, custom = "Compact using default", "Compact with instructions"
+	vim.ui.select({ default, custom, "Cancel" }, { prompt = "Compact session context?", pi_select_layout = "compact" }, function(choice)
+		if choice == default then
+			command("compaction.run", { instructions = "" }, nil, captured)
+		elseif choice == custom then
+			require("pi-integration.utils.markdown-editor").open({
+				name = scratch_name("compaction-instructions"),
+				title = " Compaction instructions ",
+				footer = " Ctrl+Enter compacts · :q cancels ",
+				prepare_text = function(value)
+					if vim.trim(value) ~= "" then return value end
+					notify("Enter instructions, or close the editor to cancel.", vim.log.levels.WARN)
+				end,
+			}, function(value)
+				if value then command("compaction.run", { instructions = value }, nil, captured) end
+			end)
+		end
+	end)
+end
 save_side_draft = function(after, skip_save)
 	if not valid(side_input_buf) or not side_context or not current(side_context) then return end
 	if after then side_after_draft = { run = after, skip_save = skip_save } end
@@ -2945,7 +2968,7 @@ function M.open(restore)
 	end
 	for name, fn in pairs({ PiControl = M.take_control, PiPending = M.show_pending_request, PiQueue = M.pick_queue, PiJobs = M.pick_jobs,
 		PiOffers = M.show_offers, PiDrafts = M.show_drafts, PiDetach = M.detach, PiReconnect = M.reconnect,
-		PiFollowUp = M.follow_up, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
+		PiFollowUp = M.follow_up, PiCompact = M.compact, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
 		PiSavedOperations = require("pi-integration.service-hosts").saved_operations,
 		PiHosts = M.pick_hosts, PiManagement = require("pi-integration.service-hosts").management_operations, PiSessions = M.pick_session, PiNew = M.new_session, PiTranscript = M.show_owner_transcript,
 		PiWorkspaceReview = M.show_workspace_diff, PiWorkspaceReviews = M.pick_workspace_reviews,
@@ -3042,7 +3065,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 -- Transport recovery is passive; refresh/completion paths never replay work.
 for _, name in ipairs({ "submit_prompt", "take_control", "change_cwd", "restart", "kill_session", "abort",
 	"rename_session", "pick_queue", "show_pending_request", "show_offers", "show_host_request", "refresh_options",
-	"pick_model", "pick_thinking", "steer", "follow_up", "side_prompt", "toggle_side", "new_side", "abort_side",
+	"pick_model", "pick_thinking", "steer", "follow_up", "compact", "side_prompt", "toggle_side", "new_side", "abort_side",
 	"pick_spawn", "pick_jobs", "retitle", "pick_workspace", "show_workspace_diff", "pick_workspace_reviews", "show_usage",
 	"show_tree", "pick_command", "refresh_messages", "show_owner_transcript", "set_access_mode", "pick_access_mode",
 	"cycle_access_mode", "set_integration_mode", "pick_integration_mode", "cycle_integration_mode", "toggle_notifications" }) do

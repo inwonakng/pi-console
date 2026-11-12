@@ -327,7 +327,7 @@ startup arguments. Existing running services retain their old runtime until rest
 ### Attachment UI
 
 C adds typed model/thinking/mode pickers and cycles, owner `!` / `!!` shell,
-native steering / `:PiFollowUp`, retry/compaction settings through the command picker,
+native steering / `:PiFollowUp`, manual compaction (`:PiCompact` / `<leader>pC`),
 history navigation/fork/clone/delete, `:PiWorkspace` enter/integrate/discard,
 side/spawn controls, retitle/notifications/usage and confirmed owner-session restart.
 `:PiKill` / `<leader>pk` stops the session worker and closes this frontend after
