@@ -118,11 +118,21 @@ function M.assign_group(entry, report)
 	current, err = organization.sections(entries)
 	if not current then return report(nil, err) end
 	local choices = { { id = "", name = "Ungrouped" } }
+	local current_group
 	for _, section in ipairs(current) do
 		if section.id ~= "" then table.insert(choices, section) end
+		for _, member in ipairs(section.entries) do
+			if member.organization_key == entry.organization_key then current_group = section.id; break end
+		end
 	end
 	table.insert(choices, { name = "+ New group…", create = true })
-	vim.ui.select(choices, { prompt = "Assign session to group", format_item = function(choice) return choice.name end, pi_select_layout = "compact" }, function(choice)
+	vim.ui.select(choices, {
+		prompt = "Assign session to group",
+		format_item = function(choice)
+			return choice.name .. (choice.id == current_group and " (current)" or "")
+		end,
+		pi_select_layout = "compact",
+	}, function(choice)
 		if not choice then return end
 		if choice.create then create() else report(organization.assign(entry, choice.id)) end
 	end)
