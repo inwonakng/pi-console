@@ -4,7 +4,6 @@ import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, r
 import { withFileMutationQueue, type ExtensionAPI, type ExtensionCommandContext, type SessionManager } from "@earendil-works/pi-coding-agent";
 import { revertSubtree } from "./history";
 import { cloneThroughEntry } from "./shared/session-clone";
-import { selectNavigation } from "./shared/navigation";
 import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
 import { projectTrustReady } from "./shared/project-trust";
 import {
@@ -188,7 +187,10 @@ export default function treeExtension(pi: ExtensionAPI) {
 			const undoOption = "History + undo work";
 			const options = ["History only"];
 			if (ctx.sessionManager.getBranch().some((entry) => entry.id === entryId)) options.push(undoOption);
-			const mode = await selectNavigation(ctx, "Delete subtree (selected turn and all descendants)", options);
+			// History deletion is user-started and does not block the conversation.
+			const mode = await serviceUi(ctx).select(JSON.stringify({
+				kind: "pi_compact_select", prompt: "Delete subtree (selected turn and all descendants)", notify: false, inline: false,
+			}), options);
 			if (!mode) return;
 			assertBashTransitionAllowed();
 			if (!runtimeActive || ctx.sessionManager.getSessionFile() !== sessionFile
@@ -231,6 +233,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 						kind: "pi_confirmation",
 						prompt: removedWorkspaces.length > 0 ? "Delete session history and workspaces?" : "Delete session history?",
 						notify: false,
+						inline: false,
 					}),
 					deletionConfirmation(entryId, removedIds.size, removedWorkspaces),
 				);

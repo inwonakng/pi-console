@@ -180,6 +180,21 @@ function M.select(ctx, id, items, opts, on_choice)
 	refresh(picker)
 end
 
+-- Confirmations for user-started commands do not block the conversation, so
+-- they use a regular float instead of taking over the input pane.
+function M.float_select(ctx, id, items, opts, on_choice)
+	local request = ctx.state.pending_ui_requests[id]
+	opts.pi_request_id = id
+	vim.ui.select(items, opts, function(choice)
+		local state = ctx.state
+		if state.pending_ui_requests[id] == request then state.pending_ui_requests[id] = nil end
+		if state.active_ui_request_id == id then state.active_ui_request_id = nil end
+		if choice ~= nil then on_choice(choice)
+		elseif request and request.on_cancel then request.on_cancel() end
+		ctx.transcript.refresh_ui()
+	end)
+end
+
 function M.input(ctx, event, on_input)
 	if not M.can_open(event.id) then on_input(nil); return end
 	local picker = open_pane(ctx, event.id, on_input)

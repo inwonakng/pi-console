@@ -95,6 +95,7 @@ function M.open_dialog(ctx, event, respond)
 		title = json.decode_object(event.title)
 	end
 	if title and title.kind == "pi_input" and type(title.prompt) == "string" then event.title = title.prompt end
+	local open_select = title and title.inline == false and pending_picker.float_select or pending_picker.select
 	if event.method == "select" then
 		if select_capability_approval(ctx, event, respond) then
 			return
@@ -122,7 +123,7 @@ function M.open_dialog(ctx, event, respond)
 				select_opts.preview_highlight = require("pi-integration.workspace-summary").highlight
 			end
 		end
-		pending_picker.select(ctx, event.id, event.options or {}, select_opts, function(choice)
+		open_select(ctx, event.id, event.options or {}, select_opts, function(choice)
 			respond(choice and { value = choice } or { cancelled = true })
 		end)
 	elseif event.method == "confirm" then
@@ -136,7 +137,7 @@ function M.open_dialog(ctx, event, respond)
 		if type(event.message) == "string" and event.message ~= "" then
 			preview_text = preview_text .. "\n\n" .. event.message
 		end
-		pending_picker.select(ctx, event.id, { "Yes", "No" }, {
+		open_select(ctx, event.id, { "Yes", "No" }, {
 			prompt = prompt,
 			prompt_label = "Confirmation",
 			pi_select_layout = "compact",
