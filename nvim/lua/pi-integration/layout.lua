@@ -46,6 +46,7 @@ end
 
 function M.update_input_sidebar(ctx)
 	local state = ctx.state
+	if require("pi-integration.pending-picker").owns_window(state.input_win) then return end
 	state.input_win = buffer.find_window(state.input_buf, state.input_win)
 	if not state.input_win then
 		return
@@ -96,6 +97,11 @@ end
 
 function M.show_transcript(ctx)
 	local state = ctx.state
+	if require("pi-integration.pending-picker").owns_window(vim.api.nvim_get_current_win())
+		and state.transcript_win and vim.api.nvim_win_is_valid(state.transcript_win) then
+		vim.api.nvim_set_current_win(state.transcript_win)
+		return false
+	end
 	local recreated = M.ensure_transcript_buffer(ctx)
 	local win = vim.api.nvim_get_current_win()
 
@@ -111,6 +117,7 @@ function M.show_transcript(ctx)
 end
 
 function M.show_input(ctx)
+	if require("pi-integration.pending-picker").focus(ctx) then return false end
 	local state = ctx.state
 	local recreated = M.ensure_input_buffer(ctx)
 	local win = vim.api.nvim_get_current_win()
@@ -128,7 +135,8 @@ end
 function M.open(ctx)
 	local state = ctx.state
 	if buffer.window_matches(state.transcript_win, state.transcript_buf)
-		and buffer.window_matches(state.input_win, state.input_buf)
+		and (buffer.window_matches(state.input_win, state.input_buf)
+			or require("pi-integration.pending-picker").owns_window(state.input_win))
 		and vim.api.nvim_win_get_tabpage(state.transcript_win) == vim.api.nvim_get_current_tabpage()
 		and vim.api.nvim_win_get_tabpage(state.input_win) == vim.api.nvim_get_current_tabpage() then
 		return false

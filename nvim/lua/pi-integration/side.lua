@@ -13,7 +13,7 @@ local function render_context()
 		transcript = { metadata_lines = function() return {} end } }
 end
 local transcript_win, input_win, return_win, focus
-local input_cursor, transcript_view, hiding, displayed_buf
+local input_cursor, transcript_view, hiding, displayed_buf, picker_height
 local help_state = {}
 local window_group = vim.api.nvim_create_augroup("PiSideWindows", { clear = true })
 
@@ -27,13 +27,46 @@ local function geometry()
 	local bottom = vim.o.cmdheight + (vim.o.laststatus > 0 and 1 or 0) + 1
 	local usable = math.max(6, vim.o.lines - top - bottom)
 	local total = math.max(6, math.floor(usable * 0.85))
-	local input_height = math.max(1, math.min(4, math.floor(total * 0.25)))
+	local input_height = picker_height and math.min(picker_height, math.max(1, total - 7))
+		or math.max(1, math.min(4, math.floor(total * 0.25)))
 	return width, math.max(1, total - input_height - 4), input_height,
 		top + math.floor((usable - total) / 2), math.max(0, math.floor((vim.o.columns - width) / 2))
 end
 
-function M.hide()
+function M.input_window() return valid(input_win) and input_win or nil end
+function M.transcript_window() return valid(transcript_win) and transcript_win or nil end
+
+function M.bind_input()
+	if focus and valid(input_win) then focus:add(input_win) end
+end
+
+function M.setup_navigation(buf, modes)
+	for _, direction in ipairs({ "h", "j", "k", "l" }) do
+		local function navigate()
+			vim.cmd("stopinsert")
+			local current = vim.api.nvim_get_current_win()
+			local target = direction == "j" and current == transcript_win and input_win
+				or direction == "k" and current == input_win and transcript_win
+			if valid(target) then vim.api.nvim_set_current_win(target)
+			else M.hide() end
+		end
+		for _, lhs in ipairs({ "<C-" .. direction .. ">", "<C-w>" .. direction, "<C-w><C-" .. direction .. ">" }) do
+			vim.keymap.set(modes or "n", lhs, navigate, { buffer = buf, silent = true, desc = "Navigate side conversation" })
+		end
+	end
+end
+
+function M.resize_input(height)
+	picker_height = height
+	if not valid(transcript_win) or not valid(input_win) then return end
+	local width, th, ih, row, col = geometry()
+	vim.api.nvim_win_set_config(transcript_win, { relative = "editor", width = width, height = th, row = row, col = col })
+	vim.api.nvim_win_set_config(input_win, { relative = "editor", width = width, height = ih, row = row + th + 2, col = col })
+end
+
+function M.hide(force)
 	if hiding then return end
+	if not force and require("pi-integration.pending-picker").owns_window(input_win) then return end
 	hiding = true
 	if focus then focus:release(); focus = nil end
 	if valid(input_win) then input_cursor = vim.api.nvim_win_get_cursor(input_win) end
@@ -42,7 +75,7 @@ function M.hide()
 		floats.close_descendants(win)
 		floats.close_window(win)
 	end
-	input_win, transcript_win = nil, nil
+	input_win, transcript_win, picker_height = nil, nil, nil
 	if valid(return_win) then vim.api.nvim_set_current_win(return_win) end
 	hiding = false
 end
@@ -78,7 +111,7 @@ function M.open(transcript_buf, input_buf, resources)
 		vim.wo[win].wrap, vim.wo[win].linebreak, vim.wo[win].conceallevel = true, true, 2
 		vim.api.nvim_create_autocmd("WinClosed", {
 			group = window_group, pattern = tostring(win), once = true,
-			callback = function() if not hiding then M.hide() end end,
+			callback = function() if not hiding then M.hide(true) end end,
 		})
 	end
 	for _, buf in ipairs({ transcript_buf, input_buf }) do
@@ -95,7 +128,7 @@ function M.open(transcript_buf, input_buf, resources)
 					"- `q` / `<leader>pb` / `:q` hides both windows, preserving the draft and conversation.",
 					"- `<leader>n` / `:PiSideNew` starts a new side conversation (normal mode).",
 					"- `:PiSideAbort` stops only side work.",
-					"- `<leader>pa` restores a pending action (normal mode).",
+					"- Pending questions/approvals use the side input pane and stay visible until answered or cancelled (Ctrl-q).",
 					"- `q` / `<Esc>` closes this help; `<Esc>` keeps native behavior in the side windows.",
 				},
 			})
@@ -103,18 +136,7 @@ function M.open(transcript_buf, input_buf, resources)
 		end, { buffer = buf, desc = "Side conversation help" })
 		vim.keymap.set("n", "<leader>pb", M.hide, { buffer = buf, desc = "Hide side conversation" })
 		vim.keymap.set("n", "q", M.hide, { buffer = buf, silent = true, desc = "Hide side conversation" })
-		for _, direction in ipairs({ "h", "j", "k", "l" }) do
-			local function navigate()
-				local current = vim.api.nvim_get_current_win()
-				local target = direction == "j" and current == transcript_win and input_win
-					or direction == "k" and current == input_win and transcript_win
-				if valid(target) then vim.api.nvim_set_current_win(target)
-				else M.hide() end
-			end
-			for _, lhs in ipairs({ "<C-" .. direction .. ">", "<C-w>" .. direction, "<C-w><C-" .. direction .. ">" }) do
-				vim.keymap.set("n", lhs, navigate, { buffer = buf, silent = true, desc = "Navigate side conversation" })
-			end
-		end
+		M.setup_navigation(buf)
 	end
 	focus = floats.focus_group({ transcript_win, input_win })
 	if input_cursor then pcall(vim.api.nvim_win_set_cursor, input_win, input_cursor) end
@@ -157,8 +179,6 @@ end
 
 vim.api.nvim_create_autocmd("VimResized", { group = window_group, callback = function()
 	if not valid(transcript_win) or not valid(input_win) then return end
-	local width, th, ih, row, col = geometry()
-	vim.api.nvim_win_set_config(transcript_win, { relative = "editor", width = width, height = th, row = row, col = col })
-	vim.api.nvim_win_set_config(input_win, { relative = "editor", width = width, height = ih, row = row + th + 2, col = col })
+	M.resize_input(picker_height)
 end })
 return M

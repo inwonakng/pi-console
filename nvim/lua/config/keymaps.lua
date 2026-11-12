@@ -18,9 +18,6 @@ map("n", "<leader>pl", "<cmd>PiLogs<cr>", { desc = "Show Pi logs" })
 
 -- Conversation-only actions must not start an agent in the overview.
 if not vim.g.pi_overview then
-	map("n", "<leader>pa", function()
-		require("pi-integration").restore_pending_action()
-	end, { desc = "Restore pending Pi action" })
 	map("n", "<leader>pi", function()
 		require("pi-integration").show_input()
 	end, { desc = "Pi input" })

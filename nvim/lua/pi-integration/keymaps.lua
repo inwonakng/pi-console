@@ -16,7 +16,6 @@ M.specs = {
 		{ lhs = "<leader>ga", action = "assign_group", desc = "Assign session to group" },
 		{ lhs = "<leader>/", action = "pick_command", desc = "Pick Pi command" },
 		{ lhs = "<leader>pi", action = "show_input", desc = "Show Pi input" },
-		{ lhs = "<leader>pa", action = "restore_pending_action", desc = "Restore pending action" },
 		{ lhs = "<leader>pc", action = "take_control", desc = "Take control" },
 		{ lhs = "<leader>pC", action = "pick_jobs", desc = "Commands overview (Bash jobs)" },
 		{ lhs = "<leader>pD", action = "change_cwd", desc = "Choose directory on current host" },

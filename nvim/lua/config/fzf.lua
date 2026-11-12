@@ -9,7 +9,7 @@ local fzf_opts = {
 
 local fzf_keymap = {
 	builtin = {
-		-- Only pending Pi dialogs may hide, via their own buffer mappings.
+		-- Pickers are never hidden or resumed.
 		["<C-z>"] = false,
 		["<M-Esc>"] = false,
 		["<C-f>"] = "preview-page-down",
@@ -194,12 +194,15 @@ local function add_prompt_preview(select_opts)
 		prefix = prefix .. (prefix ~= "" and "\n\n" or "") .. table.concat(lines, "\n")
 	end
 	local preview, preview_padding, preview_text
-	select_opts.preview_item = function(item)
+	select_opts.pi_preview_text = function(item)
 		local text = type(source) == "function" and source(item) or source
-		text = prefix .. (prefix ~= "" and text ~= "" and "\n\n" or "") .. text
+		return prefix .. (prefix ~= "" and text ~= "" and "\n\n" or "") .. text
+	end
+	select_opts.preview_item = function(item)
+		local text = select_opts.pi_preview_text(item)
 		local padding = 0
 		local win = require("fzf-lua").win.__SELF()
-		if win and win:validate_preview() then
+		if not select_opts.pi_input_win and win and win:validate_preview() then
 			local height = vim.api.nvim_win_get_height(win.preview_winid)
 			local width = vim.api.nvim_win_get_width(win.preview_winid)
 			padding = math.max(0, math.floor((height - preview_rows(text, width)) / 2))
@@ -247,16 +250,46 @@ local function option_rows(text, width)
 	return rows
 end
 
--- Preview pickers cover the screen; plain lists fit their content up to 60%.
+-- Ordinary preview pickers cover the screen. RPC pickers use the input pane.
 local function size_select_picker(select_opts, items, winopts)
-	local available = math.max(1, vim.o.lines - vim.o.cmdheight)
+	local input_win = select_opts.pi_input_win
+	local embedded = input_win and vim.api.nvim_win_is_valid(input_win)
+	local available = embedded and vim.api.nvim_win_get_height(input_win) or math.max(1, vim.o.lines - vim.o.cmdheight)
+	local width = embedded and vim.api.nvim_win_get_width(input_win) or vim.o.columns
 	local rows = 0
 	local num_width = math.max(1, math.ceil(math.log10(math.max(1, #items))))
 	for i, item in ipairs(items) do
 		local label = select_opts.format_item and select_opts.format_item(item) or tostring(item)
 		local entry = string.format("%" .. num_width .. "d. %s", i, label)
 		-- fzf reserves two columns for the pointer and one for the marker.
-		rows = rows + option_rows(entry, math.max(1, vim.o.columns - 3))
+		rows = rows + option_rows(entry, math.max(1, width - 3))
+	end
+	if embedded then
+		local preview_rows_needed = 0
+		if select_opts.pi_preview_text then
+			for _, item in ipairs(items) do
+				preview_rows_needed = math.max(preview_rows_needed, preview_rows(select_opts.pi_preview_text(item), width))
+			end
+		end
+		local preview_height = preview_rows_needed > 0 and math.min(10, math.max(2, preview_rows_needed)) or 0
+		local transcript_win = select_opts.pi_transcript_win
+		if transcript_win and vim.api.nvim_win_is_valid(transcript_win) then
+			local input_pos = vim.api.nvim_win_get_position(input_win)
+			local transcript_pos = vim.api.nvim_win_get_position(transcript_win)
+			-- Only resize vertically stacked panes; preserve side-by-side geometry.
+			if input_pos[2] == transcript_pos[2] and width == vim.api.nvim_win_get_width(transcript_win) then
+				local total = available + vim.api.nvim_win_get_height(transcript_win)
+				local height = math.min(math.max(3, math.floor(total * 0.5)), rows + 2 + preview_height)
+				if select_opts.pi_resize_input then select_opts.pi_resize_input(math.max(3, height))
+				else vim.api.nvim_win_set_height(input_win, math.max(3, height)) end
+				available = vim.api.nvim_win_get_height(input_win)
+			end
+		end
+		local options_height = math.min(rows + 2, math.max(3, available - preview_height))
+		local preview = math.min(preview_height, available - options_height)
+		winopts.preview.hidden = preview_rows_needed == 0 or preview < 2
+		if not winopts.preview.hidden then winopts.preview.vertical = "up:" .. preview end
+		return
 	end
 	local chrome = 2 -- search/prompt plus separator; count is inline with the prompt
 	local limit = math.min(available, math.max(chrome + 1, math.floor(available * 0.6)))
@@ -328,9 +361,18 @@ fzf.register_ui_select(function(select_opts, items)
 			},
 		}
 	end
-	size_select_picker(select_opts, items, winopts)
+	if select_opts.pi_input_win then
+		-- Reuse this window, including a modified draft, without :enew or a new split.
+		winopts.split = function() end
+		winopts.preview.winopts.number = false
+		picker_keymap.fzf["esc"] = "ignore"
+		picker_keymap.fzf["ctrl-c"] = "ignore"
+		picker_keymap.fzf["ctrl-z"] = "ignore"
+	else
+		size_select_picker(select_opts, items, winopts)
+	end
 	winopts.on_create = function(event)
-		disable_picker_clicks(event)
+		if not select_opts.pi_input_win then disable_picker_clicks(event) end
 		-- Reused fzf windows inherit the previous picker's preview visibility.
 		-- Restore this select's layout before fzf-lua renders its preview.
 		local win = fzf.win.__SELF()
@@ -350,12 +392,13 @@ fzf.register_ui_select(function(select_opts, items)
 		keymap = picker_keymap,
 		previewer = select_opts.previewer,
 		pi_request_id = select_opts.pi_request_id,
+		pi_on_failure = select_opts.pi_on_failure,
 		pi_select_layout = select_opts.pi_select_layout,
 	}
 end)
 
 -- Guard both vim.ui.select and direct providers (including the session picker).
--- Check before replacing fzf-lua's singleton so a hidden RPC dialog survives.
+-- Check before replacing fzf-lua's singleton so a pending RPC dialog survives.
 local pending_picker = require("pi-integration.pending-picker")
 local ui_select = vim.ui.select
 vim.ui.select = function(items, opts, on_choice)
@@ -371,12 +414,15 @@ core.fzf = function(contents, opts)
 	if not pending_picker.can_open(opts and opts.pi_request_id) then
 		return nil, nil
 	end
-	return run_fzf(contents, opts)
+	local selected, code = run_fzf(contents, opts)
+	-- A killed/failed fzf process does not dispatch vim.ui.select's callback.
+	if not selected and opts and opts.pi_on_failure then opts.pi_on_failure() end
+	return selected, code
 end
 
 fzf.setup({
 	-- Disable hide-on-cancel/accept and replay for every provider, including
-	-- session history. Pending RPC dialogs explicitly hide/unhide the live UI.
+	-- session history and pending RPC dialogs.
 	defaults = { no_hide = true, no_resume = true },
 	fzf_colors = true,
 	fzf_opts = fzf_opts.default,

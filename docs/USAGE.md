@@ -244,12 +244,17 @@ screenshot shows a reviewer's transcript.
 <summary>Question picker</summary>
 
 When the agent asks a multiple-choice question, you can pick an answer or type
-your own. If you need to reread the conversation first, you can hide the picker
-and come back to it later. The agent still waits for your answer, and other
-pickers stay unavailable until you resolve the question. `<Esc>` hides a pending
-choice/confirmation, `<leader>pa` reopens it, and `<C-q>` cancels its request.
-Freehand input uses a Markdown float: Ctrl+Enter submits in normal or insert
-mode; `:q` or `:q!` returns to the choices without submitting, even after editing.
+your own. Questions and approvals temporarily replace the input pane, preserving
+your draft. Use Ctrl+h/j/k/l to move between the picker and transcript, including
+side-by-side layouts. The picker stays visible and retains its selection while
+you read the conversation. Esc leaves terminal-input mode; Ctrl+q cancels the
+request. Other pickers stay unavailable until the pending request is resolved.
+Freehand input uses the same pane: Ctrl+Enter or Ctrl+s submits in normal or
+insert mode; Ctrl+q cancels. Answering, cancellation, or expiry restores the input
+draft and pane height. Esc Esc in the transcript aborts Pi and clears its pending
+action. Side-conversation requests use the side input pane; its windows stay open
+until you answer, cancel, or abort side work. `:PiPending` focuses the action, or
+shows an inspect-only view for viewers.
 This presentation also works for
 standard dialogs from other extensions. The question tool itself is supplied by a
 separately installed extension.
@@ -539,8 +544,9 @@ It is separate from the access modes above; `AGENTS.md` alone does not require
 trust approval.
 
 When a project needs a decision, agent work waits for you to trust the project,
-trust its parent folder, trust it for this conversation, or decline. Escape
-hides the dialog, `<leader>pa` reopens it, and Ctrl+q declines for the conversation.
+trust its parent folder, trust it for this conversation, or decline. The dialog
+uses the input pane; Ctrl+h/j/k/l moves between it and the transcript. Ctrl+q
+declines for the conversation.
 
 A conversation-only choice survives restarts but does not apply to unrelated
 projects or new conversations. Managed workspaces inherit their originating

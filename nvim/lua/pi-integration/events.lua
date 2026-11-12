@@ -87,7 +87,10 @@ end
 function M.open_dialog(ctx, event, respond)
 	event = vim.deepcopy(event)
 	local title = type(event.title) == "string" and json.decode_object(event.title) or nil
-	while title and (title.kind == "pi_service_dialog" or title.kind == "pi_side_dialog") and type(title.title) == "string" do
+	while title do
+		event.side_conversation_id = title.sideConversationId or event.side_conversation_id
+		event.side_dialog_id = title.sideDialogId or event.side_dialog_id
+		if (title.kind ~= "pi_service_dialog" and title.kind ~= "pi_side_dialog") or type(title.title) ~= "string" then break end
 		event.title = title.title
 		title = json.decode_object(event.title)
 	end

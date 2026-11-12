@@ -236,7 +236,7 @@ local function activity_statusline_label(state)
 	if state.session_activity == "Error" then return " error" .. suffix end
 	local request = state.active_ui_request_id and (state.pending_ui_requests or {})[state.active_ui_request_id]
 	if request and not request.navigation and (not request.expires or request.expires > vim.uv.now()) then
-		return " waiting·" .. request.label .. suffix .. (request.hidden and "·<leader>pa" or "")
+		return " waiting·" .. request.label .. suffix
 	end
 	local history_activity = state.tree_loading or state.history_operation and state.history_operation.label
 	if not history_activity and not state.is_loading and not state.is_agent_running and not state.is_streaming

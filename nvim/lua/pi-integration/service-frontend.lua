@@ -203,7 +203,7 @@ local function fail_start(message)
 end
 local function close_approval()
 	approval_request, approval_context = nil, nil
-	if ctx then pending_picker.clear(ctx, false) end
+	if ctx then pending_picker.clear(ctx) end
 	if approval_win and vim.api.nvim_win_is_valid(approval_win) then vim.api.nvim_win_close(approval_win, true) end
 	approval_win = nil
 end
@@ -581,7 +581,7 @@ ctx = { state = state, config = M.config,
 ctx.ui.prompt_blocked = function()
 	local owner = authority and authority.owner_view and authority.owner_view.data or snapshot
 	if owner and #owner.interactions.pending > 0 then
-		notify("Resolve the pending action first (<leader>pa); message remains in input.", vim.log.levels.WARN)
+		notify("Resolve the pending action in the input pane first; message remains in input.", vim.log.levels.WARN)
 		return true
 	end
 	return false
@@ -701,7 +701,7 @@ local function update_status_state()
 	for _, item in ipairs(owner and owner.interactions.pending or {}) do
 		if not item.submitted and not pending_replies[item.request.id] then
 			local id = item.request.id
-			state.pending_ui_requests[id] = previous[id] or { label = item.request.method, hidden = true }
+			state.pending_ui_requests[id] = previous[id] or { label = item.request.method }
 			state.active_ui_request_id = state.active_ui_request_id or id
 		end
 	end
@@ -1762,7 +1762,9 @@ local function dialog_description(value)
 	local ok, data = pcall(vim.json.decode, value or "")
 	if not ok or type(data) ~= "table" then return end
 	if data.kind == "pi_service_dialog" or data.kind == "pi_side_dialog" then
-		return dialog_description(data.title) or { title = data.title }
+		local description = dialog_description(data.title) or { title = data.title }
+		description.sideConversationId = data.sideConversationId or description.sideConversationId
+		return description
 	end
 	if data.kind == "pi_input" or data.kind == "pi_confirmation" or data.kind == "pi_compact_select"
 		or data.kind == "pi_approval_preview" then return data end
@@ -1839,10 +1841,13 @@ local function open_pending(item)
 	end
 	close_approval()
 	approval_request, approval_context = id, captured
-	state.pending_ui_requests[id] = { label = request_data.method, hidden = false, resumable = true,
-		dismiss_on_close = true, on_cancel = function() answer({ cancelled = true }) end,
+	state.pending_ui_requests[id] = { label = request_data.method,
+		on_cancel = function() answer({ cancelled = true }) end,
 		expires = remaining and (vim.uv.now() + remaining) or nil }
 	state.active_ui_request_id = id
+	local description = dialog_description(request_data.title)
+	state.pending_ui_requests[id].side = description and description.sideConversationId ~= nil
+	if state.pending_ui_requests[id].side then ctx.session.open_side() else side_view.hide() end
 	local input_buf = require("pi-integration.events").open_dialog(ctx, request_data, answer)
 	if valid(input_buf) then
 		vim.bo[input_buf].buftype = "acwrite"
@@ -1878,12 +1883,12 @@ sync_pending = function()
 		end
 	end
 end
-function M.restore_pending_action()
+function M.show_pending_request()
 	if not snapshot then return end
 	if control_current() then
 		if not dialogs_ready() then notify("Waiting for the current session state."); refresh(); return end
 		if approval_request then
-			pending_picker.restore(ctx)
+			pending_picker.focus(ctx)
 			return
 		end
 		for _, item in ipairs(snapshot.interactions.pending) do
@@ -2331,7 +2336,8 @@ save_side_draft = function(after, skip_save)
 	end, captured, finished)
 	if not pending.id then side_draft_pending, side_after_draft = nil, nil end
 end
-function M.side_prompt()
+-- RPC prompts open immediately; only the public action goes through reconnect gating.
+ctx.session.open_side = function()
 	if not valid(side_buf) or not valid(side_input_buf) or not same_context(side_context)
 		or side_context.token ~= (grant and grant.token) then
 		side_view.hide()
@@ -2373,12 +2379,12 @@ function M.side_prompt()
 			resource.bind(buf)
 			require("pi-integration.markdown-render").prepare_buffer(buf, { latex = buf == side_buf })
 			vim.keymap.set("n", "<leader>n", M.new_side, { buffer = buf, desc = "New side conversation" })
-			vim.keymap.set("n", "<leader>pa", M.restore_pending_action, { buffer = buf, desc = "Restore pending action" })
 		end
 	end
 	side_view.open(side_buf, side_input_buf, owner_resources())
 	render()
 end
+function M.side_prompt() ctx.session.open_side() end
 function M.toggle_side()
 	if side_view.visible() then side_view.hide() else M.side_prompt() end
 end
@@ -2934,7 +2940,7 @@ function M.open(restore)
 	if restore then
 		layout.set_buffer_lines(ctx, state.input_buf, restore.input_lines or { "" }, true)
 	end
-	for name, fn in pairs({ PiControl = M.take_control, PiPending = M.restore_pending_action, PiQueue = M.pick_queue, PiJobs = M.pick_jobs,
+	for name, fn in pairs({ PiControl = M.take_control, PiPending = M.show_pending_request, PiQueue = M.pick_queue, PiJobs = M.pick_jobs,
 		PiOffers = M.show_offers, PiDrafts = M.show_drafts, PiDetach = M.detach, PiReconnect = M.reconnect,
 		PiFollowUp = M.follow_up, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
 		PiSavedOperations = require("pi-integration.service-hosts").saved_operations,
@@ -3032,7 +3038,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 -- Wrap entry points, not command callbacks: dialogs keep their original stamps.
 -- Transport recovery is passive; refresh/completion paths never replay work.
 for _, name in ipairs({ "submit_prompt", "take_control", "change_cwd", "restart", "kill_session", "abort",
-	"rename_session", "pick_queue", "restore_pending_action", "show_offers", "show_host_request", "refresh_options",
+	"rename_session", "pick_queue", "show_pending_request", "show_offers", "show_host_request", "refresh_options",
 	"pick_model", "pick_thinking", "steer", "follow_up", "side_prompt", "toggle_side", "new_side", "abort_side",
 	"pick_spawn", "pick_jobs", "retitle", "pick_workspace", "show_workspace_diff", "pick_workspace_reviews", "show_usage",
 	"show_tree", "pick_command", "refresh_messages", "show_owner_transcript", "set_access_mode", "pick_access_mode",

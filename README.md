@@ -155,7 +155,6 @@ in normal mode.
 | `<leader>h`               | Open the searchable conversation history tree |
 | `<leader>m` / `<leader>t` | Choose the model / thinking level             |
 | `<leader>pq`              | Review queued prompts                         |
-| `<leader>pa`              | Reopen a pending question or approval         |
 
 The [user guide](docs/USAGE.md) covers conversation controls, screenshots, and
 optional features.
