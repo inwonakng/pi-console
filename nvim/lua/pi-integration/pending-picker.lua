@@ -1,6 +1,7 @@
 local M = {}
 
--- One live RPC dialog owns the input pane until answered or revoked.
+-- One live RPC dialog is open at a time, until answered or revoked. Inline
+-- dialogs own the input pane; float dialogs (picker.float) own no pane.
 local active
 local input_sequence = 0
 
@@ -9,12 +10,13 @@ function M.owns_buffer(buf)
 end
 
 function M.owns_window(win)
-	return active ~= nil and active.win == win
+	return active ~= nil and active.win ~= nil and active.win == win
 end
 
 function M.focus(ctx)
-	if active and active.ctx.state == ctx.state and vim.api.nvim_win_is_valid(active.win) then
-		vim.api.nvim_set_current_win(active.win)
+	local win = active and (active.float and active.buf and vim.fn.bufwinid(active.buf) or active.win)
+	if win and active.ctx.state == ctx.state and vim.api.nvim_win_is_valid(win) then
+		vim.api.nvim_set_current_win(win)
 		return true
 	end
 	return false
@@ -62,7 +64,7 @@ local function close(picker)
 			win:close()
 		end
 	end
-	restore_input(picker)
+	if not picker.float then restore_input(picker) end
 	if picker.input and picker.buf and vim.api.nvim_buf_is_valid(picker.buf) then
 		vim.api.nvim_buf_delete(picker.buf, { force = true })
 	end
@@ -94,7 +96,7 @@ function M.can_open(request_id)
 		finish(active, nil, false)
 	end
 	if not active or request_id == active.id then return true end
-	active.ctx.ui.notify("Resolve the pending action in the input pane first.", vim.log.levels.WARN)
+	active.ctx.ui.notify("Resolve the pending Pi action first.", vim.log.levels.WARN)
 	return false
 end
 
@@ -183,16 +185,21 @@ end
 -- Confirmations for user-started commands do not block the conversation, so
 -- they use a regular float instead of taking over the input pane.
 function M.float_select(ctx, id, items, opts, on_choice)
-	local request = ctx.state.pending_ui_requests[id]
+	if not M.can_open(id) then on_choice(nil); return end
+	local picker = { ctx = ctx, id = id, request = ctx.state.pending_ui_requests[id], on_choice = on_choice, float = true }
+	active = picker
 	opts.pi_request_id = id
-	vim.ui.select(items, opts, function(choice)
-		local state = ctx.state
-		if state.pending_ui_requests[id] == request then state.pending_ui_requests[id] = nil end
-		if state.active_ui_request_id == id then state.active_ui_request_id = nil end
-		if choice ~= nil then on_choice(choice)
-		elseif request and request.on_cancel then request.on_cancel() end
-		ctx.transcript.refresh_ui()
+	-- fzf-lua skips the callback when its process is killed; cancel instead.
+	opts.pi_on_failure = function() finish(picker, nil, true, true) end
+	opts.on_create = function(event) picker.buf = event.bufnr end
+	local ok, err = pcall(vim.ui.select, items, opts, function(choice)
+		finish(picker, choice, true, choice == nil)
 	end)
+	if not ok or (active == picker and not picker.buf) then
+		ctx.logs.add("error", "Pi picker failed", ok and "fzf-lua did not open a picker" or tostring(err))
+		finish(picker, nil, true, true)
+	end
+	refresh(picker)
 end
 
 function M.input(ctx, event, on_input)
