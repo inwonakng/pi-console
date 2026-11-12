@@ -32,6 +32,7 @@ require("catppuccin").setup({
 			PiOverviewTitle = { fg = colors.text, bg = M.ui_bg, bold = true },
 			PiOverviewMetadata = { fg = colors.subtext0 },
 			PiOverviewNewSession = { fg = colors.text, bg = M.ui_bg, italic = true },
+			PiInlinePickerPreview = { fg = colors.text, bg = "#151c26" },
 			PiApprovalKey = { fg = colors.text, bg = M.ui_bg },
 			PiApprovalValue = { fg = colors.green, bg = M.ui_bg },
 			PiInputSidebarFull = { fg = colors.green, bg = M.ui_bg },

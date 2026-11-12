@@ -414,6 +414,7 @@ fzf.register_ui_select(function(select_opts, items)
 	return {
 		prompt = has_prompt_preview and not winopts.preview.hidden and "Choose > " or select_prompt(select_opts.prompt),
 		winopts = winopts,
+		hls = select_opts.pi_input_win and { preview_normal = "PiInlinePickerPreview" } or nil,
 		fzf_opts = picker_fzf_opts,
 		keymap = picker_keymap,
 		previewer = select_opts.previewer,
