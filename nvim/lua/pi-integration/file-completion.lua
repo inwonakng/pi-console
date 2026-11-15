@@ -103,7 +103,10 @@ function source:get_completions(ctx, callback)
 	local cancelled = false
 	local cancel = require("pi-integration.service-frontend").complete_files(reference.prefix, function(data)
 		if cancelled or query ~= self.query then return end
-		local warning = data.error or (data.truncated and "Project scan limit reached; use an explicit path for omitted files.")
+		local warning = data.error
+		if not warning and data.truncated then
+			warning = (data.truncationReason or "Project scan limit reached") .. "; use an explicit path (e.g. @./src/) for omitted files."
+		end
 		if warning and warning ~= self.last_error then require("pi-integration.logs").notify("File completion: " .. warning, vim.log.levels.WARN) end
 		self.last_error = warning
 		local items = {}

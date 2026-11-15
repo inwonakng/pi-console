@@ -4,6 +4,7 @@ import { lstat, open, opendir, realpath, stat, type FileHandle } from "node:fs/p
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { setImmediate as yieldTurn } from "node:timers/promises";
+import ignore, { type Ignore } from "ignore";
 import { object } from "./pi-records.js";
 import { CommandError } from "./session-commands.js";
 
@@ -504,20 +505,23 @@ function outputReference(record: unknown, path: string): boolean {
       || event.message.role === "bashExecution" && event.message.fullOutputPath === path);
 }
 
-async function directoryEntries(target: Target, check: () => void): Promise<{ path: string; entries: Dirent[] }> {
+async function directoryEntries(target: Target, check: () => void, include?: (entry: Dirent) => boolean): Promise<{ path: string; entries: Dirent[] }> {
   const path = await canonical(target, check);
   const before = await lstat(path, { bigint: true });
   if (!before.isDirectory()) refuse("resource_type", "Completion path must be a directory");
   const directory = await opendir(path, { bufferSize: 32 });
   const entries: Dirent[] = [];
+  let visited = 0;
   try {
     for (;;) {
       check();
       const entry = await directory.read();
       if (!entry) break;
-      if (entries.length >= DIRECTORY_ENTRIES) refuse("resource_oversize", "Directory exceeds 10000 entry scan limit");
-      entries.push(entry);
-      if (entries.length % 128 === 0) { await yieldTurn(); check(); }
+      if (!include || include(entry)) {
+        if (entries.length >= DIRECTORY_ENTRIES) refuse("resource_oversize", "Directory exceeds 10000 entry scan limit");
+        entries.push(entry);
+      }
+      if (++visited % 128 === 0) { await yieldTurn(); check(); }
     }
   } finally { await directory.close(); }
   if (await canonical(target, check) !== path || fingerprint(await lstat(path, { bigint: true })) !== fingerprint(before)) changed();
@@ -644,8 +648,8 @@ export async function readResource(context: ResourceContext, input: unknown): Pr
 
 /** Completion follows links but preserves the requested spelling for suggestions.
  * Broken, looping or inaccessible links must not hide other directory entries. */
-async function completionEntries(path: string, check: () => void): Promise<{ path: string; canonical: string; entries: { name: string; kind: FileEntry["kind"] }[] }> {
-  const listed = await directoryEntries({ root: sep, path, followSymlinks: true }, check);
+async function completionEntries(path: string, check: () => void, include?: (entry: Dirent) => boolean): Promise<{ path: string; canonical: string; entries: { name: string; kind: FileEntry["kind"] }[] }> {
+  const listed = await directoryEntries({ root: sep, path, followSymlinks: true }, check, include);
   const entries: { name: string; kind: FileEntry["kind"] }[] = [];
   for (const entry of listed.entries) {
     check();
@@ -687,24 +691,85 @@ const IGNORED_COMPLETION_DIRS = new Set([
   ".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
   ".tox", "dist", "build", "target", ".next", ".turbo", ".cache",
 ]);
-type FileIndex = { path: string; entries: FileEntry[]; truncated: boolean };
+type FileIndex = { path: string; entries: FileEntry[]; truncated: boolean; truncationReason?: string };
+type CompletionIgnore = { base: string; rules: Ignore };
+
+async function completionIgnore(directory: string, check: () => void): Promise<CompletionIgnore[]> {
+  check();
+  let file: FileHandle | undefined;
+  try {
+    // Like Git, do not follow a symlink used as an ignore file.
+    file = await open(join(directory, ".gitignore"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = await file.stat();
+    if (!info.isFile()) return [];
+    if (info.size > COMPLETION_BYTES) refuse("resource_oversize", ".gitignore exceeds 8 MiB scan limit");
+    const buffer = Buffer.alloc(info.size + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      check();
+      const read = await file.read(buffer, bytes, buffer.length - bytes, null);
+      if (!read.bytesRead) break;
+      bytes += read.bytesRead;
+    }
+    if (bytes > info.size) changed();
+    return [{ base: directory, rules: ignore({ ignorecase: false }).add(buffer.toString("utf8", 0, bytes)) }];
+  } catch (error) {
+    if (error instanceof Error && "code" in error && ["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(String(error.code))) return [];
+    throw error;
+  } finally { await file?.close(); }
+}
+
+async function ancestorCompletionIgnores(root: string, check: () => void): Promise<CompletionIgnore[]> {
+  const ancestors: string[] = [];
+  for (let directory = root; ; directory = dirname(directory)) {
+    check();
+    ancestors.push(directory);
+    try { await lstat(join(directory, ".git")); break; }
+    catch (error) {
+      if (!(error instanceof Error && "code" in error && ["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(String(error.code)))) throw error;
+    }
+    if (dirname(directory) === directory) break;
+  }
+  const rules: CompletionIgnore[] = [];
+  // The root's own rules are loaded by the scan, along with nested rules.
+  for (const directory of ancestors.reverse().slice(0, -1)) rules.push(...await completionIgnore(directory, check));
+  return rules;
+}
+
+function ignoredCompletion(path: string, directory: boolean, ignores: CompletionIgnore[]): boolean {
+  let ignored = false;
+  for (const { base, rules } of ignores) {
+    const result = rules.test(relative(base, path).split(sep).join("/") + (directory ? "/" : ""));
+    if (result.ignored || result.unignored) ignored = result.ignored;
+  }
+  return ignored;
+}
+
 const fileIndexes = new Map<string, { time: number; result: Promise<FileIndex> }>();
 
 async function scanCompletionFiles(context: ResourceContext): Promise<FileIndex> {
   await canonical({ root: context.workspaceRoot, path: context.cwd, followSymlinks: true }, context.check);
   const root = resolve(context.cwd);
   const entries: FileEntry[] = [];
-  const directories = [{ path: root, relative: "", ancestors: new Set<string>() }];
-  let visited = 0, bytes = 0, truncated = false;
+  const directories = [{ path: root, relative: "", ancestors: new Set<string>(), ignores: await ancestorCompletionIgnores(root, context.check) }];
+  let visited = 0, bytes = 0;
+  let truncationReason: string | undefined;
   for (const directory of directories) {
     context.check();
     let children: Awaited<ReturnType<typeof completionEntries>>;
-    try { children = await completionEntries(directory.path, context.check); }
+    let ignores: CompletionIgnore[];
+    try {
+      ignores = [...directory.ignores, ...await completionIgnore(directory.path, context.check)];
+      children = await completionEntries(directory.path, context.check, (entry) => {
+        if (entry.isDirectory() && IGNORED_COMPLETION_DIRS.has(entry.name)) return false;
+        return !ignoredCompletion(join(directory.path, entry.name), entry.isDirectory(), ignores);
+      });
+    }
     catch (error) {
       // A missing or inaccessible subtree must not hide the rest of the project.
       if (directory.path === root) throw error;
       if (error instanceof CommandError && ["resource_unavailable", "resource_denied", "resource_conflict", "resource_limit"].includes(error.code)) {
-        truncated ||= error.code === "resource_limit";
+        if (error.code === "resource_limit") truncationReason ??= `${directory.relative}: ${error.message}`;
         continue;
       }
       if (error instanceof Error && "code" in error && ["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(String(error.code))) continue;
@@ -716,18 +781,21 @@ async function scanCompletionFiles(context: ResourceContext): Promise<FileIndex>
     const ancestors = new Set(directory.ancestors).add(children.canonical);
     for (const child of children.entries) {
       context.check();
-      if (++visited > COMPLETION_FILES) return { path: root, entries, truncated: true };
       const isDirectory = child.kind === "directory";
       if (isDirectory && IGNORED_COMPLETION_DIRS.has(child.name)) continue;
+      const absolute = join(directory.path, child.name);
+      // Symlink directories get their directory-only rules after stat resolution.
+      if (ignoredCompletion(absolute, isDirectory, ignores)) continue;
+      if (++visited > COMPLETION_FILES) return { path: root, entries, truncated: true, truncationReason: "Project exceeds 50,000 non-ignored entry scan limit" };
       const path = directory.relative + child.name + (isDirectory ? sep : "");
       if (!pathString(path)) continue;
       bytes += Buffer.byteLength(path);
-      if (bytes > COMPLETION_BYTES) return { path: root, entries, truncated: true };
+      if (bytes > COMPLETION_BYTES) return { path: root, entries, truncated: true, truncationReason: "Project path names exceed 8 MiB scan limit" };
       entries.push({ path, kind: child.kind });
-      if (isDirectory) directories.push({ path: join(directory.path, child.name), relative: path, ancestors });
+      if (isDirectory) directories.push({ path: absolute, relative: path, ancestors, ignores });
     }
   }
-  return { path: root, entries, truncated };
+  return { path: root, entries, truncated: truncationReason !== undefined, truncationReason };
 }
 
 async function completionIndex(context: ResourceContext): Promise<FileIndex> {
@@ -754,7 +822,7 @@ async function completionIndex(context: ResourceContext): Promise<FileIndex> {
  * Explicit paths list one owner directory, including outside the workspace.
  * This grants filename discovery only; project reads still require a path in
  * the workspace, which may lead through a symlink to an external target. */
-export async function completeFiles(context: ResourceContext, input: unknown): Promise<{ path: string; entries: FileEntry[]; nextOffset: number | null; truncated: boolean }> {
+export async function completeFiles(context: ResourceContext, input: unknown): Promise<{ path: string; entries: FileEntry[]; nextOffset: number | null; truncated: boolean; truncationReason?: string }> {
   return limited(context.check, async () => {
     if (!exact(input, ["prefix", "offset"]) || typeof input.prefix !== "string"
       || Buffer.byteLength(input.prefix) > 4096 || /[\u0000-\u001f\u007f]/.test(input.prefix) || !offset(input.offset)) {
@@ -775,6 +843,6 @@ export async function completeFiles(context: ResourceContext, input: unknown): P
     if (start > result.entries.length) refuse("resource_offset", "Completion offset is beyond the file page");
     // The bounded project index fits one response, avoiding a round trip per directory/page on remote hosts.
     const page = result.entries.slice(start, input.prefix === "" ? undefined : start + 2048);
-    return { path: result.path, entries: page, nextOffset: start + page.length < result.entries.length ? start + page.length : null, truncated: result.truncated };
+    return { path: result.path, entries: page, nextOffset: start + page.length < result.entries.length ? start + page.length : null, truncated: result.truncated, truncationReason: result.truncationReason };
   });
 }

@@ -222,7 +222,7 @@ function M.complete(options, prefix, callback)
 	if pending then table.insert(pending, listener); return cancel end
 	pending = { listener }
 	completion_pending[key] = pending
-	local entries, offset, truncated = {}, nil, false
+	local entries, offset, truncated, truncation_reason = {}, nil, false, nil
 	local function finish(data)
 		if completion_pending[key] == pending then completion_pending[key] = nil end
 		for _, subscriber in ipairs(pending) do if subscriber.callback then subscriber.callback(data) end end
@@ -237,10 +237,13 @@ function M.complete(options, prefix, callback)
 			if not ok then finish({ entries = {}, error = result.message }); return end
 			vim.list_extend(entries, result.data.entries or {})
 			truncated = truncated or result.data.truncated == true
+			local reason = result.data.truncationReason
+			if type(reason) == "string" then truncation_reason = truncation_reason or reason end
 			offset = result.data.nextOffset
 			local more = offset and offset ~= vim.NIL
 			if more and #entries < 50000 then fetch(); return end
-			local data = { entries = entries, truncated = truncated or more == true }
+			local data = { entries = entries, truncated = truncated or more == true,
+				truncationReason = truncation_reason or (more and "Directory completion exceeds 50,000 entry limit" or nil) }
 			completion_cache = { [key] = { data = data, time = vim.uv.hrtime() } }
 			finish(data)
 		end)
