@@ -56,6 +56,7 @@ function M.open(options, workspace_id, pinned)
 		vim.wo[win].fillchars = "stl: ,stlnc: "
 		vim.wo[win].winhighlight = "StatusLine:" .. group .. ",StatusLineNC:" .. group
 			.. ",DiffChange:PiReviewDiffChange,DiffText:PiReviewDiffText"
+			.. (role == "Files" and ",CursorLine:PiReviewSelected" or "")
 	end
 	local function anchor_list()
 		if not review_tab or not vim.api.nvim_tabpage_is_valid(review_tab)
@@ -90,6 +91,13 @@ function M.open(options, workspace_id, pinned)
 		anchor_list()
 		return true
 	end
+	local function highlight_selection()
+		local row = vim.api.nvim_win_get_cursor(list_win)[1]
+		vim.api.nvim_buf_clear_namespace(list_buf, selected_ns, 0, -1)
+		vim.api.nvim_buf_set_extmark(list_buf, selected_ns, row - 1, 0, {
+			end_row = row, end_col = 0, hl_group = "PiReviewSelected", hl_eol = true,
+		})
+	end
 	local function display_file(pair)
 		if not ensure_windows() then return end
 		vim.api.nvim_win_set_buf(before_win, pair.before)
@@ -102,11 +110,9 @@ function M.open(options, workspace_id, pinned)
 		displayed = pair
 		style_window(before_win, "Before", pair.path)
 		style_window(after_win, "After", pair.path)
-		vim.api.nvim_buf_clear_namespace(list_buf, selected_ns, 0, -1)
 		if rows[pair.path] then
-			vim.api.nvim_buf_set_extmark(list_buf, selected_ns, rows[pair.path] - 1, 0, {
-				line_hl_group = "PiReviewSelected", hl_eol = true,
-			})
+			vim.api.nvim_win_set_cursor(list_win, { rows[pair.path], 0 })
+			highlight_selection()
 		end
 	end
 	local function alive() return options.current(captured) end
@@ -264,7 +270,7 @@ function M.open(options, workspace_id, pinned)
 		if review.partial then table.insert(help_lines, "Partial integration: comparison is the intended Git merge, not a captured post-failure tree.") end
 		vim.list_extend(help_lines, {
 			"", "## Files", "The first file opens automatically. Enter opens another file diff.",
-			"The highlighted file is the displayed comparison. q closes the entire review.",
+			"j/k selects whole files; Enter displays the selected comparison. q closes the entire review.",
 			"S stages reviewed working files; U resets the entire workspace index to HEAD.",
 			"r opens a fresh review without replacing drafts; gS looks up the original review action.",
 			"= denotes an index-only difference against HEAD.",
@@ -298,6 +304,45 @@ function M.open(options, workspace_id, pinned)
 		bind_help(buf)
 		review_tab, list_win = vim.api.nvim_get_current_tabpage(), vim.api.nvim_get_current_win()
 		vim.wo[list_win].winfixwidth = true
+		vim.wo[list_win].wrap = true
+		vim.wo[list_win].cursorline = next(entries) ~= nil
+		vim.wo[list_win].cursorlineopt = "line"
+		vim.wo[list_win].number, vim.wo[list_win].relativenumber = false, false
+		vim.wo[list_win].signcolumn = "no"
+		local selected_row = 1
+		local function select_row(row)
+			local step = row < selected_row and -1 or 1
+			local target = row
+			while target >= 1 and target <= #output and not entries[target] do target = target + step end
+			if not entries[target] then
+				target = row
+				while target >= 1 and target <= #output and not entries[target] do target = target - step end
+			end
+			if not entries[target] then return end
+			selected_row = target
+			local cursor = vim.api.nvim_win_get_cursor(list_win)
+			if cursor[1] ~= target or cursor[2] ~= 0 then vim.api.nvim_win_set_cursor(list_win, { target, 0 }) end
+			highlight_selection()
+		end
+		local function move(step)
+			local row = vim.api.nvim_win_get_cursor(list_win)[1]
+			for _ = 1, vim.v.count1 do
+				local target = row + step
+				while target >= 1 and target <= #output and not entries[target] do target = target + step end
+				if not entries[target] then break end
+				row = target
+			end
+			select_row(row)
+		end
+		for _, key in ipairs({ "j", "gj", "<Down>" }) do
+			vim.keymap.set("n", key, function() move(1) end, { buffer = buf, desc = "Select next review file" })
+		end
+		for _, key in ipairs({ "k", "gk", "<Up>" }) do
+			vim.keymap.set("n", key, function() move(-1) end, { buffer = buf, desc = "Select previous review file" })
+		end
+		vim.api.nvim_create_autocmd("CursorMoved", {
+			buffer = buf, callback = function() select_row(vim.api.nvim_win_get_cursor(list_win)[1]) end,
+		})
 		local anchoring = false
 		vim.api.nvim_create_autocmd({ "WinNew", "WinClosed", "WinResized", "WinEnter", "TabEnter", "SafeState" }, { callback = function(event)
 			if not vim.api.nvim_tabpage_is_valid(review_tab) or not vim.api.nvim_win_is_valid(list_win) then return true end
@@ -312,6 +357,7 @@ function M.open(options, workspace_id, pinned)
 		vim.api.nvim_win_set_width(list_win, math.min(36, math.max(1, math.floor(vim.o.columns / 4))))
 		vim.api.nvim_set_current_win(list_win)
 		require("pi-integration.workspace-summary").highlight(buf)
+		require("pi-integration.list-cursor").attach(buf, "PiReviewSelected")
 		vim.keymap.set("n", "<CR>", function() local path = entries[vim.api.nvim_win_get_cursor(0)[1]]; if path then show_file(review, path) end end, { buffer = buf, desc = "Open workspace review file" })
 		vim.keymap.set("n", "q", function() vim.cmd("tabclose") end, { buffer = buf, desc = "Close workspace review" })
 		vim.b[buf].pi_review_host, vim.b[buf].pi_review_session, vim.b[buf].pi_review_channel = options.owner, captured.session, options.channel

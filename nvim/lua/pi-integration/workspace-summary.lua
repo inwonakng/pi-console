@@ -18,6 +18,8 @@ function M.highlight(buf)
 			mark(i - 1, added_start, added_end, "PiWorkspaceSummaryAdd")
 			mark(i - 1, deleted_start, deleted_end, "PiWorkspaceSummaryDelete")
 		elseif line:match("^[AMDT?=] ") then
+			local status_group = ({ A = "PiWorkspaceSummaryAdd", M = "PiWorkspaceSummaryModified", D = "PiWorkspaceSummaryDelete" })[line:sub(1, 1)]
+			if status_group then mark(i - 1, 1, 2, status_group) end
 			-- Match only the trailing counters, never numbers inside a filename.
 			added_start, added_end, deleted_start, deleted_end = line:match("  ()%+%d+()  ()%-%d+()$")
 			if not added_start then
