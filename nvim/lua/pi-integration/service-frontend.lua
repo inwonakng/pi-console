@@ -101,10 +101,10 @@ local function current_owner_label()
 end
 
 local function log(text, level)
-	logs.add(level, text, nil, { session = session_id })
+	logs.add(level, text, nil, { host = owner_key(), host_label = current_owner_label(), session = session_id })
 end
 local function notify(text, level)
-	logs.notify(text, level, { session = session_id })
+	logs.notify(text, level, { host = owner_key(), host_label = current_owner_label(), session = session_id })
 end
 local function cancel_new_session(message)
 	if not pending_new_session then return end
@@ -362,7 +362,7 @@ record_command = function(receipt, envelope, live)
 		if status == old_status and receipt.recoveryAvailable and previous.receipt and not previous.receipt.recoveryAvailable then receipt = previous.receipt end
 	end
 	local entry = logs.add(failed and "warn" or "info", message, operation_summary(envelope, receipt), {
-		key = key, session = target,
+		key = key, session = target, host = host, host_label = current_owner_label(),
 		inspect = function()
 			if not job or not hello or owner_key() ~= host or hello.channel ~= channel or not host_action and session_id ~= target then
 				logs.detail(operation_summary(envelope, receipt) .. "\n\nReconnect to the original host/session to refresh this outcome.")
@@ -385,7 +385,8 @@ local function record_queue(item)
 	if item.error or entry then
 		local message = "Send message: " .. item.status
 		if item.error then message = "Message delivery failed or interrupted. Reason: " .. failure_reason(item.error) end
-		local _, changed = logs.add(item.error and "warn" or "info", message, queue_summary(item), { key = key, session = session_id })
+		local _, changed = logs.add(item.error and "warn" or "info", message, queue_summary(item),
+			{ key = key, session = session_id, host = owner_key(), host_label = current_owner_label() })
 		if changed and item.error then logs.display(message, "warn") end
 	end
 end
@@ -575,7 +576,7 @@ local function can_close_frontend()
 end
 ctx = { state = state, config = M.config,
 	ui = { notify = notify }, logs = { add = function(level, message, details)
-		logs.add(level, message, details, { session = session_id })
+		logs.add(level, message, details, { session = session_id, host = owner_key(), host_label = current_owner_label() })
 		logs.display(message, level)
 	end },
 	notices = { empty_session = "Send a message to begin." },
@@ -827,6 +828,7 @@ local function apply_snapshot(value)
 	local previous = snapshot
 	if snapshot and value.serviceEpoch == snapshot.serviceEpoch and value.sequence < snapshot.sequence then return end
 	snapshot = snapshots.merge(snapshot, value)
+	logs.worker_state(owner_key(), current_owner_label(), session_id, snapshot)
 	local same_runtime = previous and previous.serviceEpoch == snapshot.serviceEpoch
 		and previous.runtimeRevision == snapshot.runtimeRevision
 	if not same_runtime then
@@ -859,7 +861,8 @@ local function apply_snapshot(value)
 			local details = vim.tbl_extend("force", {}, load_metrics, { elapsedMs = vim.uv.hrtime() / 1e6 - load_metrics.started,
 				worker = snapshot.startupTimings, messages = #snapshot.conversation.messages })
 			details.started = nil
-			logs.add("info", "Session loading timings", details, { session = session_id, key = "load:" .. generation .. ":" .. selection })
+			logs.add("info", "Session loading timings", details,
+				{ session = session_id, host = owner_key(), host_label = current_owner_label(), key = "load:" .. generation .. ":" .. selection })
 			load_metrics = nil
 		end
 	end
@@ -943,7 +946,7 @@ local function disconnected(reason, details, intentional)
 			vim.tbl_extend("force", { host = current_owner_label(), endpoint = M.config.service_remote or M.config.service_root or "local",
 				host_id = M.config.expected_host, service_epoch = hello and hello.serviceEpoch, connection_id = hello and hello.connectionId,
 				attachment = attachment, generation = generation }, details or {}),
-			{ session = session_id, key = "connection:" .. generation })
+			{ session = session_id, host = owner_key(), host_label = current_owner_label(), key = "connection:" .. generation })
 	end
 	cancel_new_session("Connection lost while loading session directory. No new frontend was opened.")
 	if action_connection then
@@ -1218,7 +1221,7 @@ connect = function(automatic)
 		disconnect_entry = disconnect_entry or logs.get("connection:" .. gen)
 		if disconnect_entry then
 			logs.add(disconnect_entry.level, disconnect_entry.message, vim.tbl_extend("force", disconnect_entry.details, details),
-				{ session = disconnect_entry.session, key = disconnect_entry.key })
+				{ session = disconnect_entry.session, host = disconnect_entry.host, host_label = disconnect_entry.host_label, key = disconnect_entry.key })
 		end
 	end
 	local function record(value, frame)
@@ -1286,6 +1289,7 @@ connect = function(automatic)
 				if outcome_current(outcome, receipt) then outcome.callback(receipt) end
 			end
 			if authority_updated and value.update.owner then
+				logs.worker_state(owner_key(), current_owner_label(), session_id, value.update.owner)
 				-- Snapshots can overtake queued updates. Only accepted authority may
 				-- revoke local callbacks before the coalesced read.
 				if grant and not control_current() then
@@ -2894,7 +2898,7 @@ function M.show_logs()
 	for _, entry in ipairs(feedback) do
 		record_command(entry.receipt or { id = entry.id, status = entry.sent and "unknown" or entry.error and "failed" or "pending", error = entry.error and { message = entry.error } }, entry)
 	end
-	logs.show()
+	logs.show({ host = owner_key(), host_label = current_owner_label(), session = session_id })
 end
 function M.restore_status_footer() statusline.update(ctx) end
 function M.on_transcript_rendered(buf)

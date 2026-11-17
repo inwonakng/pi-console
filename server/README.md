@@ -977,6 +977,29 @@ after losing control.
 Clean detach, slow-view drop, explicit release, takeover and session shutdown
 revoke control without answering dialogs or cancelling accepted execution.
 
+### Failure and connection logs
+
+Worker failures produce a `worker_failure` service-log record with host/session,
+service epoch, runtime revision, lifecycle phase, a bounded/redacted exception
+message and exit code/signal. The latest failure is also stored in the catalog
+and included in snapshots/session summaries, so reopening does not erase it.
+Raw protocol records and provider stderr are not copied into these diagnostics.
+A `persisted: false` record means catalog storage was unavailable; inspect the
+service log and retained ownership before attempting recovery.
+
+Connection teardown normally produces one `connection_summary` per connection,
+including the first cause and any error/close code. Set `PI_CONSOLE_DEBUG=1` in
+the server's environment before starting it to also log individual transport
+lifecycle events. Startup registration captures this value at `server enable`;
+existing registrations retain their saved environment. This does not change
+connection or cancellation behavior.
+
+Neovim's `:PiLogs` defaults to warnings/errors for its current host/session, with
+one summary line per entry. Enter opens details; `i` toggles routine entries and
+`a` toggles all hosts/sessions. Repeated unkeyed warnings/errors are grouped with
+an occurrence count and the latest details. Action receipts still update their
+own entry, preserving status lookup and recovery text.
+
 A short serialized admission lane checks authority and reserves the ID durably
 before any dispatch; a long abort does not block takeover or interaction answers.
 Command IDs are host/epoch-wide. Duplicate ID + same target/revision/operation/

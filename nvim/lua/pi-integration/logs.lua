@@ -1,7 +1,8 @@
 local floats = require("pi-integration.floats")
 local M = {}
-local entries, keyed = {}, {}
+local entries, keyed, grouped = {}, {}, {}
 local log_buf, log_win, line_entries
+local context, all_contexts, include_info = {}, false, false
 local pending, scheduled
 local max_entries = 1000
 local display_generation = 0
@@ -16,9 +17,22 @@ local function level_name(level)
 	return level == vim.log.levels.ERROR and "error" or level == vim.log.levels.WARN and "warn" or "info"
 end
 
+local function summary(entry, full)
+	local owner = entry.host_label or entry.host
+	local scope = { owner, entry.session and entry.session:sub(1, 8) or nil }
+	-- A hostless entry may still have a session identity.
+	if not owner then scope = { entry.session and entry.session:sub(1, 8) or nil } end
+	local label = #scope > 0 and (" [" .. table.concat(scope, " / ") .. "]") or ""
+	return string.format("%s %-5s%s %s%s", entry.timestamp, entry.level:upper(), label,
+		full and entry.message:gsub("[%c]", " ") or M.truncate(entry.message, 200),
+		(entry.count or 1) > 1 and (" (x" .. entry.count .. ")") or "")
+end
+
 local function lines_for(entry)
-	local lines = { string.format("%s %-7s%s %s", entry.timestamp, entry.level:upper(),
-		entry.session and (" [" .. entry.session .. "]") or "", entry.message) }
+	local lines = { summary(entry, true) }
+	if entry.host then table.insert(lines, "Host: " .. entry.host) end
+	if entry.session then table.insert(lines, "Session: " .. entry.session) end
+	if entry.count then table.insert(lines, "Occurrences: " .. entry.count .. "; last seen: " .. entry.last_timestamp) end
 	local details = entry.details
 	if details ~= nil and details ~= "" then
 		if type(details) ~= "string" then details = vim.inspect(details) end
@@ -47,13 +61,19 @@ function M.refresh()
 	local lines, first_lines = {}, {}
 	line_entries = {}
 	for _, entry in ipairs(entries) do
-		first_lines[entry] = #lines + 1
-		for _, line in ipairs(lines_for(entry)) do
-			table.insert(lines, line)
+		local in_scope = all_contexts or ((not entry.host or not context.host or entry.host == context.host)
+			and (not entry.session or not context.session or entry.session == context.session))
+		if in_scope and (include_info or entry.level == "warn" or entry.level == "error") then
+			first_lines[entry] = #lines + 1
+			table.insert(lines, summary(entry))
 			line_entries[#lines] = entry
 		end
 	end
-	if #lines == 0 then lines = { "No Pi logs for this Neovim session." } end
+	if #lines == 0 then lines = { "No matching Pi logs. Press i for routine entries or a for all hosts/sessions." } end
+	if valid_win(log_win) then
+		vim.api.nvim_win_set_config(log_win, { title = " Pi logs: " .. (all_contexts and "all hosts/sessions" or "current host/session")
+			.. (include_info and " | all levels " or " | warnings/errors ") })
+	end
 	vim.bo[log_buf].modifiable = true
 	vim.api.nvim_buf_set_lines(log_buf, 0, -1, false, lines)
 	vim.bo[log_buf].modifiable = false
@@ -85,21 +105,59 @@ function M.add(level, message, details, opts)
 	local text = vim.split(tostring(message or ""), "\n", { plain = true })
 	message = table.remove(text, 1)
 	if #text > 0 then details = table.concat(text, "\n") .. (details and ("\n" .. tostring(details)) or "") end
-	local entry = opts.key and keyed[opts.key]
-	local changed = not entry or entry.message ~= message or entry.level ~= level_name(level) or not vim.deep_equal(entry.details, details)
+	local severity = level_name(level)
+	local group = not opts.key and (severity == "warn" or severity == "error")
+		and vim.json.encode({ opts.host or "", opts.session or "", severity, message }) or nil
+	local entry = opts.key and keyed[opts.key] or group and grouped[group]
+	local changed = not entry or entry.message ~= message or entry.level ~= severity or not vim.deep_equal(entry.details, details)
+		or opts.timestamp ~= nil and entry.timestamp ~= opts.timestamp
+	local repeated = entry and group ~= nil
 	if not entry then
-		entry = { key = opts.key, timestamp = os.date("%Y-%m-%d %H:%M:%S") }
+		entry = { key = opts.key, group = group, timestamp = os.date("%Y-%m-%d %H:%M:%S") }
 		table.insert(entries, entry)
 		if opts.key then keyed[opts.key] = entry end
+		if group then grouped[group] = entry end
 	end
-	entry.level, entry.message, entry.details = level_name(level), message, details
+	if repeated then
+		entry.count = (entry.count or 1) + 1
+		entry.last_timestamp = os.date("%Y-%m-%d %H:%M:%S")
+	end
+	entry.timestamp = opts.timestamp or entry.timestamp
+	entry.level, entry.message, entry.details = severity, message, details
 	entry.session, entry.inspect = opts.session or entry.session, opts.inspect or entry.inspect
+	entry.host, entry.host_label = opts.host or entry.host, opts.host_label or entry.host_label
 	while #entries > max_entries do
 		local removed = table.remove(entries, 1)
 		if removed.key then keyed[removed.key] = nil end
+		if removed.group then grouped[removed.group] = nil end
 	end
-	if changed then M.refresh() end
+	if changed or repeated then M.refresh() end
 	return entry, changed
+end
+
+function M.worker_failure(host, label, session, failure, phase)
+	if type(failure) ~= "table" or type(failure.message) ~= "string" then return end
+	local key = table.concat({ "worker", host or "", session, failure.serviceEpoch or "", tostring(failure.runtimeRevision) }, "/")
+	local usable = phase == "ready"
+	local availability = usable and "Session is running again."
+		or phase == "initializing" and "Session is starting."
+		or (failure.cleanupRequired or failure.exit and failure.exit.descendantsUnresolved) and "Cleanup unresolved; recovery is required before reopening."
+		or "Session unavailable; start it from the session picker."
+	local message = "Worker failed: " .. M.truncate(failure.message, 120) .. ". " .. availability
+	M.add(usable and "warn" or "error", message, failure,
+		{ key = key, host = host, host_label = label, session = session, timestamp = failure.timestamp })
+end
+
+function M.worker_state(host, label, session, owner)
+	local failure = owner.lastFailure
+	local failed = owner.error and owner.error ~= vim.NIL
+	M.worker_failure(host, label, session, failure, failed and "failed" or owner.phase)
+	if failed and (type(failure) ~= "table" or failure.serviceEpoch ~= owner.serviceEpoch or failure.runtimeRevision ~= owner.runtimeRevision) then
+		M.worker_failure(host, label, session, {
+			message = tostring(owner.error), serviceEpoch = owner.serviceEpoch, runtimeRevision = owner.runtimeRevision,
+			phase = owner.phase, exit = owner.exit,
+		}, "failed")
+	end
 end
 
 function M.truncate(text, width)
@@ -178,8 +236,10 @@ function M.detail(contents, title, on_dismiss)
 	return open_float(buf, title or "Pi log details", parent, nil, on_dismiss)
 end
 
-function M.show()
-	if valid_win(log_win) then vim.api.nvim_set_current_win(log_win); return end
+function M.show(scope)
+	context = scope or {}
+	if valid_win(log_win) then M.refresh(); vim.api.nvim_set_current_win(log_win); return end
+	all_contexts, include_info = false, false
 	if not log_buf or not vim.api.nvim_buf_is_valid(log_buf) then
 		log_buf = vim.api.nvim_create_buf(false, true)
 		vim.api.nvim_buf_set_name(log_buf, "pi://logs")
@@ -190,9 +250,15 @@ function M.show()
 			if not entry then return end
 			if entry.inspect then entry.inspect() else M.detail(table.concat(lines_for(entry), "\n")) end
 		end, { buffer = log_buf, desc = "Inspect Pi log entry" })
+		vim.keymap.set("n", "a", function() all_contexts = not all_contexts; M.refresh() end,
+			{ buffer = log_buf, desc = "Toggle all hosts/sessions" })
+		vim.keymap.set("n", "i", function() include_info = not include_info; M.refresh() end,
+			{ buffer = log_buf, desc = "Toggle routine log entries" })
 	end
 	M.refresh()
-	log_win = open_float(log_buf, "Pi logs", vim.api.nvim_get_current_win(), " Enter details | q close ")
+	log_win = open_float(log_buf, "Pi logs", vim.api.nvim_get_current_win(), " Enter details | a scope | i routine | q close ")
+	vim.wo[log_win].wrap = false
+	M.refresh()
 	vim.api.nvim_win_set_cursor(log_win, { vim.api.nvim_buf_line_count(log_buf), 0 })
 end
 

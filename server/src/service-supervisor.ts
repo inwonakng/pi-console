@@ -133,7 +133,7 @@ export class ServiceSupervisor {
     const environment: Record<string, string> = { HOME: homedir(), PATH: options.path ?? process.env.PATH ?? "/usr/bin:/bin", PI_BINARY: await realpath(options.binary) };
     for (const key of ["USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "PI_CODING_AGENT_DIR"]) if (process.env[key]) environment[key] = process.env[key]!;
     for (const key of ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "ALERTER",
-      "PI_NOTIFICATION_ICON", "PI_NOTIFICATION_SOUND", "PI_NOTIFICATION_TIMEOUT", "PI_COMPLETION_SOUND",
+      "PI_CONSOLE_DEBUG", "PI_NOTIFICATION_ICON", "PI_NOTIFICATION_SOUND", "PI_NOTIFICATION_TIMEOUT", "PI_COMPLETION_SOUND",
       "PI_COMPLETION_NOTIFICATION_TIMEOUT", "PI_PERMISSION_SOUND", "PI_PERMISSION_NOTIFICATION_TIMEOUT", "PI_ERROR_SOUND"]) {
       if (process.env[key] !== undefined) environment[key] = process.env[key]!;
     }

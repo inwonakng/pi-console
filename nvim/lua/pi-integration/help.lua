@@ -82,7 +82,7 @@ function M.toggle(ctx)
 		"- `:PiWorkspace` enter, integrate, or discard a task workspace with the configured confirmations.",
 		"- `:PiWorkspaceReview` / `:PiWorkspaceReviews` inspect current or saved workspace diffs. Each review pane has its own `<leader>?` help.",
 		"- `:PiRetitle` generate a session title.",
-		"- `:PiLogs` inspect notifications, action outcomes, and recovery text; Enter opens details.",
+		"- `:PiLogs` shows warnings/errors for the current host/session. Enter opens details; `i` includes routine entries; `a` includes all hosts/sessions. Repeated warnings are grouped; worker failures survive reopening.",
 		"- `:PiHostRequest` inspect unresolved session creation or resume requests.",
 		"- `:PiSessions` browse sessions and archive, unarchive, or delete them with workspace warnings.",
 		"- `:PiSavedOperations` inspect original saved-session outcomes without repeating operations.",

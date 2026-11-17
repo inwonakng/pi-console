@@ -48,6 +48,13 @@ export class ConnectionDiagnostics {
   private lastPong: number | null = null;
   private pingCount = 0;
   private pongCount = 0;
+  private readonly openedAt = Date.now();
+  private readonly debug = process.env.PI_CONSOLE_DEBUG === "1";
+  private code?: string;
+  private closeCode?: number;
+  private upstreamConnectionId?: string;
+  private summaryScheduled = false;
+  private summarized = false;
   constructor(readonly connectionId: string, private readonly transport: "ws" | "local" | "tcp") {}
   ping(): void { this.lastPing = Date.now(); this.pingCount++; }
   pong(): void { this.lastPong = Date.now(); this.pongCount++; }
@@ -59,6 +66,16 @@ export class ConnectionDiagnostics {
   log(event: Event, fields: { cause?: DiagnosticCause; code?: string; closeCode?: number; reason?: "empty" | "omitted";
     upstreamConnectionId?: string } = {}): void {
     try {
+      if (fields.code && (!this.code || this.code === "unknown")) this.code = diagnosticCode({ code: fields.code });
+      if (typeof fields.closeCode === "number" && Number.isInteger(fields.closeCode) && fields.closeCode >= 0 && fields.closeCode <= 4999) this.closeCode = fields.closeCode;
+      if (diagnosticUUID(fields.upstreamConnectionId)) this.upstreamConnectionId = fields.upstreamConnectionId;
+      if (event === "close" && !this.summaryScheduled && !this.summarized) {
+        this.summaryScheduled = true;
+        // Stream/socket close and handler cleanup often arrive in the same turn.
+        // Coalesce them, retaining the first cause and the eventual WS close code.
+        setImmediate(() => this.summary());
+      }
+      if (!this.debug) return;
       const now = Date.now();
       console.error(JSON.stringify({ type: "connection_diagnostic", timestamp: new Date(now).toISOString(), pid: process.pid,
         connectionId: this.connectionId, transport: this.transport, event, firstCause: this.firstCause, firstSource: this.firstSource,
@@ -72,6 +89,22 @@ export class ConnectionDiagnostics {
           ? { closeCode: fields.closeCode } : {}),
         ...(["empty", "omitted"].includes(fields.reason ?? "") ? { reason: fields.reason } : {}),
         ...(diagnosticUUID(fields.upstreamConnectionId) ? { upstreamConnectionId: fields.upstreamConnectionId } : {}) }));
+    } catch { /* Logging must not affect teardown. */ }
+  }
+
+  private summary(): void {
+    if (this.summarized) return;
+    this.summarized = true;
+    // Ordinary HTTP connections are not Pi attachments.
+    if (this.transport === "tcp" && !this.firstCause && !this.code) return;
+    try {
+      const now = Date.now();
+      console.error(JSON.stringify({ type: "connection_summary", timestamp: new Date(now).toISOString(), pid: process.pid,
+        connectionId: this.connectionId, transport: this.transport, cause: this.firstCause ?? "stream_close",
+        source: this.firstSource ?? "observed", durationMs: now - this.openedAt,
+        ...(this.code ? { code: this.code } : {}), ...(this.closeCode === undefined ? {} : { closeCode: this.closeCode }),
+        ...(this.lastPong === null ? {} : { lastPongAgeMs: Math.max(0, now - this.lastPong) }),
+        ...(this.upstreamConnectionId ? { upstreamConnectionId: this.upstreamConnectionId } : {}) }));
     } catch { /* Logging must not affect teardown. */ }
   }
 }

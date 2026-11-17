@@ -119,8 +119,8 @@ export class SessionCatalog {
 
   list(): CatalogSession[] { return this.listSessions(true); }
 
-  listSummaries(): Pick<CatalogSession, "id" | "cwd" | "name">[] {
-    return this.listSessions(false).map(({ id, cwd, name }) => ({ id, cwd, name }));
+  listSummaries(): Pick<CatalogSession, "id" | "cwd" | "name" | "lastFailure">[] {
+    return this.listSessions(false).map(({ id, cwd, name, lastFailure }) => ({ id, cwd, name, lastFailure }));
   }
 
   private listSessions(loadQueue: boolean): CatalogSession[] {
@@ -246,11 +246,21 @@ export class SessionCatalog {
     });
   }
 
-  async releaseOwnership(id: string, reason?: CatalogSession["stopReason"]): Promise<void> {
+  async recordFailure(id: string, failure: NonNullable<CatalogSession["lastFailure"]>): Promise<void> {
+    await this.change(() => {
+      const session = this.get(id);
+      if (session.ownerEpoch !== undefined && session.ownerEpoch !== this.epoch) throw new Error("Session ownership changed before recording its failure");
+      session.lastFailure = structuredClone(failure);
+      this.updateSession(session);
+    });
+  }
+
+  async releaseOwnership(id: string, reason?: CatalogSession["stopReason"], failure?: CatalogSession["lastFailure"]): Promise<void> {
     await this.change(() => {
       const session = this.get(id);
       if (session.ownerEpoch !== this.epoch) throw new Error("Session ownership changed before recording its exit");
       if (session.stopReason !== "user") session.stopReason = reason;
+      if (failure) session.lastFailure = structuredClone(failure);
       delete session.ownerEpoch;
       this.updateSession(session);
     });

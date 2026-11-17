@@ -135,6 +135,10 @@ local function flush_cache(host)
 end
 local function cache(host, rows)
 	host.rows, host.cache_dirty, host.pins_dirty = rows, true, true
+	for _, row in ipairs(rows) do
+		require("pi-integration.logs").worker_failure(host.host_id, host.alias, row.id, row.lastFailure,
+			row.live and row.live.phase)
+	end
 	flush_cache(host)
 end
 local function stop(host)
@@ -195,7 +199,8 @@ local function connect(host)
 		elseif record.type == "disconnected" then
 			require("pi-integration.logs").add(vim.log.levels.WARN, "Discovery disconnected: " .. tostring(record.message),
 				{ host = host_label(host), host_id = host.host_id, code = record.code,
-					connection_id = record.connectionId or host.hello and host.hello.connectionId })
+					connection_id = record.connectionId or host.hello and host.hello.connectionId },
+				{ host = host.host_id or host.key, host_label = host.alias })
 			host.error, host.attempts = record.message, (host.attempts or 0) + 1
 			host.retry_at = vim.uv.now() + math.min(30000, 1000 * 2 ^ math.min(host.attempts - 1, 5))
 			stop(host)

@@ -7,6 +7,7 @@ import { object } from "./pi-records.js";
 import { CommandError, validPromptText, type CommandReceipt, type StoredCommand } from "./session-commands.js";
 import { validQueueItem, type AcceptedQueueItem } from "./session-queue.js";
 import { validEffectiveTitle } from "./session-rename.js";
+import type { WorkerFailure } from "./worker-diagnostics.js";
 
 export type Channel = "stable" | "dev";
 export type CatalogSession = {
@@ -22,6 +23,8 @@ export type CatalogSession = {
   provisional?: true;
   lifecycleRevision?: number;
   stopReason?: "user" | "service_shutdown" | "error";
+  /** Last failure survives reopening so diagnostics are not lost with the worker. */
+  lastFailure?: WorkerFailure;
   ownerEpoch?: string;
   acceptedQueue?: AcceptedQueueItem[];
 };

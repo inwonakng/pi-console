@@ -30,6 +30,7 @@ import { readHostOptions, OptionsHelperUnresolved, type HostOptions } from "./ho
 import { isNative, nativeCommand, readCommand, validRead, type NativeOperation } from "./session-operations.js";
 import { isBundled, BASH_TRANSITION_COMMAND, type BashTransitionPayload, BUNDLED_SOURCES, OPERATION_RESULT, operationCommand, operationResult, type BundledOperation, type OperationResult } from "./session-bundled.js";
 import { bashOperation } from "./session-bash.js";
+import { workerFailure, logWorkerFailure, type WorkerFailure } from "./worker-diagnostics.js";
 
 type TrustStatus = { state: "pending" | "ready" | "restart" | "error"; cwd: string; sessionFile: string; error?: string };
 type WorkspaceStatus = { cwd: string; sessionFile: string; transitionPending: boolean; transitionError?: string; [key: string]: unknown };
@@ -73,6 +74,7 @@ export type OwnedSessionState = SessionActivity & {
   interactions: InteractionSnapshot;
   controller?: Controller;
   error?: string;
+  lastFailure?: WorkerFailure;
   exit?: PiExit;
   startupTimings?: { validationMs: number; workerMs: number; historyMs: number;
     rpcReadyMs: number; commandDiscoveryMs: number; historyCapabilityMs: number; trustMs: number; workspaceMs: number };
@@ -87,7 +89,7 @@ export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevi
   accessMode?: string; integrationMode?: string; notificationsEnabled: boolean; cwd: string; project?: string;
 };
 export type HostSummaries = {
-  sessions: (Pick<CatalogSession, "id" | "cwd" | "name"> & { live?: OwnedSessionSummary })[];
+  sessions: (Pick<CatalogSession, "id" | "cwd" | "name" | "lastFailure"> & { live?: OwnedSessionSummary })[];
   hostId: string;
   channel: Channel;
   serviceEpoch: string;
@@ -180,9 +182,9 @@ export class HostOwner {
 
   /** Owner-local display projection only; never subscribes to workers or other hosts. */
   summaries(): HostSummaries {
-    return { sessions: this.catalog.listSummaries().map(({ id, cwd, name }) => {
+    return { sessions: this.catalog.listSummaries().map(({ id, cwd, name, lastFailure }) => {
       const session = this.lookup(id);
-      return { id, cwd, name: session?.name || name, ...(session ? { live: session.summary() } : {}) };
+      return { id, cwd, name: session?.name || name, ...(lastFailure ? { lastFailure } : {}), ...(session ? { live: session.summary() } : {}) };
     }), hostId: this.hostId, channel: this.options.channel, serviceEpoch: this.serviceEpoch };
   }
 
@@ -1836,7 +1838,8 @@ export class OwnedSession {
       ...this.activity(interactions.pending.some((item) => !item.submitted)), sessionId: this.id, serviceEpoch: this.catalog.epoch, runtimeRevision: this.runtimeRevision,
       phase: this.phase, provisional: this.catalog.get(this.id).provisional === true,
       trust: this.trust, workspace: this.workspace, piState: this.conversation.sessionState,
-      controller: this.control.snapshot(), error: this.error?.message, exit: this.exit, startupTimings: this.startupTimings,
+      controller: this.control.snapshot(), error: this.error?.message, lastFailure: this.catalog.get(this.id).lastFailure,
+      exit: this.exit, startupTimings: this.startupTimings,
     }), interactions };
   }
 
@@ -2238,6 +2241,10 @@ export class OwnedSession {
     } catch (error) {
       if (!this.stopRequested) this.error ??= asError(error);
     } finally {
+      let failure: WorkerFailure | undefined;
+      let persisted = false;
+      const describeFailure = () => workerFailure(this.error, { serviceEpoch: this.catalog.epoch,
+        runtimeRevision: this.runtimeRevision, phase: this.phase }, this.exit);
       try {
         if (this.worker) {
           this.exit = await this.worker.stop();
@@ -2252,10 +2259,27 @@ export class OwnedSession {
         await Promise.allSettled([...this.commands]);
         await this.admission;
         await this.interruptQueue("session_stopped", "Session stopped; review accepted work before explicitly editing/resubmitting");
-        if (owned) await this.catalog.releaseOwnership(this.id, this.error ? "error" : this.serviceStopping ? "service_shutdown" : undefined);
+        if (this.error) failure = describeFailure();
+        if (owned) {
+          await this.catalog.releaseOwnership(this.id, this.error ? "error" : this.serviceStopping ? "service_shutdown" : undefined, failure);
+          persisted = !!failure;
+        }
       } catch (error) {
+        const original = failure ?? (this.error ? describeFailure() : undefined);
         this.cleanupError = asError(error);
         this.error = new Error("Session ownership cleanup failed; recovery is required", { cause: error });
+        const cleanup = describeFailure();
+        cleanup.cleanupRequired = true;
+        if (original) cleanup.message = `${cleanup.message}; original failure: ${original.message}`.slice(0, 1024);
+        failure = cleanup;
+      }
+      if (this.error) {
+        failure ??= describeFailure();
+        if (!persisted) {
+          try { await this.catalog.recordFailure(this.id, failure); persisted = true; }
+          catch { /* A fenced catalog cannot persist; the service log still records the failure. */ }
+        }
+        logWorkerFailure(this.catalog.hostId, this.id, failure, persisted);
       }
       this.control.revoke();
       this.preview = undefined;

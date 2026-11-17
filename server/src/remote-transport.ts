@@ -119,7 +119,11 @@ export class RemoteListener {
       socket.setTimeout(15000, () => {
         (this.sockets.get(socket) ?? diagnostics).action("destroy", "tcp_idle_timeout"); socket.destroy();
       });
-      this.sockets.set(socket, diagnostics); socket.once("close", () => this.sockets.delete(socket));
+      this.sockets.set(socket, diagnostics);
+      socket.once("close", () => {
+        (this.sockets.get(socket) ?? diagnostics).log("close");
+        this.sockets.delete(socket);
+      });
     });
     this.server.on("upgrade", (request, socket, head) => {
       // Non-browser clients retain trusted-network access. Browser clients must
