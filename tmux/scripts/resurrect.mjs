@@ -25,7 +25,7 @@ function install(root) {
         tmux(["set-option", "-g", fallbackOption, current]);
     }
     const helper = path.join(root, "tmux", "scripts", "resurrect.mjs");
-    const command = `${quote(process.execPath)} ${quote(helper)} --save ${quote(socket)}`;
+    const command = `node ${quote(helper)} --save ${quote(socket)}`;
     tmux(["set-option", "-g", hookOption, command]);
     tmux(["set-option", "-g", installedOption, command]);
     const processes = option("@resurrect-processes");

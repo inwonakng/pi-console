@@ -2,6 +2,8 @@
 // Enter is a blocking tmux binding: place its trigger behind earlier PTY input,
 // then deliver its exact client context while that trigger awaits the RPC.
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const [action, socket, pane, name, clientPid] = process.argv.slice(2);
@@ -30,7 +32,12 @@ function install() {
         tmux(["set-option", "-g", "@pi_console_enter_fallback", fallback]);
     }
     const fallback = tmux(["show-options", "-gqv", "@pi_console_enter_fallback"]) || "send-keys Enter";
-    const helper = `${shellQuote(process.execPath)} ${shellQuote(fileURLToPath(import.meta.url))}`;
+    let root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+    // Neovim invokes this from its resolved snapshot; saved bindings must follow updates.
+    if (path.basename(path.dirname(root)) === "versions" && existsSync(path.join(root, ".pi-console-install"))) {
+        root = path.join(path.dirname(root), "..", "current");
+    }
+    const helper = `node ${shellQuote(path.join(root, "tmux/scripts/client-enter.mjs"))}`;
     const command = `${helper} --enter #{q:socket_path} #{q:pane_id} #{q:client_name} #{q:client_pid}`;
     tmux(["bind-key", "-T", "root", "Enter", "if-shell", "-F", `#{!=:#{${option}},}`, "run-shell " + shellQuote(command), fallback]);
     tmux(["set-option", "-g", "@pi_console_enter_binding", tmux(["list-keys", "-T", "root", "Enter"])]);
