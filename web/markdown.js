@@ -28,7 +28,7 @@ function codeBlock(value) {
     clearTimeout(resetTimer);
     button.disabled = true;
     try {
-      await navigator.clipboard.writeText(value);
+      await navigator.clipboard.writeText(button.closest(".code-block").querySelector("pre code").textContent);
       button.textContent = "Copied";
     } catch {
       button.textContent = "Copy failed";

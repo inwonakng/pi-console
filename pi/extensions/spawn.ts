@@ -477,8 +477,9 @@ function parseIsolationMode(value: unknown, accessMode: AccessMode): IsolationMo
 function isDirectory(path: string): boolean {
   try {
     return statSync(path).isDirectory();
-  } catch {
-    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new Error(`Could not inspect subagent profile directory ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -499,15 +500,12 @@ function findNearestProjectAgentsDir(cwd: string): string | undefined {
 }
 
 function loadSubagentProfilesFromDir(dir: string, source: SubagentProfile["source"]): SubagentProfile[] {
-  if (!existsSync(dir)) {
-    return [];
-  }
-
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw new Error(`Could not read subagent profile directory ${dir}: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   const profiles: SubagentProfile[] = [];
@@ -520,8 +518,8 @@ function loadSubagentProfilesFromDir(dir: string, source: SubagentProfile["sourc
     let content: string;
     try {
       content = readFileSync(filePath, "utf8");
-    } catch {
-      continue;
+    } catch (error) {
+      throw new Error(`Could not read subagent profile ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);

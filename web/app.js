@@ -1602,7 +1602,9 @@ function createConversation(host, row) {
     if (element.hidden || $("chat-screen").hidden) return;
     const conversation = snapshot.conversation;
     const live = Boolean(host.connected && row.live && connected);
-    const key = JSON.stringify([conversation, live]);
+    const revisions = snapshot.conversationRevisions;
+    const key = JSON.stringify([snapshot.sessionId, snapshot.serviceEpoch, snapshot.runtimeRevision,
+      revisions.history, revisions.tools, revisions.activity, live]);
     if (key === transcriptKey) return;
     transcriptKey = key;
     const target = $("transcript"), container = $("messages");
@@ -1615,12 +1617,14 @@ function createConversation(host, row) {
     const diagnostics = conversation.diagnostics || [];
     const diagnosticMessages = items => items.map(item => ({ key: `diagnostic-${item.id}`, message: { role: "error", content: item.message } }));
     const keys = conversation.messageKeys || [];
+    const keyCounts = new Map();
+    for (const key of keys) keyCounts.set(key, (keyCounts.get(key) || 0) + 1);
     const toolAnchors = new Map();
     const history = diagnosticMessages(diagnostics.filter(item => item.assistantTimestamp == null
       && item.afterMessage == null && !conversation.omittedMessages));
     conversation.messages.forEach((message, index) => {
       const anchor = keys[index];
-      const unique = anchor && keys.indexOf(anchor) === keys.lastIndexOf(anchor);
+      const unique = anchor && keyCounts.get(anchor) === 1;
       if (message.role === "assistant" && Array.isArray(message.content)) {
         for (const block of message.content) {
           if (block.type === "toolCall") toolAnchors.set(block.id, anchor);
