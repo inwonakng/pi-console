@@ -149,7 +149,7 @@ export function beginEpoch(path, epoch, ownership) {
   } finally { db.close(); }
 }
 
-/** Caller holds the owner lease and has established previous-boot evidence. */
+/** Caller holds the owner lease and has established reboot or systemd cleanup. */
 export function interruptEpoch(path, epoch, evidence) {
   const db = registry(path);
   try { transaction(db, () => {

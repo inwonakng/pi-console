@@ -44,7 +44,7 @@ export class SessionCatalog {
   /** Explicit administration only; no worker starts or command replay. */
   static reconcile(options: RecoveryOptions): Promise<void> { return reconcileService(options); }
 
-  static async open(options: { root: string; channel: Channel; appRoot: string }): Promise<SessionCatalog> {
+  static async open(options: { root: string; channel: Channel; appRoot: string; systemdUnit?: string }): Promise<SessionCatalog> {
     if (options.channel !== "stable" && options.channel !== "dev") throw new Error("Unknown service channel");
     if (!isAbsolute(options.root) || !isAbsolute(options.appRoot)) throw new Error("Service roots must be absolute host paths");
     await privateDirectory(options.root);
@@ -71,7 +71,7 @@ export class SessionCatalog {
     let retainClaim = false;
     let catalog: SessionCatalog | undefined;
     try {
-      const claim = JSON.stringify({ schemaVersion: 3, epoch, appRoot: await realpath(options.appRoot) }) + "\n";
+      const claim = JSON.stringify({ schemaVersion: 3, epoch, appRoot: await realpath(options.appRoot), systemdUnit: options.systemdUnit }) + "\n";
       await lock.writeFile(claim);
       await lock.sync();
       await syncDirectory(root);

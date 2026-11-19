@@ -118,6 +118,7 @@ export type HostOwnerOptions = {
   binary: string;
   appRoot: string;
   environment?: NodeJS.ProcessEnv;
+  systemdUnit?: string;
   provider?: string;
   model?: string;
 };

@@ -99,28 +99,29 @@ and opening listeners; it does not resume saved sessions. Redirected output and
 automatic frontend startup omit progress. Failures identify the pending step before
 the error details. These messages are CLI output, not conversation transcript entries.
 
-After owner death, interactive `server start` and `server restart` offer to
-reconcile interrupted ownership before starting. Recovery requires an explicit
-`y` or `yes`; declining leaves ownership unchanged. Non-interactive commands
-refuse recovery and show the explicit `server reconcile` command instead.
-Reconciliation still refuses live/unresolved workers and foreign ownership;
-confirmation does not bypass those checks. Saved sessions remain stopped until
+Linux systemd services recover interrupted ownership automatically at startup,
+after systemd has cleaned up the previous service's cgroup. Other launch modes
+retain explicit recovery: interactive `server start` and `server restart` ask for
+`y` or `yes`; non-interactive commands show `server reconcile` instead.
+Recovery still refuses foreign ownership and live/unresolved work without
+systemd-cleanup or previous-boot evidence. Saved sessions remain stopped until
 `server resume --session ID`; commands, queues and approvals are never replayed.
 Do not delete `owner.lock`: errors include its path and the recovery command.
 If it was already removed, reconciliation can
 recover the installation/epoch identity retained in `processes.sqlite` and find
 orphaned session ownership in the catalog.
 
-New Linux epochs record machine and kernel boot IDs. Explicit reconciliation can
-therefore distinguish a previous boot's interrupted local jobs from potentially
-live same-boot workers. It records those jobs as `interrupted`, preserves their
+New Linux epochs record machine and kernel boot IDs, and supervised epochs also
+record their systemd unit. Recovery can distinguish previous-boot jobs and work
+cleaned up by the same systemd service from potentially live unsupervised workers. It records those jobs as `interrupted`, preserves their
 results and original statuses as recovery evidence, and releases sessions without
-claiming that commands succeeded. Same-boot live/unresolved work still refuses
-replacement. A profile copied from another machine is not proof of worker death.
+claiming that commands succeeded. Same-boot live/unresolved work outside the
+supervised cleanup policy still refuses replacement. A profile copied from another machine is not proof of worker death.
 
 Recovery requires durable service identity. Unresolved jobs without usable boot
-evidence refuse replacement; there is no manual reboot override or identity
-reconstruction. Recovery remains explicit even after a reboot. Possible unknown
+or systemd-cleanup evidence refuse replacement; there is no manual override or
+identity reconstruction. Upgrading an old Linux service definition happens on
+its next managed start/enable; use a guarded restart to apply it to a live service. Possible unknown
 escaped or externally handed-off work is outside local cleanup guarantees.
 
 **One-time upgrade from execution registry schema 1:** stop the service successfully
@@ -142,8 +143,11 @@ state and current-invocation journal excerpt rather than waiting for the readine
 timeout. macOS startup detects a new launchd invocation exiting and reports its exit
 status with the new launch's log excerpt; an older invocation's status is ignored.
 Detached startup errors also include only the new launch's log excerpt.
-Neither policy automatically restarts after exit/crash: retained claims
-must be inspected, never automatically reconciled. `stop` leaves startup enabled;
+Linux services use `Restart=on-failure` with a 5-second delay. `KillMode=mixed`
+gives the server a graceful shutdown opportunity, then kills remaining cgroup
+processes when the server exits or the 30-second stop deadline expires. Startup
+reconciles interrupted records without resuming work. macOS and detached launches
+retain explicit crash recovery. `stop` leaves startup enabled;
 `disable` performs guarded IPC shutdown before unregistering startup. Normal
 stop/restart/disable refuses work at the owner's execution boundary, not from a
 previous status snapshot. `--force` is intentional authorization to interrupt
@@ -153,7 +157,7 @@ an explicit retry. Idle sessions are stopped and saved, not resumed on restart.
 Neovim Hosts (`<leader>ph`) and the web Hosts panel offer a confirmed Restart
 server action for local or connected hosts. `service.restart` accepts only the
 current host ID/epoch, a request ID, explicit confirmation and a force boolean.
-A detached coordinator uses the same guarded management path as the CLI, selects
+A coordinator uses the same guarded management path as the CLI, selects
 the target installation's current build and records its outcome in private
 `service-restart.json`. `service.restart.status` reads the original request
 (`serviceEpoch`/`id`), or the latest durable outcome with an empty payload.
@@ -168,8 +172,9 @@ under the same trusted-network restrictions as session control. `service.stop`
 remains local-only. In-epoch request IDs are deduplicated (128 attempts per owner);
 only the latest durable restart outcome is retained across owners. An unresolved
 accepted outcome blocks another frontend restart; it is never treated
-as permission to replay or reconcile. The coordinator detaches its IPC before
-shutdown and requires the existing systemd `KillMode=process` policy.
+as permission to replay or reconcile. Under Linux systemd, the coordinator runs
+in a separate transient service so main-service cgroup cleanup cannot kill it.
+Other launch modes retain the detached IPC handoff.
 
 ```sh
 pi-console server enable
@@ -678,12 +683,13 @@ in `plans/server-mode.md` intentionally accepts unknown escaped descendants.
   their own cleanup/publication. TERM begins after 2s, KILL after 5s; unresolved
   local work is reported after 8s, nested evidence after at most 12s (plus bounded
   process-table work). These are shutdown policies, not generation deadlines.
-- `HostOwner.reconcile({root, channel, appRoot})` is explicit
-  administration, serialized with other management commands. It takes the old
-  owner's kernel lifetime lease, validates installation identities, seals epochs,
-  cancels ungranted intents and waits for known jobs. Live/unresolved same-boot jobs
-  refuse replacement. Previous-boot evidence accounts for interrupted local work
-  without inventing successful results.
+- `HostOwner.reconcile({root, channel, appRoot})` is explicit administration,
+  serialized with other management commands. Linux systemd startup also invokes
+  recovery, using the lifetime lease without reacquiring the CLI's management
+  lock. Both paths validate installation identities and seal old epochs.
+  Previous-boot evidence or cleanup by the same systemd unit accounts for
+  interrupted work without inventing successful results. Other live/unresolved
+  same-boot jobs refuse replacement.
   PID files, closed pipes and empty groups are never recovery authority.
 - Registry schema 2 stores durable epoch claim/installation, boot and interruption
   evidence. Only this format is supported; there is no execution-registry migration.

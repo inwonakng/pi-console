@@ -19,7 +19,7 @@ export class ServiceRecoveryRequired extends Error {
     super(`${reason}\nRun explicit recovery: ${reconcileCommand(channel, root)}\nDo not delete ownership files. No recovery was attempted.`);
   }
 }
-/** Shared CLI/frontend lifecycle path. Never reconciles or removes retained claims. */
+/** Shared CLI/frontend lifecycle path. Supervised Linux startup handles crash recovery. */
 export async function manageService(action: ManagementAction, options: HostOwnerOptions & { root: string }, config: {
   force: boolean; port?: number; supervisorDirectory?: string; path?: string; expectedEpoch?: string;
   progress?: (step: string) => void;
@@ -45,6 +45,7 @@ export async function manageService(action: ManagementAction, options: HostOwner
       throw error;
     }
   };
+  let supervisor: ServiceSupervisor | undefined;
   const requireNoClaim = async (): Promise<void> => {
     progress?.("Checking that previous service ownership is released");
     const claimPath = join(root, "owner.lock");
@@ -54,7 +55,9 @@ export async function manageService(action: ManagementAction, options: HostOwner
     const reason = claimPresent ? `Service owner lock remains without a reachable service: ${claimPath}.`
       : (await catalogOwnerEpochs(root, channel)).length || unreconciledEpochs(join(root, "processes.sqlite")).length
         ? "Catalog or process registry retains ownership from an interrupted service, even though owner.lock is missing." : undefined;
-    if (reason) throw new ServiceRecoveryRequired(reason, channel, root);
+    if (reason && !(supervisor?.config.platform === "linux" && ["start", "restart", "enable"].includes(action))) {
+      throw new ServiceRecoveryRequired(reason, channel, root);
+    }
   };
   const privateLog = async () => {
     const file = await open(join(root, "service.log"), constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
@@ -70,7 +73,7 @@ export async function manageService(action: ManagementAction, options: HostOwner
   const unlock = await managementLock(root);
   try {
     progress?.("Checking supervisor registration and current server");
-    let supervisor = await ServiceSupervisor.load(root, channel, options.appRoot, supervisorDirectory);
+    supervisor = await ServiceSupervisor.load(root, channel, options.appRoot, supervisorDirectory);
     if (supervisor) await supervisor.loaded();
     const existing = await connect();
     if (expectedEpoch && (!existing || existing.hello.serviceEpoch !== expectedEpoch)) {

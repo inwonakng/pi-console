@@ -14,13 +14,14 @@ async function optionalJson(path: string): Promise<unknown> {
   try { return await privateJson(path, 64 * 1024); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 }
-function claimValue(text: string, epoch?: string): { epoch: string; appRoot: string } {
+function claimValue(text: string, epoch?: string): { epoch: string; appRoot: string; systemdUnit?: string } {
   const value: unknown = JSON.parse(text);
   if (!object(value) || value.schemaVersion !== 3 || typeof value.epoch !== "string"
-    || epoch !== undefined && value.epoch !== epoch || typeof value.appRoot !== "string" || !isAbsolute(value.appRoot)) {
+    || epoch !== undefined && value.epoch !== epoch || typeof value.appRoot !== "string" || !isAbsolute(value.appRoot)
+    || value.systemdUnit !== undefined && typeof value.systemdUnit !== "string") {
     throw new Error("Invalid service claim; manual inspection required");
   }
-  return { epoch: value.epoch, appRoot: value.appRoot };
+  return { epoch: value.epoch, appRoot: value.appRoot, systemdUnit: value.systemdUnit as string | undefined };
 }
 function bootValue(text: string | null): BootIdentity | undefined {
   if (!text) return;
@@ -31,12 +32,14 @@ function bootValue(text: string | null): BootIdentity | undefined {
   return { machineId: value.machineId, bootId: value.bootId };
 }
 
-/** Explicit administration only. Neither startup nor resume invokes recovery. */
-export async function reconcileService(options: RecoveryOptions): Promise<void> {
+/** Supervised startup already has cgroup cleanup; other recovery remains explicit. */
+export async function reconcileService(options: RecoveryOptions, systemdUnit?: string): Promise<void> {
   const root = await realpath(options.root);
   await privateDirectory(root);
   const owner = await managementIdentity(options.appRoot, options.channel);
-  const unlock = await managementLock(root);
+  // The CLI may hold the management lock while waiting for this service to start.
+  // Supervised startup uses the lifetime lease without reacquiring that lock.
+  const unlock = systemdUnit ? undefined : await managementLock(root);
   try {
     const lifetime = ownerLease(root); // Must precede discovery and all recovery mutations.
     try {
@@ -68,21 +71,25 @@ export async function reconcileService(options: RecoveryOptions): Promise<void> 
           const text = row.claim;
           if (onDisk !== undefined && onDisk !== text) throw new Error(`Service claim differs from durable epoch ${epoch}; leaving data unchanged`);
           if (row.owner !== owner) throw new Error(`Epoch ${epoch} belongs to another installation/checkout (${row.owner}); refusing recovery from ${owner}`);
-          claimValue(text, epoch);
+          const identity = claimValue(text, epoch);
           if (typeof archived === "string" && archived !== text) throw new Error(`Conflicting recovery claim evidence for ${epoch}`);
           const boot = bootValue(typeof row.boot === "string" ? row.boot : null);
           if (boot && currentBoot && boot.machineId !== currentBoot.machineId) throw new Error(`Epoch ${epoch} belongs to another host; local reboot recovery is not evidence of its worker termination`);
-          return { epoch, text, boot };
+          return { epoch, text, boot, systemdUnit: identity.systemdUnit };
         });
         // Archive exact durable claim bytes before changing catalog ownership or
         // retiring the file. The registry is authoritative if owner.lock is missing.
         for (const target of targets) evidence.prepare("INSERT OR IGNORE INTO recoveries VALUES(?,?)").run(target.epoch, target.text);
-        for (const { epoch, boot } of targets) {
+        for (const { epoch, boot, systemdUnit: previousUnit } of targets) {
           sealEpoch(processes, epoch);
           const deadline = performance.now() + 10000;
           for (;;) {
             const pending = inspectEpoch(processes, epoch).filter((job) => !terminal.has(job.status));
             if (!pending.length) break;
+            if (systemdUnit && previousUnit === systemdUnit) {
+              interruptEpoch(processes, epoch, { basis: "systemd_cleanup", unit: systemdUnit, time: new Date().toISOString() });
+              break;
+            }
             if (boot && currentBoot && boot.bootId !== currentBoot.bootId) {
               interruptEpoch(processes, epoch, {
                 basis: "previous_boot", recordedBoot: boot, currentBoot, time: new Date().toISOString(),
@@ -115,5 +122,5 @@ export async function reconcileService(options: RecoveryOptions): Promise<void> 
         if (claimText !== undefined) { await unlink(path); await syncDirectory(root); }
       } finally { evidence.close(); }
     } finally { lifetime.close(); }
-  } finally { await unlock(); }
+  } finally { await unlock?.(); }
 }

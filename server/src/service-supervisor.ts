@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -19,14 +19,17 @@ const xml = (s: string): string => s.replaceAll("&", "&amp;").replaceAll("<", "&
 // systemd specifiers and environment expansion must remain literal, including in paths.
 const unitValue = (s: string): string => '"' + s.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%") + '"';
 const unitArg = (s: string): string => unitValue(s.replaceAll("$", "$$"));
-function definition(config: Startup): string {
+function definition(config: Startup, legacy = false): string {
   const argv = ["/usr/bin/env", "-i", ...Object.entries(config.environment).map(([key, value]) => `${key}=${value}`),
     config.node, join(config.application, "server/dist/cli.js"), "run", ...config.args];
   if (config.platform === "linux") {
     // WorkingDirectory is a raw path, not a quoted command argument. The trailing
     // slash preserves literal trailing whitespace/backslashes in the INI value.
     const workingDirectory = homedir().replaceAll("%", "%%") + "/";
-    return `[Unit]\nDescription=pi-console ${config.channel} (${config.root.replaceAll("%", "%%")})\n\n[Service]\nType=exec\nExecStart=${argv.map(unitArg).join(" ")}\nWorkingDirectory=${workingDirectory}\nRestart=no\nKillMode=process\nTimeoutStopSec=infinity\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
+    if (!legacy) argv.push("--systemd");
+    const policy = legacy ? "Restart=no\nKillMode=process\nTimeoutStopSec=infinity"
+      : "Restart=on-failure\nRestartSec=5s\nKillMode=mixed\nTimeoutStopSec=30s";
+    return `[Unit]\nDescription=pi-console ${config.channel} (${config.root.replaceAll("%", "%%")})\n\n[Service]\nType=exec\nExecStart=${argv.map(unitArg).join(" ")}\nWorkingDirectory=${workingDirectory}\n${policy}\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
   }
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${xml(config.label)}</string>\n<key>ProgramArguments</key><array>${argv.map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>\n<key>WorkingDirectory</key><string>${xml(homedir())}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><false/>\n<key>StandardOutPath</key><string>${xml(join(config.root, "service.log"))}</string>\n<key>StandardErrorPath</key><string>${xml(join(config.root, "service.log"))}</string>\n</dict></plist>\n`;
 }
@@ -34,7 +37,7 @@ const definitionPath = (config: Startup): string => join(config.directory, confi
 const domain = (): string => `gui/${process.getuid!()}`;
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === "ENOENT";
 
-async function systemctl(args: string[]): Promise<{ stdout: string; stderr: string }> {
+async function systemdEnvironment(): Promise<NodeJS.ProcessEnv> {
   const env = { ...process.env };
   // Supervised servers use env -i; older registrations may have no bus context.
   // Discover it only for this command, without changing the saved environment.
@@ -53,12 +56,15 @@ async function systemctl(args: string[]): Promise<{ stdout: string; stderr: stri
     env.XDG_RUNTIME_DIR = runtimeDirectory;
     delete env.DBUS_SESSION_BUS_ADDRESS; // Treat an empty address as unset.
   }
-  return exec("systemctl", ["--user", ...args], { env });
+  return env;
+}
+async function systemctl(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return exec("systemctl", ["--user", ...args], { env: await systemdEnvironment() });
 }
 
 // Management holds the profile lock. Publish complete files only; a temporary
 // file left by interruption is never a registration or a startup definition.
-async function publish(path: string, text: string): Promise<void> {
+async function publish(path: string, text: string, replace = false): Promise<void> {
   const temporary = join(dirname(path), `.pi-console-startup-${randomUUID()}.tmp`);
   try {
     const file = await open(temporary, "wx", 0o600);
@@ -66,6 +72,11 @@ async function publish(path: string, text: string): Promise<void> {
     try { await lstat(path); }
     catch (error) {
       if (!missing(error)) throw error;
+      await rename(temporary, path);
+      await syncDirectory(dirname(path));
+      return;
+    }
+    if (replace) {
       await rename(temporary, path);
       await syncDirectory(dirname(path));
       return;
@@ -154,7 +165,10 @@ export class ServiceSupervisor {
     return supervisor;
   }
   private async ensureDefinition(): Promise<void> {
-    if (!await this.assertDefinition(true)) await publish(definitionPath(this.config), definition(this.config));
+    const present = await this.assertDefinition(true);
+    if (!present || await readFile(definitionPath(this.config), "utf8") !== definition(this.config)) {
+      await publish(definitionPath(this.config), definition(this.config), present);
+    }
   }
   private async assertDefinition(allowMissing = false): Promise<boolean> {
     const path = definitionPath(this.config);
@@ -163,8 +177,11 @@ export class ServiceSupervisor {
     catch (error) { if (allowMissing && missing(error)) return false; throw error; }
     try {
       const stat = await file.stat();
+      const text = await file.readFile("utf8");
       if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || stat.mode & 0o022
-        || await file.readFile("utf8") !== definition(this.config)) throw new Error(`Supervisor definition was changed or is unowned; refusing: ${path}`);
+        || text !== definition(this.config) && !(this.config.platform === "linux" && text === definition(this.config, true))) {
+        throw new Error(`Supervisor definition was changed or is unowned; refusing: ${path}`);
+      }
     } finally { await file.close(); }
     return true;
   }
@@ -208,6 +225,26 @@ export class ServiceSupervisor {
     if (!stdout.trim()) return false;
     if (await this.canonicalDefinition(stdout.trim()) !== await this.canonicalDefinition()) throw new Error("Loaded systemd unit belongs to another definition; refusing management");
     return true;
+  }
+  /** Only the new systemd main process may treat its predecessor's cgroup as cleaned. */
+  async systemdStartupUnit(): Promise<string> {
+    if (this.config.platform !== "linux" || !await this.loaded()) throw new Error("Systemd startup requires the registered Linux service");
+    const unit = `${this.config.label}.service`;
+    const { stdout } = await systemctl(["show", unit, "--property=MainPID,KillMode,SendSIGKILL"]);
+    const fields = new Map(stdout.trim().split("\n").map(line => line.split("=", 2) as [string, string]));
+    if (Number(fields.get("MainPID")) !== process.pid || fields.get("KillMode") !== "mixed" || fields.get("SendSIGKILL") !== "yes") {
+      throw new Error("Automatic recovery requires systemd-owned startup and cgroup cleanup");
+    }
+    return unit;
+  }
+  /** A restart coordinator must outlive cleanup of the service it is replacing. */
+  async startRestartWorker(worker: string, appRoot: string): Promise<void> {
+    const { config } = this;
+    await exec("systemd-run", ["--user", "--collect", "--quiet", "--service-type=exec",
+      "--property=UMask=0077", `--property=WorkingDirectory=${appRoot}`,
+      `--property=StandardOutput=append:${join(config.root, "service.log")}`, "--property=StandardError=inherit",
+      "--", "/usr/bin/env", "-i", ...Object.entries(config.environment).map(([key, value]) => `${key}=${value}`),
+      config.node, worker, config.root, config.channel, appRoot], { env: await systemdEnvironment() });
   }
   private async running(): Promise<boolean> {
     if (!await this.loaded()) return false;

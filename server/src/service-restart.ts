@@ -3,6 +3,8 @@ import { constants } from "node:fs";
 import { open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { ServiceSupervisor } from "./service-supervisor.js";
 import { privateJson, syncDirectory } from "./catalog-storage.js";
 import { identifier } from "./host-commands.js";
 import type { HostOwnerOptions } from "./host-owner.js";
@@ -45,7 +47,7 @@ export async function writeRestart(root: string, receipt: RestartReceipt): Promi
 /** Only the latest outcome crosses epochs; in-epoch IDs remain deduplicated. */
 export class ServiceRestart {
   private readonly receipts = new Map<string, RestartReceipt>();
-  private pending = false;
+  private pending?: string;
   constructor(private readonly options: HostOwnerOptions & { root: string }, private readonly hostId: string,
     private readonly epoch: string) {}
 
@@ -56,6 +58,7 @@ export class ServiceRestart {
 
   async status(epoch: string, id: string): Promise<RestartReceipt | null> {
     const latest = await readRestart(this.options.root);
+    if (latest && latest.id === this.pending && latest.status !== "accepted") this.pending = undefined;
     if (latest?.serviceEpoch === this.epoch && this.receipts.has(latest.id)) this.receipts.set(latest.id, latest);
     if (latest?.id === id && latest.serviceEpoch === epoch && latest.hostId === this.hostId) return latest;
     const saved = this.receipts.get(id);
@@ -75,7 +78,7 @@ export class ServiceRestart {
     if (this.pending) throw new CommandError("session_busy", "A server restart is already pending; inspect its outcome");
     if (this.receipts.size >= 128) throw new CommandError("session_busy", "Restart request limit reached; use the local CLI");
     // Set before the first asynchronous write/spawn so concurrent requests cannot race.
-    this.pending = true;
+    this.pending = payload.id;
     const receipt: RestartReceipt = { id: payload.id, serviceEpoch: this.epoch, hostId: this.hostId,
       force: payload.force, status: "accepted" };
     this.receipts.set(receipt.id, receipt);
@@ -89,10 +92,16 @@ export class ServiceRestart {
       try {
         const stat = await log.stat();
         if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || stat.mode & 0o077) throw new Error("service.log must be private and same-user");
+        if (this.options.systemdUnit) {
+          const supervisor = await ServiceSupervisor.load(this.options.root, this.options.channel, this.options.appRoot);
+          if (!supervisor) throw new Error("Systemd startup registration is missing");
+          await supervisor.startRestartWorker(fileURLToPath(new URL("./service-restart-worker.js", import.meta.url)), this.options.appRoot);
+          return receipt;
+        }
         const child = fork(new URL("./service-restart-worker.js", import.meta.url), [], {
           detached: true, cwd: this.options.appRoot, stdio: ["ignore", log.fd, log.fd, "ipc"],
           env: { ...process.env, ...this.options.environment }, execArgv: [] });
-        child.once("exit", () => { this.pending = false; });
+        child.once("exit", () => { if (this.pending === receipt.id) this.pending = undefined; });
         await new Promise<void>((resolve, reject) => {
           const deadline = setTimeout(() => { child.kill(); reject(new Error("Restart coordinator did not become ready")); }, 10000);
           child.once("error", (error) => { clearTimeout(deadline); reject(error); });
@@ -111,7 +120,7 @@ export class ServiceRestart {
         return receipt;
       } finally { await log.close(); }
     } catch (error) {
-      this.pending = false;
+      if (this.pending === receipt.id) this.pending = undefined;
       receipt.status = "failed";
       receipt.error = { code: error instanceof CommandError ? error.code : "service_error", message: (error instanceof Error ? error.message : "Restart setup failed").slice(0, 4096) };
       // Do not overwrite a previous unresolved request when setup refused it.

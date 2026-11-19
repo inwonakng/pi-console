@@ -12,6 +12,7 @@ import { LocalClient } from "./local-client.js";
 import { runService } from "./local-service.js";
 import { applicationRoot, defaultRoot, managementIdentity, reconcileCommand, requireNode, serviceBuild } from "./service-paths.js";
 import { ServiceSupervisor } from "./service-supervisor.js";
+import { reconcileService } from "./service-recovery.js";
 import type { Channel } from "./session-catalog.js";
 
 process.umask(0o077);
@@ -129,9 +130,11 @@ async function main(): Promise<void> {
   let force = false;
   let json = false;
   let startupBinary: string | undefined;
+  let systemd = false;
   while (args.length) {
     const key = args.shift()!;
     if (key === "--force") { force = true; continue; }
+    if (key === "--systemd" && action === "run" && !systemd) { systemd = true; continue; }
     if (key === "--json" && action === "status" && !json) { json = true; continue; }
     // Existing startup definitions pinned Pi in argv. New definitions use the
     // captured environment; retain run-only decoding so updates still boot.
@@ -167,7 +170,14 @@ async function main(): Promise<void> {
   if (action === "run") {
     await managementIdentity(options.appRoot, channel);
     if (!binary || !isAbsolute(binary)) throw new Error("Pi >=1.3.0 is required to run a local server. Install Pi and make sure pi is available on PATH.");
-    await runService({ ...options, port }); return;
+    let systemdUnit: string | undefined;
+    if (systemd) {
+      const supervisor = await ServiceSupervisor.load(root, channel, options.appRoot);
+      if (!supervisor) throw new Error("Systemd startup registration is missing");
+      systemdUnit = await supervisor.systemdStartupUnit();
+      await reconcileService({ root, channel, appRoot: options.appRoot }, systemdUnit);
+    }
+    await runService({ ...options, port, systemdUnit }); return;
   }
   if (["start", "stop", "restart", "enable", "disable"].includes(action ?? "")) {
     const manage = async () => {
