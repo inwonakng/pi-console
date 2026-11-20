@@ -885,6 +885,13 @@ local function delete_node(ctx)
 	ctx.tree.delete(node.start_id, captured, position)
 end
 
+local function prune_history(ctx)
+	local captured = ctx.state.tree_context
+	if not ctx.tree.can_mutate(captured) then return end
+	close_tree_window(ctx, false)
+	ctx.tree.prune(captured)
+end
+
 local function show_tree(ctx, position, reuse)
 	local state = ctx.state
 	reuse = reuse and state.tree_rendered_query == (state.tree_search_query or "")
@@ -982,6 +989,7 @@ local function show_tree(ctx, position, reuse)
 				"- Connected viewers can browse; mutations require current control and an idle session. Refresh after taking control.",
 				"- History is fetched from the session host; disconnecting closes this view. Offline browsing is unavailable.",
 				"- `d` delete the turn and all descendants; choose whether to undo recorded work.",
+				"- `D` keep only the active branch. File changes and worktrees are left alone.",
 				"- `b` toggle full tree / current branch.",
 				"- `o` cycle entry filters.",
 				"- `/` fuzzy search full turn text; Enter accepts, Esc cancels.",
@@ -1022,6 +1030,9 @@ local function show_tree(ctx, position, reuse)
 	vim.keymap.set("n", "d", function()
 		delete_node(ctx)
 	end, { buffer = state.tree_buf, desc = "Delete Pi tree entry subtree" })
+	vim.keymap.set("n", "D", function()
+		prune_history(ctx)
+	end, { buffer = state.tree_buf, desc = "Keep active branch only" })
 	vim.keymap.set("n", "o", function()
 		local position = selected_tree_position(ctx)
 		position.view = save_tree_view(ctx)

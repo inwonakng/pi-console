@@ -1521,6 +1521,9 @@ export class OwnedSession {
             outcome.result = { changed: true, ...(flight.operation === "history.navigate" ? { contextRevision: flight.resultRevision } : {}),
               ...(result.data.status !== undefined ? { status: result.data.status } : {}),
               ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
+          } else if (flight.operation === "history.prune") {
+            if (typeof result.data?.changed !== "boolean") throw new Error("Missing history prune completion");
+            outcome.result = { changed: result.data.changed };
           } else if (bashOperation(flight.operation)) {
             const bash = result.data?.bash;
             const expected = flight.operation === "bash.list" ? ["bash_job_list"] : flight.operation === "bash.status" ? ["bash_job_status"]
@@ -2901,7 +2904,7 @@ function modeOperation(operation: string): boolean {
 }
 
 function contextOperation(operation: string): boolean {
-  return operation === "history.navigate" || operation === "history.delete" || operation.startsWith("workspace.");
+  return operation === "history.navigate" || operation === "history.delete" || operation === "history.prune" || operation.startsWith("workspace.");
 }
 
 // serviceUi envelopes plain generic confirmation titles. No frontend-specific UI.

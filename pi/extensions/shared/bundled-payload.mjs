@@ -20,7 +20,7 @@ export function validPublicBundled(operation, p) {
         && (p.ignoredFiles === undefined || Array.isArray(p.ignoredFiles) && p.ignoredFiles.length <= 128 && p.ignoredFiles.every((v) => typeof v === "string" && v.length <= 4096));
     case "workspace.undo": case "workspace.revert": return exact(p, ["id", "reason"]) && entry(p.id)
       && typeof p.reason === "string" && !!p.reason.trim() && !p.reason.includes("\0") && Buffer.byteLength(p.reason) <= 8192;
-    case "usage.refresh": case "title.generate": case "side.open": return exact(p, []);
+    case "history.prune": case "usage.refresh": case "title.generate": case "side.open": return exact(p, []);
     case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";
     case "side.reset": return exact(p, ["fromId", "abort"]) && entry(p.fromId) && typeof p.abort === "boolean";
     case "side.select": return exact(p, ["id", "fromId", "abort"]) && entry(p.id) && entry(p.fromId) && typeof p.abort === "boolean";

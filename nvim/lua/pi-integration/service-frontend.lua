@@ -441,12 +441,12 @@ local function command(operation, payload, callback, captured, terminal, submiss
 	if operation ~= "control.acquire" and operation ~= "control.takeover" then envelope.controlToken = grant and grant.token end
 	unresolved[envelope.id] = envelope -- Diagnostic identity only, never replayed.
 	record_command({ id = envelope.id, status = "sending" }, envelope)
-	local history_labels = { ["history.navigate"] = "switching branch", ["history.delete"] = "deleting branch", ["history.clone"] = "cloning history" }
+	local history_labels = { ["history.navigate"] = "switching branch", ["history.delete"] = "deleting branch", ["history.prune"] = "pruning history", ["history.clone"] = "cloning history" }
 	if history_labels[operation] then
 		state.history_operation = { id = envelope.id, label = history_labels[operation] }
 		statusline.update(ctx)
 	end
-	if terminal then outcomes[envelope.id] = { callback = terminal, captured = captured or stamp(), lifecycle = operation == "session.kill", transition = operation == "history.navigate", history_refresh = operation == "history.delete" } end
+	if terminal then outcomes[envelope.id] = { callback = terminal, captured = captured or stamp(), lifecycle = operation == "session.kill", transition = operation == "history.navigate", history_refresh = operation == "history.delete" or operation == "history.prune" } end
 	if feedback_ui.tracks(operation) then
 		local entry = submission and submission.entry
 		local side = operation == "side.prompt" and status_data("pi-side")
@@ -2729,6 +2729,12 @@ tree_ctx.tree = {
 	delete = function(id, captured, position)
 		history_command("history.delete", { entryId = id }, captured, function()
 			tree.show(tree_ctx, position)
+		end)
+	end,
+	prune = function(captured)
+		history_command("history.prune", {}, captured, function(result)
+			if result.changed then tree.close(tree_ctx) end
+			tree.show(tree_ctx)
 		end)
 	end,
 }

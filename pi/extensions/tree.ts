@@ -1,5 +1,5 @@
 import { serviceUi } from "./shared/service-ui";
-import { registerServiceOperation } from "./shared/service-operation";
+import { registerServiceOperation, type OperationData } from "./shared/service-operation";
 import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, recordId, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { withFileMutationQueue, type ExtensionAPI, type ExtensionCommandContext, type SessionManager } from "@earendil-works/pi-coding-agent";
 import { revertSubtree } from "./history";
@@ -240,7 +240,28 @@ export default function treeExtension(pi: ExtensionAPI) {
 				if (!confirmed) return;
 			}
 
+			return applyDeletion(ctx, { sessionFile, records, removedIds, selectionLeafId, expectedLeaf, location, removedWorkspaces });
+	};
+
+	const applyDeletion = async (ctx: ExtensionCommandContext, {
+		sessionFile, records, removedIds, selectionLeafId, expectedLeaf, location, removedWorkspaces,
+	}: {
+		sessionFile: string;
+		records: ReturnType<typeof readSessionRecords>;
+		removedIds: Set<string>;
+		selectionLeafId: string | null;
+		expectedLeaf: string | null;
+		location: ReturnType<typeof locationForEntry>;
+		removedWorkspaces: WorkspaceRecord[];
+	}): Promise<OperationData | undefined> => {
 			assertBashTransitionAllowed();
+			const stillCurrent = () => runtimeActive && ctx.isIdle() && !hasRunningSubagents() && !subagentHistoryBlockReason()
+				&& ctx.sessionManager.getSessionFile() === sessionFile && ctx.sessionManager.getLeafId() === selectionLeafId
+				&& JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(records);
+			if (!stillCurrent()) {
+				ctx.ui.notify("Session history or activity changed; retry the deletion.", "warning");
+				return;
+			}
 			return withBashTransition(async () => {
 				const plan = planSessionDeletion(records, removedIds, expectedLeaf);
 				let committed = false;
@@ -261,11 +282,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 						beforeSwitch: async () => {
 							await withFileMutationQueue(sessionFile, async () => {
 								assertBashTransitionAllowed();
-								if (!runtimeActive || !ctx.isIdle() || hasRunningSubagents() || subagentHistoryBlockReason()
-									|| ctx.sessionManager.getSessionFile() !== sessionFile || ctx.sessionManager.getLeafId() !== selectionLeafId
-									|| JSON.stringify(readSessionRecords(sessionFile)) !== JSON.stringify(records)) {
-									throw new Error("Session history or activity changed; select the subtree again.");
-								}
+								if (!stillCurrent()) throw new Error("Session history or activity changed; retry the deletion.");
 								writeJsonlFile(sessionFile, plan.records);
 								committed = true;
 							});
@@ -312,6 +329,50 @@ export default function treeExtension(pi: ExtensionAPI) {
 				}
 			});
 	};
+	registerServiceOperation(pi, "history.prune", async (_, ctx) => {
+		assertBashTransitionAllowed();
+		const blocked = subagentHistoryBlockReason();
+		if (blocked || !ctx.isIdle() || hasRunningSubagents()) {
+			ctx.ui.notify(blocked ?? "Wait for Pi and its subagents to finish before deleting session history.", "warning");
+			return;
+		}
+		const sessionFile = ctx.sessionManager.getSessionFile();
+		if (!sessionFile) {
+			ctx.ui.notify("Cannot prune history from an in-memory session.", "error");
+			return;
+		}
+		const leafId = ctx.sessionManager.getLeafId();
+		if (leafId === null) {
+			ctx.ui.notify("There is no active history branch to keep.", "info");
+			return { changed: false };
+		}
+		const records = readSessionRecords(sessionFile);
+		const keep = new Map(ctx.sessionManager.getBranch(leafId).map((entry) => [entry.id, entry.parentId]));
+		const unmatched = new Set(keep.keys());
+		const removedIds = new Set<string>();
+		for (const record of records) {
+			const id = recordId(record);
+			if (record.type === "session" || !id) continue;
+			if (!keep.has(id)) removedIds.add(id);
+			else if (keep.get(id) === parentId(record)) unmatched.delete(id);
+		}
+		if (!keep.has(leafId) || unmatched.size !== 0) {
+			ctx.ui.notify("The active branch does not match persisted history. Reload the session before pruning.", "warning");
+			return;
+		}
+		if (removedIds.size === 0) {
+			ctx.ui.notify("No inactive history branches to remove.", "info");
+			return { changed: false };
+		}
+		const location = locationForEntry(ctx, leafId);
+		const confirmed = await serviceUi(ctx).confirm(JSON.stringify({
+			kind: "pi_confirmation", prompt: "Keep active branch only?", notify: false, inline: false,
+		}), `Permanently delete ${removedIds.size} history ${removedIds.size === 1 ? "entry" : "entries"} outside the active branch?\n\nFile changes and worktrees will be left alone.`);
+		if (!confirmed) return;
+		return applyDeletion(ctx, {
+			sessionFile, records, removedIds, selectionLeafId: leafId, expectedLeaf: leafId, location, removedWorkspaces: [],
+		});
+	});
 	registerServiceOperation(pi, "history.delete", ({ entryId }, ctx) => deleteTree(entryId, ctx));
 	pi.registerCommand("pi-tree-delete", { description: "Delete an entry and its descendant subtree from the current session",
 		handler: async (args, ctx) => { await deleteTree(args, ctx); } });

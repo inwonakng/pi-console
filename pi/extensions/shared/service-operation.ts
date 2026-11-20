@@ -12,6 +12,7 @@ export type BundledOperation =
   | { operation: "history.clone"; payload: { entryId: string } }
   | { operation: "history.fork"; payload: { entryId: string } }
   | { operation: "history.delete"; payload: { entryId: string } }
+  | { operation: "history.prune"; payload: Record<string, never> }
   | { operation: "workspace.enter"; payload: { id?: string; ignoredFiles?: string[] } }
   | { operation: "workspace.integrate"; payload: { id?: string; commitMessage?: string } }
   | { operation: "workspace.revert"; payload: { id: string; reason: string } }

@@ -16,6 +16,7 @@ export type BundledOperation =
   | { operation: "history.clone"; payload: { entryId: string } }
   | { operation: "history.fork"; payload: { entryId: string } }
   | { operation: "history.delete"; payload: { entryId: string } }
+  | { operation: "history.prune"; payload: Record<string, never> }
   | { operation: "workspace.enter"; payload: { id?: string; ignoredFiles?: string[] } }
   | { operation: "workspace.integrate"; payload: { id?: string; commitMessage?: string } }
   | { operation: "workspace.revert"; payload: { id: string; reason: string } }
@@ -37,7 +38,7 @@ export type BundledOperation =
 export const BUNDLED_SOURCES = {
   "access.set": "access-mode.ts", "access.cycle": "access-mode.ts",
   "integration.set": "workspace.ts", "integration.cycle": "workspace.ts",
-  "history.navigate": "tree.ts", "history.clone": "tree.ts", "history.fork": "tree.ts", "history.delete": "tree.ts",
+  "history.navigate": "tree.ts", "history.clone": "tree.ts", "history.fork": "tree.ts", "history.delete": "tree.ts", "history.prune": "tree.ts",
   "workspace.enter": "workspace.ts", "workspace.integrate": "workspace.ts", "workspace.discard": "workspace.ts", "workspace.revert": "workspace.ts", "workspace.undo": "workspace.ts",
   "side.open": "side.ts", "side.prompt": "side.ts", "side.draft": "side.ts", "side.reset": "side.ts", "side.abort": "side.ts", "side.select": "side.ts", "side.delete": "side.ts",
   "bash.list": "access-mode.ts", "bash.status": "access-mode.ts", "bash.join": "access-mode.ts", "bash.stop": "access-mode.ts", "bash.cancel-wait": "access-mode.ts",
