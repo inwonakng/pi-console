@@ -1,6 +1,8 @@
 local which_key = require("which-key")
 
-which_key.setup({})
+which_key.setup({
+	win = { no_overlap = false },
+})
 which_key.add({
 	{ "<leader><tab>", group = "tabs" },
 	{ "<leader>b", group = "buffers" },
