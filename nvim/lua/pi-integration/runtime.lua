@@ -8,7 +8,7 @@ function M.start_overview()
 	return true
 end
 function M.list() return hosts.list() end
-function M.list_async(callback) vim.schedule(function() callback(hosts.list()) end) end
+function M.list_async(callback) hosts.list_async(callback) end
 function M.last_focused(entries)
 	local latest
 	for _, entry in ipairs(entries) do

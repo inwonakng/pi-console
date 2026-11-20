@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { serviceManaged, serviceRuntimeId } from "./service-ui";
 import type { BashControlResult } from "./bash-jobs";
+import { validPublicBundled } from "./bundled-payload.mjs";
 
 export type BundledOperation =
   | { operation: "access.set"; payload: { mode: "readonly" | "ask" | "edit" | "full" } }
@@ -38,38 +39,11 @@ const object = (value: unknown): value is Record<string, unknown> => !!value && 
 const exact = (p: Record<string, unknown>, keys: string[]) => Object.keys(p).length === keys.length && keys.every((key) => key in p);
 export function validBundled(operation: unknown, p: Record<string, unknown>): boolean {
   switch (operation) {
-    case "access.set": return exact(p, ["mode"]) && typeof p.mode === "string" && ["readonly", "ask", "edit", "full"].includes(p.mode);
-    case "integration.set": return exact(p, ["mode"]) && typeof p.mode === "string" && ["ask", "allowed"].includes(p.mode);
-    case "access.cycle": case "integration.cycle": {
-      const allowed = operation === "access.cycle" ? ["readonly", "ask", "edit", "full"] : ["ask", "allowed"];
-      return exact(p, ["modes"]) && Array.isArray(p.modes) && p.modes.length > 0 && p.modes.length <= allowed.length
-        && new Set(p.modes).size === p.modes.length && p.modes.every((mode) => typeof mode === "string" && allowed.includes(mode));
-    }
-    case "history.navigate": return exact(p, ["entryId", "summarize"]) && typeof p.entryId === "string" && /^[\w-]{1,128}$/.test(p.entryId) && typeof p.summarize === "boolean";
-    case "history.clone": case "history.fork": case "history.delete": return exact(p, ["entryId"]) && typeof p.entryId === "string" && /^[\w-]{1,128}$/.test(p.entryId);
-    case "workspace.enter": case "workspace.integrate": case "workspace.discard":
-      return Object.keys(p).every((key) => key === "id" || operation === "workspace.enter" && key === "ignoredFiles" || operation === "workspace.integrate" && key === "commitMessage")
-        && (p.commitMessage === undefined || typeof p.commitMessage === "string" && !!p.commitMessage.trim() && !p.commitMessage.includes("\0") && Buffer.byteLength(p.commitMessage) <= 16384)
-        && (p.id === undefined || typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id))
-        && (p.ignoredFiles === undefined || Array.isArray(p.ignoredFiles) && p.ignoredFiles.length <= 128 && p.ignoredFiles.every((v) => typeof v === "string" && v.length <= 4096));
-    case "workspace.undo": case "workspace.revert": return exact(p, ["id", "reason"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
-      && typeof p.reason === "string" && !!p.reason.trim() && !p.reason.includes("\0") && Buffer.byteLength(p.reason) <= 8192;
-    case "usage.refresh": case "title.generate": case "side.open": case "spawn.cancel": return exact(p, []);
-    case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";
+    case "spawn.cancel": return exact(p, []);
     case "bash.transition": return exact(p, ["action", "token"]) && ["acquire", "release"].includes(String(p.action))
       && typeof p.token === "string" && /^[\w-]{1,128}$/.test(p.token);
     case "bash.interrupt": return exact(p, ["phase", "frontendAvailable"]) && ["hold", "confirm"].includes(String(p.phase)) && typeof p.frontendAvailable === "boolean";
-    case "side.reset": return exact(p, ["fromId", "abort"]) && typeof p.fromId === "string" && /^[\w-]{1,128}$/.test(p.fromId) && typeof p.abort === "boolean";
-    case "side.select": return exact(p, ["id", "fromId", "abort"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
-      && typeof p.fromId === "string" && /^[\w-]{1,128}$/.test(p.fromId) && typeof p.abort === "boolean";
-    case "side.delete": case "side.abort": return exact(p, ["id"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id);
-    case "side.prompt": return exact(p, ["id", "text"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id) && typeof p.text === "string" && !!p.text.trim() && Buffer.byteLength(p.text) <= 1024 * 1024;
-    case "side.draft": return exact(p, ["id", "text"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id) && typeof p.text === "string" && Buffer.byteLength(p.text) <= 1024 * 1024;
-    case "bash.list": return Object.keys(p).every(key => key === "offset") && (p.offset === undefined || Number.isSafeInteger(p.offset) && Number(p.offset) >= 0);
-    case "bash.status": case "bash.join": case "bash.stop": return exact(p, ["jobId"]) && typeof p.jobId === "string" && /^[A-Za-z0-9_-]{22}$/.test(p.jobId);
-    case "bash.cancel-wait": return exact(p, ["invocationId"]) && typeof p.invocationId === "string" && /^[\w-]{1,128}$/.test(p.invocationId);
-    case "spawn.join": case "spawn.stop": return exact(p, ["id"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id);
-    default: return false;
+    default: return validPublicBundled(operation, p);
   }
 }
 export type BashServiceResult = Exclude<BashControlResult, { kind: "bash_job_output" }> | { kind: "bash_wait_cancelled"; invocationId: string; cancelled: boolean };

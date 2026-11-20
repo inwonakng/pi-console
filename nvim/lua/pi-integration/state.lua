@@ -42,7 +42,6 @@ function M.new()
 		is_compacting = false,
 		is_loading = false,
 		loading_error = nil,
-		reverting_history = nil,
 		pending_ui_requests = {},
 		active_ui_request_id = nil,
 		pending_retry_error = nil,

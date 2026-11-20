@@ -322,14 +322,11 @@ export class HostOwner {
         }
       };
       check();
-      this.savedMutations.add(id);
-      try {
-        await this.catalog.validateSessionFile(id);
-        check();
-        return await readResource({ sessionFile: this.catalog.sessionFile(id), cwd: record.cwd, workspaceRoot: record.cwd,
-          workspacesRoot: join(this.catalog.root, "workspaces"), tempRoot: tmpdir(), skillPaths: [], liveOutputPaths: [], check },
-          { ...query, kind: "history" });
-      } finally { this.savedMutations.delete(id); }
+      await this.catalog.validateSessionFile(id);
+      check();
+      return readResource({ sessionFile: this.catalog.sessionFile(id), cwd: record.cwd, workspaceRoot: record.cwd,
+        workspacesRoot: join(this.catalog.root, "workspaces"), tempRoot: tmpdir(), skillPaths: [], liveOutputPaths: [], check },
+        { ...query, kind: "history" });
     });
     this.hostAdmission = task.then(() => undefined, () => undefined);
     return task.finally(() => { this.hostAdmitting--; });

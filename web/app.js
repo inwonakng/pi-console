@@ -100,6 +100,14 @@ try {
   if (Array.isArray(saved)) sessionOrder = [...new Set(saved.filter(key => typeof key === "string"))];
 } catch { /* Storage may be unavailable; retain order for this page. */ }
 let sessionDrag, revealedSession, sessionActionsTarget;
+const pendingStops = new Map();
+function canStopSession(host, row) {
+  return !pageLeaving && registered(host) && host.connected && navigator.onLine !== false
+    && host.hello.capabilities.includes("session.manage") && !!row?.live && row.live.status !== "Stopping";
+}
+function canRequestSessionStop(host, row) {
+  return canStopSession(host, row) && !pendingStops.has(sessionKey(host.hello.hostId, row.id));
+}
 function renderSessionActions() {
   if (!sessionActionsTarget) return;
   const { host, id } = sessionActionsTarget;
@@ -107,26 +115,51 @@ function renderSessionActions() {
   $("session-actions-name").textContent = row ? sessionName(row) : "Session unavailable";
   $("session-actions-project").textContent = row?.live?.project || "Project directory unavailable.";
   $("session-actions-create").disabled = !registered(host) || !host.connected || navigator.onLine === false || !row?.live?.project;
-  $("session-actions-stop").disabled = !registered(host) || !host.connected || navigator.onLine === false
-    || !row?.live || row.live.status === "Stopping";
+  $("session-actions-stop").disabled = !canRequestSessionStop(host, row);
 }
 function showSessionActions(host, row) {
   sessionActionsTarget = { host, id: row.id };
   renderSessionActions();
   $("session-actions-dialog").showModal();
 }
-const pendingStops = new Map();
-function queueSessionStop(host, row) {
+function prepareSessionStop(host, row, pending = {}) {
   const key = sessionKey(host.hello.hostId, row.id);
-  if (pendingStops.has(key) || !host.connected || navigator.onLine === false || !row.live) return;
   const connection = host.client;
   const envelope = { version: 1, id: requestId(), sessionId: row.id, serviceEpoch: host.hello.serviceEpoch,
     runtimeRevision: row.live.runtimeRevision, operation: "session.kill", payload: { confirmed: true } };
+  pendingStops.set(key, pending);
+  return async () => {
+    if (pendingStops.get(key) !== pending) return;
+    try {
+      if (!canStopSession(host, row) || host.client !== connection || host.hello.serviceEpoch !== envelope.serviceEpoch) {
+        throw new Error("Host connection changed. Stop was cancelled; it was not replayed.");
+      }
+      const receipt = receiptResult(await connection.request("session.manage", envelope));
+      await terminalReceipt(connection, "session.manage.status", {
+        serviceEpoch: envelope.serviceEpoch, commandId: envelope.id, sessionId: row.id,
+      }, receipt);
+      const summaries = await connection.request("sessions.subscribe");
+      if (registered(host) && host.client === connection) setSummaries(host, summaries);
+    } catch (error) {
+      if (pendingStops.get(key) === pending) notice(`Could not confirm stop for "${sessionName(row)}": ${error.message}`);
+    } finally {
+      if (pendingStops.get(key) === pending) {
+        pending.message?.remove();
+        pendingStops.delete(key);
+        renderOverview();
+      }
+    }
+  };
+}
+function queueSessionStop(host, row) {
+  if (!canRequestSessionStop(host, row)) return;
+  const key = sessionKey(host.hello.hostId, row.id);
   const message = text("div", "", "stop-notice");
   const status = text("span", `Stop in 5 seconds: "${sessionName(row)}". Active work will stop; history is kept.`, "stop-message");
   status.setAttribute("role", "status");
   const pending = { message };
   const undo = button("Undo", () => {
+    if (!pending.timer || pendingStops.get(key) !== pending) return;
     clearTimeout(pending.timer);
     pendingStops.delete(key);
     message.remove();
@@ -138,29 +171,13 @@ function queueSessionStop(host, row) {
   undo.setAttribute("aria-label", `Undo stop for ${sessionName(row)}`);
   message.append(status, undo);
   $("stop-notices").append(message);
-  pendingStops.set(key, pending);
+  const stop = prepareSessionStop(host, row, pending);
   revealedSession = null;
-  pending.timer = setTimeout(async () => {
+  pending.timer = setTimeout(() => {
+    pending.timer = null;
     undo.remove();
     status.textContent = `Stopping "${sessionName(row)}"...`;
-    try {
-      if (pageLeaving || !registered(host) || !host.connected || navigator.onLine === false
-        || host.client !== connection || host.hello.serviceEpoch !== envelope.serviceEpoch) {
-        throw new Error("Host connection changed. Stop was cancelled; it was not replayed.");
-      }
-      const receipt = receiptResult(await connection.request("session.manage", envelope));
-      await terminalReceipt(connection, "session.manage.status", {
-        serviceEpoch: envelope.serviceEpoch, commandId: envelope.id, sessionId: row.id,
-      }, receipt);
-      setSummaries(host, await connection.request("sessions.subscribe"));
-      message.remove();
-    } catch (error) {
-      message.remove();
-      notice(`Could not confirm stop for "${sessionName(row)}": ${error.message}`);
-    } finally {
-      pendingStops.delete(key);
-      renderOverview();
-    }
+    return stop();
   }, 5000);
   renderOverview();
   undo.focus({ preventScroll: true });
@@ -321,7 +338,7 @@ function bindSessionDrag(heading, key, stop, onStop) {
     setTimeout(() => list.removeEventListener("click", suppressClick, true), 0);
     if (drag.swiping && drag.commit && !cancelled) onStop();
     renderOverview();
-    if (!pendingStops.has(key)) [...list.children].find(node => node.dataset.key === key)?.querySelector(".session-row").focus({ preventScroll: true });
+    if (!pendingStops.get(key)?.message) [...list.children].find(node => node.dataset.key === key)?.querySelector(".session-row").focus({ preventScroll: true });
   };
   const cancel = () => finish(true);
   const pointerMove = event => { if (event.pointerId === sessionDrag?.pointerId) move(event); };
@@ -647,7 +664,7 @@ function renderOverview() {
   }));
   if (sessionDrag) return;
   const ranks = new Map(sessionOrder.map((key, index) => [key, index]));
-  const rows = filteredRows().filter(({ host, row }) => !pendingStops.has(sessionKey(host.hello.hostId, row.id)))
+  const rows = filteredRows().filter(({ host, row }) => !pendingStops.get(sessionKey(host.hello.hostId, row.id))?.message)
     .sort((a, b) => ranks.get(sessionKey(a.host.hello.hostId, a.row.id)) - ranks.get(sessionKey(b.host.hello.hostId, b.row.id)));
   $("session-list").replaceChildren(...rows.map(({ host, row }) => {
     const key = sessionKey(host.hello.hostId, row.id);
@@ -677,8 +694,7 @@ function renderOverview() {
     actions.setAttribute("aria-controls", "session-actions-dialog");
     headingRow.append(link, actions);
     const swipe = text("div", "", "session-swipe");
-    const stop = button("Stop", () => queueSessionStop(host, row), !host.connected || navigator.onLine === false
-      || !host.hello.capabilities.includes("session.manage") || row.live?.status === "Stopping");
+    const stop = button("Stop", () => queueSessionStop(host, row), !canRequestSessionStop(host, row));
     stop.className = "session-stop";
     stop.setAttribute("aria-label", `Stop ${sessionName(row)}; history is kept`);
     swipe.append(stop, headingRow);
@@ -1009,19 +1025,16 @@ $("session-actions-create").addEventListener("click", () => {
   showCreate(host, project);
 });
 $("session-actions-stop").addEventListener("click", () => {
-  if (!sessionActionsTarget || $("session-actions-stop").disabled) return;
+  if (!sessionActionsTarget) return;
   const { host, id } = sessionActionsTarget;
   const row = host.sessions.find(row => row.id === id);
-  if (!row?.live || !registered(host) || !host.connected || navigator.onLine === false) return;
+  if (!canRequestSessionStop(host, row)
+    || !confirm(`Stop "${sessionName(row)}" on ${host.alias}? Active work will be interrupted; history is preserved.`)) return;
+  const stop = prepareSessionStop(host, row);
   $("session-actions-dialog").close();
-  const key = sessionKey(host.hello.hostId, id);
-  let conversation = conversations.get(key);
-  if (!conversation) {
-    conversation = createConversation(host, row);
-    conversations.set(key, conversation);
-    $("panels").append(conversation.element);
-  }
-  void conversation.stop(notice);
+  notice();
+  renderOverview();
+  void stop();
 });
 $("cancel-create").addEventListener("click", () => $("create-dialog").close());
 $("create-host").addEventListener("change", () => {
@@ -1106,7 +1119,7 @@ window.addEventListener("pagehide", event => {
   pageLeaving = true;
   for (const pending of pendingStops.values()) {
     clearTimeout(pending.timer);
-    pending.message.remove();
+    pending.message?.remove();
   }
   pendingStops.clear();
   scheduleRecovery();
@@ -1238,13 +1251,13 @@ function createConversation(host, row) {
     return !disposed && connected && captured.client === client && !captured.client?.closed && captured.selectedId === selectedId
       && captured.attachment === attachment && captured.runtimeRevision === runtimeRevision;
   }
-  async function run(action, onError = notice) {
+  async function run(action) {
     if (busy) return;
     busy = true;
     notice();
     renderControls();
     try { await action(); }
-    catch (error) { onError(error.message); }
+    catch (error) { notice(error.message); }
     finally { busy = false; renderControls(); }
   }
   async function command(operation, payload = {}) {
@@ -2109,7 +2122,7 @@ function createConversation(host, row) {
   $("options").addEventListener("click", () => navigate(`${sessionRoute(host, row)}/options`));
   $("options-back").addEventListener("click", () => backTo(sessionRoute(host, row)));
   $("detach").addEventListener("click", () => detachConversation(key));
-  async function stopSession(onError = notice) {
+  async function stopSession() {
     if (!connected) await reconnect();
     return run(async () => {
       if (!connected) throw new Error("Could not connect to this session. Reconnect before trying to stop it.");
@@ -2123,7 +2136,7 @@ function createConversation(host, row) {
         applySnapshot(value);
       }
       if (sameContext(captured)) await command("session.kill", { confirmed: true });
-    }, onError);
+    });
   }
   $("stop").addEventListener("click", () => stopSession());
   $("reconnect").addEventListener("click", () => { void reconnect(); });
@@ -2272,7 +2285,7 @@ function createConversation(host, row) {
   return {
     get host() { return host; },
     identity, id: selectedId, element, reconnect, recover,
-    acquireInitialControl, stop: stopSession,
+    acquireInitialControl,
     draft: () => $("prompt").value,
     viewed() { if (snapshot) renderSession(); },
     connected: () => connected,

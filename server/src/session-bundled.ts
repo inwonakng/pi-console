@@ -1,3 +1,4 @@
+import { validPublicBundled } from "../../pi/extensions/shared/bundled-payload.mjs";
 import { object } from "./pi-records.js";
 import { validBashResult, type BashServiceResult } from "./session-bash.js";
 
@@ -6,7 +7,6 @@ import { validBashResult, type BashServiceResult } from "./session-bash.js";
 export type BashTransitionPayload = { action: "acquire" | "release"; token: string };
 export const BASH_TRANSITION_COMMAND = "pi-console-bash-transition";
 
-// Keep payload validation in step with pi/extensions/shared/service-operation.ts.
 export type BundledOperation =
   | { operation: "access.set"; payload: { mode: "readonly" | "ask" | "edit" | "full" } }
   | { operation: "integration.set"; payload: { mode: "ask" | "allowed" } }
@@ -46,40 +46,8 @@ export const BUNDLED_SOURCES = {
 } as const;
 export const OPERATION_RESULT = "pi-console-operation-result";
 export const operationCommand = (operation: BundledOperation["operation"]): string => `pi-console-${operation.replaceAll(".", "-")}`;
-const exact = (p: Record<string, unknown>, keys: string[]) => Object.keys(p).length === keys.length && keys.every((key) => key in p);
-const entry = (v: unknown) => typeof v === "string" && /^[\w-]{1,128}$/.test(v);
 export function validBundled(operation: unknown, p: Record<string, unknown>): boolean {
-  switch (operation) {
-    case "access.set": return exact(p, ["mode"]) && typeof p.mode === "string" && ["readonly", "ask", "edit", "full"].includes(p.mode);
-    case "integration.set": return exact(p, ["mode"]) && typeof p.mode === "string" && ["ask", "allowed"].includes(p.mode);
-    case "access.cycle": case "integration.cycle": {
-      const allowed = operation === "access.cycle" ? ["readonly", "ask", "edit", "full"] : ["ask", "allowed"];
-      return exact(p, ["modes"]) && Array.isArray(p.modes) && p.modes.length > 0 && p.modes.length <= allowed.length
-        && new Set(p.modes).size === p.modes.length && p.modes.every((mode) => typeof mode === "string" && allowed.includes(mode));
-    }
-    case "history.navigate": return exact(p, ["entryId", "summarize"]) && entry(p.entryId) && typeof p.summarize === "boolean";
-    case "history.clone": case "history.fork": case "history.delete": return exact(p, ["entryId"]) && entry(p.entryId);
-    case "workspace.enter": case "workspace.integrate": case "workspace.discard":
-      return Object.keys(p).every((key) => key === "id" || operation === "workspace.enter" && key === "ignoredFiles" || operation === "workspace.integrate" && key === "commitMessage")
-        && (p.commitMessage === undefined || typeof p.commitMessage === "string" && !!p.commitMessage.trim() && !p.commitMessage.includes("\0") && Buffer.byteLength(p.commitMessage) <= 16384)
-        && (p.id === undefined || typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id))
-        && (p.ignoredFiles === undefined || Array.isArray(p.ignoredFiles) && p.ignoredFiles.length <= 128 && p.ignoredFiles.every((v) => typeof v === "string" && v.length <= 4096));
-    case "workspace.undo": case "workspace.revert": return exact(p, ["id", "reason"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
-      && typeof p.reason === "string" && !!p.reason.trim() && !p.reason.includes("\0") && Buffer.byteLength(p.reason) <= 8192;
-    case "usage.refresh": case "title.generate": case "side.open": return exact(p, []);
-    case "notifications.set": return exact(p, ["enabled"]) && typeof p.enabled === "boolean";
-    case "side.reset": return exact(p, ["fromId", "abort"]) && typeof p.fromId === "string" && /^[\w-]{1,128}$/.test(p.fromId) && typeof p.abort === "boolean";
-    case "side.select": return exact(p, ["id", "fromId", "abort"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id)
-      && typeof p.fromId === "string" && /^[\w-]{1,128}$/.test(p.fromId) && typeof p.abort === "boolean";
-    case "side.delete": case "side.abort": return exact(p, ["id"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id);
-    case "side.prompt": return exact(p, ["id", "text"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id) && typeof p.text === "string" && !!p.text.trim() && Buffer.byteLength(p.text) <= 1024 * 1024;
-    case "side.draft": return exact(p, ["id", "text"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id) && typeof p.text === "string" && Buffer.byteLength(p.text) <= 1024 * 1024;
-    case "bash.list": return Object.keys(p).every(key => key === "offset") && (p.offset === undefined || Number.isSafeInteger(p.offset) && Number(p.offset) >= 0);
-    case "bash.status": case "bash.join": case "bash.stop": return exact(p, ["jobId"]) && typeof p.jobId === "string" && /^[A-Za-z0-9_-]{22}$/.test(p.jobId);
-    case "bash.cancel-wait": return exact(p, ["invocationId"]) && typeof p.invocationId === "string" && /^[\w-]{1,128}$/.test(p.invocationId);
-    case "spawn.join": case "spawn.stop": return exact(p, ["id"]) && typeof p.id === "string" && /^[\w-]{1,128}$/.test(p.id);
-    default: return false;
-  }
+  return typeof operation === "string" && Object.hasOwn(BUNDLED_SOURCES, operation) && validPublicBundled(operation, p);
 }
 export function isBundled(value: { operation: string }): value is BundledOperation { return Object.hasOwn(BUNDLED_SOURCES, value.operation); }
 export type OperationResult = { version: 1; invocationId: string; runtimeId: string; sessionId: string; sessionFile: string;

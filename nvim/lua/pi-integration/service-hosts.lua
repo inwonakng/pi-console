@@ -1,5 +1,6 @@
 local store = require("pi-integration.frontend-store")
 local transport = require("pi-integration.service-connection")
+local tmux = require("pi-integration.backends.tmux")
 local M = {}
 local hosts, started, timer = {}, false, nil
 local forgotten_explicit = {}
@@ -286,16 +287,14 @@ function M.find(identity)
 	end
 	return fallback
 end
-function M.list()
-	M.start()
+local function list_entries(attachments)
+	attachments = attachments or {}
 	local owners, entries = {}, {}
 	local ordered = vim.tbl_keys(hosts); table.sort(ordered)
 	for _, key in ipairs(ordered) do
 		local host = hosts[key]
 		if host.host_id and (not owners[host.host_id] or host.connected and not owners[host.host_id].connected) then owners[host.host_id] = host end
 	end
-	local tmux = require("pi-integration.backends.tmux")
-	local attachments = tmux.available() and tmux.list() or {}
 	local identities = vim.tbl_keys(owners); table.sort(identities)
 	for _, identity in ipairs(identities) do
 		local host = owners[identity]
@@ -305,7 +304,7 @@ function M.list()
 				local live = row.live or {}
 				local focused, initial_group
 				local frontend_keys = {}
-				for _, pane in ipairs(attachments or {}) do
+				for _, pane in ipairs(attachments) do
 					if pane.host_id == identity and pane.session_id == row.id then
 						table.insert(frontend_keys, "frontend:" .. vim.json.encode({ pane.id, pane.pid }))
 						focused = math.max(focused or 0, pane.last_focused_at or 0)
@@ -333,7 +332,7 @@ function M.list()
 		end
 	end
 	-- An empty frontend has a pane identity, never a fabricated owner session ID.
-	for _, pane in ipairs(attachments or {}) do
+	for _, pane in ipairs(attachments) do
 		if pane.frontend_attachment and not pane.session_id then
 			local host = owners[pane.host_id]
 			local entry = vim.deepcopy(pane)
@@ -348,6 +347,18 @@ function M.list()
 		end
 	end
 	return entries
+end
+function M.list()
+	M.start()
+	return list_entries(tmux.available() and tmux.list())
+end
+function M.list_async(callback)
+	M.start()
+	if tmux.available() then
+		tmux.list_async(function(attachments) callback(list_entries(attachments)) end)
+	else
+		vim.schedule(function() callback(list_entries()) end)
+	end
 end
 function M.expected_identity(target)
 	local data, saved_identities = config()
