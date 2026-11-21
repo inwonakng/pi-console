@@ -11,7 +11,7 @@ import { withRepositoryMutation, subagentProtectedRoots } from "./subagent-state
 import { childWorkspaceWriteBlock } from "./workspace-policy";
 import { accessGeneration, accessRuntimeGeneration, getAccessMode, getScratchDirectory, setScratchDirectory } from "./access-state";
 import { loadExtensionSettings } from "./extension-settings";
-import { admitPermissionSnapshot, assertPermissionSnapshot, capturePermissionSnapshot, baselineReadPaths, baselineWritePaths, canonicalPath, getGrantedScopes, hasPermission, pathInside, requestPermission, resolveToolPath, type PermissionAuthorization, type PermissionSnapshot } from "./permissions";
+import { admitPermissionSnapshot, assertPermissionSnapshot, capturePermissionSnapshot, baselinePaths, canonicalPath, getGrantedScopes, hasPermission, pathInside, requestPermission, resolveToolPath, type PermissionAuthorization, type PermissionSnapshot } from "./permissions";
 
 export type BashAccessRequest = {
   readPaths?: string[];
@@ -127,9 +127,10 @@ function networkConfig(): SandboxRuntimeConfig["network"] {
 
 function filesystemConfig(cwd: string, reads: string[], writes: string[]): FilesystemPolicy {
   const protectedRoots = subagentProtectedRoots();
-  const allowWrite = [...new Set([...baselineWritePaths(cwd), ...writes].map(canonicalPath))]
+  const baseline = baselinePaths(cwd);
+  const allowWrite = [...new Set([...baseline.write, ...writes].map(canonicalPath))]
     .filter((path) => !protectedRoots.some((root) => pathInside(root, path)));
-  const allowRead = [...new Set([...baselineReadPaths(cwd), ...reads, ...allowWrite].map(canonicalPath))];
+  const allowRead = [...new Set([...baseline.read, ...reads, ...allowWrite].map(canonicalPath))];
   return {
     denyRead: allowRead.includes("/") ? [] : ["/"],
     allowRead: allowRead.filter((path) => path !== "/"),
@@ -324,10 +325,12 @@ async function executeRestricted(
   let snapshot: PermissionSnapshot | undefined;
   let policyPaths: string[] = [];
   let parentAdmitted = false;
-  const baseline = () => JSON.stringify([baselineReadPaths(root).map(canonicalPath), baselineWritePaths(root).map(canonicalPath)]);
-  const initialBaseline = baseline();
+  const baselineSignature = ({ read, write }: ReturnType<typeof baselinePaths>) =>
+    JSON.stringify([read.map(canonicalPath), write.map(canonicalPath)]);
+  const initialPaths = baselinePaths(root);
+  const initialBaseline = baselineSignature(initialPaths);
   const assertAuthority = () => {
-    if ((!parentAdmitted && (accessGeneration() !== generation || baseline() !== initialBaseline))
+    if ((!parentAdmitted && (accessGeneration() !== generation || baselineSignature(baselinePaths(root)) !== initialBaseline))
       || accessRuntimeGeneration() !== runtimeGeneration || canonicalPath(cwd) !== root
       || policyPaths.some(path => canonicalPath(path) !== path)
       || JSON.stringify(subagentProtectedRoots()) !== protectedRoots || childWorkspaceWriteBlock(ctx)) {
@@ -356,7 +359,6 @@ async function executeRestricted(
   const writes = paths([...(request.writePaths ?? []), ...(request.workspaceWriteAccess ? [root] : [])]);
   const sockets = paths(request.unixSocketPaths);
   // Validate the configured policy before considering an unrestricted fallback.
-  const baselinePaths = baselineReadPaths(root);
   const globShaped = (path: string) => /[*?\[\]]/.test(path);
   if (!request.unsandboxed && sockets.length) {
     if (process.platform !== "darwin") {
@@ -365,7 +367,7 @@ async function executeRestricted(
     if (sockets.some(globShaped)) throw new Error("unixSocketPaths must be literal paths without sandbox wildcard characters. No command was started.");
   }
   if (request.unsandboxed || !state.config || !manager().isSandboxingEnabled()
-    || [...baselinePaths, ...reads, ...writes].some(globShaped)) {
+    || [...initialPaths.read, ...reads, ...writes].some(globShaped)) {
     return runUnsandboxed(command, root, options, context, onSessionGrant, assertAuthority, sealAuthority, admit);
   }
   const preview = { text: command, filetype: "sh" };

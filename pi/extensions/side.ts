@@ -76,6 +76,7 @@ type Generation = {
   messages: AgentMessage[];
   tools: SideTool[];
   partialMessage?: AgentMessage;
+  publishTimer?: NodeJS.Timeout;
   draft: string;
   pendingPrompt?: string;
   pendingAfter?: string;
@@ -228,10 +229,15 @@ export default function sideExtension(pi: ExtensionAPI) {
     } finally { rmSync(temporary, { force: true }); }
   }
 
+  function cancelPublish(g: Generation): void {
+    clearTimeout(g.publishTimer);
+    g.publishTimer = undefined;
+  }
+
   function publish(g: Generation): void {
-    if (g !== current || shuttingDown || g.ctx.mode !== "rpc") return;
-    // The frontend already coalesces streaming snapshots. Do not add another
-    // timer before the owner can even observe a side update.
+    if (g !== current) return;
+    cancelPublish(g);
+    if (shuttingDown || g.ctx.mode !== "rpc") return;
     const permissions = permissionSnapshot(g.entries);
     if (!g.running) {
       for (const tool of g.tools) if (tool.state === "running") tool.state = "interrupted";
@@ -256,6 +262,18 @@ export default function sideExtension(pi: ExtensionAPI) {
       activity: g.activity,
       dialogIds: [...g.dialogIds],
     }));
+  }
+
+  function publishStreaming(g: Generation, child: SideRpc): void {
+    if (g.publishTimer || g !== current || shuttingDown || !g.running || g.cancelled) return;
+    g.publishTimer = setTimeout(() => {
+      g.publishTimer = undefined;
+      try {
+        if (g !== current || shuttingDown || !g.running || g.cancelled
+          || g.child !== child || child.stopped || !owns(g)) return;
+        publish(g);
+      } catch (error) { child.protocolFailure(error); }
+    }, 100);
   }
 
   function failure(g: Generation, error: unknown): void {
@@ -381,7 +399,7 @@ export default function sideExtension(pi: ExtensionAPI) {
     } else if (data.type === "message_update") {
       if (data.message) g.partialMessage = data.message as AgentMessage;
       else if (g.partialMessage) updateSidePartial(g.partialMessage as unknown as SideRpcEvent, data);
-      publish(g);
+      publishStreaming(g, child);
     } else if (data.type === "message_end") {
       const message = data.message as AgentMessage;
       g.partialMessage = undefined;
@@ -425,6 +443,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       g.activity = g.tools.some(tool => tool.state === "running") ? g.activity : undefined;
       publish(g);
     } else if (data.type === "agent_settled") {
+      cancelPublish(g);
       void drain(g).then(() => {
         g.running = false;
         g.partialMessage = undefined;
@@ -474,8 +493,8 @@ export default function sideExtension(pi: ExtensionAPI) {
         g.running = false;
         g.partialMessage = undefined;
         g.activity = undefined;
-        failure(g, error);
-        state(g);
+        try { failure(g, error); }
+        finally { state(g); }
         // Never restart and replay a possibly executed prompt automatically.
       });
       g.child = child;
@@ -509,6 +528,7 @@ export default function sideExtension(pi: ExtensionAPI) {
   }
 
   async function retire(g: Generation): Promise<void> {
+    cancelPublish(g);
     if (!g.persisted && !g.child) return;
     g.cancelled = true;
     g.dialogs.abort();
@@ -636,6 +656,7 @@ export default function sideExtension(pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    if (current) cancelPublish(current);
     shuttingDown = false;
     storageError = undefined;
     conversations.clear();
@@ -648,6 +669,7 @@ export default function sideExtension(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    if (current) cancelPublish(current);
     titles.abort();
     // Start bounded child shutdown before an in-flight abort/transition can
     // wait indefinitely for an RPC response from that same child.

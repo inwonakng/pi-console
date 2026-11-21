@@ -5,21 +5,20 @@ import { resolveToolPath } from "./paths";
 import { canonicalPath } from "./permissions";
 import { subagentWriteBlock } from "./subagent-state";
 import { findGitRoot, getExpectedWorkspaceMissing, getPendingWorkspaceId, isWorkspaceFinalized,
-  listWorkspaces, pathInside, sameSessionFile, workspaceForContext } from "./workspace";
+  listWorkspaces, pathInside, sameSessionFile, workspaceForContext, type WorkspaceRecord } from "./workspace";
 
 const TRANSITION_ACTIONS = new Set(["enter", "integrate", "discard", "revert"]);
 
-function managedRepositoryPath(path: string): boolean {
-  return listWorkspaces().some((record) =>
+function managedRepositoryPath(path: string, records: WorkspaceRecord[]): boolean {
+  return records.some((record) =>
     record.retained
     && (pathInside(record.worktreePath, path) || pathInside(record.destinationRoot, path))
   );
 }
 
 function hasMixedWorkspaceTransition(ctx: ExtensionContext): boolean {
-  const branch = ctx.sessionManager.getBranch();
-  for (let index = branch.length - 1; index >= 0; index--) {
-    const entry = branch[index];
+  const sm = ctx.sessionManager;
+  for (let entry = sm.getLeafEntry(); entry; entry = entry.parentId ? sm.getEntry(entry.parentId) : undefined) {
     if (entry.type !== "message" || entry.message.role !== "assistant") {
       continue;
     }
@@ -41,20 +40,16 @@ function workspaceBlockReason(
   input: Record<string, unknown>,
   ctx: ExtensionContext,
 ): string | undefined {
-  let repositoryEdit = false;
-  let mutationPath: string | undefined;
-  if (toolName === "edit" || toolName === "write") {
-    const gitRoot = findGitRoot(ctx.cwd);
-    mutationPath = typeof input.path === "string" ? resolveToolPath(input.path, ctx.cwd) : undefined;
-    repositoryEdit = !mutationPath
-      || (!!gitRoot && pathInside(gitRoot, mutationPath))
-      || managedRepositoryPath(mutationPath);
-  }
-  if (!repositoryEdit) {
+  if (toolName !== "edit" && toolName !== "write") return undefined;
+  const gitRoot = findGitRoot(ctx.cwd);
+  let snapshot: WorkspaceRecord[] | undefined;
+  const records = () => snapshot ??= listWorkspaces();
+  const mutationPath = typeof input.path === "string" ? resolveToolPath(input.path, ctx.cwd) : undefined;
+  if (mutationPath && !(gitRoot && pathInside(gitRoot, mutationPath)) && !managedRepositoryPath(mutationPath, records())) {
     return undefined;
   }
 
-  const active = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile());
+  const active = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile(), records);
   if (active && existsSync(active.worktreePath)) {
     if (active.kind === "task" && !sameSessionFile(active.sourceSessionFile, ctx.sessionManager.getSessionFile())) {
       return `Workspace ${active.id} belongs to a different Pi session; edits in this worktree are blocked.`;
@@ -77,8 +72,10 @@ function workspaceBlockReason(
 
 /** Managed children have write authority only during an unfinished revision. */
 export function childWorkspaceWriteBlock(ctx: ExtensionContext): string | undefined {
-  const active = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile())
-    ?? listWorkspaces().filter((record) => record.kind === "child" && pathInside(record.worktreePath, canonicalPath(ctx.cwd)))
+  let snapshot: WorkspaceRecord[] | undefined;
+  const records = () => snapshot ??= listWorkspaces();
+  const active = workspaceForContext(ctx.cwd, ctx.sessionManager.getSessionFile(), records)
+    ?? records().filter((record) => record.kind === "child" && pathInside(record.worktreePath, canonicalPath(ctx.cwd)))
       .sort((left, right) => right.worktreePath.length - left.worktreePath.length)[0];
   if (active?.kind !== "child") return undefined;
   if (isWorkspaceFinalized(active) || !active.retained || active.lifecycle === "discarded") {

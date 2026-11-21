@@ -122,7 +122,17 @@ end
 local function flush_cache(host)
 	if host.cache_dirty and (not host.cache_retry_at or vim.uv.hrtime() / 1e6 >= host.cache_retry_at) then
 		local ok, err = store.update("discovery", vim.empty_dict(), function(data)
-			data[host.host_id] = host.rows
+			local rows = {}
+			for index, row in ipairs(host.rows) do
+				-- Keep the live feed intact; discovery readers do not use its sequence.
+				if type(row.live) == "table" and row.live.sequence ~= nil then
+					row = vim.tbl_extend("force", {}, row)
+					row.live = vim.tbl_extend("force", {}, row.live)
+					row.live.sequence = nil
+				end
+				rows[index] = row
+			end
+			data[host.host_id] = rows
 			return true
 		end)
 		host.cache_dirty, host.cache_error = not ok, not ok and err or nil

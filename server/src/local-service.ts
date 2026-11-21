@@ -227,6 +227,9 @@ async function serve(options: HostOwnerOptions & { root: string; port?: number }
               network: listenerAddresses(port), ...(!isRemote ? { endpoint: path } : {}) };
             break;
           case "health":
+            exact(p, []);
+            result = { sessions: [], serviceEpoch: owner.serviceEpoch, buildId, runtimeBuildId: owner.buildId, channel: options.channel };
+            break;
           case "sessions":
             exact(p, []);
             result = { sessions: owner.list(), serviceEpoch: owner.serviceEpoch, buildId, runtimeBuildId: owner.buildId, channel: options.channel };

@@ -1813,11 +1813,12 @@ export class OwnedSession {
 
   private ownerState(): OwnedSessionState {
     const interactions = this.worker?.interactionSnapshot() ?? { revision: 0, pending: [] };
+    const { provisional, lastFailure } = this.catalog.getMetadata(this.id);
     return { ...structuredClone({
       ...this.activity(interactions.pending.some((item) => !item.submitted)), sessionId: this.id, serviceEpoch: this.catalog.epoch, runtimeRevision: this.runtimeRevision,
-      phase: this.phase, provisional: this.catalog.get(this.id).provisional === true,
+      phase: this.phase, provisional: provisional === true,
       trust: this.trust, workspace: this.workspace, piState: this.conversation.sessionState,
-      controller: this.control.snapshot(), error: this.error?.message, lastFailure: this.catalog.get(this.id).lastFailure,
+      controller: this.control.snapshot(), error: this.error?.message, lastFailure,
       exit: this.exit, startupTimings: this.startupTimings,
     }), interactions };
   }
@@ -2867,7 +2868,7 @@ export class OwnedSession {
   }
 
   private changed(): void {
-    this.publish({ owner: this.ownerState() });
+    this.publish(this.viewers.size ? { owner: this.ownerState() } : {});
     this.scheduleQueue();
     const wake = this.wake;
     this.wake = undefined;

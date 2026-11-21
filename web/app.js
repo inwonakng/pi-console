@@ -435,7 +435,11 @@ function setSummaries(host, value) {
   for (const conversation of conversations.values()) {
     if (conversation.identity === host.hello.hostId && (!conversation.host.connected || !hosts.includes(conversation.host))) conversation.rebind(host);
   }
-  if (host.historyRows) host.historyRows = value.sessions.map(row => ({ ...host.historyRows.find(saved => saved.id === row.id), ...row, live: row.live }));
+  if (host.historyRows) {
+    const savedById = new Map();
+    for (const saved of host.historyRows) if (!savedById.has(saved.id)) savedById.set(saved.id, saved);
+    host.historyRows = value.sessions.map(row => ({ ...savedById.get(row.id), ...row, live: row.live }));
+  }
   renderOverview();
   if ($("history-dialog").open) renderHistory();
   renderScreens();
@@ -1369,6 +1373,9 @@ function createConversation(host, row) {
     renderSession();
     void restoreControl();
   }
+  function renderSend(controlled = Boolean(controlsCurrent()), ready = owner?.phase === "ready") {
+    $("send").disabled = !controlled || !ready || busy || !$("prompt").value.trim();
+  }
   function renderControls() {
     const controlled = Boolean(controlsCurrent());
     $("reconnect").hidden = connected;
@@ -1389,7 +1396,7 @@ function createConversation(host, row) {
     $("rename").disabled = !controlled || busy;
     const ready = owner?.phase === "ready";
     $("prompt").disabled = !controlled || !ready;
-    $("send").disabled = !controlled || !ready || busy || !$("prompt").value.trim();
+    renderSend(controlled, ready);
     $("composer-hint").textContent = navigator.onLine === false ? "Offline. Recovery resumes when online."
       : !row.live && host.connected ? "Session stopped. Resume it from History."
       : !host.connected || !connected ? host.recovery.blocked || recovery.blocked || !recoveryAllowed
@@ -1619,12 +1626,15 @@ function createConversation(host, row) {
     if (key === transcriptKey) return;
     transcriptKey = key;
     const target = $("transcript"), container = $("messages");
-    const scrollTop = target.scrollTop;
-    const top = target.getBoundingClientRect().top;
-    const anchor = [...container.children].flatMap(node => node.dataset.role === "assistant" ? [...node.children].slice(1) : [node])
-      .flatMap(node => node.classList.contains("activity-group") && node.open ? [node.firstElementChild, ...node.lastElementChild.children] : [node])
-      .find(node => node.getBoundingClientRect().bottom > top);
-    const anchorTop = anchor?.getBoundingClientRect().top;
+    let scrollTop, anchor, anchorTop;
+    if (!following) {
+      scrollTop = target.scrollTop;
+      const top = target.getBoundingClientRect().top;
+      anchor = [...container.children].flatMap(node => node.dataset.role === "assistant" ? [...node.children].slice(1) : [node])
+        .flatMap(node => node.classList.contains("activity-group") && node.open ? [node.firstElementChild, ...node.lastElementChild.children] : [node])
+        .find(node => node.getBoundingClientRect().bottom > top);
+      anchorTop = anchor?.getBoundingClientRect().top;
+    }
     const diagnostics = conversation.diagnostics || [];
     const diagnosticMessages = items => items.map(item => ({ key: `diagnostic-${item.id}`, message: { role: "error", content: item.message } }));
     const keys = conversation.messageKeys || [];
@@ -2096,7 +2106,7 @@ function createConversation(host, row) {
     prompt.style.height = `${prompt.scrollHeight + 2}px`;
     if (following) $("transcript").scrollTop = $("transcript").scrollHeight;
   }
-  $("prompt").addEventListener("input", () => { resizePrompt(); renderControls(); });
+  $("prompt").addEventListener("input", () => { resizePrompt(); renderSend(); });
   $("prompt").addEventListener("paste", event => {
     const prompt = event.currentTarget;
     if (prompt.disabled || prompt.readOnly) return;

@@ -90,26 +90,29 @@ local function summary(state, activity)
 	return text, segments
 end
 
-function M.refresh(state, activity, write)
+function M.flush(state, activity, write)
+	if not activity.header_dirty then return end
 	local text
 	text, activity.segments = summary(state, activity)
 	write(activity.start_line, text)
+	activity.header_dirty = nil
 end
 
 -- Rows are only replaced or appended; earlier rows never move. A child joins
 -- the trailing activity when at most one blank separator precedes it.
-function M.append(state, items, child, text, at, write)
+function M.append(items, child, text, at, write)
 	local activity = items[#items]
 	local start = activity and activity.kind == "activity" and at - activity.end_line <= 2
 	if not start then
 		activity = { kind = "activity", key = child.key, start_line = at, end_line = at, children = {} }
 		table.insert(items, activity)
+		write(at, "> ")
 		at = at + 1
 	end
 	child.start_line, child.end_line = at, at
 	table.insert(activity.children, child)
 	activity.end_line = at
-	M.refresh(state, activity, write)
+	activity.header_dirty = true
 	write(at, text)
 	return activity
 end
@@ -120,23 +123,23 @@ function M.write_tool(state, items, output_id, at, write)
 	local entry = state.tool_items_by_output[output_id]
 	if entry then
 		write(entry.child.start_line, text)
-		M.refresh(state, entry.activity, write)
+		entry.activity.header_dirty = true
 		return false
 	end
 	local output = state.tool_outputs[output_id]
 	local child = { kind = "tool", output_id = output_id, key = output.tool_call_id or ("tool:" .. output_id) }
-	local activity = M.append(state, items, child, text, at, write)
+	local activity = M.append(items, child, text, at, write)
 	state.tool_items_by_output[output_id] = { activity = activity, child = child }
 	return true
 end
 
-function M.update_row(state, items, kind, output_id, text, write)
+function M.update_row(items, kind, output_id, text, write)
 	for _, activity in ipairs(items) do
 		if activity.kind == "activity" then
 			for _, child in ipairs(activity.children) do
 				if child.kind == kind and child.output_id == output_id then
 					write(child.start_line, text)
-					M.refresh(state, activity, write)
+					activity.header_dirty = true
 					return
 				end
 			end

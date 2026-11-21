@@ -633,7 +633,7 @@ export function isWorkspaceFinalized(record: WorkspaceRecord): boolean {
   return record.integration === "applied" || record.integration === "none";
 }
 
-export function workspaceForContext(cwd: string, _sessionFile?: string): WorkspaceRecord | undefined {
+export function workspaceForContext(cwd: string, _sessionFile?: string, records = listWorkspaces): WorkspaceRecord | undefined {
   const resolvedCwd = canonicalPath(cwd);
   const envId = process.env.PI_WORKSPACE_ID;
   if (envId) {
@@ -642,7 +642,7 @@ export function workspaceForContext(cwd: string, _sessionFile?: string): Workspa
       return record;
     }
   }
-  const candidates = listWorkspaces().filter((record) => {
+  const candidates = records().filter((record) => {
     if (!record.retained) {
       return false;
     }

@@ -581,6 +581,7 @@ and rejects caller-supplied attachment IDs or other targets. Tokens are returned
 by `grant`, never in snapshots/receipts. `attach` returns a copied watermark snapshot
 before strictly newer updates. Detach or slow-view eviction revokes that attachment,
 not accepted work. UI snapshot replacement is a pure render coalesced after updates.
+`health` returns an empty `sessions` array for compatibility; use the `sessions` method to list sessions.
 
 Host `host.create` / `host.resume` commands contain `{id,serviceEpoch,operation,payload}`.
 Their receipt means allocation/scheduling, **not startup readiness or completed agent work**.

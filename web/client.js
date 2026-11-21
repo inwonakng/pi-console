@@ -172,7 +172,8 @@ export class ServiceClient {
           this.recoveryBlocked = true;
           throw new Error("Host channel changed. Refresh its registration explicitly.");
         }
-        if (value.serviceEpoch !== this.hello.serviceEpoch || value.buildId !== this.hello.buildId || !Array.isArray(value.sessions)) {
+        if (value.serviceEpoch !== this.hello.serviceEpoch || value.buildId !== this.hello.buildId
+          || (value.sessions !== undefined && !Array.isArray(value.sessions))) {
           throw new Error("Host service changed. Refreshing its connection.");
         }
         return value;

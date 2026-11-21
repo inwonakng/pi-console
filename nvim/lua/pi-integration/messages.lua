@@ -138,7 +138,7 @@ local function append_thinking_summary(ctx, lines, items, text, key, streaming)
 	local child = { kind = "thinking", output_id = output_id, key = key or ("thinking:" .. output_id),
 		streaming = streaming or nil }
 	local summary = pi_thinking_output.summary_lines(ctx.state, output_id, streaming)[1]
-	activity.append(ctx.state, items, child, summary, #lines + 1, line_writer(lines))
+	activity.append(items, child, summary, #lines + 1, line_writer(lines))
 	table.insert(lines, "")
 	return true
 end
@@ -158,7 +158,7 @@ local function append_skill_load_summaries(ctx, lines, items, loads, has_body, p
 	for _, load in ipairs(loads) do
 		local output_id = pi_skills.store_load(ctx.state, load)
 		local child = { kind = "skill", output_id = output_id, key = load.tool_call_id or ("skill:" .. output_id) }
-		activity.append(ctx.state, items, child, pi_skills.summary_lines(ctx.state, output_id)[1], #lines + 1,
+		activity.append(items, child, pi_skills.summary_lines(ctx.state, output_id)[1], #lines + 1,
 			line_writer(lines))
 	end
 	table.insert(lines, "")
@@ -456,6 +456,26 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 		end
 	end
 
+	local write = line_writer(lines)
+	local function flush_activities()
+		for _, item in ipairs(items) do
+			if item.kind == "activity" then activity.flush(ctx.state, item, write) end
+		end
+	end
+
+	local function record_execution_call(name, id, args, status, parent, started_at)
+		local state = ctx.state
+		local call = id and state.tool_calls and state.tool_calls[id]
+		-- A silent restart can change whether a tool counts as failed without
+		-- rewriting its row (e.g. spawn_control with no details).
+		if status and (call ~= nil and call.execution_status == "interrupted") ~= (status == "interrupted") then
+			local output_id = id and state.live_tool_output_by_call and state.live_tool_output_by_call[id]
+			local entry = output_id and state.tool_items_by_output[output_id]
+			if entry then activity.flush(state, entry.activity, write) end
+		end
+		pi_tool_output.record_execution_call(state, name, id, args, status, parent, started_at)
+	end
+
 	local function ensure_assistant_block()
 		if assistant_block_open then
 			if last_rendered_kind then
@@ -496,6 +516,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 			for _, field in ipairs(output_state_fields) do output_state[field] = ctx.state[field] end
 			-- Copy items and their state lookup together to preserve group/child identity.
 			-- Never retain final-render rows: later events can rewrite this prefix.
+			flush_activities()
 			cache.checkpoint = vim.deepcopy({
 				count = prefix_end, metadata = metadata, dependencies = dependencies,
 				lines = lines, items = items, state = output_state,
@@ -525,7 +546,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 		end
 		if role == "tool_execution_start" or role == "tool_execution_update" then
 			if role == "tool_execution_start" then
-				pi_tool_output.record_execution_call(ctx.state, message.toolName, message.toolCallId, message.args,
+				record_execution_call(message.toolName, message.toolCallId, message.args,
 					message.state == "interrupted" and "interrupted" or "running", message.parentToolCallId, message.startedAt)
 			end
 			if not pi_skills.tool_result_skill_name(ctx.state, message) then
@@ -551,11 +572,11 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 			local name = message.toolName or "tool"
 			local text = message_utils.extract_text(message) or ""
 			local tool_call_id = message_utils.tool_call_id(message)
-			pi_tool_output.record_execution_call(ctx.state, name, tool_call_id, nil, "completed", message.parentToolCallId, message.startedAt)
+			record_execution_call(name, tool_call_id, nil, "completed", message.parentToolCallId, message.startedAt)
 			if pi_skills.tool_result_skill_name(ctx.state, message) then
 				local output_id = pi_skills.apply_tool_result(ctx.state, message, text)
 				if output_id then
-					activity.update_row(ctx.state, items, "skill", output_id,
+					activity.update_row(items, "skill", output_id,
 						pi_skills.summary_lines(ctx.state, output_id)[1], line_writer(lines))
 				end
 				appended = false
@@ -657,6 +678,7 @@ function M.collect_message_lines(ctx, messages, tools, cache)
 		vim.list_extend(lines, { "", "> " .. ctx.notices.empty_session })
 	end
 
+	flush_activities()
 	return lines, items
 end
 

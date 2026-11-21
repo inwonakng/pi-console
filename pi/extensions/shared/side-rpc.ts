@@ -14,7 +14,7 @@ export class SideRpc {
   private stderr = "";
   private readonly closed: Promise<void>;
 
-  constructor(args: string[], cwd: string, onEvent: (event: SideRpcEvent) => void, onExit: (error: Error) => void) {
+  constructor(args: string[], cwd: string, onEvent: (event: SideRpcEvent) => void, private readonly onExit: (error: Error) => void) {
     this.process = managedSpawn(process.env.PI_BINARY || "pi", args, {
       cwd,
       env: {
@@ -49,9 +49,7 @@ export class SideRpc {
             onEvent(event);
           }
         } catch (error) {
-          this.fail(error instanceof Error ? error : new Error(String(error)));
-          onExit(new Error(`Side RPC protocol failure: ${String(error)}`));
-          void this.stop().catch(() => undefined);
+          this.protocolFailure(error);
         }
       }
     });
@@ -122,6 +120,13 @@ export class SideRpc {
       clearTimeout(terminate);
       if (kill) clearTimeout(kill);
     }
+  }
+
+  protocolFailure(error: unknown): void {
+    this.fail(error instanceof Error ? error : new Error(String(error)));
+    try { this.onExit(new Error(`Side RPC protocol failure: ${String(error)}`)); }
+    catch { /* Publishing the recovery status can fail for the same reason. */ }
+    finally { void this.stop().catch(() => undefined); }
   }
 
   private fail(error: Error): void {

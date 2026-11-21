@@ -47,7 +47,8 @@ local side_draft_saved, side_draft_pending, side_after_draft, restored_side_draf
 local save_side_draft, side_save_scheduled
 local side_actions = { drafts = {} }
 local resume_check
-local stats_timer, stats_pending, workspace_stats_key
+local stats_timer
+local workspace_stats = { due = 0 }
 local owner_states, pending_settings = {}, {}
 local selected_cwd, starting, auto_control_selection, startup_options, startup_status
 local startup_options_context, startup_options_pending
@@ -653,7 +654,9 @@ local function update_status_state()
 	end
 	state.workspace = owner and owner.workspace or (not session_id and { localCheckout = true, cwd = selected_cwd } or nil)
 	local stats_key = state.workspace and state.workspace.id and table.concat({ tostring(session_id), tostring(current_revision()), state.workspace.id }, "/")
-	if stats_key ~= workspace_stats_key then state.workspace_diff, workspace_stats_key = nil, stats_key end
+	if stats_key ~= workspace_stats.key then
+		state.workspace_diff, workspace_stats.key, workspace_stats.due = nil, stats_key, 0
+	end
 	local model = pi_state.model or defaults.model
 	state.provider = model and model.provider
 	state.model_id = model and model.id
@@ -828,11 +831,13 @@ local function refresh_workspace_stats()
 			and trust and trust.state == "ready" and trust.cwd == runtime.cwd and trust.sessionFile == runtime.sessionFile
 	end
 	if not ready() then return end
-	if stats_pending then return end
+	if workspace_stats.pending then return end
+	local now = vim.uv.hrtime() / 1e6
+	if now < workspace_stats.due then return end
 	local captured = stamp()
-	stats_pending = captured
+	workspace_stats.pending, workspace_stats.due = captured, now + 20000
 	request("resource.read", { kind = "workspaceStats", runtimeRevision = captured.revision }, function(ok, result)
-		if stats_pending == captured then stats_pending = nil end
+		if workspace_stats.pending == captured then workspace_stats.pending = nil end
 		if not same_context(captured) or not ready() then return end
 		state.workspace_diff = ok and result.data ~= vim.NIL and result.data or nil
 		statusline.update(ctx)
@@ -984,7 +989,7 @@ local function disconnected(reason, details, intentional)
 	generation = generation + 1
 	job, attachment, grant, authority, hello, startup_options, startup_status = nil, nil, nil, nil, nil, nil, nil
 	startup_options_context, startup_options_pending = nil, nil
-	stats_pending, workspace_stats_key, state.workspace_diff = nil, nil, nil
+	workspace_stats.pending, workspace_stats.key, workspace_stats.due, state.workspace_diff = nil, nil, 0, nil
 	session_status, session_error = "unattached", nil
 	feedback_ui.interrupt(feedback)
 	callbacks, outcomes, auto_control_selection, starting, resume_check = {}, {}, nil, waiting_start, nil
@@ -1347,6 +1352,11 @@ connect = function(automatic)
 			end
 			local change = value.update.conversation
 			local event = change and change.type == "event" and change.event
+			if event and (event.type == "tool_execution_end" or event.type == "agent_settled")
+				and hello and value.update.serviceEpoch == hello.serviceEpoch
+				and value.update.runtimeRevision == current_revision() then
+				workspace_stats.due = 0
+			end
 			local streaming = event and (event.type == "message_update" or event.type == "tool_execution_update"
 				or event.type == "extension_ui_request" and (event.method == "setStatus" or event.method == "setWidget"))
 			local immediate = value.update.owner or receipt or value.update.acceptedQueue
@@ -1431,7 +1441,8 @@ local function detach_selection()
 	ctx.ui.window_id, ctx.ui.window_submission, ctx.ui.reopen = nil, nil, nil
 	pending_context, pending_seen, pending_replies, queue_editor = nil, {}, {}, nil
 	startup_options, startup_status, startup_options_context, startup_options_pending = nil, nil, nil, nil
-	stats_pending, workspace_stats_key, state.workspace_diff, kill_pending, resume_check = nil, nil, nil, nil, nil
+	workspace_stats.pending, workspace_stats.key, workspace_stats.due, state.workspace_diff = nil, nil, 0, nil
+	kill_pending, resume_check = nil, nil
 	session_status, session_error = nil, nil
 	reset_refresh(false)
 end
@@ -3043,6 +3054,7 @@ function M.open(restore)
 				-- A previously queued decoration pass may have been skipped on hide.
 				transcript.render(ctx)
 				refresh(true)
+				workspace_stats.due = 0
 				refresh_workspace_stats()
 			end
 		end)
@@ -3050,6 +3062,7 @@ function M.open(restore)
 	vim.api.nvim_create_autocmd({ "FocusGained", "FocusLost" }, { callback = function(event)
 		frontend_focused = event.event == "FocusGained"
 		if frontend_focused then
+			workspace_stats.due = 0
 			record_focus(); follow_resumed_selection(); check_visibility()
 			vim.schedule(acknowledge_viewed_response)
 		end

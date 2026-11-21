@@ -202,19 +202,29 @@ export function canonicalPath(path: string): string {
   return resolveLinks(path, 40);
 }
 
-export function baselineReadPaths(cwd: string): string[] {
+export function baselinePaths(cwd: string): { read: string[]; write: string[] } {
+  const accessSettings = loadExtensionSettings()["access-mode"];
   const agentDir = getAgentDir();
   const system = process.platform === "darwin"
     ? ["/bin", "/dev", "/etc", "/Library", "/private/etc", "/private/var/db/timezone", "/sbin", "/System", "/usr"]
     : ["/bin", "/dev", "/etc", "/lib", "/lib64", "/nix/store", "/proc", "/sbin", "/usr"];
-  return [cwd, ...system, "/opt", "/usr/lib/node_modules", "/usr/local/lib/node_modules",
+  const read = [cwd, ...system, "/opt", "/usr/lib/node_modules", "/usr/local/lib/node_modules",
     join(agentDir, "AGENTS.md"), join(agentDir, "agents"), join(agentDir, "prompts"), join(agentDir, "skills"),
-    ...(loadExtensionSettings()["access-mode"]?.["read-paths"] ?? ["/"]).map((path) => resolveToolPath(path, cwd)),
-    ...baselineWritePaths(cwd)];
+    ...(accessSettings?.["read-paths"] ?? ["/"]).map((path) => resolveToolPath(path, cwd))];
+  const write = writeBaseline(cwd, accessSettings);
+  return { read: [...read, ...write], write };
+}
+
+export function baselineReadPaths(cwd: string): string[] {
+  return baselinePaths(cwd).read;
 }
 
 export function baselineWritePaths(cwd: string): string[] {
-  const configured = loadExtensionSettings()["access-mode"]?.["write-paths"] ?? ["/tmp"];
+  return writeBaseline(cwd, loadExtensionSettings()["access-mode"]);
+}
+
+function writeBaseline(cwd: string, accessSettings: ReturnType<typeof loadExtensionSettings>["access-mode"]): string[] {
+  const configured = accessSettings?.["write-paths"] ?? ["/tmp"];
   const scratch = getScratchDirectory();
   if (scratch && canonicalPath(scratch) !== scratch) {
     throw new Error("Scratch directory no longer resolves to its generated path; start a new Pi session.");

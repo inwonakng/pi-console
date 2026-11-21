@@ -129,10 +129,14 @@ export class SessionCatalog {
   }
 
   get(id: string): CatalogSession {
+    return this.withQueue(this.getMetadata(id));
+  }
+
+  getMetadata(id: string): Omit<CatalogSession, "acceptedQueue"> {
     return this.read(() => {
       const row = this.db.prepare("SELECT metadata FROM sessions WHERE id=?").get(id);
       if (!row) throw new Error("Unknown service session");
-      return this.withQueue(JSON.parse(String(row.metadata)) as CatalogSession);
+      return JSON.parse(String(row.metadata)) as Omit<CatalogSession, "acceptedQueue">;
     });
   }
 
@@ -286,7 +290,7 @@ export class SessionCatalog {
   }
 
   private async backfillMetadata(): Promise<void> {
-    for (const session of this.list()) {
+    for (const session of this.listSessions(false)) {
       // Never read a file still claimed by an unresolved worker.
       if (session.ownerEpoch !== undefined) continue;
       let metadata: Awaited<ReturnType<typeof readManagedMetadata>>;
@@ -295,8 +299,18 @@ export class SessionCatalog {
         console.warn(`Could not refresh metadata for session ${session.id}:`, error);
         continue; // An unreadable history must not hide other saved sessions.
       }
-      await this.updateTitle(session.id, metadata.name);
-      await this.updateActivity(session.id, metadata.lastActivityAt);
+      await this.serial(() => {
+        const current = this.getMetadata(session.id);
+        if (current.deleted || current.ownerEpoch !== undefined) return;
+        const titleChanged = current.name !== metadata.name;
+        const activityChanged = !(Date.parse(metadata.lastActivityAt) <= Date.parse(current.lastActivityAt ?? current.createdAt));
+        if (!titleChanged && !activityChanged) return;
+        this.transaction(() => {
+          if (titleChanged) current.name = metadata.name;
+          if (activityChanged) current.lastActivityAt = metadata.lastActivityAt;
+          this.updateSession(current);
+        });
+      });
     }
   }
 

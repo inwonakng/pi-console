@@ -2024,6 +2024,12 @@ export default function spawnExtension(pi: ExtensionAPI) {
     let assistantPreview = "";
     let progressPublishTimer: NodeJS.Timeout | undefined;
     let lastProgressPublishAt = 0;
+    const childActivityFailure = (error: unknown) => {
+      // Process callbacks cannot throw into the owner's event loop. Retain
+      // the failure and finish disposal before allowing history changes.
+      run.cleanupError ??= `Could not record child activity: ${error instanceof Error ? error.message : String(error)}`;
+      run.child?.abort();
+    };
     const publishProgress = (immediate = false) => {
       if (immediate) {
         if (progressPublishTimer) {
@@ -2041,8 +2047,12 @@ export default function spawnExtension(pi: ExtensionAPI) {
       const delay = Math.max(0, 250 - (now - lastProgressPublishAt));
       progressPublishTimer = setTimeout(() => {
         progressPublishTimer = undefined;
+        if (retired || runs.get(run.id) !== run) return;
         lastProgressPublishAt = Date.now();
-        publishSpawnStatus();
+        try {
+          if (run.status === "running" && !run.settled && !run.closing) writeStatus(run);
+          publishSpawnStatus();
+        } catch (error) { childActivityFailure(error); }
       }, delay);
     };
     const transcript = (event: RpcEvent) => {
@@ -2160,15 +2170,9 @@ export default function spawnExtension(pi: ExtensionAPI) {
             const progress = summarizeChildEvent(event);
             if (run.status === "running" && progress && progress !== run.progress) {
               run.progress = progress;
-              if (!retired) writeStatus(run);
               publishProgress();
             }
-          } catch (error) {
-            // Process callbacks cannot throw into the owner's event loop. Retain
-            // the failure and finish disposal before allowing history changes.
-            run.cleanupError ??= `Could not record child activity: ${error instanceof Error ? error.message : String(error)}`;
-            run.child?.abort();
-          }
+          } catch (error) { childActivityFailure(error); }
         },
       });
     } catch (error) {
