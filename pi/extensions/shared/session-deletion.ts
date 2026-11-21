@@ -136,11 +136,15 @@ export function planSessionDeletion(records: JsonRecord[], deletedIds: Set<strin
 	if (leafParentId !== null && !keptIds.has(leafParentId)) {
 		throw new Error(`Cannot retain deleted leaf ${leafParentId}.`);
 	}
+	// Pi reads the last title across all branches, including an explicit clear.
+	// Keep it as a detached record if its branch was removed, without restoring any history.
+	const title = records.findLast((record) => record.type === "session_info");
+	if (title && deletedIds.has(recordId(title) ?? "")) kept.push({ ...title, parentId: null });
 	const lastKeptId = recordId(kept[kept.length - 1]!);
 	const desiredLeafId = leafParentId === null || lastKeptId !== leafParentId
 		? appendLeafMarker(kept, leafParentId)
 		: leafParentId;
-	return { records: kept, desiredLeafId, deletedCount: deletedIds.size };
+	return { records: kept, desiredLeafId };
 }
 
 export function writeJsonlFile(path: string, records: object[]): void {

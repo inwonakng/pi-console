@@ -342,8 +342,11 @@ export default function treeExtension(pi: ExtensionAPI) {
 		for (const record of records) {
 			const id = recordId(record);
 			if (record.type === "session" || !id) continue;
-			if (!keep.has(id)) removedIds.add(id);
-			else if (keep.get(id) === parentId(record)) unmatched.delete(id);
+			if (keep.has(id)) {
+				if (keep.get(id) === parentId(record)) unmatched.delete(id);
+			} else if (record.type !== "session_info" || parentId(record) !== null) {
+				removedIds.add(id);
+			}
 		}
 		if (!keep.has(leafId) || unmatched.size !== 0) {
 			ctx.ui.notify("The active branch does not match persisted history. Reload the session before pruning.", "warning");
