@@ -361,8 +361,12 @@ record_command = function(receipt, envelope, live)
 	local message = label .. ": " .. status
 	if failed then
 		local uncertain = status ~= "failed" or receipt.error and receipt.error.code == "stale_runtime"
-		message = (uncertain and ("Completion of " .. label .. " could not be confirmed.") or ("Action " .. label .. " not completed."))
-			.. " Reason: " .. failure_reason(receipt.error)
+		if status == "uncertain" and operation == "history.delete" and receipt.error and receipt.error.code == "operation_uncertain" then
+			message = failure_reason(receipt.error)
+		else
+			message = (uncertain and ("Completion of " .. label .. " could not be confirmed.") or ("Action " .. label .. " not completed."))
+				.. " Reason: " .. failure_reason(receipt.error)
+		end
 		if operation == "side.draft" or operation:match("^workspace%.review%.") then message = message .. " Local draft retained." end
 	end
 	local old_status = previous and previous.status

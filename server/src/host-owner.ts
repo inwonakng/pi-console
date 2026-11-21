@@ -1477,6 +1477,9 @@ export class OwnedSession {
 
   private async executeBundled(receipt: CommandReceipt, flight: BundledFlight): Promise<void> {
     const outcome = structuredClone(receipt);
+    const unconfirmed = flight.operation === "history.delete"
+      ? "Pi couldn't confirm the deletion. Reopen the session and check the history tree before trying again."
+      : "Pi couldn't confirm whether this action finished. Reopen the session and check what changed before trying again.";
     let clone: CatalogSession | undefined;
     let historyRefreshed = false;
     try {
@@ -1577,14 +1580,14 @@ export class OwnedSession {
           // must not turn a completed settings change into a fatal uncertainty.
           if (!modeOperation(flight.operation) && !bashOperation(flight.operation)) this.checkIdentity();
         } else outcome.error = { code: result.code ?? "operation_failed", message: result.status === "failed"
-          ? "Operation was refused/cancelled before application" : "Operation may be partially applied; inspect before taking further action" };
+          ? "Operation was refused/cancelled before application" : unconfirmed };
       } catch (error) {
         outcome.status = !flight.dispatched && error instanceof CommandError ? "failed" : "uncertain";
         console.error(JSON.stringify({ type: "operation_failure", sessionId: this.id, operation: flight.operation,
           invocationId: flight.invocationId, runtimeId: flight.runtimeId, dispatched: flight.dispatched,
           status: outcome.status, error: asError(error).stack ?? asError(error).message }));
         outcome.error = { code: outcome.status === "failed" && error instanceof CommandError ? error.code : "operation_uncertain",
-          message: outcome.status === "failed" ? "Operation was not dispatched" : "Operation outcome is uncertain; inspect, never automatically replay" };
+          message: outcome.status === "failed" ? "Operation was not dispatched" : unconfirmed };
       }
       if (outcome.status === "uncertain") this.commandFailure(new Error(outcome.error!.message));
       const completion = this.admission.then(async () => {
