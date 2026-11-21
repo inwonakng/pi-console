@@ -52,10 +52,6 @@ end
 -- Acquire with {win, ...}; :add(win) includes another member. A nested group
 -- temporarily owns focus. :release() is idempotent and resumes its parent,
 -- never refocusing the released group. Closing its last member also releases it.
-function M.has_focus_group()
-	return focus_groups[#focus_groups] ~= nil
-end
-
 function M.focus_group(wins)
 	local group = { members = {}, released = false }
 

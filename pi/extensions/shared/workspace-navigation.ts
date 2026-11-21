@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext, ExtensionContext, SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { assertManagedResources } from "../../scripts/managed-process.mjs";
 import { assertHistoryWorkspaceAvailable, beginWorkspaceContinuation, clearWorkspaceContinuation, getWorkspaceContinuation, getWorkspaceTransitionError, getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, setWorkspaceTransitionError, workspaceDisplayState, WORKSPACE_CONTINUATION_STATUS, type WorkspaceRecord } from "./workspace";
@@ -68,7 +68,6 @@ export async function moveToLocation(
   const pendingWorkspaceId = getPendingWorkspaceId();
   const ownsPending = (ctx.cwd !== cwd || options.reload === true) && !pendingWorkspaceId;
   const previousCwd = ctx.cwd;
-  const previousModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
   const continuation = options.continueWith ? getWorkspaceContinuation(file) ?? beginWorkspaceContinuation(file) : undefined;
   let currentCtx = ctx;
   let continueArrival: (() => Promise<void>) | undefined;
@@ -115,18 +114,7 @@ export async function moveToLocation(
         publishWorkspaceState(nextCtx);
       }
     }
-    const selected = nextCtx.model;
-    const registered = selected && selected.provider !== "unknown" && selected.id !== "unknown" && selected.api !== "unknown"
-      ? nextCtx.modelRegistry.find(selected.provider, selected.id) : undefined;
-    const configured = registered ? nextCtx.modelRegistry.hasConfiguredAuth(registered) : false;
-    const blocked = !!options.continueWith && !modelReady(nextCtx);
-    manager.appendCustomEntry("pi-workspace-runtime", {
-      version: 1, previousCwd, cwd: nextCtx.cwd, previousModel,
-      model: selected ? { provider: selected.provider, id: selected.id } : undefined,
-      registered: !!registered, configured,
-      continuation: options.continueWith ? blocked ? "blocked" : "ready" : "none",
-    });
-    if (blocked) {
+    if (options.continueWith && !modelReady(nextCtx)) {
       releaseContinuation();
       nextCtx.ui.notify("Workspace switch completed, but automatic continuation stopped because the selected model is unavailable or its provider is not configured. Select a valid model (in pi-console: <leader>m), then explicitly continue. No prompt was sent or queued.", "error");
       return;
@@ -240,18 +228,4 @@ export async function moveToLocation(
     releaseSelection?.();
     if (ownsPending && getPendingWorkspaceId() === "navigation") setPendingWorkspace(undefined);
   }
-}
-
-export function locationEntry(entry: SessionEntry): boolean {
-  return entry.type === "custom" && entry.customType === LOCATION_ENTRY;
-}
-
-export function workspaceIdAt(ctx: ExtensionContext, entryId: string | null): string | undefined {
-  const branch = entryId === null ? [] : ctx.sessionManager.getBranch(entryId);
-  for (let index = branch.length - 1; index >= 0; index--) {
-    const entry = branch[index];
-    if (!locationEntry(entry)) continue;
-    return (entry.data as { workspaceId?: string } | undefined)?.workspaceId;
-  }
-  return undefined;
 }

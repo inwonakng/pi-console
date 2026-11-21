@@ -45,12 +45,10 @@ export function nativeCommand(command: NativeOperation): RpcCommand {
 export function isNative(value: { operation: string }): value is NativeOperation { return (NATIVE_OPERATIONS as readonly string[]).includes(value.operation); }
 export const SESSION_READS = ["models", "thinking", "entries", "tree", "treeEntries", "stats", "forkMessages", "commands"] as const;
 export type SessionRead = typeof SESSION_READS[number];
-export function readCommand(kind: unknown, since?: string): RpcCommand | undefined {
+export function readCommand(kind: Exclude<SessionRead, "entries" | "tree" | "treeEntries">): RpcCommand {
   switch (kind) {
     case "models": return { type: "get_available_models" };
     case "thinking": return { type: "get_available_thinking_levels" };
-    case "entries": return { type: "get_entries", ...(since === undefined ? {} : { since }) };
-    case "tree": return { type: "get_tree" };
     case "stats": return { type: "get_session_stats" };
     case "forkMessages": return { type: "get_fork_messages" };
     case "commands": return { type: "get_commands" };

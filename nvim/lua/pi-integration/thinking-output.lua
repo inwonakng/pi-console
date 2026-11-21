@@ -43,8 +43,6 @@ end
 function M.reset(state)
 	state.thinking_outputs = {}
 	state.next_thinking_output_id = 0
-	state.active_thinking_output_id = nil
-	state.active_thinking_line = nil
 end
 
 function M.store(state, text)
@@ -55,19 +53,6 @@ function M.store(state, text)
 		filetype = "markdown",
 	}
 	return id
-end
-
-function M.append(state, output_id, delta)
-	local output = state.thinking_outputs[output_id]
-	if not output then
-		return
-	end
-	output.text = (output.text or "") .. (delta or "")
-end
-
-function M.text(state, output_id)
-	local output = state.thinking_outputs[output_id]
-	return output and output.text or nil
 end
 
 function M.summary_lines(state, output_id, streaming)

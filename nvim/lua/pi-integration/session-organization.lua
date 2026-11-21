@@ -202,6 +202,16 @@ function M.sections(entries)
 	end)
 end
 
+-- Prompt against saved membership without syncing the live list.
+function M.group_info(group_id)
+	local state, err = load()
+	if not state then return nil, err end
+	for _, group in ipairs(state.groups) do
+		if group.id == group_id then return { name = group.name, count = #group.keys } end
+	end
+	return nil, "That group no longer exists"
+end
+
 -- Read last-assigned membership without modifying the organization.
 function M.group_filter(group_id)
 	local state, err = load()

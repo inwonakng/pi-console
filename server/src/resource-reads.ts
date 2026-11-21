@@ -746,8 +746,9 @@ function ignoredCompletion(path: string, directory: boolean, ignores: Completion
 }
 
 const fileIndexes = new Map<string, { time: number; result: Promise<FileIndex> }>();
+type CompletionContext = Pick<ResourceContext, "cwd" | "workspaceRoot" | "check">;
 
-async function scanCompletionFiles(context: ResourceContext): Promise<FileIndex> {
+async function scanCompletionFiles(context: CompletionContext): Promise<FileIndex> {
   await canonical({ root: context.workspaceRoot, path: context.cwd, followSymlinks: true }, context.check);
   const root = resolve(context.cwd);
   const entries: FileEntry[] = [];
@@ -798,7 +799,7 @@ async function scanCompletionFiles(context: ResourceContext): Promise<FileIndex>
   return { path: root, entries, truncated: truncationReason !== undefined, truncationReason };
 }
 
-async function completionIndex(context: ResourceContext): Promise<FileIndex> {
+async function completionIndex(context: CompletionContext): Promise<FileIndex> {
   const key = JSON.stringify([context.workspaceRoot, context.cwd]);
   let cached = fileIndexes.get(key);
   if (!cached || Date.now() - cached.time >= COMPLETION_TTL) {
@@ -822,7 +823,7 @@ async function completionIndex(context: ResourceContext): Promise<FileIndex> {
  * Explicit paths list one owner directory, including outside the workspace.
  * This grants filename discovery only; project reads still require a path in
  * the workspace, which may lead through a symlink to an external target. */
-export async function completeFiles(context: ResourceContext, input: unknown): Promise<{ path: string; entries: FileEntry[]; nextOffset: number | null; truncated: boolean; truncationReason?: string }> {
+export async function completeFiles(context: CompletionContext, input: unknown): Promise<{ path: string; entries: FileEntry[]; nextOffset: number | null; truncated: boolean; truncationReason?: string }> {
   return limited(context.check, async () => {
     if (!exact(input, ["prefix", "offset"]) || typeof input.prefix !== "string"
       || Buffer.byteLength(input.prefix) > 4096 || /[\u0000-\u001f\u007f]/.test(input.prefix) || !offset(input.offset)) {

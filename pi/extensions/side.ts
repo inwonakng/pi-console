@@ -47,6 +47,9 @@ type JournalData =
   | { kind: "state"; running: boolean; error?: string; pendingPrompt?: string; pendingAfter?: string };
 type JournalRecord = RecordBase & JournalData;
 
+const sideActions = ["open", "prompt", "reset", "abort", "draft", "select", "delete"] as const;
+type SideAction = { action: typeof sideActions[number]; id?: string; fromId?: string; abort?: boolean; message?: string; draft?: string };
+
 type ToolStart = Extract<JsonAgentSessionEvent, { type: "tool_execution_start" }>;
 type ToolEnd = Extract<JsonAgentSessionEvent, { type: "tool_execution_end" }>;
 type SideTool = Omit<ToolStart, "type"> & {
@@ -656,34 +659,12 @@ export default function sideExtension(pi: ExtensionAPI) {
     current = undefined;
   });
 
-  const sideAction = async (args: string, ctx: import("@earendil-works/pi-coding-agent").ExtensionCommandContext): Promise<{ disposition: "accepted" } | undefined> => {
-      if (ctx.mode !== "rpc") {
-        ctx.ui.notify("Side conversations are controlled through the pi-console frontend.", "warning");
-        return;
-      }
-      let request: { action: string; id?: string; fromId?: string; abort?: boolean;
-        message?: string; draft?: string; requestId?: string; parentSessionFile?: string };
-      try {
-        request = JSON.parse(args);
-        if (!request || !["open", "prompt", "reset", "abort", "draft", "select", "delete"].includes(request.action)) throw new Error("Invalid action");
-      } catch {
-        ctx.ui.notify('Usage: /pi-side {"action":"open|prompt|reset|abort|draft|select|delete","message":"...","draft":"..."}', "warning");
-        return;
-      }
-      const reply = (success: boolean, error?: string) => {
-        ctx.ui.setStatus("pi-side-response", JSON.stringify({
-          parentSessionFile: ctx.sessionManager.getSessionFile() ?? "",
-          requestId: request.requestId, success, error,
-        }));
-        return success ? { disposition: "accepted" as const } : undefined;
-      };
-      const reject = (error: string) => { ctx.ui.notify(error, "warning"); reply(false, error); };
+  const sideAction = async (request: SideAction, ctx: ExtensionContext,
+    reply?: (success: boolean, error?: string) => void): Promise<{ disposition: "accepted" } | undefined> => {
+      const accept = () => { reply?.(true); return { disposition: "accepted" as const }; };
+      const reject = (error: string) => { ctx.ui.notify(error, "warning"); reply?.(false, error); };
       if (shuttingDown) { reject("Pi is shutting down."); return; }
       if (storageError) { reject(storageError); return; }
-      if (request.parentSessionFile !== undefined && request.parentSessionFile !== ctx.sessionManager.getSessionFile()) {
-        reject("The parent session changed; the side action was not applied.");
-        return;
-      }
       const g = current ??= restore(ctx);
       g.ctx = ctx;
       if (transition) { reject("Side conversation is stopping or switching chats."); return; }
@@ -692,7 +673,7 @@ export default function sideExtension(pi: ExtensionAPI) {
         state(g);
         generateTitle(g);
         publish(g);
-        return reply(true);
+        return accept();
       }
       if (["prompt", "draft", "abort"].includes(request.action) && request.id !== g.id
         || ["reset", "select"].includes(request.action) && request.fromId !== g.id) {
@@ -713,10 +694,10 @@ export default function sideExtension(pi: ExtensionAPI) {
           publish(current!);
         })().finally(() => { transition = undefined; });
         await transition;
-        return reply(true);
+        return accept();
       }
       if (request.action === "reset" || request.action === "select") {
-        if (request.action === "select" && request.id === g.id) return reply(true);
+        if (request.action === "select" && request.id === g.id) return accept();
         if (g.running && request.abort !== true) { reject("Confirm aborting the running side chat before moving."); return; }
         if (!existsSync(g.parentSessionFile)) { reject("Send a main prompt first so side chats have a saved parent session."); return; }
         const next = request.action === "reset" ? fresh(ctx, reference(ctx, pi)) : request.id && conversations.get(request.id);
@@ -734,7 +715,7 @@ export default function sideExtension(pi: ExtensionAPI) {
           publish(next);
         })().finally(() => { transition = undefined; });
         await transition;
-        return reply(true);
+        return accept();
       }
       if (request.action === "draft") {
         if (typeof request.draft !== "string" || Buffer.byteLength(request.draft) > 1024 * 1024) {
@@ -745,7 +726,7 @@ export default function sideExtension(pi: ExtensionAPI) {
           state(g);
         }
         publish(g);
-        return reply(true);
+        return accept();
       }
       if (!existsSync(g.parentSessionFile)) {
         reject("Send a main prompt first so the side conversation has a saved parent session.");
@@ -755,7 +736,7 @@ export default function sideExtension(pi: ExtensionAPI) {
         g.activity = "Stopping side conversation";
         publish(g);
         transition = abort(g).catch((error) => failure(g, error)).finally(() => { transition = undefined; });
-        return reply(true);
+        return accept();
       }
       if (g.reference?.source.leafId && !ctx.sessionManager.getEntry(g.reference.source.leafId)) {
         reject("This side chat's main context was deleted. Start a new side chat; its history is still available here."); return;
@@ -780,7 +761,7 @@ export default function sideExtension(pi: ExtensionAPI) {
       refreshMessages(g);
       generateTitle(g);
       publish(g);
-      reply(true);
+      const accepted = accept();
       // Do not await the independent run in the parent's RPC command handler.
       g.work = (async () => {
         try {
@@ -803,17 +784,43 @@ export default function sideExtension(pi: ExtensionAPI) {
           state(g);
         }
       })();
-      return { disposition: "accepted" as const };
+      return accepted;
   };
   pi.registerCommand("pi-side", { description: "Control ask-mode side chats (JSON: open, prompt, reset, select, delete, abort, draft).",
-    handler: async (args, ctx) => { await sideAction(args, ctx); } });
-  for (const operation of ["side.open", "side.prompt", "side.draft", "side.reset", "side.abort", "side.select", "side.delete"] as const) {
-    registerServiceOperation(pi, operation, (payload, ctx) => sideAction(JSON.stringify({
+    handler: async (args, ctx) => {
+      if (ctx.mode !== "rpc") {
+        ctx.ui.notify("Side conversations are controlled through the pi-console frontend.", "warning");
+        return;
+      }
+      let request: SideAction & { requestId?: string; parentSessionFile?: string };
+      try {
+        request = JSON.parse(args);
+        if (!request || !sideActions.includes(request.action)) throw new Error("Invalid action");
+      } catch {
+        ctx.ui.notify('Usage: /pi-side {"action":"open|prompt|reset|abort|draft|select|delete","message":"...","draft":"..."}', "warning");
+        return;
+      }
+      const reply = (success: boolean, error?: string) => {
+        ctx.ui.setStatus("pi-side-response", JSON.stringify({
+          parentSessionFile: ctx.sessionManager.getSessionFile() ?? "",
+          requestId: request.requestId, success, error,
+        }));
+      };
+      if (!shuttingDown && !storageError && request.parentSessionFile !== undefined && request.parentSessionFile !== ctx.sessionManager.getSessionFile()) {
+        const error = "The parent session changed; the side action was not applied.";
+        ctx.ui.notify(error, "warning");
+        reply(false, error);
+        return;
+      }
+      await sideAction(request, ctx, reply);
+    },
+  });
+  for (const action of sideActions) {
+    registerServiceOperation(pi, `side.${action}`, (payload, ctx) => sideAction({
       ...payload,
-      action: operation.slice(5),
-      message: operation === "side.prompt" && "text" in payload ? payload.text : undefined,
-      draft: operation === "side.draft" && "text" in payload ? payload.text : undefined,
-      parentSessionFile: ctx.sessionManager.getSessionFile(),
-    }), ctx));
+      action,
+      message: action === "prompt" && "text" in payload ? payload.text : undefined,
+      draft: action === "draft" && "text" in payload ? payload.text : undefined,
+    }, ctx));
   }
 }

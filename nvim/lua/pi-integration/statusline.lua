@@ -242,7 +242,7 @@ local function activity_statusline_label(state)
 		or state.tree_loading or state.history_operation and state.history_operation.label
 	if state.history_send then suffix = suffix .. " · message queued" end
 	if not history_activity and not state.is_loading and not state.is_agent_running and not state.is_streaming
-		and not state.is_retrying and not state.awaiting_agent_output then
+		and not state.is_retrying then
 		if next_pending and (next_pending.edit_buf or next_pending.id == state.queue_edit_item) then
 			return " waiting·editing queued message" .. suffix
 		end
@@ -695,7 +695,7 @@ function M.setup(ctx)
 			local state = ctx.state
 			if state.frontend_visible == false then return end
 			if not state.tree_loading and not state.history_operation and not state.is_loading and not state.is_agent_running and not state.is_streaming
-				and not state.is_retrying and not state.awaiting_agent_output then return end
+				and not state.is_retrying then return end
 			if not buffer.window_matches(state.status_win, state.status_buf) then return end
 			state.activity_spinner_tick = math.floor(vim.uv.hrtime() / (interval_ms * 1000000)) % #activity_spinner_frames + 1
 			-- Animate only the native footer row, without rebuilding bars or history.

@@ -1,7 +1,7 @@
 local M = {}
 
 function M.is_agent_active(state)
-	return state.is_agent_running or state.is_streaming or state.is_retrying or state.awaiting_agent_output
+	return state.is_agent_running or state.is_streaming or state.is_retrying
 end
 
 function M.new()
@@ -35,9 +35,7 @@ function M.new()
 		tree_match_rows = {},
 		is_streaming = false,
 		is_agent_running = false,
-		refresh_transcript_after_settled = false,
 		completion_pending = false,
-		session_replacement_pending = false,
 		is_retrying = false,
 		is_compacting = false,
 		is_loading = false,
@@ -45,7 +43,6 @@ function M.new()
 		pending_ui_requests = {},
 		active_ui_request_id = nil,
 		pending_retry_error = nil,
-		awaiting_agent_output = false,
 		activity_label = nil,
 		activity_tool_call_id = nil,
 		activity_spinner_tick = 1,
@@ -78,7 +75,6 @@ function M.new()
 		pending_transcript_scroll = nil,
 		pending_user_messages = {},
 		abort_requested = false,
-		last_stderr_lines = {},
 		transcript_items = {},
 		tool_outputs = {},
 		next_tool_output_id = 0,
@@ -92,11 +88,8 @@ function M.new()
 		skill_tool_calls = {},
 		skill_outputs = {},
 		next_skill_output_id = 0,
-		active_thinking_output_id = nil,
-		active_thinking_line = nil,
 		session_stats = nil,
 		todo_status = nil,
-		todo_tool_output_id = nil,
 		notification_status = nil,
 		codex_usage = nil,
 	}

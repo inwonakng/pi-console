@@ -41,7 +41,7 @@ const notifications = setupNotifications($("notification-toggle"), $("notificati
 const sessionName = row => row?.name || row?.cwd?.split("/").filter(Boolean).pop() || "Untitled session";
 const sessionKey = (hostId, sessionId) => `${hostId}/${sessionId}`;
 const sessionRoute = (host, row) => `#sessions/${host.hello.hostId}/${row.id}`;
-let hosts = [], conversations = new Map(), activeKey = null, activeScreen = "overview", connecting = false, generation = 0;
+let hosts = [], conversations = new Map(), activeKey = null, activeScreen = "overview", connecting = false;
 let controllerLabel = "webui";
 let pageLeaving = false, recoveryTimer, recoveryCheck = false;
 const recoveryState = () => ({ attempt: 0, due: 0, blocked: false });
@@ -497,14 +497,12 @@ function connectHost(host, automatic = false) {
 async function connectAll() {
   if (connecting) return;
   connecting = true;
-  const current = ++generation;
   $("connect").disabled = true;
   try {
     const response = await fetch("/v1/hosts", { cache: "no-store" });
     if (!response.ok) throw new Error(`Could not read registered hosts (${response.status}).`);
     const registry = await response.json();
     if (registry.channel !== channel || !Array.isArray(registry.hosts)) throw new Error("Invalid host registry or channel.");
-    if (current !== generation) return;
     controllerLabel = registry.clientAddress ? `webui@${registry.clientAddress}` : "webui";
     const previous = hosts;
     hosts = registry.hosts.map(target => {

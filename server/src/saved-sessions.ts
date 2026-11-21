@@ -83,9 +83,3 @@ export async function withSavedSessionHelper<T>(options: HelperOptions, run: (re
     await rm(directory, { recursive: true, force: true });
   }
 }
-
-export function savedSessionHelper(options: HelperOptions, payload: SavedPayload): Promise<SavedResult>;
-export function savedSessionHelper(options: HelperOptions, payload: CleanupPayload): Promise<CleanupResult>;
-export function savedSessionHelper(options: HelperOptions, payload: SavedPayload | CleanupPayload): Promise<SavedResult | CleanupResult> {
-  return withSavedSessionHelper<SavedResult | CleanupResult>(options, request => payload.action === "cleanup" ? request(payload) : request(payload));
-}

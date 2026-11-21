@@ -235,7 +235,6 @@ export function managedSpawn(command, args, options) {
         catch { /* Missing terminal evidence remains unresolved in managedResult. */ }
       }
     });
-    child.on('message', () => {});
     child.on('spawn', () => {
       if (child.connected) child.send({ type: 'launch', command, args, env: { ...env, PI_CONSOLE_PROCESS_JOB: id } }, () => {});
     });
@@ -425,7 +424,6 @@ async function supervise(path, id) {
       if (!finished) await delay(250);
     }
     const result = JSON.parse(db.prepare('SELECT result FROM jobs WHERE id=?').get(id).result);
-    if (process.connected) await new Promise(resolve => process.send({ type: 'managed_exit', exit: result }, () => resolve()));
     process.exitCode = result.managedUnresolved || result.error ? 1 : result.code ?? (result.signal ? 1 : 0);
   } catch (e) {
     console.error('Managed supervisor failed; ownership remains unresolved:', e);

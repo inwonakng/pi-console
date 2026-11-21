@@ -51,7 +51,6 @@ export class PiProcess {
   private readonly requestPrefix = randomUUID();
   private buffer = "";
   private readonly decoder = new TextDecoder("utf-8", { fatal: true });
-  private stderr = "";
   private stopping = false;
   private exited = false;
   private failure?: Error;
@@ -120,7 +119,6 @@ export class PiProcess {
         options.onExit(exit);
       });
     });
-    this.process.stderr.setEncoding("utf8");
     this.process.stdout.on("data", (chunk: Buffer) => {
       if (this.failure) return;
       let text: string;
@@ -129,10 +127,8 @@ export class PiProcess {
       this.read(text);
     });
     this.process.stdout.on("end", () => this.endOutput());
-    // Provider diagnostics may contain credentials; discovery never retains them.
-    this.process.stderr.on("data", (chunk: string) => {
-      if (!options.hostOptionsHelper) this.stderr = (this.stderr + chunk).slice(-8192);
-    });
+    // Drain provider diagnostics without retaining them; they may contain credentials.
+    this.process.stderr.resume();
     this.process.stdin.on("error", (error) => this.fail(error));
     this.process.stdout.on("error", (error) => this.fail(error));
     this.process.stderr.on("error", (error) => this.fail(error));
@@ -158,10 +154,6 @@ export class PiProcess {
 
   interactionSnapshot(): InteractionSnapshot {
     return this.interactions.snapshot();
-  }
-
-  recentStderr(): string {
-    return this.stderr;
   }
 
   request(command: RpcCommand, beforeDispatch?: () => void): Promise<PiResponse> {

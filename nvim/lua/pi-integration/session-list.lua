@@ -1,6 +1,6 @@
 -- Organization and interaction semantics shared by the overview and sidebar.
 local runtime = require("pi-integration.runtime")
-local pins = require("pi-integration.session-pins")
+local pins = require("pi-integration.service-pins")
 local organization = require("pi-integration.session-organization")
 local icons = require("pi-integration.status-icons")
 local M = {}
@@ -15,7 +15,7 @@ function M.same(left, right)
 	if left.kind == "session" and right.kind == "session" then
 		local a, b = left.entry, right.entry
 		if a.host_id or b.host_id then return a.host_id == b.host_id and a.session_id == b.session_id end
-		return a.id == b.id or a.path ~= nil and runtime.canonical_path(a.path) == runtime.canonical_path(b.path)
+		return a.id == b.id or a.path ~= nil and a.path == b.path
 	end
 	return false
 end
@@ -159,7 +159,7 @@ function M.new()
 					M.text(entry.cwd), M.text(entry.workspace_id), M.text(entry.status), M.text(entry.host_name), M.text(entry.host_id), section.name,
 				}, " "):lower()
 				if (not host_filter or host_filter == entry.host_id) and (query == "" or searchable:find(query, 1, true)) then table.insert(matching, entry) end
-				if reveal and (entry.id == reveal.id or reveal.path and runtime.canonical_path(entry.path) == runtime.canonical_path(reveal.path)) then
+				if reveal and (entry.id == reveal.id or reveal.path and entry.path == reveal.path) then
 					collapsed[section.id] = false
 				end
 			end
@@ -258,17 +258,11 @@ function M.new()
 			local group_id = node and (node.kind == "group" and node.id or node.group_id)
 			if group_id == nil then return end
 			if group_id == "" then return report(nil, "Ungrouped cannot be renamed") end
-			local current, err = organization.sections({})
-			if not current then return report(nil, err) end
-			for _, group in ipairs(current) do
-				if group.id == group_id then
-					vim.ui.input({ prompt = "Rename group: ", default = group.name }, function(name)
-						if name then report(organization.rename(group_id, name)) end
-					end)
-					return
-				end
-			end
-			report(nil, "That group no longer exists")
+			local group, err = organization.group_info(group_id)
+			if not group then return report(nil, err) end
+			vim.ui.input({ prompt = "Rename group: ", default = group.name }, function(name)
+				if name then report(organization.rename(group_id, name)) end
+			end)
 		end, "Rename selected group or session's group")
 		if config.role == "overview" then
 			map("<Esc><Esc>", function()
@@ -282,11 +276,8 @@ function M.new()
 			if node.kind == "group" then
 				if node.id == "" then return report(nil, "Ungrouped cannot be deleted") end
 				-- Include hidden closed sessions and changes from other viewers.
-				local current, err = organization.sections({})
-				if not current then return report(nil, err) end
-				local group
-				for _, section in ipairs(current) do if section.id == node.id then group = section end end
-				if not group then return report(nil, "That group no longer exists") end
+				local group, err = organization.group_info(node.id)
+				if not group then return report(nil, err) end
 				if group.count == 0 then return report(organization.delete(node.id)) end
 				vim.ui.select({ "Yes", "No" }, { prompt = "Delete group '" .. group.name .. "' and move its " .. group.count .. " sessions to Ungrouped?", pi_select_layout = "compact" }, function(choice)
 					if choice == "Yes" then report(organization.delete(node.id, true)) end

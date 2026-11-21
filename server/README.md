@@ -583,7 +583,7 @@ before strictly newer updates. Detach or slow-view eviction revokes that attachm
 not accepted work. UI snapshot replacement is a pure render coalesced after updates.
 
 Host `host.create` / `host.resume` commands contain `{id,serviceEpoch,operation,payload}`.
-Their receipt means allocation/scheduling, **not ready() or completed agent work**.
+Their receipt means allocation/scheduling, **not startup readiness or completed agent work**.
 Same ID/payload resolves disk state without launching twice; changed payload conflicts.
 Use status lookups for lost acknowledgments. New epochs never reauthorize old envelopes.
 No client automatically retries a mutation. Administrative stop is separately guarded
@@ -683,7 +683,7 @@ in `plans/server-mode.md` intentionally accepts unknown escaped descendants.
   their own cleanup/publication. TERM begins after 2s, KILL after 5s; unresolved
   local work is reported after 8s, nested evidence after at most 12s (plus bounded
   process-table work). These are shutdown policies, not generation deadlines.
-- `HostOwner.reconcile({root, channel, appRoot})` is explicit administration,
+- `reconcileService({root, channel, appRoot})` is explicit administration,
   serialized with other management commands. Linux systemd startup also invokes
   recovery, using the lifetime lease without reacquiring the CLI's management
   lock. Both paths validate installation identities and seal old epochs.
@@ -814,11 +814,9 @@ a new reliable service-stop API.
 paths and host launch environment. It pins resolved paths and copies the environment;
 default per-channel roots and resource-change refusal are described above. This is
 not itself an atomic dev runtime snapshot; F1 installers supply a staged snapshot.
-`create(cwd)`
-returns after catalog creation, not after trust setup. `resume(id)` returns the
-same initializing/live handle for concurrent callers. Observe `snapshot()` and
-answer its pending interactions **before** awaiting `ready()` when setup needs a
-choice; waiting first would deadlock an unattended trust dialog.
+`resume(id)` returns the same initializing/live handle for concurrent callers.
+Observe startup through `snapshot()` and answer its pending interactions when
+setup needs a choice.
 
 Startup runs `get_state`, `get_commands`, `/pi-trust-setup`, checks the retained
 trust result, then `/pi-workspace-publish`. A successful extension-command receipt
@@ -835,14 +833,12 @@ liveness at the actual stdin write position, including under backpressure.
 `assertReady()` rejects dispatch before trust/workspace readiness. The editable
 accepted queue below rechecks this gate at its actual pipe write position.
 All APIs remain owner-internal.
-`ready()` records initial startup completion; use the current snapshot/gate to
-check later availability, not that already-resolved promise.
 
 Snapshots contain copied startup/interactions and materialized conversation state.
 `lookup()` and `subscribe()` never start or restore anything.
 `OwnedSession.stop()` is explicit low-level owner shutdown, not detach and not an
 unrestricted frontend stop endpoint. `HostOwner.close()` refuses active/initializing
-sessions or in-flight creation; it never silently stops them.
+sessions; it never silently stops them.
 
 The catalog's exclusive claim is not proof that all worker descendants have died.
 It refuses stale claims and unresolved ownership rather than guessing from a

@@ -388,8 +388,8 @@ end
 -- tool_items_by_output also belongs to the renderer and shares objects with items.
 local output_state_fields = {
 	"tool_outputs", "next_tool_output_id", "tool_calls", "live_tool_output_by_call",
-	"spawn_run_output_by_id", "todo_tool_output_id", "tool_items_by_output",
-	"thinking_outputs", "next_thinking_output_id", "active_thinking_output_id", "active_thinking_line",
+	"spawn_run_output_by_id", "tool_items_by_output",
+	"thinking_outputs", "next_thinking_output_id",
 	"skill_tool_calls", "skill_outputs", "next_skill_output_id",
 }
 

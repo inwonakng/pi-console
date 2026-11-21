@@ -302,7 +302,7 @@ window. Unknown detach/reparent/namespace/external-service escapes remain possib
 No persisted PID is used to signal recovery targets.
 
 `SessionCatalog` holds a separate kernel lifetime lease. Explicit
-`HostOwner.reconcile({root,channel,appRoot})` acquires it under the
+`reconcileService({root,channel,appRoot})` acquires it under the
 management lock, validates all installation identities, seals old epochs, waits for
 known managed jobs and stores exact retained claim bytes in immutable FULL SQLite
 recovery rows before catalog transition/claim retirement. Interrupted publication

@@ -186,7 +186,6 @@ function M.apply_folds(state, win)
 					break
 				end
 			end
-			activity.folded = last > activity.start_line and not activity.expanded
 			if last > activity.start_line then
 				table.insert(folds, { activity.start_line, last, activity.expanded, activity.key })
 			end

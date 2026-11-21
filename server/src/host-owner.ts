@@ -2,16 +2,14 @@ import { HISTORY_COMMAND, HISTORY_STATUS, HistoryRead, savedHistoryPreview, type
 import { lstat, open } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { DESKTOP_NOTIFICATION_STATUS, validDesktopNotification, type DesktopNotification } from "../../pi/extensions/shared/desktop-notification.mjs";
-import { completeHostFiles } from "./host-discovery.js";
 import { tmpdir } from "node:os";
 import { WorkspaceReviews, type ReviewMutation } from "./workspace-reviews.js";
 import { fingerprint, readResource, completeFiles, completeDirectory, type ResourceContext } from "./resource-reads.js";
 import { hostCommand, hostFingerprint, type HostReceipt } from "./host-commands.js";
 import { inspectEpoch } from "../../pi/scripts/managed-process.mjs";
 import { LINUX_SESSION_NETWORK_LABEL } from "../../pi/scripts/linux-session-network.mjs";
-import type { RecoveryOptions } from "./service-recovery.js";
 import { createHash, randomUUID } from "node:crypto";
-import { SavedHelperUnresolved, savedSessionHelper, withSavedSessionHelper, type SavedPreview, type SavedSessionRequest } from "./saved-sessions.js";
+import { SavedHelperUnresolved, withSavedSessionHelper, type SavedPreview, type SavedSessionRequest } from "./saved-sessions.js";
 import { isAbsolute, join } from "node:path";
 import type { RpcCommand, RpcExtensionUIResponse, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
 import { PiCommandError, PiProcess, type PiExit, type PiProcessOptions } from "./pi-process.js";
@@ -131,7 +129,6 @@ type CachedHostOptions = { options: HostOptions; expiresAt: number };
 export class HostOwner {
   readonly notifications = new EventEmitter<{ notification: [OriginNotification] }>();
   private readonly sessions = new Map<string, OwnedSession>();
-  private creating = 0;
   private closing = false;
   private hostAdmission: Promise<void> = Promise.resolve();
   private hostAdmitting = 0;
@@ -167,9 +164,6 @@ export class HostOwner {
     } catch (error) { await catalog.close(); throw error; }
   }
 
-  /** Explicit recovery only; callers then reopen and explicitly resume a saved session. */
-  static reconcile(options: RecoveryOptions): Promise<void> { return SessionCatalog.reconcile(options); }
-
   get shutdownStarted(): boolean { return this.closing; }
   get buildId(): string { return this.resources.buildId; }
   get hostId(): string { return this.catalog.hostId; }
@@ -196,7 +190,12 @@ export class HostOwner {
 
   async completeForHost(cwd: unknown, input: unknown, check: () => void): Promise<unknown> {
     this.assertOpen();
-    return completeHostFiles(cwd, input, () => { this.assertOpen(); check(); });
+    check();
+    if (typeof cwd !== "string" || !isAbsolute(cwd) || Buffer.byteLength(cwd) > 4096
+      || /[\u0000-\u001f\u007f]/.test(cwd) || cwd.split(/[\\/]/).includes("..")) {
+      throw new CommandError("invalid_command", "Host file completion requires an absolute selected directory");
+    }
+    return completeFiles({ cwd, workspaceRoot: cwd, check: () => { this.assertOpen(); check(); } }, input);
   }
 
   /** Cache display metadata only; session startup still initializes and checks trust normally. */
@@ -371,15 +370,6 @@ export class HostOwner {
     return task.finally(() => { this.hostAdmitting--; });
   }
 
-  async create(cwd: string): Promise<OwnedSession> {
-    this.assertOpen();
-    if (this.workspaceCleanupRunning) throw new CommandError("session_busy", "Workspace cleanup in progress; retry opening the session");
-    this.catalog.assertLaunchAllowed();
-    this.creating++;
-    try { return this.resume((await this.catalog.create(cwd)).id); }
-    finally { this.creating--; }
-  }
-
   /** Register synchronously, before any file checks, commits or child startup. */
   resume(id: string, recoverOnly = false): OwnedSession {
     this.assertOpen();
@@ -531,7 +521,7 @@ export class HostOwner {
     const task = this.hostAdmission.then(async () => {
       this.assertOpen();
       this.catalog.assertLaunchAllowed();
-      if (this.creating || inspectEpoch(this.catalog.processRegistry, this.serviceEpoch).some(job => job.status === "unresolved")) return;
+      if (inspectEpoch(this.catalog.processRegistry, this.serviceEpoch).some(job => job.status === "unresolved")) return;
       const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
       const protectedSessions = new Set<string>();
       const protectedCwds: string[] = [];
@@ -546,19 +536,11 @@ export class HostOwner {
       }
       this.workspaceCleanupRunning = true;
       try {
-        const result = await savedSessionHelper({ binary: this.options.binary, appRoot: this.options.appRoot,
-          sessionDirectory: join(this.catalog.root, "sessions"), workspaceRoot: join(this.catalog.root, "workspaces"),
-          environment: this.options.environment, assertExecutionAllowed: () => this.catalog.assertExecutionAllowed() },
-        { action: "cleanup", cutoff, protectedSessions: [...protectedSessions], protectedCwds });
+        const result = await this.withSavedHelper(request =>
+          request({ action: "cleanup", cutoff, protectedSessions: [...protectedSessions], protectedCwds }));
         if (!result.success) throw new Error("Workspace cleanup did not complete");
         console.error(JSON.stringify({ type: "workspace_cleanup", timestamp: new Date().toISOString(),
           workspaces: result.workspaces, runs: result.runs, failed: result.failed }));
-      } catch (error) {
-        if (error instanceof SavedHelperUnresolved) {
-          this.helperUnresolved = error;
-          for (const session of this.sessions.values()) session.storageFailed(error);
-        }
-        throw error;
       } finally {
         this.workspaceCleanupRunning = false;
       }
@@ -572,7 +554,7 @@ export class HostOwner {
    * preflight, before awaiting any child. No frontend disconnect calls this. */
   async shutdown(force = false): Promise<void> {
     this.assertOpen();
-    if (this.creating || this.hostAdmitting > (this.workspaceCleanup ? 1 : 0)) throw new CommandError("session_busy", "Host lifecycle admission is in progress; inspect and retry explicitly");
+    if (this.hostAdmitting > (this.workspaceCleanup ? 1 : 0)) throw new CommandError("session_busy", "Host lifecycle admission is in progress; inspect and retry explicitly");
     if (!force) {
       for (const session of this.sessions.values()) {
         const reason = session.stopBlockReason();
@@ -618,7 +600,7 @@ export class HostOwner {
 
   /** Closing a view must not call this or OwnedSession.stop(). */
   async close(): Promise<void> {
-    if (this.creating || [...this.sessions.values()].some((session) => !session.finished)) {
+    if ([...this.sessions.values()].some((session) => !session.finished)) {
       throw new Error("Stop sessions before closing the host service");
     }
     this.assertOpen();
@@ -634,7 +616,7 @@ export class HostOwner {
   }
 }
 
-/** Initializing identity is available before ready(), including its pending UI.
+/** Initializing identity is available before startup completes, including its pending UI.
  * Execution mutations use the private typed admission layer, never raw RPC.
  */
 export class OwnedSession {
@@ -710,18 +692,12 @@ export class OwnedSession {
   private done = false;
   private wake?: () => void;
   private readonly running: Promise<void>;
-  private readonly initialized: Promise<void>;
-  private resolveReady!: () => void;
-  private rejectReady!: (error: Error) => void;
 
   constructor(private readonly catalog: SessionCatalog, private readonly record: CatalogSession, private readonly options: HostOwnerOptions & { environment: NodeJS.ProcessEnv }, revision: number, sequence = 0, private readonly assertSavedIdle: () => void = () => {},
     private readonly notify: (notification: DesktopNotification) => void = () => {},
     private readonly previousTranscript?: { preview: TranscriptPreview; version: string; piSessionId: string }) {
     this.runtimeRevision = revision;
     this.sequence = sequence;
-    this.initialized = new Promise<void>((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
-    // An unattended session can fail before anyone waits for readiness.
-    void this.initialized.catch(() => undefined);
     this.running = Promise.resolve().then(() => this.run());
   }
 
@@ -729,7 +705,6 @@ export class OwnedSession {
   get name(): string | undefined { return this.conversation.sessionState?.sessionName; }
   get finished(): boolean { return this.done && !this.lifecyclePending; }
   get recoverable(): boolean { return !this.stopRequested && !this.error && !this.done; }
-  ready(): Promise<void> { return this.initialized; }
 
   snapshot(): OwnedSessionSnapshot {
     return { ...this.ownerState(), sequence: this.sequence, preview: structuredClone(this.preview), conversation: this.conversation.snapshot(), conversationRevisions: this.conversation.sectionRevisions(),
@@ -1619,7 +1594,7 @@ export class OwnedSession {
       check();
       return { runtimeRevision: this.runtimeRevision, data };
     }
-    const response = await worker.request(readCommand(input.kind, input.since)!, check);
+    const response = await worker.request(readCommand(input.kind), check);
     check();
     return { runtimeRevision: this.runtimeRevision, data: "data" in response ? response.data : null };
   }
@@ -2237,7 +2212,6 @@ export class OwnedSession {
       if (!this.conversation.hydrated) throw new Error("Pi conversation did not reach a stable startup snapshot");
       this.phase = "ready";
       this.changed();
-      this.resolveReady();
       this.restartReady?.resolve();
       this.restartReady = undefined;
       const exit = await this.worker!.waitForExit();
@@ -2290,7 +2264,6 @@ export class OwnedSession {
       this.previewGeneration++;
       this.phase = this.error ? "failed" : "stopped";
       this.done = true;
-      this.rejectReady(this.error ?? new Error("Session stopped before startup completed"));
       this.changed();
     }
   }

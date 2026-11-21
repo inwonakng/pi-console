@@ -758,23 +758,6 @@ export function historyWorkspaceDiscardWarning(records: WorkspaceRecord[]): stri
   ].join("\n");
 }
 
-export function workspaceDiscardWarning(records: WorkspaceRecord[]): string {
-  if (records.length === 0) return "";
-  const lines = ["The following worktrees will also be removed. Unintegrated changes will be discarded; existing destination changes will not be reverted:"];
-  for (const record of records) {
-    lines.push(`- ${record.label} (${record.lifecycle}): ${record.worktreePath}`);
-    lines.push(`  changed files: ${record.changedFiles.length > 0 ? record.changedFiles.join(", ") : "(none)"}`);
-    lines.push(`  recovery patch: ${record.resultPatchPath}`);
-    if (record.includedIgnoredFiles?.length) {
-      lines.push(`  included ignored files (not in patch): ${record.includedIgnoredFiles.map((file) => file.path).join(", ")}`);
-    }
-    if (record.unpreservedFiles?.length) {
-      lines.push(`  ignored untracked files (not in patch): ${record.unpreservedFiles.join(", ")}`);
-    }
-  }
-  return lines.join("\n");
-}
-
 function assertManagedCleanup(record: WorkspaceRecord): void {
   if (record.managedCleanupPending) throw new Error(`Workspace ${record.id} has known unresolved managed writers (${record.managedCleanupPending}); capture/integration/removal blocked`);
 }

@@ -4,7 +4,7 @@ import { clampThinkingLevel } from "@earendil-works/pi-ai";
 type Model = NonNullable<ExtensionContext["model"]>;
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 type Selection = { provider: string; id: string; model?: Model; thinkingLevel?: ThinkingLevel; exactThinking?: boolean };
-type Readiness = { ready: boolean; requested?: Selection; reason?: "unavailable" | "refresh-failed" | "selection-failed" };
+type Readiness = { ready: boolean; requested?: Selection };
 type PendingSelection = { file: string; selection: Selection };
 
 export const MODEL_READINESS_STATUS = "pi-console-model-readiness";
@@ -74,47 +74,37 @@ function initialSelection(pi: ExtensionAPI, ctx: ExtensionContext): Selection | 
 }
 
 /** One local provider refresh and exact reselection; never sends model work. */
-export async function initializeModelReadiness(pi: ExtensionAPI, ctx: ExtensionContext, signal: AbortSignal): Promise<Readiness> {
-  if (signal.aborted) return { ready: false, reason: "unavailable" };
+export async function initializeModelReadiness(pi: ExtensionAPI, ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
   const pending = state.pending;
   if (pending) state.pending = undefined;
-  const previous = selectedModel(ctx);
-  let requested: Selection | undefined;
-  let result: Readiness = { ready: false, reason: "unavailable" };
+  const result: Readiness = { ready: false };
   try {
-    requested = pending && pending.file === ctx.sessionManager.getSessionFile() ? pending.selection : initialSelection(pi, ctx);
+    const requested = pending && pending.file === ctx.sessionManager.getSessionFile() ? pending.selection : initialSelection(pi, ctx);
     result.requested = requested;
     if (requested) {
-      result.reason = "refresh-failed";
       const refreshed = await ctx.modelRegistry.refresh({ providers: [requested.provider], allowNetwork: false, signal });
-      if (signal.aborted) return result;
+      if (signal.aborted) return;
       if (!refreshed.aborted && !refreshed.errors.has(requested.provider) && !ctx.modelRegistry.getError()) {
-        result.reason = "unavailable";
         const model = ctx.modelRegistry.find(requested.provider, requested.id) ?? requested.model;
         if (validModel(model) && ctx.modelRegistry.hasConfiguredAuth(model)) {
-          result.reason = "selection-failed";
           if (await pi.setModel(model)) {
-            if (signal.aborted) return result;
+            if (signal.aborted) return;
             const level = requested.thinkingLevel && (requested.exactThinking ? requested.thinkingLevel : clampThinkingLevel(model, requested.thinkingLevel));
             if (level) pi.setThinkingLevel(level);
             const selected = ctx.model;
-            if (validModel(selected) && selected.provider === requested.provider && selected.id === requested.id
-                && (!level || pi.getThinkingLevel() === level) && ctx.modelRegistry.hasConfiguredAuth(selected)) result = { ready: true, requested };
+            result.ready = validModel(selected) && selected.provider === requested.provider && selected.id === requested.id
+              && (!level || pi.getThinkingLevel() === level) && ctx.modelRegistry.hasConfiguredAuth(selected);
           }
         }
       }
     }
   } catch {
-    // Provider errors can contain credentials; diagnostics keep only the stage.
+    // Provider errors can contain credentials; report only availability.
   }
-  if (signal.aborted) return result;
+  if (signal.aborted) return;
   state.results.set(ctx.sessionManager, result);
   ctx.ui.setStatus(MODEL_READINESS_STATUS, result.ready ? "ready" : "unavailable");
-  pi.appendEntry("pi-model-readiness", { version: 1, ready: result.ready, reason: result.reason,
-    requested: requested && { provider: requested.provider, id: requested.id },
-    previous: previous && { provider: previous.provider, id: previous.id },
-    selected: validModel(ctx.model) ? { provider: ctx.model.provider, id: ctx.model.id } : undefined });
-  return result;
 }
 
 export function modelReady(ctx: ExtensionContext): boolean {

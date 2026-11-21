@@ -199,15 +199,17 @@ class PiRpcChild {
     });
     void this.closed.catch(() => undefined);
 
-    this.proc.stdout.on("data", (chunk) => {
-      this.stdoutBuffer += chunk.toString("utf8");
+    this.proc.stdout.setEncoding("utf8");
+    this.proc.stderr.setEncoding("utf8");
+    this.proc.stdout.on("data", (chunk: string) => {
+      this.stdoutBuffer += chunk;
       this.drainLines(this.stdoutBuffer, (remaining) => {
         this.stdoutBuffer = remaining;
       }, (line) => this.handleStdoutLine(line, options.onEvent, options.onDialog));
     });
 
-    this.proc.stderr.on("data", (chunk) => {
-      this.stderrBuffer += chunk.toString("utf8");
+    this.proc.stderr.on("data", (chunk: string) => {
+      this.stderrBuffer += chunk;
       this.drainLines(this.stderrBuffer, (remaining) => {
         this.stderrBuffer = remaining;
       }, (line) => {
@@ -1515,36 +1517,6 @@ export default function spawnExtension(pi: ExtensionAPI) {
     return { changed: true };
   });
 
-  const waitForRun = async (run: SpawnRun, signal: AbortSignal | undefined, stopOnAbort: boolean): Promise<SpawnRun> => {
-    // Execution status can settle before asynchronous artifact finalization.
-    // Always await the owning completion promise, including for restored runs.
-    if (!signal) {
-      return run.finished;
-    }
-    if (signal.aborted) {
-      if (stopOnAbort) {
-        stopRun(run, "parent_abort");
-      }
-      throw new Error("spawn_control aborted");
-    }
-    return new Promise<SpawnRun>((resolve, reject) => {
-      const abort = () => {
-        if (stopOnAbort) {
-          stopRun(run, "parent_abort");
-        }
-        reject(new Error("spawn_control aborted"));
-      };
-      signal.addEventListener("abort", abort, { once: true });
-      run.finished.then(resolve, reject).finally(() => {
-        signal.removeEventListener("abort", abort);
-      });
-    });
-  };
-
-  const waitForRuns = async (selected: SpawnRun[], signal: AbortSignal | undefined, stopOnAbort: boolean): Promise<void> => {
-    await Promise.all(selected.map((run) => waitForRun(run, signal, stopOnAbort)));
-  };
-
   const waitForActions = (selected: SpawnRun[], signal?: AbortSignal): Promise<void> => {
     const actionable = () => selected.some((run) => run.execution === "waiting_parent" || run.execution === "waiting_user")
       || selected.every((run) => run.settled || run.execution === "idle");
@@ -1683,7 +1655,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
       );
       if (choice !== "Continue and stop subagents") return { cancel: true };
       for (const run of running) stopRun(run, "session_switch");
-      await waitForRuns(running, undefined, false);
+      await Promise.all(running.map((run) => run.finished));
     } catch (error) {
       ctx.ui.notify(`Could not stop subagents: ${error instanceof Error ? error.message : String(error)}`, "error");
       return { cancel: true };
@@ -2420,7 +2392,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         await finalizeJoin([run], ctx.signal, "command", () => emitCommandResult(resultSummary(run), artifactDetails(run)));
       } else {
         stopRun(run, "stopped_by_parent");
-        await waitForRun(run, undefined, false);
+        await run.finished;
         publishSpawnStatus();
         emitCommandResult(`Stopped ${run.id}: ${run.status}`, artifactDetails(run));
       }
@@ -2454,7 +2426,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         if (action === "stop") {
           const run = getRunById(id);
           stopRun(run, "stopped_by_parent");
-          await waitForRun(run, undefined, false);
+          await run.finished;
           publishSpawnStatus();
           emitCommandResult(`Stopped ${run.id}: ${run.status}${run.error ? ` (${run.error})` : ""}`, artifactDetails(run));
           return;
@@ -2855,7 +2827,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         if (params.action === "close") {
           if (!run.settled && run.execution !== "idle") throw new Error("Close requires an idle worker; use stop to cancel active work");
           stopRun(run, "closed_by_parent");
-          await waitForRun(run, undefined, false);
+          await run.finished;
           if (!run.cleanupError) { run.closing = true; run.execution = "closed"; writeStatus(run); }
         }
         if (params.action === "discard") {
@@ -2896,7 +2868,7 @@ export default function spawnExtension(pi: ExtensionAPI) {
         for (const run of selected) {
           stopRun(run, "stopped_by_parent");
         }
-        await waitForRuns(selected, undefined, false);
+        await Promise.all(selected.map((run) => run.finished));
         const text = selected.map((run) => `Stopped ${run.id}: ${run.status}${run.error ? ` (${run.error})` : ""}`).join("\n");
         return { content: [{ type: "text", text }], details: { runs: selected.map(run => statusJson(run)) } };
       }

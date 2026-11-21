@@ -133,8 +133,4 @@ function M.enter_move()
 	})
 end
 
-function M.get_mode()
-	return active_mode and active_mode.name or "normal"
-end
-
 return M

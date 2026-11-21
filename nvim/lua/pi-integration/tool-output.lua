@@ -402,7 +402,6 @@ function M.reset(state)
 	state.tool_calls = {}
 	state.live_tool_output_by_call = {}
 	state.spawn_run_output_by_id = {}
-	state.todo_tool_output_id = nil
 end
 
 function M.record_calls(state, message)
@@ -799,7 +798,6 @@ function M.store(state, tool_name, text, filetype, details, display, tool_call_i
 	if tool_name == "spawn" and not is_error then
 		M.bind_spawn_run(state, details, id)
 	end
-	if is_todo_tool_name(tool_name) then state.todo_tool_output_id = id end
 	return id
 end
 
@@ -828,7 +826,6 @@ function M.store_or_update_live(state, tool_name, tool_call_id, text, filetype, 
 			M.bind_spawn_run(state, output.details, output_id)
 		end
 		output.spawn = spawn_artifacts(output.name, output.text, output.details)
-		if is_todo_tool_name(output.name) then state.todo_tool_output_id = output_id end
 		return output_id, true
 	end
 	return M.store(state, tool_name, text, filetype, details, display, tool_call_id, is_error), false
@@ -905,10 +902,6 @@ function M.update_spawn_outputs(state, details, text)
 		return updated, remaining, false
 	end
 	return updated, details, false
-end
-
-function M.live_output_id(state, tool_call_id)
-	return tool_call_id and state.live_tool_output_by_call and state.live_tool_output_by_call[tool_call_id] or nil
 end
 
 local function failure_summary(output)

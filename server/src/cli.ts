@@ -5,7 +5,6 @@ import { unreconciledEpochs } from "../../pi/scripts/managed-process.mjs";
 import { resolve, join, isAbsolute, basename, dirname } from "node:path";
 import { listenerPort } from "./remote-transport.js";
 import { randomUUID } from "node:crypto";
-import { HostOwner } from "./host-owner.js";
 import { catalogOwnerEpochs } from "./catalog-storage.js";
 import { object } from "./pi-records.js";
 import { LocalClient } from "./local-client.js";
@@ -164,7 +163,7 @@ async function main(): Promise<void> {
   };
   const port = listenerPort(flags.get("--port"), channel);
   if (action === "reconcile") {
-    await HostOwner.reconcile({ root, channel, appRoot: options.appRoot });
+    await reconcileService({ root, channel, appRoot: options.appRoot });
     console.log("Reconciled ownership. Reboot-interrupted job outcomes remain unknown. No worker started or command replayed; start the service, inspect saved data, then explicitly resume."); return;
   }
   if (action === "run") {
@@ -205,7 +204,7 @@ async function main(): Promise<void> {
       if (!/^(y|yes)$/i.test(answer.trim())) throw error;
       // Management has released its lock. Recovery acquires its own locks and
       // rechecks ownership; the retry then performs normal startup checks again.
-      await HostOwner.reconcile({ root, channel, appRoot: options.appRoot });
+      await reconcileService({ root, channel, appRoot: options.appRoot });
       console.error("Reconciled ownership. Interrupted job outcomes may remain unknown. Starting the server; saved sessions remain stopped.");
       result = await manage();
     }

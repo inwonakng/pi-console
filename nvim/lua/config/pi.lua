@@ -18,7 +18,7 @@ if restore_file and vim.fn.filereadable(restore_file) == 1 then
 end
 vim.g.pi_overview = role ~= "conversation"
 local integration = require("pi-integration")
-integration.setup({ role = role, show_thinking = true,
+integration.setup({ role = role,
 	launcher = vim.fs.joinpath(app_root, "bin", "pi-console"), restart_file = restart_file })
 -- Build the layout after VimEnter finishes restoring the startup window.
 vim.api.nvim_create_autocmd("VimEnter", { once = true, callback = vim.schedule_wrap(function() integration.open(restore) end) })

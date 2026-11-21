@@ -7,7 +7,6 @@ import { type DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { object } from "./pi-records.js";
 import { assertManagedLaunchAllowed, beginEpoch, ownerLease, sealEpoch, inspectEpoch, unreconciledEpochs } from "../../pi/scripts/managed-process.mjs";
 import { managementIdentity, reconcileCommand } from "./service-paths.js";
-import { reconcileService, type RecoveryOptions } from "./service-recovery.js";
 import { CommandError, type CommandReceipt, type StoredCommand } from "./session-commands.js";
 import { validQueueItem, type AcceptedQueueItem } from "./session-queue.js";
 import { validEffectiveTitle } from "./session-rename.js";
@@ -40,9 +39,6 @@ export class SessionCatalog {
     private readonly lifetime: { close(): void }) {}
 
   get processRegistry(): string { return join(this.root, "processes.sqlite"); }
-
-  /** Explicit administration only; no worker starts or command replay. */
-  static reconcile(options: RecoveryOptions): Promise<void> { return reconcileService(options); }
 
   static async open(options: { root: string; channel: Channel; appRoot: string; systemdUnit?: string }): Promise<SessionCatalog> {
     if (options.channel !== "stable" && options.channel !== "dev") throw new Error("Unknown service channel");

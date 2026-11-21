@@ -255,7 +255,7 @@ function M.open(config)
 		end
 		cursor = focused_row or cursor
 		if #starts == 0 then
-			table.insert(lines, runtime.available() and " No matching conversations. Press <leader>pn to start one." or " No supported session backend available.")
+			table.insert(lines, " No matching conversations. Press <leader>pn to start one.")
 		end
 		cursor = cursor or nearest_row or math.max(1, math.min(view.lnum, #lines))
 		updating = true
