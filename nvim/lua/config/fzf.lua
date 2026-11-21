@@ -271,7 +271,8 @@ local function size_select_picker(select_opts, items, winopts, fit_pane)
 				preview_rows_needed = math.max(preview_rows_needed, preview_rows(select_opts.pi_preview_text(item), width))
 			end
 		end
-		local preview_height = preview_rows_needed > 0 and math.min(10, math.max(2, preview_rows_needed)) or 0
+		-- One extra row for the divider between the preview and the choices.
+		local preview_height = preview_rows_needed > 0 and math.min(10, math.max(2, preview_rows_needed)) + 1 or 0
 		local transcript_win = select_opts.pi_transcript_win
 		if (fit_pane ~= false or available < 3) and transcript_win and vim.api.nvim_win_is_valid(transcript_win) then
 			local input_pos = vim.api.nvim_win_get_position(input_win)
@@ -287,7 +288,7 @@ local function size_select_picker(select_opts, items, winopts, fit_pane)
 		end
 		local options_height = math.min(rows + 2, math.max(3, available - preview_height))
 		local preview = math.min(preview_height, available - options_height)
-		winopts.preview.hidden = preview_rows_needed == 0 or preview < 2
+		winopts.preview.hidden = preview_rows_needed == 0 or preview < 3
 		if not winopts.preview.hidden then winopts.preview.vertical = "up:" .. preview end
 		return
 	end
@@ -393,7 +394,13 @@ fzf.register_ui_select(function(select_opts, items)
 			local generate_layout = win.generate_layout
 			win.generate_layout = function(self)
 				local layout = generate_layout(self)
-				if layout.preview then layout.preview.win = self.fzf_winid end
+				if layout.preview then
+					layout.preview.win = self.fzf_winid
+					-- Divide the preview from the choices inside fzf's reserved rows;
+					-- an fzf preview border would reserve an extra row.
+					layout.preview.border = { "", "", "", "", "─", "─", "─", "" }
+					layout.preview.height = layout.preview.height - 1
+				end
 				return layout
 			end
 			-- Match fzf's reserved preview rows to the Neovim preview overlay.
@@ -414,7 +421,7 @@ fzf.register_ui_select(function(select_opts, items)
 	return {
 		prompt = has_prompt_preview and not winopts.preview.hidden and "Choose > " or select_prompt(select_opts.prompt),
 		winopts = winopts,
-		hls = select_opts.pi_input_win and { preview_normal = "PiInlinePickerPreview" } or nil,
+		hls = select_opts.pi_input_win and { preview_normal = "PiInlinePickerPreview", preview_border = "PiPaneBorder" } or nil,
 		fzf_opts = picker_fzf_opts,
 		keymap = picker_keymap,
 		previewer = select_opts.previewer,
