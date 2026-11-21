@@ -1399,7 +1399,7 @@ export class OwnedSession {
           || error instanceof PiCommandError && error.outcome === "rejected") ? "failed" : "uncertain";
         outcome.error = { code: outcome.status === "failed" && error instanceof CommandError ? error.code : "rename_uncertain",
           message: outcome.status === "failed" ? "Rename was not dispatched; review session state before retrying"
-            : "Rename outcome is uncertain; inspect session metadata, never automatically replay" };
+            : "Pi couldn't confirm the rename. Reopen the session and check its title before trying again." };
       }
       // An unproven outcome must not reopen dispatch on handled alone. Stop the
       // child conservatively; accepted text remains recoverable for explicit review.

@@ -78,7 +78,7 @@ export class ServiceClient {
     });
     socket.addEventListener("close", event => {
       recordDiagnostic("socket_close", { ...this.diagnostics, code: event.code, wasClean: event.wasClean, reason: event.reason ? "omitted" : "empty" });
-      this.close("Disconnected. Commands were not replayed; inspect the session before sending again.", "socket_closed");
+      this.close("Disconnected. Reconnect and check whether your last message appears before sending it again.", "socket_closed");
     });
     socket.addEventListener("error", () => {
       recordDiagnostic("socket_error", this.diagnostics);
@@ -155,7 +155,7 @@ export class ServiceClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         recordDiagnostic("request_timeout", { ...this.diagnostics, method: diagnosticMethod(method), pending: this.pending.size });
-        this.close("Lost connection to the server. Your last action may still have gone through. Commands were not replayed; inspect before trying again.", method === "health" ? "probe_timeout" : "request_timeout");
+        this.close("The server didn't respond in time. Reconnect and check whether your last action took effect before trying again.", method === "health" ? "probe_timeout" : "request_timeout");
       }, timeout);
       this.pending.set(id, { resolve, reject, timer });
       try { this.socket.send(record); }
