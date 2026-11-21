@@ -1,7 +1,7 @@
 import type { ExtensionCommandContext, ExtensionContext, SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { assertManagedResources } from "../../scripts/managed-process.mjs";
-import { beginWorkspaceContinuation, clearWorkspaceContinuation, getWorkspaceContinuation, getWorkspaceTransitionError, getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, setWorkspaceTransitionError, workspaceDisplayState, WORKSPACE_CONTINUATION_STATUS, type WorkspaceRecord } from "./workspace";
+import { assertHistoryWorkspaceAvailable, beginWorkspaceContinuation, clearWorkspaceContinuation, getWorkspaceContinuation, getWorkspaceTransitionError, getPendingWorkspaceId, loadWorkspace, setExpectedWorkspaceMissing, setPendingWorkspace, setWorkspaceTransitionError, workspaceDisplayState, WORKSPACE_CONTINUATION_STATUS, type WorkspaceRecord } from "./workspace";
 import { hasRunningSubagents, subagentHistoryBlockReason, withSubagentWorkspaceRestore } from "./subagent-state";
 import { prepareProjectTrust, projectTrustReady } from "./project-trust";
 import { modelReady, preserveModelForSwitch } from "./model-readiness";
@@ -162,6 +162,7 @@ export async function moveToLocation(
     setWorkspaceTransitionError(file, undefined);
     if (ctx.cwd !== cwd || options.reload) assertManagedResources();
     if (leafId !== null && !options.reload && !ctx.sessionManager.getEntry(leafId)) throw new Error(`Unknown session entry: ${leafId}`);
+    assertHistoryWorkspaceAvailable(cwd);
     if (!existsSync(cwd)) throw new Error(`Working directory is unavailable: ${cwd}`);
     if ((ctx.cwd !== cwd || options.reload) && ctx.mode !== "rpc"
       && (ctx.cwd !== cwd || ctx.sessionManager.getHeader()?.cwd !== ctx.cwd)) {
@@ -192,6 +193,7 @@ export async function moveToLocation(
       // Revalidate after async trust/beforeSwitch work, then carry the exemption
       // through Pi's session_before_switch hook for this replacement only.
       validateRestore();
+      assertHistoryWorkspaceAvailable(cwd);
       const switchRuntime = () => switchWithCwd(file, {
         cwdOverride: cwd,
         withSession: async (nextCtx) => {

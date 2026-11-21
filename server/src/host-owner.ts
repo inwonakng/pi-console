@@ -1518,7 +1518,7 @@ export class OwnedSession {
             outcome.result = { sessionId: clone.id, ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
           } else if (flight.operation === "history.navigate" || flight.operation === "history.delete") {
             if (result.data?.changed !== true || flight.operation === "history.delete" && !["applied", "cleanup_incomplete"].includes(result.data.status ?? "")) throw new Error("Missing history completion");
-            outcome.result = { changed: true, ...(flight.operation === "history.navigate" ? { contextRevision: flight.resultRevision } : {}),
+            outcome.result = { changed: true, contextRevision: flight.resultRevision,
               ...(result.data.status !== undefined ? { status: result.data.status } : {}),
               ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
           } else if (flight.operation === "history.prune") {

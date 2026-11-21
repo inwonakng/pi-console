@@ -1,7 +1,8 @@
 import { serviceUi } from "./shared/service-ui";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { spawnSync } from "child_process";
+import { execFile, spawnSync } from "child_process";
+import { promisify } from "node:util";
 import {
   chmodSync,
   existsSync,
@@ -18,9 +19,9 @@ import {
 import { appendFile } from "fs/promises";
 import { dirname, join, relative, resolve, sep } from "path";
 import { createHash } from "crypto";
-import { loadWorkspace, prepareWorkspaceDiscard, removeWorkspace, sameSessionFile, workspaceDiscardWarning, workspaceForContext } from "./shared/workspace";
+import { cleanupDeletedHistoryWorktrees, historyWorkspaceDiscardWarning, loadWorkspace, sameSessionFile, workspaceForContext } from "./shared/workspace";
 import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
-import { collectDeletedIds, locationWorkspaceId, planSessionDeletion, readSessionRecords, recordId, workspaceIdsRemovedWithSubtree, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
+import { collectDeletedIds, locationWorkspaceId, planSessionDeletion, readSessionRecords, readSessionSnapshot, recordId, workspaceIdsRemovedWithSubtree, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
 import { pathInside, resolveToolPath } from "./shared/paths";
 import { hasPermission } from "./shared/permissions";
@@ -72,12 +73,18 @@ function markHistoryChanged(ctx: ExtensionCommandContext) {
 	ctx.ui.setStatus("pi-history-changed", new Date().toISOString());
 }
 
-function runGit(args: string[], options: { cwd?: string; input?: Buffer; binary?: boolean } = {}) {
+const execGit = promisify(execFile);
+const gitFlags = ["--no-optional-locks", "--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null"];
+
+function gitEnv() {
 	const env = { ...process.env };
 	for (const name of Object.keys(env)) if (name.startsWith("GIT_")) delete env[name];
-	const result = spawnSync("git", ["--no-optional-locks", "--no-pager", "-c", "core.hooksPath=/dev/null",
-		"-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", ...args], {
-		env: { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", GIT_NO_REPLACE_OBJECTS: "1" },
+	return { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", GIT_NO_REPLACE_OBJECTS: "1" };
+}
+
+function runGit(args: string[], options: { cwd?: string; input?: Buffer; binary?: boolean } = {}) {
+	const result = spawnSync("git", [...gitFlags, ...args], {
+		env: gitEnv(),
 		cwd: options.cwd,
 		input: options.input,
 		encoding: options.binary || options.input ? undefined : "utf-8",
@@ -185,8 +192,7 @@ function absolutePath(root: string, path: string) {
 	return resolvedPath;
 }
 
-function snapshotCurrentFile(root: string, path: string): SnapshotState {
-	ensureSnapshotStore();
+function currentFileState(root: string, path: string): Exclude<SnapshotState, { kind: "file" }> | { kind: "file"; path: string; mode: number } {
 	const filePath = absolutePath(root, path);
 	let stats;
 	try {
@@ -201,8 +207,15 @@ function snapshotCurrentFile(root: string, path: string): SnapshotState {
 	if (!stats.isFile()) {
 		return { kind: "unsupported", reason: stats.isDirectory() ? "directory" : "special file" };
 	}
-	const output = runGit(["--git-dir", SNAPSHOT_GIT_DIR, "hash-object", "--no-filters", "-w", filePath]);
-	return { kind: "file", blob: String(output).trim(), mode: stats.mode & 0o777 };
+	return { kind: "file", path: filePath, mode: stats.mode & 0o777 };
+}
+
+function snapshotCurrentFile(root: string, path: string): SnapshotState {
+	ensureSnapshotStore();
+	const state = currentFileState(root, path);
+	if (state.kind !== "file") return state;
+	const blob = runGit(["--git-dir", SNAPSHOT_GIT_DIR, "hash-object", "--no-filters", "-w", state.path]);
+	return { kind: "file", blob: String(blob).trim(), mode: state.mode };
 }
 
 function sameState(left: SnapshotState, right: SnapshotState) {
@@ -323,10 +336,12 @@ function restorePlan(records: TurnRecord[]) {
 	return Array.from(planned.values());
 }
 
-function validateCurrentState(root: string, files: FileRecord[]) {
-	const conflicts = [];
+async function validateCurrentState(root: string, files: FileRecord[]) {
+	const conflicts: string[] = [];
 	for (const file of files) {
-		const current = snapshotCurrentFile(root, file.path);
+		const state = currentFileState(root, file.path);
+		const current: SnapshotState = state.kind !== "file" ? state : { kind: "file", mode: state.mode,
+			blob: (await execGit("git", [...gitFlags, "--git-dir", SNAPSHOT_GIT_DIR, "hash-object", "--no-filters", state.path], { env: gitEnv() })).stdout.trim() };
 		if (!sameState(current, file.after)) {
 			conflicts.push(file.path);
 		}
@@ -351,7 +366,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 	const sourceLeaf = ctx.sessionManager.getLeafId();
 	const branch = ctx.sessionManager.getBranch();
 	const afterIds = branchIdsAfter(branch, targetId);
-	const records = readSessionRecords(sessionFile);
+	const { contents, records } = readSessionSnapshot(sessionFile);
 	const deletedIds = selected
 		? collectDeletedIds(records, selected.id)
 		: targetId ? collectDeletedIds(records, targetId)
@@ -403,20 +418,26 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 			`Rollback workspace ${id} does not belong to this conversation.`);
 		return { workspace, files: restorePlan(rollbackRecords.filter((record) => record.workspaceId === id)) };
 	});
-	const validateFiles = () => {
-		const conflicts = rollback.flatMap(({ workspace, files }) =>
-			validateCurrentState(workspace.worktreePath, files).map((path) => `${workspace.label}: ${path}`));
+	const validateFiles = async () => {
+		const conflicts: string[] = [];
+		for (const { workspace, files } of rollback) {
+			for (const path of await validateCurrentState(workspace.worktreePath, files)) conflicts.push(`${workspace.label}: ${path}`);
+		}
 		assertOk(conflicts.length === 0, `Revert blocked; files changed since the agent turn:\n${conflicts.join("\n")}`);
 	};
-	validateFiles();
-	const patches = await Promise.all(discarded.map((record) => record.retained ? prepareWorkspaceDiscard(record.id) : record));
 	const fileCount = rollback.reduce((count, item) => count + item.files.length, 0);
+	const filePreview = rollback.filter(({ files }) => files.length > 0).map(({ workspace, files }) =>
+		`${workspace.label}:
+${files.map(({ path, before, after }) => {
+			const action = before.kind === "missing" ? "remove" : after.kind === "missing" ? "restore deleted file" : "restore previous state";
+			return `- ${action}: ${JSON.stringify(path)}`;
+		}).join("\n")}`).join("\n\n");
 	const approved = await serviceUi(ctx).confirm(
 		JSON.stringify({ kind: "pi_confirmation", prompt: "Permanently revert history?", notify: false, inline: false }),
 		`Delete ${deletedIds.size} history entries${selected ? ", including the selected message and every branch beneath it" : " after the selected point"}? This cannot be undone through the tree.\n`
-		+ `Restore ${fileCount} recorded file change(s) on the active path.\n`
+		+ `Restore ${fileCount} recorded file change(s) on the active path.\n${filePreview ? `\n${filePreview}\n\n` : ""}`
 		+ `Continue in ${target.cwd}.\n`
-		+ (patches.length ? workspaceDiscardWarning(patches) : "No worktree will be discarded."));
+		+ (discarded.length ? historyWorkspaceDiscardWarning(discarded) : "No worktree will be discarded."));
 	if (!approved) return;
 	assertBashTransitionAllowed();
 	assertOk(isRuntimeActive() && ctx.sessionManager.getSessionFile() === sessionFile
@@ -425,8 +446,15 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 		let historyDeleted = false;
 		let filesRestored = false;
 		let cleanupIncomplete = false;
+		let arrivalUi: ExtensionCommandContext["ui"] | undefined;
 		ctx.ui.setStatus("pi-history-revert", "pending");
 		try {
+			try { await validateFiles(); }
+			catch (error) {
+				ctx.ui.setStatus("pi-history-revert", undefined);
+				ctx.ui.notify(String(error), "warning");
+				return;
+			}
 			const moved = await moveToLocation(ctx, target.cwd, plan.desiredLeafId, {
 				reload: true,
 				saveCursor: false,
@@ -437,10 +465,9 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 					assertOk(ctx.sessionManager.getSessionFile() === sessionFile && ctx.sessionManager.getLeafId() === sourceLeaf,
 						"Session history changed; select the subtree again.");
 					const validateSession = () => assertOk(
-						JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(records),
+						readFileSync(sessionFile, "utf8") === contents,
 						"Session history changed while preparing revert; select the rollback point again.");
 					validateSession();
-					validateFiles();
 					for (const { workspace, files } of rollback) {
 						for (const file of files) {
 							await withFileMutationQueue(absolutePath(workspace.worktreePath, file.path), async () => {
@@ -472,17 +499,7 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 					} catch (error) {
 						warnings.push(`Could not prune rollback records: ${error instanceof Error ? error.message : String(error)}`);
 					}
-					for (const record of discarded) {
-						try {
-							const cleaned = await removeWorkspace(record.id,
-								record.integration === "applied" || record.integration === "none" ? "integrated" : "discarded");
-							if (cleaned.lifecycle === "cleanup_failed") {
-								warnings.push(`Could not remove ${record.label}: ${cleaned.integrationReason}`);
-							}
-						} catch (error) {
-							warnings.push(`Could not remove ${record.label}: ${error instanceof Error ? error.message : String(error)}`);
-						}
-					}
+					arrivalUi = nextCtx.ui;
 					cleanupIncomplete = warnings.length > 0;
 					nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
 					nextCtx.ui.setStatus("pi-history-revert", "complete");
@@ -521,7 +538,9 @@ async function revertAfter(ctx: ExtensionCommandContext, targetId: string | null
 				ctx.ui.setStatus("pi-history-revert", undefined);
 				ctx.ui.notify("Revert cancelled. Original history and files were restored; no worktrees were removed.", "warning");
 			}
-			return moved ? { changed: true, status: cleanupIncomplete ? "cleanup_incomplete" : "applied" } : undefined;
+			if (!moved) return;
+			if (discarded.length) void cleanupDeletedHistoryWorktrees(discarded, target.cwd, message => arrivalUi?.notify(message, "warning"));
+			return { changed: true, status: cleanupIncomplete ? "cleanup_incomplete" : "applied" };
 		} catch (error) {
 			// A switch can throw before teardown as well as after it. Only the former
 			// leaves an old runtime able to append beneath deleted entries.

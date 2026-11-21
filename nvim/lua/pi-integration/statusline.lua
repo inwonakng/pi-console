@@ -238,7 +238,9 @@ local function activity_statusline_label(state)
 	if request and not request.navigation and (not request.expires or request.expires > vim.uv.now()) then
 		return " waiting·" .. request.label .. suffix
 	end
-	local history_activity = state.tree_loading or state.history_operation and state.history_operation.label
+	local history_activity = state.history_operation and state.history_operation.reverting and "reverting files"
+		or state.tree_loading or state.history_operation and state.history_operation.label
+	if state.history_send then suffix = suffix .. " · message queued" end
 	if not history_activity and not state.is_loading and not state.is_agent_running and not state.is_streaming
 		and not state.is_retrying and not state.awaiting_agent_output then
 		if next_pending and (next_pending.edit_buf or next_pending.id == state.queue_edit_item) then

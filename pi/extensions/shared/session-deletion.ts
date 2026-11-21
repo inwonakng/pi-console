@@ -5,10 +5,14 @@ import { listWorkspaces, orderWorkspaceDeletion, sameSessionFile, type Workspace
 type JsonRecord = Record<string, unknown>;
 
 export function readSessionRecords(sessionFile: string): JsonRecord[] {
-	return readFileSync(sessionFile, "utf8")
-		.split(/\r?\n/)
+	return readSessionSnapshot(sessionFile).records;
+}
+
+export function readSessionSnapshot(sessionFile: string) {
+	const contents = readFileSync(sessionFile, "utf8");
+	return { contents, records: contents.split(/\r?\n/)
 		.filter((line) => line.trim() !== "")
-		.map((line) => JSON.parse(line) as JsonRecord);
+		.map((line) => JSON.parse(line) as JsonRecord) };
 }
 
 export function recordId(record: JsonRecord): string | undefined {
@@ -87,9 +91,11 @@ export function spawnRunIdsRemovedWithSubtree(records: JsonRecord[], deletedIds:
 export function workspacesRemovedWithSubtree(records: JsonRecord[], deletedIds: Set<string>, sessionFile: string): WorkspaceRecord[] {
 	const taskIds = new Set(workspaceIdsRemovedWithSubtree(records, deletedIds));
 	const runIds = new Set(spawnRunIdsRemovedWithSubtree(records, deletedIds));
-	return orderWorkspaceDeletion(listWorkspaces().filter((record) => (record.retained || record.lifecycle === "cleanup_failed")
-		&& sameSessionFile(record.sourceSessionFile, sessionFile)
-		&& (record.kind === "task" ? taskIds.has(record.id) : !!record.runId && runIds.has(record.runId))));
+	if (!taskIds.size && !runIds.size) return [];
+	const all = listWorkspaces();
+	return orderWorkspaceDeletion(all.filter((record) => (record.retained || record.lifecycle === "cleanup_failed")
+		&& (record.kind === "task" ? taskIds.has(record.id) : !!record.runId && runIds.has(record.runId))
+		&& sameSessionFile(record.sourceSessionFile, sessionFile)), all);
 }
 
 function makeId(existingIds: Set<string>): string {

@@ -49,12 +49,17 @@ export function subagentHistoryBlockReason(): string | undefined {
   return globalState[STATE_KEY]?.historyBlockReason();
 }
 
+const HISTORY_CLEANUP_KEY = Symbol.for("pi.agent.extensions.history-workspace-cleanup");
+const cleanupGlobal = globalThis as typeof globalThis & { [HISTORY_CLEANUP_KEY]?: Map<string, string> };
+export const historyCleanupWorktrees = cleanupGlobal[HISTORY_CLEANUP_KEY] ??= new Map();
+
 export function subagentProtectedRoots(): string[] {
-  return globalState[STATE_KEY]?.protectedRoots() ?? [];
+  return [...(globalState[STATE_KEY]?.protectedRoots() ?? []), ...historyCleanupWorktrees.values()];
 }
 
 export function subagentWriteBlock(path: string): string | undefined {
-  return subagentProtectedRoots().some((root) => pathInside(root, path))
+  if ([...historyCleanupWorktrees.values()].some(root => pathInside(root, path))) return "Worktree cleanup is pending.";
+  return (globalState[STATE_KEY]?.protectedRoots() ?? []).some((root) => pathInside(root, path))
     ? "A child owns an unresolved contribution in this repository. Accept or explicitly discard it before parent repository writes."
     : undefined;
 }

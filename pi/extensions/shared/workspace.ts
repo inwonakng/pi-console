@@ -1,5 +1,7 @@
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
+import { writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -22,6 +24,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathInside as lexicalPathInside } from "./paths";
 import { assertBashTransitionAllowed, withBashTransition } from "./bash-jobs";
+import { assertRepositoryIdle, historyCleanupWorktrees as historyCleanup } from "./subagent-state";
 import { commitDestination, prepareWorkspaceCommit, publishWorkspaceCommit, previewCommitUndo, prepareCommitUndo,
   type WorkspaceCommit, type WorkspaceUndoPreview } from "./workspace-commits";
 
@@ -196,6 +199,16 @@ function gitBuffer(cwd: string, args: string[], options: { env?: NodeJS.ProcessE
   return result.stdout;
 }
 
+const execGit = promisify(execFile);
+
+async function gitAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<Buffer> {
+  const result = await execGit("git", ["-C", cwd, ...args], {
+    env, encoding: "buffer", maxBuffer: 128 * 1024 * 1024,
+    ...(process.env.PI_CONSOLE_SERVICE === "1" ? { timeout: 10000, killSignal: "SIGKILL" as const } : {}),
+  });
+  return result.stdout;
+}
+
 function gitText(cwd: string, args: string[], options: { env?: NodeJS.ProcessEnv; input?: Buffer } = {}): string {
   return gitBuffer(cwd, args, options).toString("utf8").trimEnd();
 }
@@ -308,6 +321,16 @@ function rejectUnsupportedRepositoryState(gitRoot: string): void {
 }
 
 function captureSnapshot(gitRoot: string, workspaceId: string, purpose: string, trackedTree?: string): Snapshot {
+  const input = prepareSnapshot(gitRoot, workspaceId, purpose, trackedTree);
+  try {
+    gitBuffer(gitRoot, ["add", "-A"], { env: input.env });
+    return finishSnapshot(gitRoot, workspaceId, purpose, input);
+  } finally {
+    rmSync(input.tempIndex, { force: true });
+  }
+}
+
+function prepareSnapshot(gitRoot: string, workspaceId: string, purpose: string, trackedTree?: string) {
   ensureDirectories();
   rejectUnsupportedRepositoryState(gitRoot);
   const head = gitText(gitRoot, ["rev-parse", "HEAD"]).trim();
@@ -326,15 +349,30 @@ function captureSnapshot(gitRoot: string, workspaceId: string, purpose: string, 
       writeFileSync(tempIndex, Buffer.alloc(0));
       gitBuffer(gitRoot, ["read-tree", head], { env: { ...process.env, GIT_INDEX_FILE: tempIndex } });
     }
-    const env = { ...process.env, GIT_INDEX_FILE: tempIndex };
-    gitBuffer(gitRoot, ["add", "-A"], { env });
-    const tree = gitText(gitRoot, ["write-tree"], { env }).trim();
-    const commit = commitSnapshotTree(gitRoot, tree, head, purpose);
-    const ref = snapshotRef(workspaceId, purpose);
-    updateRef(gitRoot, ref, commit);
-    return { head, branch, commit, tree, ref, indexFingerprint: fingerprint(indexPath) };
-  } finally {
+    return { head, branch, indexPath, tempIndex, env: { ...process.env, GIT_INDEX_FILE: tempIndex } };
+  } catch (error) {
     rmSync(tempIndex, { force: true });
+    throw error;
+  }
+}
+
+function finishSnapshot(gitRoot: string, workspaceId: string, purpose: string, input: ReturnType<typeof prepareSnapshot>): Snapshot {
+  const { head, branch, indexPath, env } = input;
+  const tree = gitText(gitRoot, ["write-tree"], { env }).trim();
+  const commit = commitSnapshotTree(gitRoot, tree, head, purpose);
+  const ref = snapshotRef(workspaceId, purpose);
+  updateRef(gitRoot, ref, commit);
+  return { head, branch, commit, tree, ref, indexFingerprint: fingerprint(indexPath) };
+}
+
+async function captureDiscardSnapshot(record: WorkspaceRecord, purpose: string): Promise<Snapshot> {
+  const root = record.worktreePath;
+  const input = prepareSnapshot(root, record.id, purpose);
+  try {
+    await gitAsync(root, ["add", "-A"], input.env);
+    return finishSnapshot(root, record.id, purpose, input);
+  } finally {
+    rmSync(input.tempIndex, { force: true });
   }
 }
 
@@ -710,6 +748,14 @@ function snapshotWorkspaceResult(record: WorkspaceRecord): WorkspaceRecord {
     .filter((path) => !included.has(path));
   saveWorkspace(record);
   return record;
+}
+
+export function historyWorkspaceDiscardWarning(records: WorkspaceRecord[]): string {
+  if (!records.length) return "";
+  return ["These worktrees will be removed. Unintegrated changes will be discarded; existing destination changes will stay.",
+    ...records.map(record => `- ${record.label}: ${record.worktreePath}`),
+    "Pi will save recovery patches before removal. Ignored files may not be included.",
+  ].join("\n");
 }
 
 export function workspaceDiscardWarning(records: WorkspaceRecord[]): string {
@@ -1378,7 +1424,57 @@ export async function removeWorkspace(id: string, finalLifecycle: "integrated" |
   }, undefined, true);
 }
 
-function removeWorkspaceLocked(record: WorkspaceRecord, finalLifecycle: "integrated" | "discarded"): WorkspaceRecord {
+// History has already been saved and reloaded. Fence re-entry into these worktrees
+// without closing prompt or Bash admission in the surviving workspace.
+export function assertHistoryWorkspaceAvailable(cwd: string): void {
+  for (const path of historyCleanup.values()) {
+    if (pathInside(path, cwd)) throw new Error(`Worktree cleanup is pending: ${path}`);
+  }
+}
+
+export async function cleanupDeletedHistoryWorktrees(records: WorkspaceRecord[], activeCwd: string, warn: (message: string) => void): Promise<void> {
+  const selected = records.filter(record => !historyCleanup.has(record.id));
+  for (const record of selected) historyCleanup.set(record.id, record.worktreePath);
+  for (const prior of selected) {
+    try {
+      const cleaned = await withWorkspaceLock(prior.id, async (record) => {
+        assertManagedCleanup(record);
+        assertCommitSettled(record);
+        if (!record.retained && record.lifecycle !== "cleanup_failed") return record;
+        if (pathInside(record.worktreePath, activeCwd)) throw new Error("Worktree still contains the active directory; keeping it.");
+        assertRepositoryIdle([record.worktreePath]);
+        if (record.retained) {
+          assertWorkspaceAvailable(record);
+          if (isWorkspaceFinalized(record)) {
+            const check = await captureDiscardSnapshot(record, "deletion-check-" + randomUUID());
+            try {
+              if (check.tree !== record.resultTree) throw new Error("Finalized worktree has newer changes; preserve them before removal.");
+            } finally { deleteRef(record.worktreePath, check.ref); }
+          } else {
+            const result = await captureDiscardSnapshot(record, "result");
+            const patch = await gitAsync(record.worktreePath, ["diff", "--binary", "--full-index", record.baselineTree, result.tree]);
+            const changedFiles = await gitAsync(record.worktreePath, ["diff", "--no-renames", "--name-only", "-z", record.baselineTree, result.tree]);
+            await writeFile(record.resultPatchPath, patch);
+            record.changedFiles = splitNul(changedFiles);
+            record.resultCommit = result.commit;
+            record.resultTree = result.tree;
+            record.resultRef = result.ref;
+            saveWorkspace(record);
+          }
+        }
+        assertRepositoryIdle([record.worktreePath]);
+        return removeWorkspaceLocked(record, isWorkspaceFinalized(record) ? "integrated" : "discarded");
+      });
+      if (cleaned.lifecycle === "cleanup_failed") throw new Error(cleaned.integrationReason ?? cleaned.worktreePath);
+    } catch (error) {
+      warn(`History was updated, but could not finish cleanup of ${prior.label} (${prior.worktreePath}): ${String(error)}`);
+    } finally {
+      historyCleanup.delete(prior.id);
+    }
+  }
+}
+
+async function removeWorkspaceLocked(record: WorkspaceRecord, finalLifecycle: "integrated" | "discarded"): Promise<WorkspaceRecord> {
   try {
     if (retainedChildWorkspaces(record.id).length > 0) {
       throw new Error(`Join or discard child workspaces before removing ${record.label}.`);
@@ -1386,7 +1482,7 @@ function removeWorkspaceLocked(record: WorkspaceRecord, finalLifecycle: "integra
     // Cleanup only needs the shared repository, not the integration destination.
     const gitDir = cleanupGitDirectory(record);
     if (record.retained && existsSync(record.worktreePath)) {
-      gitBuffer(gitDir, ["worktree", "remove", "--force", record.worktreePath]);
+      await gitAsync(gitDir, ["worktree", "remove", "--force", record.worktreePath]);
     }
     record.retained = false;
     record.lifecycle = finalLifecycle;

@@ -1,16 +1,16 @@
+import { readFileSync } from "node:fs";
 import { serviceUi } from "./shared/service-ui";
 import { registerServiceOperation, type OperationData } from "./shared/service-operation";
-import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, recordId, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
+import { collectDeletedIds, parentId, planSessionDeletion, readSessionRecords, readSessionSnapshot, recordId, workspacesRemovedWithSubtree, writeJsonlFile } from "./shared/session-deletion";
 import { withFileMutationQueue, type ExtensionAPI, type ExtensionCommandContext, type SessionManager } from "@earendil-works/pi-coding-agent";
 import { revertSubtree } from "./history";
 import { cloneThroughEntry } from "./shared/session-clone";
 import { locationForEntry, moveToLocation } from "./shared/workspace-navigation";
 import { projectTrustReady } from "./shared/project-trust";
 import {
-	prepareWorkspaceDiscard,
-	removeWorkspace,
+	cleanupDeletedHistoryWorktrees,
+	historyWorkspaceDiscardWarning,
 	setExpectedWorkspaceMissing,
-	workspaceDiscardWarning,
 	type WorkspaceRecord,
 } from "./shared/workspace";
 import { hasRunningSubagents, subagentHistoryBlockReason } from "./shared/subagent-state";
@@ -66,7 +66,7 @@ function deletionConfirmation(entryId: string, deleteCount: number, workspaces: 
 		`Delete entry ${entryId} and ${descendants} descendant entr${descendants === 1 ? "y" : "ies"}?`,
 	];
 	if (workspaces.length === 0) return lines[0]!;
-	lines.push("", workspaceDiscardWarning(workspaces));
+	lines.push("", historyWorkspaceDiscardWarning(workspaces));
 	return lines.join("\n");
 }
 
@@ -206,7 +206,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const records = readSessionRecords(sessionFile);
+			const { contents, records } = readSessionSnapshot(sessionFile);
 			const target = records.find((record) => recordId(record) === entryId);
 			if (!target) {
 				ctx.ui.notify(`Unknown tree entry: ${entryId}`, "error");
@@ -219,8 +219,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 			let removedWorkspaces: WorkspaceRecord[];
 			try {
 				location = locationForEntry(ctx, expectedLeaf);
-				const affected = workspacesRemovedWithSubtree(records, removedIds, sessionFile);
-				removedWorkspaces = await Promise.all(affected.map((record) => record.retained ? prepareWorkspaceDiscard(record.id) : record));
+				removedWorkspaces = workspacesRemovedWithSubtree(records, removedIds, sessionFile);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Could not prepare tree deletion: ${message}`, "error");
@@ -240,13 +239,14 @@ export default function treeExtension(pi: ExtensionAPI) {
 				if (!confirmed) return;
 			}
 
-			return applyDeletion(ctx, { sessionFile, records, removedIds, selectionLeafId, expectedLeaf, location, removedWorkspaces });
+			return applyDeletion(ctx, { sessionFile, contents, records, removedIds, selectionLeafId, expectedLeaf, location, removedWorkspaces });
 	};
 
 	const applyDeletion = async (ctx: ExtensionCommandContext, {
-		sessionFile, records, removedIds, selectionLeafId, expectedLeaf, location, removedWorkspaces,
+		sessionFile, contents, records, removedIds, selectionLeafId, expectedLeaf, location, removedWorkspaces,
 	}: {
 		sessionFile: string;
+		contents: string;
 		records: ReturnType<typeof readSessionRecords>;
 		removedIds: Set<string>;
 		selectionLeafId: string | null;
@@ -257,7 +257,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 			assertBashTransitionAllowed();
 			const stillCurrent = () => runtimeActive && ctx.isIdle() && !hasRunningSubagents() && !subagentHistoryBlockReason()
 				&& ctx.sessionManager.getSessionFile() === sessionFile && ctx.sessionManager.getLeafId() === selectionLeafId
-				&& JSON.stringify(readSessionRecords(sessionFile)) === JSON.stringify(records);
+				&& readFileSync(sessionFile, "utf8") === contents;
 			if (!stillCurrent()) {
 				ctx.ui.notify("Session history or activity changed; retry the deletion.", "warning");
 				return;
@@ -265,7 +265,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 			return withBashTransition(async () => {
 				const plan = planSessionDeletion(records, removedIds, expectedLeaf);
 				let committed = false;
-				let cleanupIncomplete = false;
+				let arrivalUi: ExtensionCommandContext["ui"] | undefined;
 				const restoreOriginal = async () => {
 					await withFileMutationQueue(sessionFile, async () => {
 						assertBashTransitionAllowed();
@@ -287,21 +287,8 @@ export default function treeExtension(pi: ExtensionAPI) {
 								committed = true;
 							});
 						},
-						onArrival: async (nextCtx) => {
-							for (const record of removedWorkspaces) {
-								try {
-									const lifecycle = record.integration === "applied" || record.integration === "none"
-										? "integrated" : "discarded";
-									const cleaned = await removeWorkspace(record.id, lifecycle);
-									if (cleaned.lifecycle === "cleanup_failed") {
-										cleanupIncomplete = true;
-										nextCtx.ui.notify(`Could not remove ${record.label}: ${cleaned.integrationReason ?? cleaned.worktreePath}`, "warning");
-									}
-								} catch (error) {
-									cleanupIncomplete = true;
-									nextCtx.ui.notify(`Could not remove ${record.label}: ${String(error)}`, "warning");
-								}
-							}
+						onArrival: (nextCtx) => {
+							arrivalUi = nextCtx.ui;
 							nextCtx.ui.setStatus("pi-tree-leaf", nextCtx.sessionManager.getLeafId() ?? "");
 							nextCtx.ui.setStatus("pi-history-changed", new Date().toISOString());
 						},
@@ -311,7 +298,9 @@ export default function treeExtension(pi: ExtensionAPI) {
 						await restoreOriginal();
 						ctx.ui.notify("Deletion cancelled. Original history was restored; no workspaces were removed.", "warning");
 					}
-					return switched ? { changed: true, status: cleanupIncomplete ? "cleanup_incomplete" : "applied" } : undefined;
+					if (!switched) return;
+					if (removedWorkspaces.length) void cleanupDeletedHistoryWorktrees(removedWorkspaces, location.cwd, message => arrivalUi?.notify(message, "warning"));
+					return { changed: true, status: "applied" };
 				} catch (error) {
 					// A cancelled/failed switch can leave the old manager alive. Restore
 					// its original tree before allowing another append from that manager.
@@ -346,7 +335,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 			ctx.ui.notify("There is no active history branch to keep.", "info");
 			return { changed: false };
 		}
-		const records = readSessionRecords(sessionFile);
+		const { contents, records } = readSessionSnapshot(sessionFile);
 		const keep = new Map(ctx.sessionManager.getBranch(leafId).map((entry) => [entry.id, entry.parentId]));
 		const unmatched = new Set(keep.keys());
 		const removedIds = new Set<string>();
@@ -370,7 +359,7 @@ export default function treeExtension(pi: ExtensionAPI) {
 		}), `Permanently delete ${removedIds.size} history ${removedIds.size === 1 ? "entry" : "entries"} outside the active branch?\n\nFile changes and worktrees will be left alone.`);
 		if (!confirmed) return;
 		return applyDeletion(ctx, {
-			sessionFile, records, removedIds, selectionLeafId: leafId, expectedLeaf: leafId, location, removedWorkspaces: [],
+			sessionFile, contents, records, removedIds, selectionLeafId: leafId, expectedLeaf: leafId, location, removedWorkspaces: [],
 		});
 	});
 	registerServiceOperation(pi, "history.delete", ({ entryId }, ctx) => deleteTree(entryId, ctx));

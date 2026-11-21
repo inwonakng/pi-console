@@ -342,6 +342,15 @@ record_command = function(receipt, envelope, live)
 	local operation = receipt.operation or envelope and envelope.operation
 	if not operation then return end
 	local status = receipt.status or "unknown"
+	local held = state.history_send
+	if held and held.id == id and status ~= "accepted" and status ~= "sending" then
+		if status == "completed" and receipt.result and receipt.result.contextRevision then
+			held.revision = receipt.result.contextRevision
+		else
+			state.history_send = nil
+			notify("Message was not sent; draft kept in the input.")
+		end
+	end
 	if state.history_operation and state.history_operation.id == id
 		and status ~= "accepted" and status ~= "sending" then
 		state.history_operation = nil
@@ -605,6 +614,9 @@ ctx.transcript.refresh_ui = function()
 	if sync_pending then vim.schedule(sync_pending) end
 end
 local function update_status_state()
+	if state.history_operation and snapshot and snapshot.conversation.statuses["pi-history-revert"] == "pending" then
+		state.history_operation.reverting = true
+	end
 	local owner = authority and authority.owner_view and authority.owner_view.data or snapshot
 	local queue = authority and authority.queue_view and authority.queue_view.data or snapshot and snapshot.acceptedQueue
 	local initial = session_id and startup_status and startup_status.session_id == session_id and startup_status or nil
@@ -888,6 +900,7 @@ local function apply_snapshot(value)
 	end
 	if state.frontend_visible then tree.update(tree_ctx) end
 	if advance_start then advance_start() end
+	if ctx.ui.resume_history_send then ctx.ui.resume_history_send() end
 end
 refresh = function(immediate, callback)
 	if callback then table.insert(refresh_callbacks, callback) end
@@ -961,7 +974,7 @@ local function disconnected(reason, details, intentional)
 		record_command({ id = envelope.id, status = "unknown", error = { message = "Connection lost before the outcome was confirmed. Reconnect to check its status; nothing will be resent automatically." } }, envelope)
 	end
 	tree.close(tree_ctx)
-	state.history_operation = nil
+	state.history_operation, state.history_send = nil, nil
 	offers = {}
 	resources.invalidate()
 	generation = generation + 1
@@ -995,7 +1008,7 @@ attach = function(id, acquire, initial)
 	if pending_new_session and pending_new_session.session ~= id then cancel_new_session() end
 	auto_control_selection = nil
 	tree.close(tree_ctx)
-	state.history_operation = nil
+	state.history_operation, state.history_send = nil, nil
 	offers = {}
 	if pending_host then pending_host_select = false end
 	resources.invalidate()
@@ -1407,7 +1420,7 @@ local function detach_selection()
 	request("detach", {})
 	close_approval()
 	tree.close(tree_ctx)
-	state.history_operation = nil
+	state.history_operation, state.history_send = nil, nil
 	offers, outcomes = {}, {}
 	resources.invalidate()
 	attachment, grant, authority, auto_control_selection = nil, nil, nil, nil
@@ -1650,11 +1663,38 @@ ctx.ui.submit_window = function(original)
 		render(); refresh(true)
 	end)
 end
+-- Hold Send locally through the one history operation that the user approved.
+-- The input remains the recoverable draft until normal prompt admission succeeds.
+ctx.ui.resume_history_send = function()
+	local held = state.history_send
+	if not held or not held.revision then return end
+	if not same_selection(held.context) or not control_current() or held.context.token ~= grant.token
+		or not valid(held.buf) or held.buf ~= state.input_buf or vim.api.nvim_buf_get_changedtick(held.buf) ~= held.tick
+		or snapshot.phase == "failed" or snapshot.phase == "stopped" or current_revision() > held.revision then
+		state.history_send = nil
+		statusline.update(ctx)
+		notify("Queued send cancelled; check the draft before resending.")
+		return
+	end
+	if snapshot.runtimeRevision ~= held.revision or current_revision() ~= held.revision
+		or snapshot.phase ~= "ready" or not snapshot.conversation.hydrated or #snapshot.interactions.pending > 0 then return end
+	state.history_send = nil
+	statusline.update(ctx)
+	submit_input(text(held.buf))
+end
 function M.submit_prompt(original)
 	original = original or text(state.input_buf)
 	local trimmed = vim.trim(original)
 	if trimmed == "" then return end
 	if ctx.ui.prompt_blocked() then return end
+	if state.history_send then notify("A message is already held for the revert."); return end
+	local history = state.history_operation
+	if history and history.reverting and control_current() and valid(state.input_buf) and text(state.input_buf) == original then
+		state.history_send = { id = history.id, context = stamp(), buf = state.input_buf,
+			tick = vim.api.nvim_buf_get_changedtick(state.input_buf) }
+		statusline.update(ctx)
+		return
+	end
 	for _, pending in pairs(callbacks) do
 		if pending.method == "window.submit" or pending.method == "command" and pending.operation == "prompt.submit" then
 			notify("Message submission is pending; input remains local."); return
