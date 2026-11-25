@@ -455,7 +455,7 @@ local function command(operation, payload, callback, captured, terminal, submiss
 	if operation ~= "control.acquire" and operation ~= "control.takeover" then envelope.controlToken = grant and grant.token end
 	unresolved[envelope.id] = envelope -- Diagnostic identity only, never replayed.
 	record_command({ id = envelope.id, status = "sending" }, envelope)
-	local history_labels = { ["history.navigate"] = "switching branch", ["history.delete"] = "deleting branch", ["history.prune"] = "pruning history", ["history.clone"] = "cloning history" }
+	local history_labels = { ["history.navigate"] = "switching branch", ["history.delete"] = "deleting branch", ["history.prune"] = "pruning history", ["history.clone"] = "cloning history", ["session.handoff"] = "writing handoff" }
 	if history_labels[operation] then
 		state.history_operation = { id = envelope.id, label = history_labels[operation] }
 		statusline.update(ctx)
@@ -2367,25 +2367,34 @@ local function native_draft(operation, initial)
 	owner_resources().bind(buf)
 end
 function M.follow_up() native_draft("followUp.submit") end
-function M.compact()
+function M.handoff()
 	if not snapshot or not attachment then notify("Attach to a live session first."); return end
 	if not control_current() then notify("Viewer: use :PiControl first.", vim.log.levels.WARN); return end
 	local captured = stamp()
-	local default, custom = "Compact using default", "Compact with instructions"
-	vim.ui.select({ default, custom, "Cancel" }, { prompt = "Compact session context?", pi_select_layout = "compact" }, function(choice)
+	local function submit(instructions)
+		command("session.handoff", { instructions = instructions }, function(ok, result)
+			if not ok then notify(result.message or "Could not start handoff.", vim.log.levels.WARN) end
+		end, captured, function(receipt)
+			if receipt.status == "completed" and receipt.result and receipt.result.sessionId then
+				M.select_owner(M.config, receipt.result.sessionId, true)
+			end
+		end)
+	end
+	local default, custom = "Handoff", "Handoff with instructions"
+	vim.ui.select({ default, custom, "Cancel" }, { prompt = "Hand off to a new session?", pi_select_layout = "compact" }, function(choice)
 		if choice == default then
-			command("compaction.run", { instructions = "" }, nil, captured)
+			submit("")
 		elseif choice == custom then
 			require("pi-integration.utils.markdown-editor").open({
-				name = scratch_name("compaction-instructions"),
-				title = " Compaction instructions ",
-				footer = " Ctrl+Enter compacts · cancel ",
+				name = scratch_name("handoff-instructions"),
+				title = " Handoff instructions ",
+				footer = " Ctrl+Enter hands off · cancel ",
 				prepare_text = function(value)
 					if vim.trim(value) ~= "" then return value end
 					notify("Enter instructions, or close the editor to cancel.", vim.log.levels.WARN)
 				end,
 			}, function(value)
-				if value then command("compaction.run", { instructions = value }, nil, captured) end
+				if value then submit(value) end
 			end)
 		end
 	end)
@@ -3087,7 +3096,7 @@ function M.open(restore)
 	end
 	for name, fn in pairs({ PiControl = M.take_control, PiPending = M.show_pending_request, PiQueue = M.pick_queue, PiJobs = M.pick_jobs,
 		PiOffers = M.show_offers, PiDrafts = M.show_drafts, PiDetach = M.detach, PiReconnect = M.reconnect,
-		PiFollowUp = M.follow_up, PiCompact = M.compact, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
+		PiFollowUp = M.follow_up, PiHandoff = M.handoff, PiSidePrompt = M.side_prompt, PiSideNew = M.new_side, PiSideAbort = M.abort_side,
 		PiSavedOperations = require("pi-integration.service-hosts").saved_operations,
 		PiHosts = M.pick_hosts, PiManagement = require("pi-integration.service-hosts").management_operations, PiSessions = M.pick_session, PiNew = M.new_session, PiTranscript = M.show_owner_transcript,
 		PiWorkspaceReview = M.show_workspace_diff, PiWorkspaceReviews = M.pick_workspace_reviews,
@@ -3184,7 +3193,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 -- Transport recovery is passive; refresh/completion paths never replay work.
 for _, name in ipairs({ "submit_prompt", "take_control", "change_cwd", "restart", "kill_session", "abort",
 	"rename_session", "pick_queue", "show_pending_request", "show_offers", "show_host_request", "refresh_options",
-	"pick_model", "pick_thinking", "follow_up", "compact", "side_prompt", "toggle_side", "new_side", "pick_side", "abort_side",
+	"pick_model", "pick_thinking", "follow_up", "handoff", "side_prompt", "toggle_side", "new_side", "pick_side", "abort_side",
 	"pick_spawn", "pick_jobs", "retitle", "pick_workspace", "show_workspace_diff", "pick_workspace_reviews", "show_usage",
 	"show_tree", "pick_command", "refresh_messages", "show_owner_transcript", "set_access_mode", "pick_access_mode",
 	"cycle_access_mode", "set_integration_mode", "pick_integration_mode", "cycle_integration_mode", "toggle_notifications" }) do

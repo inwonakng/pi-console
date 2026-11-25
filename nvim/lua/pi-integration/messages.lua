@@ -9,6 +9,7 @@ local activity = require("pi-integration.activity")
 
 local function message_role_title(message, state)
 	local role = message.role or message.type or "message"
+	if role == "custom" and message.customType == "pi-handoff" then return "Handoff" end
 	local details = type(message.details) == "table" and message.details or {}
 	local context = role == "custom" and message_utils.agent_context(message_utils.extract_text(message)) or nil
 	local sender = details.sender or (context and context.sender)
@@ -166,8 +167,20 @@ local function append_skill_load_summaries(ctx, lines, items, loads, has_body, p
 end
 
 function M.append_text_message(lines, message, text, has_body, state)
-	local context = message.role == "custom" and message_utils.agent_context(text) or nil
-	if context then text = message_utils.agent_payload_text(context.payload) or text end
+	if message.role == "custom" and message.customType == "pi-handoff" then
+		local details = type(message.details) == "table" and message.details or {}
+		if type(details.sourceSessionId) == "string" and details.sourceSessionId:match("^[%x%-]+$") then
+			text = "Source session: `" .. details.sourceSessionId .. "`\n\n" .. text
+		end
+		if type(details.instructions) == "string" and vim.trim(details.instructions) ~= "" then
+			local quoted = vim.split(details.instructions, "\n", { plain = true })
+			for i, line in ipairs(quoted) do quoted[i] = "> " .. line end
+			text = text .. "\n\n**Handoff instructions**\n\n" .. table.concat(quoted, "\n")
+		end
+	elseif message.role == "custom" then
+		local context = message_utils.agent_context(text)
+		if context then text = message_utils.agent_payload_text(context.payload) or text end
+	end
 	local text_lines = vim.split(text, "\n", { plain = true })
 	add_message_separator(lines, has_body)
 	table.insert(lines, "## " .. message_role_title(message, state))

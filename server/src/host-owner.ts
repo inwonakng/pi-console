@@ -1316,13 +1316,13 @@ export class OwnedSession {
     await completion;
   }
 
-  private assertRenameReady(): void {
+  private assertRenameReady(action = "Rename"): void {
     if (this.phase !== "ready" || !this.usableWorkspace()) {
-      throw new CommandError("session_unavailable", "Rename requires ready trust/workspace state");
+      throw new CommandError("session_unavailable", `${action} requires ready trust/workspace state`);
     }
     if (this.aborting || this.queueFlight || this.queueRunPending || !this.conversation.settled
       || this.worker?.interactionSnapshot().pending.some((item) => !sideInteraction(item.request.title))) {
-      throw new CommandError("session_busy", "Rename requires settled execution without a pending main interaction");
+      throw new CommandError("session_busy", `${action} requires settled execution without a pending main interaction`);
     }
   }
 
@@ -1443,7 +1443,8 @@ export class OwnedSession {
     const interruptingJoin = command.operation === "spawn.stop" && this.bundled?.operation === "spawn.join" && !this.bundledInterrupt;
     if (!bash && (this.rename || this.bundled && !interruptingJoin || this.bundledInterrupt || this.nativePending || this.aborting)) throw new CommandError("session_busy", "Another session operation is pending");
     if (this.phase !== "ready" || !bash && !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
-    if (command.operation.startsWith("history.") || command.operation.startsWith("workspace.") || command.operation === "title.generate") this.assertRenameReady();
+    if (command.operation === "session.handoff") this.assertRenameReady("Handoff");
+    else if (command.operation.startsWith("history.") || command.operation.startsWith("workspace.") || command.operation === "title.generate") this.assertRenameReady();
     const runtimeId = worker.interactionRuntime()!.id;
     const invocationId = randomUUID();
     return { worker, revision: command.runtimeRevision, runtimeId, invocationId, operation: command.operation, dispatched: false,
@@ -1458,7 +1459,7 @@ export class OwnedSession {
     const unconfirmed = flight.operation === "history.delete"
       ? "Pi couldn't confirm the deletion. Reopen the session and check the history tree before trying again."
       : "Pi couldn't confirm whether this action finished. Reopen the session and check what changed before trying again.";
-    let clone: CatalogSession | undefined;
+    let detached: CatalogSession | undefined;
     let historyRefreshed = false;
     try {
       const guard = () => {
@@ -1470,7 +1471,8 @@ export class OwnedSession {
         this.commandRuntime(flight.revision, flight.worker);
         if (this.phase !== "ready" || !bashOperation(flight.operation) && !this.usableWorkspace()) throw new CommandError("session_unavailable", "Trust/workspace state is not ready");
         if (!bashOperation(flight.operation)) this.assertReady(flight.revision);
-        if (flight.operation.startsWith("history.") || flight.operation.startsWith("workspace.") || flight.operation === "title.generate") this.assertRenameReady();
+        if (flight.operation === "session.handoff") this.assertRenameReady("Handoff");
+        else if (flight.operation.startsWith("history.") || flight.operation.startsWith("workspace.") || flight.operation === "title.generate") this.assertRenameReady();
       };
       try {
         await this.ensureBundledCommand(flight.worker, operationCommand(flight.operation), BUNDLED_SOURCES[flight.operation], guard);
@@ -1487,10 +1489,11 @@ export class OwnedSession {
         if (response.command !== "prompt" || response.data.disposition !== "handled" || !result) throw new Error("No correlated terminal operation result");
         outcome.status = result.status;
         if (result.status === "completed") {
-          if (flight.operation === "history.clone" || flight.operation === "history.fork") {
-            if (!result.data?.sessionFile || !result.data.cwd) throw new Error("Clone result omitted identity");
-            clone = await this.catalog.cloneRecord(result.data.sessionFile, result.data.cwd);
-            outcome.result = { sessionId: clone.id, ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
+          if (flight.operation === "session.handoff" || flight.operation === "history.clone" || flight.operation === "history.fork") {
+            if (!result.data?.sessionFile || !result.data.cwd) throw new Error("Detached session result omitted identity");
+            detached = await this.catalog.detachedSessionRecord(result.data.sessionFile, result.data.cwd);
+            if (detached.id === this.id) throw new Error("Detached session reused the source identity");
+            outcome.result = { sessionId: detached.id, ...(result.data.editorText !== undefined ? { editorText: result.data.editorText } : {}) };
           } else if (flight.operation === "history.navigate" || flight.operation === "history.delete") {
             if (result.data?.changed !== true || flight.operation === "history.delete" && !["applied", "cleanup_incomplete"].includes(result.data.status ?? "")) throw new Error("Missing history completion");
             outcome.result = { changed: true, contextRevision: flight.resultRevision,
@@ -1563,7 +1566,7 @@ export class OwnedSession {
       }
       if (outcome.status === "uncertain") this.commandFailure(new Error(outcome.error!.message));
       const completion = this.admission.then(async () => {
-        await this.catalog.updateCommand(outcome, clone);
+        await this.catalog.updateCommand(outcome, outcome.status === "completed" ? detached : undefined);
         if (this.bundled === flight) this.bundled = undefined;
         if (this.bundledInterrupt === flight) this.bundledInterrupt = undefined;
         this.bashFlights.delete(flight.invocationId);
@@ -1696,9 +1699,6 @@ export class OwnedSession {
     this.assertNativeTransitionAllowed(command);
     if (command.operation === "retry.abort" || command.operation === "shell.abort") return;
     if (this.rename || this.bundled || this.bundledInterrupt || this.nativePending || this.aborting) throw new CommandError("session_busy", "Another session operation is pending");
-    if (command.operation === "compaction.run" && (!this.conversation.settled || this.queueFlight || this.queueRunPending)) {
-      throw new CommandError("session_busy", "Manual compaction requires settled execution");
-    }
   }
 
   private async executeNative(command: { runtimeRevision: number } & NativeOperation, receipt: CommandReceipt): Promise<void> {

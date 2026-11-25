@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerServiceHistory } from "./shared/service-history";
+import { registerServiceOperation } from "./shared/service-operation";
+import { createSessionHandoff } from "./shared/session-handoff";
 import { managedBash } from "./shared/managed-bash";
 import { assertManagedResources } from "../scripts/managed-process.mjs";
 import { startServiceRuntime, stopServiceRuntime } from "./shared/service-ui";
@@ -17,6 +19,7 @@ export default function serviceExtension(pi: ExtensionAPI): void {
     catch (error) { ctx.ui.notify(String(error), "error"); return { cancel: true }; }
   });
   const lifetime = new AbortController();
+  registerServiceOperation(pi, "session.handoff", ({ instructions }, ctx) => createSessionHandoff(ctx, instructions, lifetime.signal));
   let initialized = false;
   pi.on("session_start", async (_event, ctx) => {
     if (!initialized) {

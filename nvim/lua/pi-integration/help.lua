@@ -76,7 +76,7 @@ function M.toggle(ctx)
 		"- `:PiPending` focuses the pending action; viewers inspect only. Esc Esc in the transcript aborts Pi and clears its pending action.",
 		"- `:PiQueue` inspect, edit, or remove queued messages. Ctrl+Enter saves an edit; editing pauses dispatch while connected.",
 		"- `:PiFollowUp` sends to the native follow-up queue.",
-		"- `:PiCompact` compact the session context with default or custom instructions; requires an idle session.",
+		"- `:PiHandoff` start a new session with a briefing and optional instructions; requires an idle session.",
 		"- `:PiSide` toggle the side conversation; hiding preserves its draft and conversation.",
 		"- `:PiSidePrompt` / `:PiSideNew` / `:PiSideAbort` prompt, replace, or stop side work.",
 		"- `:PiWorkspace` enter, integrate, or discard a task workspace with the configured confirmations.",

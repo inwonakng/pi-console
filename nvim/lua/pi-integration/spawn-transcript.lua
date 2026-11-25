@@ -24,6 +24,8 @@ local function read_messages(contents)
 			-- Decision entries update the row at the original request.
 		elseif type(record) == "table" and record.type == "message" and type(record.message) == "table" then
 			table.insert(messages, record.message)
+		elseif type(record) == "table" and record.type == "custom_message" and record.customType == "pi-handoff" then
+			table.insert(messages, { role = "custom", customType = record.customType, content = record.content, details = record.details })
 		elseif type(record) == "table" and (record.type == "compaction" or record.type == "branch_summary") then
 			table.insert(messages, { role = "assistant", content = { { type = "text", text = record.type .. ": " .. tostring(record.summary or "") } } })
 		elseif type(event) == "table" then

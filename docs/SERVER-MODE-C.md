@@ -16,7 +16,8 @@ Unknown fields, nonprimitive enums and unknown operations refuse before admissio
 | `!command` / `!!command` in input | `shell.run {command, excludeFromContext}`. `!!` excludes the result from model context. `shell.abort {}` interrupts owner Bash. Explicit user Bash retains Pi's unrestricted-shell semantics. Neovim's own local shell commands are not redirected. |
 | Native follow-up | `followUp.submit {text}`. Nonempty/non-slash, at most 1 MiB; not application queue items. |
 | Model/thinking pickers | `model.set {provider, modelId}`, `thinking.set {level}`. Levels: off/minimal/low/medium/high/xhigh/max; effective state comes from Pi. |
-| Native delivery/settings | `followUp.mode {mode: all | one-at-a-time}`; `compaction.auto` / `retry.auto {enabled}`; `compaction.run {instructions}`; `retry.abort {}`. |
+| Native delivery/settings | `followUp.mode {mode: all | one-at-a-time}`; `compaction.auto` / `retry.auto {enabled}`; `retry.abort {}`. |
+| Handoff | `session.handoff {instructions}` creates a detached session seeded with a briefing, leaves the source unchanged and returns the new session ID. |
 | Access/integration pickers and cycle shortcuts | `access.set {mode: readonly | ask | edit | full}`, `integration.set {mode: ask | allowed}`. `access.cycle` / `integration.cycle {modes}` advances owner state in the configured, validated order, without optimistic frontend state. |
 | Rename/retitle/notification/usage shortcuts | Existing `session.rename {title}`; `title.generate {}`; `notifications.set {enabled}`; `usage.refresh {}`. Usage is explicitly not-applicable outside Codex; no credentials are supplied by a frontend. Notification settings remain session-owned; headless desktop delivery remains disabled. |
 | History/tree navigation | `history.navigate {entryId, summarize}`. Retains existing before-user/after-other-entry positions, summary restrictions, trust and workspace restoration. |

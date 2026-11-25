@@ -8,6 +8,7 @@ export type BundledOperation =
   | { operation: "integration.set"; payload: { mode: "ask" | "allowed" } }
   | { operation: "access.cycle"; payload: { modes: ("readonly" | "ask" | "edit" | "full")[] } }
   | { operation: "integration.cycle"; payload: { modes: ("ask" | "allowed")[] } }
+  | { operation: "session.handoff"; payload: { instructions: string } }
   | { operation: "history.navigate"; payload: { entryId: string; summarize: boolean } }
   | { operation: "history.clone"; payload: { entryId: string } }
   | { operation: "history.fork"; payload: { entryId: string } }

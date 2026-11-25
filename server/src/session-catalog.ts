@@ -414,15 +414,14 @@ export class SessionCatalog {
     });
   }
 
-  /** A detached clone keeps the source handle untouched. Registration shares
-   * the terminal receipt transaction; trust stays keyed to its canonical file. */
-  async cloneRecord(file: string, cwd: string): Promise<CatalogSession> {
+  /** Register a detached session with its command receipt, leaving the source handle untouched. */
+  async detachedSessionRecord(file: string, cwd: string): Promise<CatalogSession> {
     const directory = join(this.root, "sessions");
     const id = basename(file, ".jsonl");
-    if (dirname(file) !== directory || file !== join(directory, `${id}.jsonl`) || !/^[0-9a-f-]{36}$/.test(id)) throw new Error("Clone is not a service-managed session file");
+    if (dirname(file) !== directory || file !== join(directory, `${id}.jsonl`) || !/^[0-9a-f-]{36}$/.test(id)) throw new Error("Detached session is not a service-managed file");
     const record: CatalogSession = { id, piSessionId: id, cwd, createdAt: new Date().toISOString() };
     const header = await validateManagedFile(this.root, record);
-    if (header.cwd !== cwd) throw new Error("Clone cwd does not match its header");
+    if (header.cwd !== cwd) throw new Error("Detached session cwd does not match its header");
     Object.assign(record, await readManagedMetadata(this.root, record));
     const handle = await open(file, "r+");
     try { await handle.sync(); } finally { await handle.close(); }
@@ -430,7 +429,7 @@ export class SessionCatalog {
     return record;
   }
 
-  async updateCommand(receipt: CommandReceipt, clone?: CatalogSession): Promise<void> {
+  async updateCommand(receipt: CommandReceipt, detached?: CatalogSession): Promise<void> {
     const next = structuredClone(receipt);
     await this.change(() => {
       const command = this.commandRecord(next.serviceEpoch, next.id);
@@ -447,9 +446,9 @@ export class SessionCatalog {
         session.name = next.result.title;
         this.updateSession(session);
       }
-      if (clone) {
-        if (!["history.clone", "history.fork"].includes(next.operation) || next.status !== "completed" || next.result?.sessionId !== clone.id) throw new Error("Invalid clone registration outcome");
-        insertSession(this.db, clone);
+      if (detached) {
+        if (!["session.handoff", "history.clone", "history.fork"].includes(next.operation) || next.status !== "completed" || next.result?.sessionId !== detached.id) throw new Error("Invalid detached session registration outcome");
+        insertSession(this.db, detached);
       }
       this.transactionBytes += commandBytes(updated);
       const { metadata, recovery } = splitReceipt(next);

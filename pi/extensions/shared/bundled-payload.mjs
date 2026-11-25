@@ -11,6 +11,7 @@ export function validPublicBundled(operation, p) {
       return exact(p, ["modes"]) && Array.isArray(p.modes) && p.modes.length > 0 && p.modes.length <= allowed.length
         && new Set(p.modes).size === p.modes.length && p.modes.every((mode) => typeof mode === "string" && allowed.includes(mode));
     }
+    case "session.handoff": return exact(p, ["instructions"]) && typeof p.instructions === "string" && Buffer.byteLength(p.instructions) <= 65536;
     case "history.navigate": return exact(p, ["entryId", "summarize"]) && entry(p.entryId) && typeof p.summarize === "boolean";
     case "history.clone": case "history.fork": case "history.delete": return exact(p, ["entryId"]) && entry(p.entryId);
     case "workspace.enter": case "workspace.integrate": case "workspace.discard":

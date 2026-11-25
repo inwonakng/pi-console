@@ -69,10 +69,13 @@ even after the workspace has been cleaned up.
 
 To stop the current run, press Escape twice in the transcript buffer.
 
-Pi compacts the context automatically when it is nearly full. To compact
-manually, use `<leader>pC` or `:PiCompact` while the session is idle and choose
-the default summary or custom instructions. Custom instructions open in a
-floating editor: Ctrl+Enter compacts; `:q` cancels.
+Pi compacts model context automatically when it is nearly full. Use
+`<leader>pH` or `:PiHandoff` in an idle session to open a new session with a
+briefing. The new transcript starts with the briefing, the source session ID,
+and any custom instructions. The source transcript stays unchanged. The new
+agent waits for your next message and receives only the briefing from the old
+conversation. For custom instructions, Ctrl+Enter submits; `:q` cancels.
+Return to the origin checkout before handing off from a managed workspace.
 
 ### Side conversations
 

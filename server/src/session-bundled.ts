@@ -12,6 +12,7 @@ export type BundledOperation =
   | { operation: "integration.set"; payload: { mode: "ask" | "allowed" } }
   | { operation: "access.cycle"; payload: { modes: ("readonly" | "ask" | "edit" | "full")[] } }
   | { operation: "integration.cycle"; payload: { modes: ("ask" | "allowed")[] } }
+  | { operation: "session.handoff"; payload: { instructions: string } }
   | { operation: "history.navigate"; payload: { entryId: string; summarize: boolean } }
   | { operation: "history.clone"; payload: { entryId: string } }
   | { operation: "history.fork"; payload: { entryId: string } }
@@ -38,6 +39,7 @@ export type BundledOperation =
 export const BUNDLED_SOURCES = {
   "access.set": "access-mode.ts", "access.cycle": "access-mode.ts",
   "integration.set": "workspace.ts", "integration.cycle": "workspace.ts",
+  "session.handoff": "service.ts",
   "history.navigate": "tree.ts", "history.clone": "tree.ts", "history.fork": "tree.ts", "history.delete": "tree.ts", "history.prune": "tree.ts",
   "workspace.enter": "workspace.ts", "workspace.integrate": "workspace.ts", "workspace.discard": "workspace.ts", "workspace.revert": "workspace.ts", "workspace.undo": "workspace.ts",
   "side.open": "side.ts", "side.prompt": "side.ts", "side.draft": "side.ts", "side.reset": "side.ts", "side.abort": "side.ts", "side.select": "side.ts", "side.delete": "side.ts",
