@@ -87,7 +87,7 @@ function M.append(ctx, lines, items, permission)
 	local summary = "permission: " .. tostring(permission.tool or "tool") .. " - " .. decision
 	local text = "> " .. tool_output.summary_icon("permission") .. " " .. summary:gsub("[\r\n]", " ")
 	local child = { kind = "tool", output_id = output_id, key = "permission:" .. tostring(permission.id or output_id) }
-	require("pi-integration.activity").append(ctx.state, items, child, text, #lines + 1,
+	require("pi-integration.activity").append(items, child, text, #lines + 1,
 		function(line, value) lines[line] = value end)
 	table.insert(lines, "")
 end
