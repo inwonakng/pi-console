@@ -1,5 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { managedSpawn, managedResult, stopManaged } from "../../scripts/managed-process.mjs";
+import { managedSpawn, managedResult, stopManaged, SIDE_AGENT_LABEL } from "../../scripts/managed-process.mjs";
 import type { RpcCommand, RpcExtensionUIResponse } from "@earendil-works/pi-coding-agent";
 
 export type SideRpcEvent = Record<string, unknown>;
@@ -27,6 +27,7 @@ export class SideRpc {
         PI_WORKSPACE_ID: "",
         PI_SUBAGENT_NAME: "",
       },
+      label: SIDE_AGENT_LABEL,
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.process.stdout.setEncoding("utf8");

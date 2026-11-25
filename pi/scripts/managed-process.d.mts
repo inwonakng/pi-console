@@ -9,6 +9,7 @@ export type ResourceManifest = {
   readonly resolutions: readonly { from: string; name: string; target: string | null }[];
   readonly lookup: readonly { path: string; target: string | null }[];
 };
+export const SIDE_AGENT_LABEL: "pi-console:side-agent";
 export function assertResourceManifest(manifest: ResourceManifest): void;
 export function assertManagedResources(environment?: NodeJS.ProcessEnv): void;
 export function ownerLease(root: string): { close(): void };

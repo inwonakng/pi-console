@@ -11,6 +11,8 @@ const require = createRequire(import.meta.url);
 function database(path, options = {}) { const { DatabaseSync } = require('node:sqlite'); return new DatabaseSync(path, options); }
 
 const script = fileURLToPath(import.meta.url);
+/** Side chat Pi child. Host shutdown treats it as idle unless the parent reports a running side chat. */
+export const SIDE_AGENT_LABEL = 'pi-console:side-agent';
 const contexts = new WeakMap();
 const terminal = "('done','cancelled','interrupted')";
 

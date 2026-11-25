@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { WorkspaceReviews, type ReviewMutation } from "./workspace-reviews.js";
 import { fingerprint, readResource, completeFiles, completeDirectory, type ResourceContext } from "./resource-reads.js";
 import { hostCommand, hostFingerprint, type HostReceipt } from "./host-commands.js";
-import { inspectEpoch } from "../../pi/scripts/managed-process.mjs";
+import { inspectEpoch, SIDE_AGENT_LABEL } from "../../pi/scripts/managed-process.mjs";
 import { LINUX_SESSION_NETWORK_LABEL } from "../../pi/scripts/linux-session-network.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { SavedHelperUnresolved, withSavedSessionHelper, type SavedPreview, type SavedSessionRequest } from "./saved-sessions.js";
@@ -563,11 +563,12 @@ export class HostOwner {
       if (this.catalog.list().some((session) => session.acceptedQueue?.some((item) => item.status !== "failed"))) {
         throw new CommandError("session_busy", "Accepted queued work would be interrupted");
       }
-      // The session-local network keeper is idle infrastructure, stopped by
-      // normal session cleanup. Unresolved keepers still block shutdown.
+      // The session-local network keeper and side chat Pi are stopped by normal
+      // session cleanup. A generating side chat blocks via stopBlockReason;
+      // unresolved processes and their descendants still block shutdown.
       if (inspectEpoch(this.catalog.processRegistry, this.serviceEpoch).some((job) => job.parent !== null
         && !["done", "cancelled", "interrupted"].includes(job.status)
-        && !(job.label === LINUX_SESSION_NETWORK_LABEL && job.status === "running"))) {
+        && !((job.label === LINUX_SESSION_NETWORK_LABEL || job.label === SIDE_AGENT_LABEL) && job.status === "running"))) {
         throw new CommandError("session_busy", "Known managed child work remains; use an intentional force stop to interrupt it");
       }
     }
@@ -1751,6 +1752,18 @@ export class OwnedSession {
     if (changed) { await this.catalog.replaceQueue(this.id, items); this.queueChanged(); }
   }
 
+  /** Malformed side status counts as running so it cannot authorize stopping its child. */
+  private sideRunning(): boolean {
+    const raw = this.conversation.status("pi-side");
+    if (!raw) return false;
+    try {
+      const value: unknown = JSON.parse(raw);
+      if (!object(value)) return true;
+      return value.running !== false
+        || Array.isArray(value.conversations) && value.conversations.some((chat) => !object(chat) || chat.running === true);
+    } catch { return true; }
+  }
+
   private activity(pending = (this.worker?.pendingInteractionCount ?? 0) > 0): SessionActivity {
     const status = this.done ? "Stopped"
       : this.error || this.phase === "failed" ? "Error"
@@ -2095,6 +2108,7 @@ export class OwnedSession {
     if (this.activity().subagentRuns.some((run) => !run.quiescent || run.writerOwned || run.pendingRequests.length)) {
       return `Session ${this.id} has active workers or unresolved contributions; stop refused`;
     }
+    if (this.sideRunning()) return `Session ${this.id} has a running side chat; stop refused`;
     if (this.phase !== "ready" || this.stopRequested || !this.usableWorkspace() || !this.conversation.settled
       || this.admitting || this.commands.size || this.lifecyclePending || this.bundled || this.nativePending || this.aborting || this.rename || this.queueFlight || this.queueRunPending
       || this.worker?.interactionCount || this.catalog.queue(this.id).some((item) => item.status !== "failed")) {
