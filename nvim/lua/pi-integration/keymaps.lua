@@ -126,12 +126,6 @@ function M.setup(ctx)
 	local input_specs = M.merged("input")
 	local transcript_specs = M.merged("transcript")
 
-	-- A bare q waits for a macro register and stalls scheduled UI updates.
-	for _, buf in ipairs({ ctx.state.input_buf, ctx.state.transcript_buf }) do
-		if ctx.buffer.valid(buf) then
-			vim.keymap.set("n", "q", "<Nop>", { buffer = buf, silent = true })
-		end
-	end
 	set_keymaps(ctx, ctx.state.input_buf, input_specs)
 	set_keymaps(ctx, ctx.state.transcript_buf, transcript_specs)
 	register_which_key(ctx, ctx.state.input_buf, input_specs)
