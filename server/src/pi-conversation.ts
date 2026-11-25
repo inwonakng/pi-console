@@ -79,7 +79,9 @@ export const CONVERSATION_SECTIONS = {
 } as const satisfies Record<string, readonly (keyof ConversationSnapshot)[]>;
 export type ConversationSection = keyof typeof CONVERSATION_SECTIONS;
 export type ConversationRevisions = Record<ConversationSection, number>;
-export type ConversationSections = { [K in ConversationSection]?: Pick<ConversationSnapshot, typeof CONVERSATION_SECTIONS[K][number]> };
+export type ConversationSections = { [K in ConversationSection]?: Pick<ConversationSnapshot, typeof CONVERSATION_SECTIONS[K][number]> }
+  /** With a delta cursor, history may keep the client's first `keep` messages and send only the rest. */
+  & { history?: { keep?: number } };
 
 export type FrontendEffect =
   | { type: "notification"; message: string; level: "info" | "warning" | "error" }
@@ -123,19 +125,40 @@ export class PiConversation {
   private diagnosticSeq = 0;
   private readonly liveSizes = new Map<string, number>();
   private liveBytes = 0;
+  /** Message keys as served at recent history revisions; a client cursor names its baseline. */
+  private readonly servedKeys = new Map<number, string[]>();
 
   snapshot(): ConversationSnapshot {
+    this.rememberServedHistory();
     return structuredClone(this.state);
   }
   sectionRevisions(): ConversationRevisions { return { ...this.revisions }; }
-  changedSections(known: ConversationRevisions): ConversationSections {
+  changedSections(known: ConversationRevisions, historyDelta = false): ConversationSections {
     const sections: ConversationSections = {};
+    const base = historyDelta ? this.servedKeys.get(known.history) : undefined;
+    this.rememberServedHistory();
     for (const section of Object.keys(CONVERSATION_SECTIONS) as ConversationSection[]) {
       if (known[section] === this.revisions[section]) continue;
-      Object.defineProperty(sections, section, { enumerable: true, value: structuredClone(Object.fromEntries(
-        CONVERSATION_SECTIONS[section].map((key) => [key, this.state[key]]))) });
+      let value: unknown;
+      if (section === "history" && base) {
+        // Jumps and appends usually share a long prefix with the client's copy.
+        const keys = this.state.messageKeys;
+        let keep = 0;
+        while (keep < base.length && keep < keys.length && base[keep] === keys[keep]) keep++;
+        value = { messages: structuredClone(this.state.messages.slice(keep)), messageKeys: keys.slice(keep), keep,
+          omittedMessages: this.state.omittedMessages, historyRevision: this.state.historyRevision, hydrated: this.state.hydrated };
+      } else {
+        value = structuredClone(Object.fromEntries(CONVERSATION_SECTIONS[section].map((key) => [key, this.state[key]])));
+      }
+      Object.defineProperty(sections, section, { enumerable: true, value });
     }
     return sections;
+  }
+  private rememberServedHistory(): void {
+    const revision = this.revisions.history;
+    if (this.servedKeys.has(revision)) return;
+    this.servedKeys.set(revision, this.state.messageKeys.slice());
+    if (this.servedKeys.size > 16) this.servedKeys.delete(this.servedKeys.keys().next().value!);
   }
   /** Exact owner-observed output metadata, without copying a conversation per chunk. */
   outputPaths(): string[] {

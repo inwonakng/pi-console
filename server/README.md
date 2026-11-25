@@ -912,6 +912,11 @@ are retained per connection; detaching releases them. Initial attachment updates
 start only after its history has been fetched. Both frontends assemble all pages
 before replacing their transcript baseline. Total transcript length has no cap;
 existing per-response and live-state budgets remain in force.
+Hosts advertising `snapshot.historyDelta` accept `historyDelta: true` in the `known`
+cursor. When the host still remembers the history served at the cursor's revision,
+a changed history section carries `keep`: retain that many leading
+`messages`/`messageKeys` from the client's baseline and append the sent ones.
+Without `keep`, the section is a complete replacement as before.
 Hosts advertising `history.treeEntries` accept typed `session.read` with
 `{ kind: "treeEntries", runtimeRevision, since? }`. It returns flat `entries` and
 `leafId` for the complete history tree (or all entries after `since`). Every raw

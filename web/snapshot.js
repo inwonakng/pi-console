@@ -36,7 +36,8 @@ export async function loadSnapshotHistory(result, read) {
 export function snapshotQuery(snapshot, hello) {
   return snapshot?.conversationRevisions && hello?.capabilities.includes("snapshot.sections")
     ? { known: { sessionId: snapshot.sessionId, serviceEpoch: snapshot.serviceEpoch, runtimeRevision: snapshot.runtimeRevision,
-      conversationRevisions: snapshot.conversationRevisions } } : {};
+      conversationRevisions: snapshot.conversationRevisions,
+      ...(hello.capabilities.includes("snapshot.historyDelta") ? { historyDelta: true } : {}) } } : {};
 }
 export function mergeSnapshot(previous, value) {
   if (value.conversation) return value;
@@ -51,6 +52,12 @@ export function mergeSnapshot(previous, value) {
       for (const key of keys) {
         delete conversation[key];
         if (Object.hasOwn(changed, key)) conversation[key] = changed[key];
+      }
+      if (section === "history" && changed.keep !== undefined) {
+        const { keep } = changed, old = previous.conversation;
+        if (!Number.isSafeInteger(keep) || keep < 0 || keep > old.messages.length || keep > old.messageKeys.length) throw new Error("Invalid history delta");
+        conversation.messages = [...old.messages.slice(0, keep), ...changed.messages];
+        conversation.messageKeys = [...old.messageKeys.slice(0, keep), ...changed.messageKeys];
       }
     } else if (previous.conversationRevisions[section] !== value.conversationRevisions[section]) {
       throw new Error("Snapshot section baseline changed");

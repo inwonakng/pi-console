@@ -77,7 +77,7 @@ export type OwnedSessionState = SessionActivity & {
   startupTimings?: { validationMs: number; workerMs: number; historyMs: number;
     rpcReadyMs: number; commandDiscoveryMs: number; historyCapabilityMs: number; trustMs: number; workspaceMs: number };
 };
-export type SnapshotCursor = { sessionId: string; serviceEpoch: string; runtimeRevision: number; conversationRevisions: ConversationRevisions };
+export type SnapshotCursor = { sessionId: string; serviceEpoch: string; runtimeRevision: number; conversationRevisions: ConversationRevisions; historyDelta?: true };
 export type OwnedSessionSnapshot = OwnedSessionState & { sequence: number; preview?: TranscriptPreview; conversation: ConversationSnapshot; conversationRevisions: ConversationRevisions; commands: CommandReceipt[]; acceptedQueue: AcceptedQueueSnapshot };
 export type OwnedSessionPatch = Omit<OwnedSessionSnapshot, "conversation"> & { conversationSections: ConversationSections };
 export type OwnedSessionSummary = Pick<OwnedSessionState, "phase" | "runtimeRevision" | "controller" | keyof SessionActivity> & {
@@ -715,7 +715,7 @@ export class OwnedSession {
   snapshotSince(known?: SnapshotCursor): OwnedSessionSnapshot | OwnedSessionPatch {
     // Never reuse sections across a service or runtime replacement.
     if (!known || known.sessionId !== this.id || known.serviceEpoch !== this.catalog.epoch || known.runtimeRevision !== this.runtimeRevision) return this.snapshot();
-    return { ...this.ownerState(), sequence: this.sequence, preview: structuredClone(this.preview), conversationSections: this.conversation.changedSections(known.conversationRevisions),
+    return { ...this.ownerState(), sequence: this.sequence, preview: structuredClone(this.preview), conversationSections: this.conversation.changedSections(known.conversationRevisions, known.historyDelta === true),
       conversationRevisions: this.conversation.sectionRevisions(), commands: this.catalog.recentCommands(this.id), acceptedQueue: this.queueSnapshot() };
   }
 

@@ -64,7 +64,8 @@ function M.query(snapshot, hello)
 	if not snapshot or not snapshot.conversationRevisions or not hello
 		or not vim.tbl_contains(hello.capabilities, "snapshot.sections") then return {} end
 	return { known = { sessionId = snapshot.sessionId, serviceEpoch = snapshot.serviceEpoch, runtimeRevision = snapshot.runtimeRevision,
-		conversationRevisions = snapshot.conversationRevisions } }
+		conversationRevisions = snapshot.conversationRevisions,
+		historyDelta = vim.tbl_contains(hello.capabilities, "snapshot.historyDelta") or nil } }
 end
 function M.merge(previous, value)
 	if value.conversation then return value end
@@ -76,6 +77,14 @@ function M.merge(previous, value)
 		local changed = value.conversationSections[section]
 		if changed then
 			for _, key in ipairs(keys) do conversation[key] = changed[key] end
+			if section == "history" and changed.keep ~= nil then
+				-- Build new lists: rendered state still references the previous ones.
+				local keep, old = changed.keep, previous.conversation
+				assert(type(keep) == "number" and keep >= 0 and keep % 1 == 0 and keep <= #old.messages
+					and keep <= #old.messageKeys, "Invalid history delta")
+				conversation.messages = vim.list_extend(vim.list_slice(old.messages, 1, keep), changed.messages)
+				conversation.messageKeys = vim.list_extend(vim.list_slice(old.messageKeys, 1, keep), changed.messageKeys)
+			end
 		else
 			assert(previous.conversationRevisions[section] == value.conversationRevisions[section], "Snapshot section baseline changed")
 		end

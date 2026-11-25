@@ -27,8 +27,9 @@ function exact(value: Record<string, unknown>, keys: string[]): void {
 function snapshotCursor(value: unknown): SnapshotCursor | undefined {
   if (value === undefined) return;
   if (!object(value)) throw new CommandError("invalid_command", "Invalid snapshot cursor");
-  exact(value, ["sessionId", "serviceEpoch", "runtimeRevision", "conversationRevisions"]);
+  exact(value, ["sessionId", "serviceEpoch", "runtimeRevision", "conversationRevisions", "historyDelta"]);
   const revisions = value.conversationRevisions;
+  if (value.historyDelta !== undefined && value.historyDelta !== true) throw new CommandError("invalid_command", "Invalid snapshot cursor");
   if (!identifier(value.sessionId) || !identifier(value.serviceEpoch) || !Number.isSafeInteger(value.runtimeRevision) || (value.runtimeRevision as number) < 0 || !object(revisions)
     || Object.keys(revisions).length !== Object.keys(CONVERSATION_SECTIONS).length
     || Object.keys(CONVERSATION_SECTIONS).some((key) => !Number.isSafeInteger(revisions[key]) || (revisions[key] as number) < 0)) {
