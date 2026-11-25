@@ -30,6 +30,18 @@ if [ "$#" -eq 0 ]; then
     fi
 fi
 
+# tmux releases wait-for locks when the last client disconnects with no
+# sessions. During config loading that can happen between helper commands.
+if [ "$#" -ne 0 ] && [ "$(tmux display-message -p '#{server_sessions}')" = 0 ]; then
+    hook='session-created[82]'
+    printf -v command 'bash %q --apply' "$app_root/tmux/scripts/setup.sh"
+    command=${command//\\/\\\\}
+    command=${command//\"/\\\"}
+    command=${command//\$/\\\$}
+    tmux set-hook -g "$hook" "set-hook -gu '$hook' ; run-shell \"$command\""
+    exit 0
+fi
+
 printf -v launch 'bash %q' "$app_root/bin/pi-console"
 tmux source-file "$script_dir/../pi-console.conf"
 # Install the selected launcher before helpers: a helper failure must not leave
