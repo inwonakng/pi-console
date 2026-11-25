@@ -865,13 +865,21 @@ results replace previous results; nested parent IDs survive. Correlated direct-b
 responses finish retained output even though Pi emits no final bash message event.
 
 Initial history and idle reconciliation use `get_state`, session stats and the
-bundled private `pi-console-history-read` command. Its source is discovered before
-dispatch; correlated, ordered JSON-text status chunks stay below the existing
-16-MiB RPC record limit. The command captures Pi's complete session projection
-synchronously and streams each message independently, with no message-count or
-aggregate-history byte limit. Individual messages retain the 16-MiB record limit. History is
-applied synchronously after its terminal result and handled acknowledgment, fenced
-at dispatch and stdout reduction by worker/runtime, idle state and event version.
+bundled private `pi-console-history-read` command. History and typed bundled
+operations share one `get_commands` discovery per worker, runtime ID and runtime
+revision. Dispatch requires one extension command with the exact name and expected
+source path. Failed discovery is evicted; a discovered list stays cached for its
+runtime scope even if an individual command is refused.
+
+The command captures Pi's session projection synchronously and sends correlated,
+ordered JSON-text status chunks below the 16-MiB RPC record limit. A projection
+read may name a previous invocation as its `base`. For a known base, completion
+reports the common prefix length (`keep`) by comparing serialized message text
+and streams only the tail. Without a known base, it streams the full projection.
+Messages are streamed independently, with no message-count or aggregate-history
+byte limit and a 16-MiB limit per message. History is applied synchronously after
+its terminal result and handled acknowledgment, fenced at dispatch and stdout
+reduction by worker/runtime, idle state and event version.
 History replacement publishes a lightweight sequence checkpoint; attachments fetch
 the changed snapshot sections rather than receiving a large subscription update.
 Typed entries (including `since`) and tree reads use the same private channel,

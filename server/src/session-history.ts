@@ -77,7 +77,7 @@ export class HistoryRead {
   private data?: HistoryData;
   readonly limit: number;
 
-  constructor(readonly identity: HistoryIdentity) {
+  constructor(readonly identity: HistoryIdentity, private readonly base?: readonly PiMessage[]) {
     this.limit = identity.kind === "projection" ? 16 * 1024 * 1024 : HISTORY_RESULT_BYTES;
   }
 
@@ -117,10 +117,12 @@ export class HistoryRead {
       this.messages.length = 0;
       this.failure = new CommandError(value.code, value.error);
     } else if (this.identity.kind === "projection") {
-      keys.push("status", "messages");
+      keys.push("status", "messages", "keep");
+      const keep = value.keep;
       if (value.status !== "completed" || value.messages !== this.messages.length || this.chunks.length
+        || keep !== undefined && (typeof keep !== "number" || !Number.isSafeInteger(keep) || keep < 0 || keep > (this.base?.length ?? -1))
         || Object.keys(value).some(key => !keys.includes(key))) throw new Error("Invalid projection completion");
-      this.data = { messages: this.messages, omittedMessages: 0 };
+      this.data = { messages: keep ? this.base!.slice(0, keep).concat(this.messages) : this.messages, omittedMessages: 0 };
     } else {
       keys.push("status", "bytes");
       const text = this.chunks.join("");

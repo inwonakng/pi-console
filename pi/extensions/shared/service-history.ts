@@ -7,6 +7,7 @@ const STATUS = "pi-console-history-result";
 const HISTORY_BYTES = 16 * 1024 * 1024;
 const RESULT_BYTES = 80 * 1024 * 1024 - 64 * 1024; // Public response envelope allowance.
 const CHUNK_UNITS = 64 * 1024;
+const PROJECTION_BASES = 3;
 type Kind = "projection" | "entries" | "tree" | "treeEntries";
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 class ReadRefusal extends Error {
@@ -104,13 +105,16 @@ function encode(value: unknown): string {
 /** Fixed observational command: no messages, entries, model calls or async capture. */
 export function registerServiceHistory(pi: ExtensionAPI): void {
   if (process.env.PI_CONSOLE_SERVICE !== "1") return;
+  const projections = new Map<string, string[]>();
+  let scope: string | undefined;
   pi.registerCommand(COMMAND, { description: "Internal bounded service history read", handler: async (args, ctx) => {
     const v: unknown = JSON.parse(args);
     if (!serviceManaged(ctx) || !object(v) || v.version !== 1
-      || Object.keys(v).some(key => !["version", "invocationId", "runtimeId", "sessionId", "sessionFile", "kind", "since"].includes(key))
+      || Object.keys(v).some(key => !["version", "invocationId", "runtimeId", "sessionId", "sessionFile", "kind", "since", "base"].includes(key))
       || ![v.invocationId, v.runtimeId, v.sessionId, v.sessionFile].every(part => typeof part === "string" && !!part && Buffer.byteLength(part) <= 4096)
       || typeof v.kind !== "string" || !["projection", "entries", "tree", "treeEntries"].includes(v.kind)
-      || (v.since !== undefined && (!["entries", "treeEntries"].includes(v.kind) || typeof v.since !== "string" || !v.since || Buffer.byteLength(v.since) > 4096))) {
+      || (v.since !== undefined && (!["entries", "treeEntries"].includes(v.kind) || typeof v.since !== "string" || !v.since || Buffer.byteLength(v.since) > 4096))
+      || (v.base !== undefined && (v.kind !== "projection" || typeof v.base !== "string" || !v.base || Buffer.byteLength(v.base) > 4096))) {
       throw new Error("Invalid managed history read");
     }
     const identity = { version: 1, invocationId: v.invocationId, runtimeId: v.runtimeId,
@@ -137,15 +141,28 @@ export function registerServiceHistory(pi: ExtensionAPI): void {
       // session projection/entries/tree can still change underneath this read.
       if (v.kind === "projection") {
         if (!ctx.isIdle()) throw new ReadRefusal("session_busy", "Projected history requires an idle session");
-        const messages = ctx.sessionManager.buildSessionProjection().messages;
-        // Bound each message and wire record, never the number of messages or
-        // total history. Encoding one message at a time avoids a giant JSON string.
+        const currentScope = JSON.stringify([v.runtimeId, v.sessionId, v.sessionFile]);
+        if (currentScope !== scope) { projections.clear(); scope = currentScope; }
+        const { messages } = ctx.sessionManager.buildSessionProjection();
+        const base = typeof v.base === "string" ? projections.get(v.base) : undefined;
+        const texts: string[] = [];
+        let keep = 0;
+        // Compare JSON rather than entry identity: Pi can retain mutable
+        // message details and content supplied by extensions.
         for (const message of messages) {
+          const i = texts.length;
           const text = JSON.stringify(message);
+          const previous = base?.[i];
+          if (previous !== undefined && previous === text) {
+            texts.push(previous);
+            if (keep === i) { keep++; continue; } // Already checked and served.
+          } else texts.push(text);
           if (Buffer.byteLength(text) > HISTORY_BYTES) throw new ReadRefusal("resource_limit", "Pi conversation message exceeds 16 MiB");
           chunks(text, true);
         }
-        reply({ index, status: "completed", messages: messages.length });
+        reply({ index, status: "completed", messages: messages.length - keep, ...(base ? { keep } : {}) });
+        projections.set(v.invocationId as string, texts);
+        if (projections.size > PROJECTION_BASES) projections.delete(projections.keys().next().value!);
       } else {
         const text = capture(ctx, v.kind as Kind, v.since as string | undefined);
         if (Buffer.byteLength(text) > RESULT_BYTES) throw new ReadRefusal("resource_limit", "History read exceeds public response budget");

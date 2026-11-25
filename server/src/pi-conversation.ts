@@ -174,6 +174,7 @@ export class PiConversation {
     return [...paths];
   }
   get historyVersion(): number { return this.version; }
+  get historyRevision(): number { return this.state.historyRevision; }
   get awaitingSettlement(): boolean { return this.unsettled; }
   get hydrated(): boolean { return this.state.hydrated; }
   get timelineAnchor(): { afterMessage: string | null } | undefined {
@@ -281,11 +282,16 @@ export class PiConversation {
         this.version++;
         break;
       }
-      case "history":
+      case "history": {
+        const { messages, messageKeys } = this.state;
         this.state.messages = [];
         this.state.messageKeys = [];
         this.state.omittedMessages = change.omittedMessages ?? 0;
-        for (const message of change.messages) this.append(message);
+        let reusedPrefix = true;
+        for (const [index, message] of change.messages.entries()) {
+          reusedPrefix &&= message === messages[index];
+          this.append(message, reusedPrefix ? messageKeys[index] : undefined);
+        }
         this.state.historyRevision++;
         this.state.hydrated = true;
         if (this.state.partialAssistant?.interrupted) {
@@ -301,6 +307,7 @@ export class PiConversation {
           this.reserve("partial", undefined);
         }
         break;
+      }
       case "permission_history":
         this.state.omittedPermissions = change.omitted;
         this.setPermissions(change.permissions);
@@ -387,19 +394,22 @@ export class PiConversation {
     this.liveBytes = total;
   }
 
-  private append(message: PiMessage, bytes = size(message)): void {
+  private append(message: PiMessage, key?: string): void {
+    if (key === undefined) {
+      if (size(message) > HISTORY_BYTES) throw new Error("Pi conversation message exceeds 16 MiB");
+      key = messageKey(message);
+    }
     if (message.role === "assistant") {
       for (const diagnostic of this.state.diagnostics) {
         if (diagnostic.assistantTimestamp !== undefined && diagnostic.assistantTimestamp === message.timestamp) {
-          diagnostic.afterMessage = messageKey(message);
+          diagnostic.afterMessage = key;
           delete diagnostic.assistantTimestamp;
           this.reserve(`diagnostic:${diagnostic.id}`, diagnostic);
         }
       }
     }
-    if (bytes > HISTORY_BYTES) throw new Error("Pi conversation message exceeds 16 MiB");
     this.state.messages.push(message);
-    this.state.messageKeys.push(messageKey(message));
+    this.state.messageKeys.push(key);
   }
 
   private setPermissions(items: PermissionHistoryItem[]): void {

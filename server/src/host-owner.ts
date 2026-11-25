@@ -1,4 +1,4 @@
-import { HISTORY_COMMAND, HISTORY_STATUS, HistoryRead, savedHistoryPreview, type TranscriptPreview, type HistoryKind, type HistoryData, type ProjectedHistory } from "./session-history.js";
+import { HISTORY_COMMAND, HISTORY_STATUS, HistoryRead, savedHistoryPreview, type TranscriptPreview, type HistoryIdentity, type HistoryKind, type HistoryData, type ProjectedHistory } from "./session-history.js";
 import { lstat, open } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { DESKTOP_NOTIFICATION_STATUS, validDesktopNotification, type DesktopNotification } from "../../pi/extensions/shared/desktop-notification.mjs";
@@ -37,6 +37,7 @@ type BundledFlight = {
   message: string; dispatched: boolean; requestId?: string; result?: OperationResult; resultRevision?: number; recipient?: Controller;
   bashJobId?: string; cancelWaitId?: string;
 };
+type RuntimeCommands = Extract<RpcResponse, { command: "get_commands"; success: true }>["data"]["commands"];
 type HistoryFlight = {
   worker: PiProcess; revision: number; read: HistoryRead; message: string; requestId?: string;
   version?: number; terminalCurrent?: boolean; data?: HistoryData; error?: CommandError;
@@ -626,6 +627,7 @@ export class OwnedSession {
   private readonly conversation = new PiConversation();
   private preview?: TranscriptPreview;
   private retainedHistory?: { version: string; historyRevision: number };
+  private projectionBase?: { worker: PiProcess; identity: HistoryIdentity; messages: ProjectedHistory["messages"] };
   private previewGeneration = 0;
   private readonly viewers = new Set<SessionSubscription>();
   private readonly reservations = new QueueReservations(() => this.queueChanged());
@@ -672,7 +674,7 @@ export class OwnedSession {
   private refresh?: Promise<void>;
   private refreshAgain = false;
   private readonly historyReads = new Map<string, HistoryFlight>();
-  private historyCapability?: { worker: PiProcess; runtimeId: string; revision: number; validation: Promise<void> };
+  private bundledCommands?: { worker: PiProcess; runtimeId: string; revision: number; discovery: Promise<RuntimeCommands> };
   private readonly captures = new Map<string, { worker: PiProcess; revision: number }>();
   private runtimeRevision: number;
   private workerRevision = 0;
@@ -1471,13 +1473,7 @@ export class OwnedSession {
         if (flight.operation.startsWith("history.") || flight.operation.startsWith("workspace.") || flight.operation === "title.generate") this.assertRenameReady();
       };
       try {
-        const discovery = await flight.worker.request({ type: "get_commands" }, guard);
-        guard();
-        const name = operationCommand(flight.operation);
-        if (discovery.command !== "get_commands" || discovery.data.commands.filter((c) => c.name === name && c.source === "extension"
-          && c.sourceInfo?.path === join(this.options.appRoot, "pi", "extensions", BUNDLED_SOURCES[flight.operation])).length !== 1) {
-          throw new CommandError("unsupported_command", "Bundled typed capability is missing or ambiguous");
-        }
+        await this.ensureBundledCommand(flight.worker, operationCommand(flight.operation), BUNDLED_SOURCES[flight.operation], guard);
         const response = await flight.worker.request({ type: "prompt", message: flight.message }, () => {
           guard();
           flight.dispatched = true;
@@ -2183,6 +2179,8 @@ export class OwnedSession {
         this.checkRunning();
         this.catalog.assertLaunchAllowed();
         this.workerRevision = 0;
+        this.projectionBase = undefined;
+        this.bundledCommands = undefined;
         this.trust = undefined;
         this.workspace = undefined;
         this.exit = undefined;
@@ -2300,7 +2298,7 @@ export class OwnedSession {
       this.interruptCommands = { worker, revision, commands: commands.data.commands };
       stage = performance.now();
       try {
-        await this.ensureHistoryCapability(worker, () => {
+        await this.ensureBundledCommand(worker, HISTORY_COMMAND, "service.ts", () => {
           this.checkRunning();
           if (worker !== this.worker || revision !== this.runtimeRevision) throw new CommandError("stale_runtime", "Startup runtime changed");
         }, commands);
@@ -2564,6 +2562,7 @@ export class OwnedSession {
         if (history.terminalCurrent && this.currentHistory(history)) {
           const projection = history.data as ProjectedHistory;
           this.retain({ type: "history", ...projection });
+          this.projectionBase = { worker: history.worker, identity: history.read.identity, messages: projection.messages };
         } else this.refreshAgain = true;
       }
       return;
@@ -2636,8 +2635,11 @@ export class OwnedSession {
     if (!runtime?.active) throw new CommandError("session_unavailable", "History runtime is unavailable");
     const identity = { version: 1 as const, invocationId: randomUUID(), runtimeId: runtime.id,
       sessionId: this.record.piSessionId, sessionFile: this.catalog.sessionFile(this.id), kind };
-    const flight: HistoryFlight = { worker, revision: this.runtimeRevision, read: new HistoryRead(identity),
-      message: `/${HISTORY_COMMAND} ${JSON.stringify({ ...identity, ...(since === undefined ? {} : { since }) })}` };
+    const previous = this.projectionBase;
+    const base = kind === "projection" && previous?.worker === worker && previous.identity.runtimeId === identity.runtimeId
+      && previous.identity.sessionId === identity.sessionId && previous.identity.sessionFile === identity.sessionFile ? previous : undefined;
+    const flight: HistoryFlight = { worker, revision: this.runtimeRevision, read: new HistoryRead(identity, base?.messages),
+      message: `/${HISTORY_COMMAND} ${JSON.stringify({ ...identity, since, base: base?.identity.invocationId })}` };
     const guard = () => {
       this.catalog.assertExecutionAllowed(); check();
       const current = worker.interactionRuntime();
@@ -2650,7 +2652,7 @@ export class OwnedSession {
     try {
       // Capture around the worker's authoritative projection, never at stop time.
       const before = kind === "projection" ? await this.historyFingerprint() : undefined;
-      await this.ensureHistoryCapability(worker, guard);
+      await this.ensureBundledCommand(worker, HISTORY_COMMAND, "service.ts", guard);
       await worker.request({ type: "prompt", message: flight.message }, () => {
         guard();
         if (kind === "projection" && !this.historyIdle()) {
@@ -2667,7 +2669,7 @@ export class OwnedSession {
         guard();
         if (before === after && this.conversation.hydrated
           && history === this.conversation.sectionRevisions().history && this.currentHistory(flight)) {
-          this.retainedHistory = { version: before, historyRevision: this.conversation.snapshot().historyRevision };
+          this.retainedHistory = { version: before, historyRevision: this.conversation.historyRevision };
         }
       }
       return flight.data;
@@ -2679,37 +2681,39 @@ export class OwnedSession {
     catch { return; }
   }
 
-  private async ensureHistoryCapability(worker: PiProcess, guard: () => void, discovery?: RpcResponse): Promise<void> {
+  private async ensureBundledCommand(worker: PiProcess, name: string, source: string, guard: () => void, discovery?: RpcResponse): Promise<void> {
     guard();
     const runtimeId = worker.interactionRuntime()?.id;
-    if (!runtimeId) throw new CommandError("stale_runtime", "History runtime changed");
-    let cached = this.historyCapability;
-    if (!cached || cached.worker !== worker || cached.runtimeId !== runtimeId || cached.revision !== this.runtimeRevision) {
-      const revision = this.runtimeRevision;
+    if (!runtimeId) throw new CommandError("stale_runtime", "Bundled command runtime changed");
+    const revision = this.runtimeRevision;
+    let cached = this.bundledCommands;
+    if (!cached || cached.worker !== worker || cached.runtimeId !== runtimeId || cached.revision !== revision) {
       // Discovery belongs to the runtime, not the lifetime of its first viewer.
       const context = () => {
         this.catalog.assertExecutionAllowed();
         const runtime = worker.interactionRuntime();
         if (worker !== this.worker || revision !== this.runtimeRevision || !runtime?.active || runtime.id !== runtimeId
           || runtime.sessionId !== this.record.piSessionId || runtime.sessionFile !== this.catalog.sessionFile(this.id)
-          || this.stopRequested || this.exit) throw new CommandError("stale_runtime", "History capability context changed");
+          || this.stopRequested || this.exit) throw new CommandError("stale_runtime", "Bundled command context changed");
       };
-      const validation = (async () => {
-        // Never let a missing/overridden private command fall through to a model.
+      const commands = (async () => {
         const response = discovery ?? await worker.request({ type: "get_commands" }, context);
         context();
-        const capabilities = response.success && response.command === "get_commands"
-          ? response.data.commands.filter(command => command.name === HISTORY_COMMAND) : [];
-        if (capabilities.length !== 1 || capabilities[0]!.source !== "extension"
-          || capabilities[0]!.sourceInfo?.path !== join(this.options.appRoot, "pi", "extensions", "service.ts")) {
-          throw new CommandError("unsupported_command", "Bundled history capability is missing or ambiguous");
-        }
+        if (!response.success || response.command !== "get_commands") throw new Error("Unexpected Pi command discovery response");
+        return response.data.commands;
       })();
-      this.historyCapability = cached = { worker, runtimeId, revision, validation };
+      this.bundledCommands = cached = { worker, runtimeId, revision, discovery: commands };
     }
-    try { await cached.validation; }
-    catch (error) { if (this.historyCapability === cached) this.historyCapability = undefined; throw error; }
+    const commands = await cached.discovery.catch((error: unknown) => {
+      if (this.bundledCommands === cached) this.bundledCommands = undefined;
+      throw error;
+    });
     guard();
+    // Never let a missing/overridden private command fall through to a model.
+    const matches = commands.filter(command => command.name === name && command.source === "extension");
+    if (matches.length !== 1 || matches[0]!.sourceInfo?.path !== join(this.options.appRoot, "pi", "extensions", source)) {
+      throw new CommandError("unsupported_command", `Bundled capability is missing or ambiguous: ${name}`);
+    }
   }
 
   /** Refresh live state even during workspace continuation; history needs idle.
@@ -2792,7 +2796,9 @@ export class OwnedSession {
     if (change.type === "history" || change.type === "invalidate_history" || change.type === "event"
       && ["message_start", "message_end", "entry_appended"].includes(change.event.type)) this.retainedHistory = undefined;
     if (change.type === "history") { this.preview = undefined; this.previewGeneration++; }
-    this.conversation.apply(structuredClone(change));
+    // Projection messages are private parsed data. Own them directly so the
+    // next projection can share these objects without touching the live clone boundary.
+    this.conversation.apply(change.type === "history" ? change : structuredClone(change));
     if (change.type === "invalidate_history" && this.refresh) this.refreshAgain = true;
     // History baselines can exceed the subscription's 8-MiB backlog budget.
     // Both frontends refresh revisioned snapshot sections on every checkpoint.
@@ -2828,6 +2834,8 @@ export class OwnedSession {
   private syncRevision(): void {
     const revision = this.worker?.interactionRevision ?? 0;
     if (revision !== this.workerRevision) {
+      this.projectionBase = undefined;
+      this.bundledCommands = undefined;
       if (this.workerRevision > 0) {
         this.preview = undefined;
         this.previewGeneration++;
