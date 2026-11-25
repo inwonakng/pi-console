@@ -154,17 +154,20 @@ function M.select(ctx, id, items, opts, on_choice)
 			picker.side.bind_input()
 			picker.side.setup_navigation(picker.buf, { "n", "t" })
 		end
-		-- Esc leaves terminal-input mode; it neither hides nor answers.
-		vim.keymap.set("t", "<Esc>", "<C-\\><C-n>", { buffer = picker.buf, nowait = true })
+		local last_escape
+		vim.keymap.set("t", "<Esc>", function()
+			local now = vim.uv.now()
+			if last_escape and now - last_escape <= vim.o.timeoutlen then
+				finish(picker, nil, true, true)
+			end
+			last_escape = now
+		end, { buffer = picker.buf, nowait = true, desc = "Double Esc cancels pending Pi action" })
 		if not picker.side then
 			for _, direction in ipairs({ "h", "j", "k", "l" }) do
 				vim.keymap.set("t", "<C-" .. direction .. ">", "<C-\\><C-n><C-w>" .. direction,
 					{ buffer = picker.buf, desc = "Navigate windows" })
 			end
 		end
-		vim.keymap.set({ "t", "n" }, "<C-q>", function()
-			finish(picker, nil, true, true)
-		end, { buffer = picker.buf, desc = "Cancel pending Pi action" })
 		-- fzf-lua re-enters this window while closing; a queued startinsert
 		-- would then apply to whichever window close() refocuses.
 		vim.api.nvim_create_autocmd("BufEnter", { buffer = picker.buf, callback = function()
@@ -218,18 +221,20 @@ function M.input(ctx, event, on_input)
 		end
 		local title = event.title or "Pi input"
 		if event.placeholder and event.placeholder ~= "" then title = title .. " | " .. event.placeholder end
-		vim.wo[picker.win].winbar = " " .. title:gsub("[\r\n%%]+", " ") .. " (Ctrl+Enter submits; Ctrl+Q cancels)"
-		for _, key in ipairs({ "<C-CR>", "<C-s>" }) do
-			vim.keymap.set({ "n", "i" }, key, function()
-				local text = table.concat(vim.api.nvim_buf_get_lines(picker.buf, 0, -1, false), "\n")
-				vim.cmd("stopinsert")
-				finish(picker, text, true)
-			end, { buffer = picker.buf, desc = "Submit Pi answer" })
-		end
-		vim.keymap.set({ "n", "i" }, "<C-q>", function()
+		vim.wo[picker.win].winbar = " " .. title:gsub("[\r\n%%]+", " ") .. " (Ctrl+Enter submits; :q cancels)"
+		vim.keymap.set({ "n", "i" }, "<C-CR>", function()
+			local text = table.concat(vim.api.nvim_buf_get_lines(picker.buf, 0, -1, false), "\n")
 			vim.cmd("stopinsert")
-			finish(picker, nil, true, true)
-		end, { buffer = picker.buf, desc = "Cancel pending Pi input" })
+			finish(picker, text, true)
+		end, { buffer = picker.buf, desc = "Submit Pi answer" })
+		vim.api.nvim_create_autocmd("CmdlineLeave", { buffer = picker.buf, callback = function()
+			if vim.v.event.abort or vim.fn.getcmdtype() ~= ":" then return end
+			local cmd = vim.trim(vim.fn.getcmdline())
+			if cmd ~= "q" and cmd ~= "q!" and cmd ~= "quit" and cmd ~= "quit!" then return end
+			-- Keep the split and restore its input buffer instead of quitting it.
+			vim.cmd("let v:event.abort = v:true")
+			vim.schedule(function() finish(picker, nil, true, true) end)
+		end })
 		vim.api.nvim_create_autocmd({ "BufHidden", "BufWipeout" }, { buffer = picker.buf, once = true,
 			callback = function() vim.schedule(function() finish(picker, nil, true, true) end) end })
 		vim.cmd("startinsert")
