@@ -161,7 +161,7 @@ function M.select(ctx, id, items, opts, on_choice)
 				finish(picker, nil, true, true)
 			end
 			last_escape = now
-		end, { buffer = picker.buf, nowait = true, desc = "Double Esc cancels pending Pi action" })
+		end, { buffer = picker.buf, nowait = true, desc = "Cancel pending Pi action" })
 		if not picker.side then
 			for _, direction in ipairs({ "h", "j", "k", "l" }) do
 				vim.keymap.set("t", "<C-" .. direction .. ">", "<C-\\><C-n><C-w>" .. direction,
@@ -221,7 +221,7 @@ function M.input(ctx, event, on_input)
 		end
 		local title = event.title or "Pi input"
 		if event.placeholder and event.placeholder ~= "" then title = title .. " | " .. event.placeholder end
-		vim.wo[picker.win].winbar = " " .. title:gsub("[\r\n%%]+", " ") .. " (Ctrl+Enter submits; :q cancels)"
+		vim.wo[picker.win].winbar = " " .. title:gsub("[\r\n%%]+", " ") .. " (Ctrl+Enter: submit; :q: cancel)"
 		vim.keymap.set({ "n", "i" }, "<C-CR>", function()
 			local text = table.concat(vim.api.nvim_buf_get_lines(picker.buf, 0, -1, false), "\n")
 			vim.cmd("stopinsert")
