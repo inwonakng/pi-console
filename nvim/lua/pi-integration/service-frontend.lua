@@ -2462,7 +2462,7 @@ ctx.session.open_side = function()
 		for _, buf in ipairs({ side_buf, side_input_buf }) do
 			resource.bind(buf)
 			require("pi-integration.markdown-render").prepare_buffer(buf, { latex = buf == side_buf })
-			vim.keymap.set("n", "<leader>n", M.new_side, { buffer = buf, desc = "New side conversation" })
+			vim.keymap.set("n", "<leader>pn", M.new_side, { buffer = buf, desc = "New side conversation" })
 			vim.keymap.set("n", "<leader>s", M.pick_side, { buffer = buf, desc = "Pick side chat" })
 		end
 	end

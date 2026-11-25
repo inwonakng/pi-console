@@ -91,7 +91,7 @@ agent keeps working; neither side prompts nor answers enter its model context.
 
 The first side prompt references the finalized main-history point. Follow-ups
 retain that context even as the main conversation advances. In either side buffer,
-normal-mode `<leader>n` (or `:PiSideNew`) creates another side chat with fresh
+normal-mode `<leader>pn` (or `:PiSideNew`) creates another side chat with fresh
 main context, preserving the previous chat's history and draft. Inside either
 side window, `<leader>s` (or `:PiSides`) opens the side-chat picker, with recent
 message previews. Enter switches chats; Ctrl-x deletes the selected chat after

@@ -134,7 +134,7 @@ function M.open(transcript_buf, input_buf, resources)
 					"- `<CR>` in the transcript follows a link, toggles an activity, or opens output.",
 					"- `q` / `<leader>ps` / `:q` hides both windows, preserving the draft and conversation.",
 					"- `<leader>s` / `:PiSides` picks a side chat; Ctrl-x in the picker deletes it.",
-					"- `<leader>n` / `:PiSideNew` starts a new side chat, keeping this chat (normal mode).",
+					"- `<leader>pn` / `:PiSideNew` starts a new side chat, keeping this chat (normal mode).",
 					"- Switching or creating a chat asks before aborting a running side chat.",
 					"- `:PiSideAbort` stops only side work.",
 					"- Pending questions/approvals use the side input pane and stay visible until answered or cancelled (Ctrl-q).",
