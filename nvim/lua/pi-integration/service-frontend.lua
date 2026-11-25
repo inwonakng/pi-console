@@ -2379,7 +2379,7 @@ function M.compact()
 			require("pi-integration.utils.markdown-editor").open({
 				name = scratch_name("compaction-instructions"),
 				title = " Compaction instructions ",
-				footer = " Ctrl+Enter compacts · :q cancels ",
+				footer = " Ctrl+Enter compacts · cancel ",
 				prepare_text = function(value)
 					if vim.trim(value) ~= "" then return value end
 					notify("Enter instructions, or close the editor to cancel.", vim.log.levels.WARN)
