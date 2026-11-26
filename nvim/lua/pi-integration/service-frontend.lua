@@ -718,6 +718,14 @@ local function update_status_state()
 	state.is_streaming = attachment ~= nil and pi_state.isStreaming == true
 	state.is_retrying = state.session_activity == "Retrying"
 	state.activity_label = state.session_activity == "Compacting" and "compacting" or "work"
+	local side_raw = statuses["pi-side"]
+	if side_raw ~= side_actions.status_raw then
+		side_actions.status_raw, side_actions.status = side_raw, status_data("pi-side")
+	end
+	local side = side_actions.status
+	local side_activity = side and side.activity
+	state.side_activity_label = not terminal and side and side.running
+		and (type(side_activity) == "string" and side_activity ~= "" and side_activity:gsub("[%c]", " ") or "Working") or nil
 	state.pending_user_messages = queue and queue.items or {}
 	state.submission_sending = feedback_ui.sending(feedback, session_id)
 	state.queue_edit_item = queue and queue.reservation and queue.reservation.itemId
@@ -786,15 +794,15 @@ render = function(metadata_only)
 		transcript.update_metadata(ctx)
 	end
 	rendered_metadata = metadata
-	local side_raw = conversation and conversation.statuses and conversation.statuses["pi-side"]
 	local side_feedback = {}
 	for _, entry in ipairs(feedback) do
 		if entry.operation == "side.prompt" and entry.sessionId == session_id then table.insert(side_feedback, entry) end
 	end
+	local side_raw = side_actions.status_raw
 	if valid(side_buf) and (side_buf ~= rendered_side_buf or side_raw ~= rendered_side
 		or not vim.deep_equal(side_feedback, rendered_side_feedback)) then
 		rendered_side_buf, rendered_side, rendered_side_feedback = side_buf, side_raw, vim.deepcopy(side_feedback)
-		local side = status_data("pi-side")
+		local side = side_actions.status
 		if side and side.id and side.id ~= side_id then
 			if side_id and valid(side_input_buf) then
 				side_actions.drafts[side_id] = text(side_input_buf)
@@ -809,7 +817,6 @@ render = function(metadata_only)
 		local visible = feedback_ui.side_timeline_messages(feedback, session_id, side)
 		side_view.render(side_buf, visible, side and side.tools, side and side.id)
 		side_view.set_title(side and side.title)
-		side_view.set_activity(side and side.running and (side.activity or "Working"))
 	end
 	-- Every snapshot is a pure render; never replay event/effect handlers.
 	if body_changed or metadata_changed then transcript.render(ctx) end

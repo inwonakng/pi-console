@@ -224,6 +224,11 @@ local function current_thinking_level_label(state)
 	return level
 end
 
+local function activity_spinner_frame(state)
+	local tick = tonumber(state.activity_spinner_tick) or 1
+	return activity_spinner_frames[((tick - 1) % #activity_spinner_frames) + 1]
+end
+
 local function activity_statusline_label(state)
 	local queued, next_pending, sending = 0, nil, state.submission_sending
 	for _, pending in ipairs(state.pending_user_messages or {}) do
@@ -258,10 +263,7 @@ local function activity_statusline_label(state)
 	else
 		label = state.activity_label or "work"
 	end
-	label = label .. suffix
-	local tick = tonumber(state.activity_spinner_tick) or 1
-	local frame = activity_spinner_frames[((tick - 1) % #activity_spinner_frames) + 1]
-	return " " .. frame .. " " .. label
+	return " " .. activity_spinner_frame(state) .. " " .. label .. suffix
 end
 
 local function spawn_statusline_label(state)
@@ -457,19 +459,24 @@ end
 function M.render_secondary(ctx)
 	local state = ctx.state
 	local activity_label = activity_statusline_label(state)
+	local side_label = state.side_activity_label
+		and ((activity_label ~= "" and " ·" or "") .. " " .. activity_spinner_frame(state) .. " Side: " .. state.side_activity_label)
+		or ""
 	local spawn_label = spawn_statusline_label(state)
 	local commands, unresolved = tonumber(state.bash_running_count) or 0, tonumber(state.bash_unresolved_count) or 0
 	if commands > 0 then spawn_label = spawn_label .. " · commands " .. commands end
 	if unresolved > 0 then spawn_label = spawn_label .. " · unresolved commands " .. unresolved end
-	local left_text = activity_label .. spawn_label
+	local left_text = activity_label .. side_label .. spawn_label
 	local width = vim.api.nvim_win_get_width(state.status_win)
 	local build_label = build_info.statusline_label(math.max(0, width - 1)) .. " "
 	local build_width = vim.fn.strdisplaywidth(build_label)
 	local _, _, _, _, parts = format_session_stats(state)
 	parts = parts or {}
 	local stats_text, stats_statusline = format_stat_parts(parts)
-	-- Drop less-important stats from the left, keeping cost nearest the build.
-	while #parts > 0 and vim.fn.strdisplaywidth(stats_text) + 1 + build_width > width do
+	local gap_width = left_text ~= "" and 3 or 0
+	-- Make room for both activity labels before adding optional stats.
+	local reserved_left = side_label ~= "" and (vim.fn.strdisplaywidth(activity_label .. side_label) + gap_width) or 0
+	while #parts > 0 and vim.fn.strdisplaywidth(stats_text) + 1 + build_width + reserved_left > width do
 		table.remove(parts, 1)
 		stats_text, stats_statusline = format_stat_parts(parts)
 	end
@@ -477,13 +484,14 @@ function M.render_secondary(ctx)
 	local right_label = (stats_text ~= "" and (stats_statusline .. "%#PiStatusSeparator#·") or "")
 		.. statusline_text(build_label, build_info.highlight() .. "Bar")
 
-	local gap_width = left_text ~= "" and 3 or 0
 	local available_left_width = math.max(0, width - right_width - gap_width)
 	local visible_activity = truncate_plain_to_width(activity_label, available_left_width)
-	local visible_spawn = visible_activity == activity_label
-		and truncate_plain_to_width(spawn_label, math.max(0, available_left_width - vim.fn.strdisplaywidth(visible_activity)))
-		or ""
-	local left_label = statusline_text(visible_activity, "PiActivity") .. statusline_text(visible_spawn, "PiSubagentBar")
+	local remaining = math.max(0, available_left_width - vim.fn.strdisplaywidth(visible_activity))
+	local visible_side = visible_activity == activity_label and truncate_plain_to_width(side_label, remaining) or ""
+	local visible_spawn = visible_activity == activity_label and visible_side == side_label
+		and truncate_plain_to_width(spawn_label, math.max(0, remaining - vim.fn.strdisplaywidth(visible_side))) or ""
+	local left_label = statusline_text(visible_activity, "PiActivity") .. statusline_text(visible_side, "PiSideActivity")
+		.. statusline_text(visible_spawn, "PiSubagentBar")
 	return left_label .. "%#PiUsageStats#%=" .. right_label .. "%*"
 end
 
@@ -747,7 +755,7 @@ function M.setup(ctx)
 			local state = ctx.state
 			if state.frontend_visible == false then return end
 			if not state.tree_loading and not state.history_operation and not state.is_loading and not state.is_agent_running and not state.is_streaming
-				and not state.is_retrying then return end
+				and not state.is_retrying and not state.side_activity_label then return end
 			if not buffer.window_matches(state.status_win, state.status_buf) then return end
 			state.activity_spinner_tick = math.floor(vim.uv.hrtime() / (interval_ms * 1000000)) % #activity_spinner_frames + 1
 			-- Animate only the native footer row, without rebuilding bars or history.
