@@ -973,6 +973,10 @@ export class OwnedSession {
       const recipient = this.control.snapshot();
       const worker = this.commandRuntime(command.runtimeRevision);
       if (command.operation === "prompt.submit") this.assertPromptAllowed();
+      // Side chats would otherwise turn an unused window into accepted work.
+      if (command.operation.startsWith("side.") && this.catalog.get(this.id).provisional) {
+        throw new CommandError("session_busy", "Side chat is available after the first main message", "not_sent");
+      }
       if ((this.startupPending || this.catalog.queue(this.id).some((item) => item.status === "queued" && item.startup !== undefined))
         && !command.operation.startsWith("control.") && !command.operation.startsWith("interaction.")
         && !["turn.abort", "session.kill"].includes(command.operation)) throw new CommandError("session_busy", "First prompt settings are being applied; retry after startup");

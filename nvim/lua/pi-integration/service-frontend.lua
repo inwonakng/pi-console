@@ -2490,7 +2490,14 @@ ctx.session.open_side = function()
 	render()
 	return true
 end
+local function side_allowed()
+	local owner = authority and authority.owner_view and authority.owner_view.data or snapshot
+	if session_id and owner and not owner.provisional then return true end
+	notify("Side chat is available after the first main message.")
+	return false
+end
 function M.side_prompt()
+	if not side_allowed() then return end
 	command("side.open", {})
 	ctx.session.open_side()
 end
@@ -2535,8 +2542,9 @@ function side_actions.move(id)
 		side_actions.confirm("Abort this side chat and " .. (id and "switch chats?" or "start a new chat?"), "Abort and move", function() move(true) end)
 	else move(false) end
 end
-function M.new_side() side_actions.move() end
+function M.new_side() if side_allowed() then side_actions.move() end end
 function M.pick_side()
+	if not side_allowed() then return end
 	local side, captured = status_data("pi-side"), stamp()
 	if not side then notify("Side chats are not available yet."); return end
 	require("pi-integration.side-picker").open(side, {
