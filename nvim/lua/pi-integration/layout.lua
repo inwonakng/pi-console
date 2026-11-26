@@ -20,10 +20,8 @@ function M.set_buffer_lines(ctx, buf, lines, modifiable)
 	ctx.buffer.set_modifiable(buf, modifiable)
 end
 
-function M.apply_window_padding(_, win)
+local function apply_window_padding(win)
 	vim.api.nvim_set_option_value("winbar", "", { win = win })
-	vim.api.nvim_set_option_value("fillchars", "stl:─,stlnc:─", { win = win })
-	vim.api.nvim_set_option_value("statusline", "%#PiPaneBorder#%=", { win = win })
 	vim.api.nvim_set_option_value("statuscolumn", "", { win = win })
 	vim.api.nvim_set_option_value("winhl", "", { win = win })
 	vim.api.nvim_set_option_value("signcolumn", "yes:1", { win = win })
@@ -54,7 +52,7 @@ function M.update_input_sidebar(ctx)
 	local highlight = state.session_id and input_sidebar_highlight(state.access_mode) or "PiInputSidebarUnknown"
 	for _, win in ipairs(vim.api.nvim_list_wins()) do
 		if buffer.window_matches(win, state.input_buf) then
-			vim.api.nvim_set_option_value("fillchars", "stl:─,stlnc:─,eob:▌", { win = win })
+			vim.api.nvim_set_option_value("fillchars", "stl: ,stlnc: ,eob:▌", { win = win })
 			vim.api.nvim_set_option_value("statuscolumn", "%#" .. highlight .. "#▌%#SignColumn# ", { win = win })
 			vim.api.nvim_set_option_value("winhl", "EndOfBuffer:" .. highlight, { win = win })
 		end
@@ -62,13 +60,17 @@ function M.update_input_sidebar(ctx)
 end
 
 function M.apply_input_window_options(ctx, win)
-	M.apply_window_padding(ctx, win)
+	apply_window_padding(win)
+	-- Keep the native statusline row above the footer, but blend it into the input.
+	vim.api.nvim_set_option_value("statusline", "%#Normal#%=", { win = win })
 	vim.api.nvim_set_option_value("winfixheight", true, { win = win })
 	M.update_input_sidebar(ctx)
 end
 
-function M.apply_transcript_window_options(ctx, win)
-	M.apply_window_padding(ctx, win)
+function M.apply_transcript_window_options(_, win)
+	apply_window_padding(win)
+	vim.api.nvim_set_option_value("fillchars", "stl:─,stlnc:─", { win = win })
+	vim.api.nvim_set_option_value("statusline", "%#PiPaneBorder#%=", { win = win })
 	vim.api.nvim_set_option_value("winfixheight", false, { win = win })
 	vim.api.nvim_set_option_value("scrolloff", 4, { win = win })
 end

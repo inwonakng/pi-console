@@ -14,7 +14,7 @@ local function render_context()
 end
 local transcript_win, input_win, return_win, sizes
 local transcript_view, input_view, displayed_buf, displayed_input_buf, picker_height
-local left_sizes, bottom_sizes = {}, {}
+local right_sizes, bottom_sizes = {}, {}
 local help_state = {}
 local window_group = vim.api.nvim_create_augroup("PiSideWindows", { clear = true })
 local winhl = table.concat({
@@ -96,7 +96,7 @@ function M.hide(force, closing_win)
 		end
 	end
 	if valid(transcript_win) then
-		if sizes == left_sizes then sizes.width = vim.api.nvim_win_get_width(transcript_win)
+		if sizes == right_sizes then sizes.width = vim.api.nvim_win_get_width(transcript_win)
 		elseif valid(input_win) then
 			-- Keep the full pair's size, excluding any temporary picker expansion.
 			sizes.height = vim.api.nvim_win_get_height(transcript_win) + vim.api.nvim_win_get_height(input_win)
@@ -116,8 +116,8 @@ end })
 local function open_pair(transcript_buf, input_buf, state)
 	local input_height = sizes.input or 5
 	local config = { style = "minimal" }
-	if sizes == left_sizes then
-		config.split, config.win = "left", -1
+	if sizes == right_sizes then
+		config.split, config.win = "right", -1
 		config.width = math.min(sizes.width or math.max(60, math.floor(vim.o.columns * 0.4)), vim.o.columns - 2)
 	else
 		local footer = state and state.status_win
@@ -151,7 +151,7 @@ function M.open(transcript_buf, input_buf, resources, state)
 		render_state, render_cache = { show_nested_tools = false }, {}
 	end
 	displayed_buf, displayed_input_buf = transcript_buf, input_buf
-	sizes = vim.o.columns >= 110 and left_sizes or bottom_sizes
+	sizes = vim.o.columns >= 110 and right_sizes or bottom_sizes
 	local ok, err = pcall(open_pair, transcript_buf, input_buf, state)
 	if not ok then
 		close_pair()
@@ -167,8 +167,8 @@ function M.open(transcript_buf, input_buf, resources, state)
 	for _, win in ipairs({ transcript_win, input_win }) do
 		vim.wo[win].wrap, vim.wo[win].linebreak, vim.wo[win].conceallevel = true, true, 2
 		vim.wo[win].winhl = winhl
-		vim.wo[win].fillchars = "stl:─,stlnc:─,eob: "
-		vim.wo[win].statusline = "%#PiPaneBorder#%="
+		vim.wo[win].fillchars = "stl: ,stlnc: ,eob: "
+		vim.wo[win].statusline = "%#PiSideNormal#%="
 		vim.api.nvim_create_autocmd("WinClosed", {
 			group = window_group, pattern = tostring(win), once = true,
 			callback = function() M.hide(true, win) end,

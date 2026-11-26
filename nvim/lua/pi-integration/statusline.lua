@@ -475,7 +475,7 @@ function M.render_secondary(ctx)
 	end
 	local right_width = build_width + (stats_text ~= "" and (vim.fn.strdisplaywidth(stats_text) + 1) or 0)
 	local right_label = (stats_text ~= "" and (stats_statusline .. "%#PiStatusSeparator#·") or "")
-		.. statusline_text(build_label, build_info.highlight())
+		.. statusline_text(build_label, build_info.highlight() .. "Bar")
 
 	local gap_width = left_text ~= "" and 3 or 0
 	local available_left_width = math.max(0, width - right_width - gap_width)
@@ -483,7 +483,7 @@ function M.render_secondary(ctx)
 	local visible_spawn = visible_activity == activity_label
 		and truncate_plain_to_width(spawn_label, math.max(0, available_left_width - vim.fn.strdisplaywidth(visible_activity)))
 		or ""
-	local left_label = statusline_text(visible_activity, "PiActivity") .. statusline_text(visible_spawn, "PiSubagent")
+	local left_label = statusline_text(visible_activity, "PiActivity") .. statusline_text(visible_spawn, "PiSubagentBar")
 	return left_label .. "%#PiUsageStats#%=" .. right_label .. "%*"
 end
 
@@ -546,11 +546,14 @@ end
 local function apply_bar_window_options(win)
 	vim.api.nvim_set_option_value("wrap", false, { win = win })
 	vim.api.nvim_set_option_value("winbar", "", { win = win })
-	vim.api.nvim_set_option_value("fillchars", "stl: ,stlnc: ", { win = win })
+	vim.api.nvim_set_option_value("fillchars", "stl: ,stlnc: ,eob: ", { win = win })
 	vim.api.nvim_set_option_value("statusline", "", { win = win })
 	vim.api.nvim_set_option_value("winfixheight", true, { win = win })
 	vim.api.nvim_set_option_value("winfixbuf", true, { win = win })
-	vim.api.nvim_set_option_value("winhl", "Normal:PiStatusFooterNormal,EndOfBuffer:PiStatusFooterNormal", { win = win })
+	vim.api.nvim_set_option_value("winhl", table.concat({
+		"Normal:PiStatusFooterNormal", "NormalNC:PiStatusFooterNormal", "EndOfBuffer:PiStatusFooterNormal",
+		"StatusLine:PiStatusFooterNormal", "StatusLineNC:PiStatusFooterNormal",
+	}, ","), { win = win })
 end
 
 local function ensure_bar_window(state, bar, buf)

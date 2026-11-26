@@ -3,7 +3,7 @@ require("pi-integration.build-info")
 local M = {}
 
 M.ui_bg = "#080808"
-M.status_bg = M.ui_bg
+M.status_bg = "#13161c"
 M.pane_border = "#2a2a2a"
 
 require("catppuccin").setup({
@@ -42,8 +42,8 @@ require("catppuccin").setup({
 			PiInputSidebarAsk = { fg = colors.peach, bg = M.ui_bg },
 			PiInputSidebarReadonly = { fg = colors.red, bg = M.ui_bg },
 			PiInputSidebarUnknown = { fg = colors.overlay0, bg = M.ui_bg },
-			PiBuildDev = { fg = colors.yellow, bg = M.status_bg, bold = true },
-			PiBuildStable = { fg = colors.subtext1, bg = M.status_bg },
+			PiBuildDev = { fg = colors.yellow, bg = M.ui_bg, bold = true },
+			PiBuildStable = { fg = colors.subtext1, bg = M.ui_bg },
 			PiUsageStats = { fg = colors.subtext1, bg = M.status_bg },
 			PiStatusSeparator = { fg = colors.text, bg = M.status_bg },
 			PiUsageInput = { fg = colors.blue, bg = M.status_bg },
@@ -128,8 +128,8 @@ require("catppuccin").setup({
 			PiActivity = { fg = colors.mauve, bg = M.status_bg, bold = true },
 			StatusLine = { fg = M.pane_border, bg = M.ui_bg },
 			StatusLineNC = { fg = M.pane_border, bg = M.ui_bg },
-			MsgArea = { fg = colors.text, bg = M.status_bg },
-			ModeMsg = { fg = colors.text, bg = M.status_bg, bold = true },
+			MsgArea = { fg = colors.text, bg = M.ui_bg },
+			ModeMsg = { fg = colors.text, bg = M.ui_bg, bold = true },
 			WinBar = { bg = M.ui_bg },
 			WinBarNC = { bg = M.ui_bg },
 			WinSeparator = { fg = M.pane_border, bg = M.ui_bg },
@@ -138,6 +138,9 @@ require("catppuccin").setup({
 			DiffDelete = { fg = colors.red, bg = "#2a1014" },
 			DiffText = { fg = colors.text, bg = "#3a3214", bold = true },
 		}
+		for _, group in ipairs({ "PiBuildDev", "PiBuildStable", "PiSubagent" }) do
+			highlights[group .. "Bar"] = vim.tbl_extend("force", highlights[group], { bg = M.status_bg })
+		end
 		for _, name in ipairs({
 			"ModeFull", "ModeEdit", "ModeAsk", "ModeReadonly", "ModeUnknown",
 			"IntegrationAsk", "IntegrationAllowed", "NotifyOn", "NotifyOff", "UsageStats",
