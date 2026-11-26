@@ -167,8 +167,8 @@ function M.open(transcript_buf, input_buf, resources, state)
 	for _, win in ipairs({ transcript_win, input_win }) do
 		vim.wo[win].wrap, vim.wo[win].linebreak, vim.wo[win].conceallevel = true, true, 2
 		vim.wo[win].winhl = winhl
-		vim.wo[win].fillchars = "stl: ,stlnc: ,eob: "
-		vim.wo[win].statusline = "%#PiSideNormal#%="
+		vim.wo[win].fillchars = win == transcript_win and "stl:─,stlnc:─,eob: " or "stl: ,stlnc: ,eob: "
+		vim.wo[win].statusline = win == transcript_win and "%#PiSideBorder#%=" or "%#PiSideNormal#%="
 		vim.api.nvim_create_autocmd("WinClosed", {
 			group = window_group, pattern = tostring(win), once = true,
 			callback = function() M.hide(true, win) end,

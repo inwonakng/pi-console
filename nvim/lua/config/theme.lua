@@ -16,6 +16,7 @@ require("catppuccin").setup({
 		},
 	},
 	custom_highlights = function(colors)
+		local side_bg = "#0b1222"
 		local highlights = {
 			Normal = { bg = M.ui_bg },
 			NormalNC = { bg = M.ui_bg },
@@ -23,8 +24,9 @@ require("catppuccin").setup({
 			SignColumn = { bg = M.ui_bg },
 			EndOfBuffer = { bg = M.ui_bg },
 			PiPaneBorder = { fg = M.pane_border, bg = M.ui_bg },
-			PiSideNormal = { fg = colors.text, bg = "#0b1222" },
-			PiSideTitle = { fg = colors.subtext1, bg = "#0b1222" },
+			PiSideNormal = { fg = colors.text, bg = side_bg },
+			PiSideBorder = { fg = M.pane_border, bg = side_bg },
+			PiSideTitle = { fg = colors.subtext1, bg = side_bg },
 			PiStatusFooter = { bg = M.status_bg },
 			PiStatusFooterNormal = { fg = colors.text, bg = M.status_bg },
 			PiSessionTitle = { fg = colors.text, bg = M.status_bg, bold = true },
@@ -128,8 +130,8 @@ require("catppuccin").setup({
 			PiActivity = { fg = colors.mauve, bg = M.status_bg, bold = true },
 			StatusLine = { fg = M.pane_border, bg = M.ui_bg },
 			StatusLineNC = { fg = M.pane_border, bg = M.ui_bg },
-			MsgArea = { fg = colors.text, bg = M.ui_bg },
-			ModeMsg = { fg = colors.text, bg = M.ui_bg, bold = true },
+			MsgArea = { fg = colors.text, bg = M.status_bg },
+			ModeMsg = { fg = colors.text, bg = M.status_bg, bold = true },
 			WinBar = { bg = M.ui_bg },
 			WinBarNC = { bg = M.ui_bg },
 			WinSeparator = { fg = M.pane_border, bg = M.ui_bg },
