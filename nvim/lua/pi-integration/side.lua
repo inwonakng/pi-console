@@ -16,6 +16,9 @@ local transcript_win, input_win, return_win, sizes
 local transcript_view, input_view, displayed_buf, displayed_input_buf, picker_height
 local right_sizes, bottom_sizes = {}, {}
 local help_state = {}
+local activity, activity_timer
+local working_frames = require("pi-integration.status-icons").working_frames
+local activity_interval_ms = 250
 local window_group = vim.api.nvim_create_augroup("PiSideWindows", { clear = true })
 local winhl = table.concat({
 	"Normal:PiSideNormal", "NormalNC:PiSideNormal", "EndOfBuffer:PiSideNormal", "SignColumn:PiSideNormal",
@@ -37,6 +40,29 @@ function M.set_title(title)
 	if not valid(transcript_win) then return end
 	local label = type(title) == "string" and title ~= "" and title:gsub("[%c]", " "):gsub("%%", "%%%%") or "Chat"
 	vim.wo[transcript_win].winbar = " Side · " .. label .. " · <leader>? keys"
+end
+
+-- The input pane's bottom row shows side work while it runs.
+function M.input_statusline()
+	if not activity then return "%#PiSideNormal#%=" end
+	local tick = math.floor(vim.uv.hrtime() / (activity_interval_ms * 1000000))
+	local frame = working_frames[(tick % #working_frames) + 1]
+	return "%#PiSideActivity# " .. frame .. " %#PiSideTitle#" .. activity:gsub("%%", "%%%%") .. "%#PiSideNormal#%="
+end
+
+function M.set_activity(label)
+	label = type(label) == "string" and label ~= "" and label:gsub("[%c]", " ") or nil
+	if label == activity then return end
+	activity = label
+	if activity and not activity_timer then
+		activity_timer = vim.uv.new_timer()
+		activity_timer:start(activity_interval_ms, activity_interval_ms, vim.schedule_wrap(function()
+			if activity and valid(input_win) then vim.api.nvim__redraw({ win = input_win, statusline = true }) end
+		end))
+	elseif not activity and activity_timer then
+		activity_timer:stop(); activity_timer:close(); activity_timer = nil
+	end
+	if valid(input_win) then vim.api.nvim__redraw({ win = input_win, statusline = true }) end
 end
 
 function M.adjust_input_height(amount)
@@ -168,7 +194,8 @@ function M.open(transcript_buf, input_buf, resources, state)
 		vim.wo[win].wrap, vim.wo[win].linebreak, vim.wo[win].conceallevel = true, true, 2
 		vim.wo[win].winhl = winhl
 		vim.wo[win].fillchars = win == transcript_win and "stl:─,stlnc:─,eob: " or "stl: ,stlnc: ,eob: "
-		vim.wo[win].statusline = win == transcript_win and "%#PiSideBorder#%=" or "%#PiSideNormal#%="
+		vim.wo[win].statusline = win == transcript_win and "%#PiSideBorder#%="
+			or "%!v:lua.require'pi-integration.side'.input_statusline()"
 		vim.api.nvim_create_autocmd("WinClosed", {
 			group = window_group, pattern = tostring(win), once = true,
 			callback = function() M.hide(true, win) end,

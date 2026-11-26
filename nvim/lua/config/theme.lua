@@ -27,6 +27,7 @@ require("catppuccin").setup({
 			PiSideNormal = { fg = colors.text, bg = side_bg },
 			PiSideBorder = { fg = M.pane_border, bg = side_bg },
 			PiSideTitle = { fg = colors.subtext1, bg = side_bg },
+			PiSideActivity = { fg = colors.blue, bg = side_bg },
 			PiStatusFooter = { bg = M.status_bg },
 			PiStatusFooterNormal = { fg = colors.text, bg = M.status_bg },
 			PiSessionTitle = { fg = colors.text, bg = M.status_bg, bold = true },

@@ -809,6 +809,7 @@ render = function(metadata_only)
 		local visible = feedback_ui.side_timeline_messages(feedback, session_id, side)
 		side_view.render(side_buf, visible, side and side.tools, side and side.id)
 		side_view.set_title(side and side.title)
+		side_view.set_activity(side and side.running and (side.activity or "Working"))
 	end
 	-- Every snapshot is a pure render; never replay event/effect handlers.
 	if body_changed or metadata_changed then transcript.render(ctx) end
