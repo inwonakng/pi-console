@@ -11,6 +11,8 @@ a default-workflow replacement, full installer or authorization for D–F.
 See [`plans/server-mode-handoff.md`](../plans/server-mode-handoff.md) for the current
 stopping point and next implementation slice.
 
+Neovim reconnect acquires session control only if unclaimed and never takes over.
+
 ## C local single-session evidence (2026-10-21)
 
 The [C report](SERVER-MODE-C.md) records the typed allowlist, positive bundled-result
@@ -105,7 +107,7 @@ No external-provider success or new third-party dialog guarantee is claimed.
   and auxiliary queue/answer draft text, and does not reacquire another frontend's
   control. Recovery files live under
   `${XDG_STATE_HOME:-$HOME/.local/state}/pi-console/frontend/<channel>/service-drafts`,
-  not a release-specific Neovim directory. Reconnect similarly stays a viewer. Restored auxiliary drafts are inspect-only.
+  not a release-specific Neovim directory. Restored auxiliary drafts are inspect-only.
 - Every frontend/bridge/observer closed during streaming: same runtime continued and
   later attachment saw longer partial text with no controller. An unanswered approval
   likewise remained after zero frontends; late actual Neovim rendered its full preview
@@ -217,9 +219,10 @@ handlers. It renders coalesced pure owner snapshots after ordered update notific
 control, approvals, shared queues, rename and abort. Owner-path actions/links, shell,
 slash/settings/history/workspace/side/spawn controls are explicitly unavailable.
 Effects are inspect-only recovered-draft buffers, never editor/navigation application.
-Reconnect does not acquire a grant or replay a mutation. Local main/queue/answer drafts
-have private frontend recovery files; controlled restart uses the launcher's private
-handoff. These new draft/restart paths still need full acceptance below.
+In this candidate, reconnect did not acquire a grant or replay a mutation. Local
+main/queue/answer drafts have private frontend recovery files; controlled restart uses
+the launcher's private handoff. These new draft/restart paths still need full acceptance
+below.
 
 Fresh checks used **Neovim 0.12.6**, unchanged installed **Pi 1.3.0**, its actual bundled
 extensions, an isolated agent/home/project and a scratch offline slow-stream provider.

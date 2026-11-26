@@ -56,7 +56,6 @@ local frontend_focused = false
 local viewed_response
 local action_connection, close_bridge
 local reconnect_enabled, reconnect_ticket, reconnect_attempts = false, nil, 0
-local passive_connection = false
 -- Set when a disconnect released an unused new window; the reconnect opens a
 -- fresh one instead of reattaching to the discarded session.
 local reopen_window = false
@@ -1018,7 +1017,7 @@ local function disconnected(reason, details, intentional)
 	end
 	return entry
 end
-attach = function(id, acquire, initial)
+attach = function(id, initial)
 	if not job then return end
 	if not initial then ctx.ui.window_id = nil end
 	if pending_new_session and pending_new_session.session ~= id then cancel_new_session() end
@@ -1050,8 +1049,8 @@ attach = function(id, acquire, initial)
 		session_id, attachment, grant, snapshot, authority = id, value.attachmentId, nil, nil, nil
 		local explicit = ctx.ui.reopen ~= nil
 		ctx.ui.reopen = nil
-		auto_control_selection = (explicit or acquire ~= false) and stamp() or nil
-		if auto_control_selection then auto_control_selection.explicit = explicit end
+		auto_control_selection = stamp()
+		auto_control_selection.explicit = explicit
 		apply_snapshot(value.snapshot)
 		local lookups, seen = {}, {}
 		for command_id, envelope in pairs(unresolved) do
@@ -1134,7 +1133,7 @@ local function host_operation(operation, payload)
 					if operation == "host.create" and startup_status then startup_status.session_id = session_id end
 					feedback_ui.bind(feedback, envelope.id, session_id)
 					backup()
-					attach(session_id, nil, receipt.attachmentId and receipt or nil)
+					attach(session_id, receipt.attachmentId and receipt or nil)
 				else notify("Host request completed; select the session in :PiSessions. Current view was not changed.") end
 			elseif receipt.error then
 				fail_start("Startup failed; submitted text remains in :PiDrafts.")
@@ -1153,7 +1152,7 @@ ctx.ui.open_window = function()
 	end
 	host_operation("host.create", { cwd = selected_cwd, provisional = true })
 end
-recover_selection = function(allow_restore, passive)
+recover_selection = function(allow_restore)
 	local captured = stamp()
 	session_status, session_error = "checking", nil
 	render()
@@ -1165,7 +1164,7 @@ recover_selection = function(allow_restore, passive)
 			local row
 			for _, entry in ipairs(value.sessions or {}) do if entry.id == session_id then row = entry; break end end
 			if row and not row.archived and not row.deleted then
-				if row.live then attach(session_id, not passive); return end
+				if row.live then attach(session_id); return end
 				if row.stopReason == "service_shutdown" and allow_restore and vim.tbl_contains(hello.capabilities, "host.recover") then
 					host_operation("host.recover", { sessionId = session_id }); return
 				end
@@ -1177,7 +1176,7 @@ recover_selection = function(allow_restore, passive)
 		render()
 	end)
 end
-local function recover_host(allow_restore, passive)
+local function recover_host(allow_restore)
 	if not pending_host then return false end
 	local envelope, captured = pending_host, stamp()
 	session_status, session_error = "checking", nil
@@ -1185,9 +1184,9 @@ local function recover_host(allow_restore, passive)
 	request("host.status", { serviceEpoch = envelope.serviceEpoch, commandId = envelope.id }, function(ok, receipt)
 		if pending_host ~= envelope then
 			-- The original delivery callback can resolve A while this lookup is
-			-- checking the user's newer selection B. Continue B's read-only recovery.
+			-- checking the user's newer selection B. Continue B's attachment check.
 			if not pending_host and same_selection(captured) and not attachment and session_id then
-				recover_selection(false, passive)
+				recover_selection(false)
 			end
 			return
 		end
@@ -1198,7 +1197,7 @@ local function recover_host(allow_restore, passive)
 			if select_result and same_selection(captured) then
 				session_id = receipt.result.sessionId
 				feedback_ui.bind(feedback, envelope.id, session_id)
-				recover_selection(allow_restore, passive)
+				recover_selection(allow_restore)
 			elseif same_selection(captured) then
 				session_status, session_error = nil, nil
 			end
@@ -1213,7 +1212,7 @@ local function recover_host(allow_restore, passive)
 		-- Recovery can resolve an ID after another selection, never revive its
 		-- original right to select. Reattach the user's selected view instead.
 		if not select_result and same_selection(captured) and not attachment and session_id then
-			recover_selection(allow_restore and pending_host == nil, passive)
+			recover_selection(allow_restore and pending_host == nil)
 		end
 	end)
 	return true
@@ -1229,10 +1228,8 @@ connect = function(automatic)
 	if source and source.target.enabled == false then notify("Host is disconnected. Enable it in :PiHosts before attaching."); return end
 	if job then notify("Already connected."); return end
 	reconnect_enabled, reconnect_ticket = true, nil
-	passive_connection = automatic == true
 	if automatic then
-		-- Transport recovery only observes existing work. Explicit restore/resume
-		-- and an unsent startup prompt must not become background mutations.
+		-- Reconnect can acquire unclaimed control but never replays prompts or restores sessions.
 		recovery_requested, resume_requested = false, false
 		fail_start("Connection lost during startup; submitted text remains in :PiDrafts. Submit it explicitly after reconnecting.")
 	end
@@ -1273,10 +1270,10 @@ connect = function(automatic)
 			render()
 			local restore = recovery_requested; recovery_requested = false
 			local reopen = reopen_window; reopen_window = false
-			if recover_host(restore, automatic) then return end
+			if recover_host(restore) then return end
 			if session_id then
 				if resume_requested then resume_requested = false; host_operation("host.resume", { sessionId = session_id })
-				else recover_selection(restore, automatic) end
+				else recover_selection(restore) end
 			elseif not automatic or reopen then ctx.ui.open_window() end
 		elseif value.type == "response" then
 			local pending = callbacks[value.id]; callbacks[value.id] = nil
@@ -1499,10 +1496,10 @@ function M.select_owner(target, id, resume, cwd)
 	end
 	if not job then connect()
 	elseif hello and not attachment then
-		if recover_host(false, false) then return end
+		if recover_host(false) then return end
 		if id then
 			if resume_requested then resume_requested = false; host_operation("host.resume", { sessionId = id })
-			else recover_selection(false, false) end
+			else recover_selection(false) end
 		else ctx.ui.open_window() end
 	end
 end
@@ -3002,7 +2999,7 @@ local function follow_resumed_selection()
 			if not ok or not same_selection(captured) then return end
 			for _, row in ipairs(result.sessions or {}) do
 				if row.id == session_id and row.live and not row.archived and not row.deleted then
-					attach(session_id, not passive_connection); return
+					attach(session_id); return
 				end
 			end
 		end)
@@ -3198,7 +3195,7 @@ action_connection = require("pi-integration.service-action-connection").new({
 	end,
 })
 -- Wrap entry points, not command callbacks: dialogs keep their original stamps.
--- Transport recovery is passive; refresh/completion paths never replay work.
+-- Recovery, refresh, and completion paths never replay work.
 for _, name in ipairs({ "submit_prompt", "take_control", "change_cwd", "restart", "kill_session", "abort",
 	"rename_session", "pick_queue", "show_pending_request", "show_offers", "show_host_request", "refresh_options",
 	"pick_model", "pick_thinking", "follow_up", "handoff", "side_prompt", "toggle_side", "new_side", "pick_side", "abort_side",
