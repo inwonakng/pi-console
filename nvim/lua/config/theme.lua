@@ -3,7 +3,7 @@ require("pi-integration.build-info")
 local M = {}
 
 M.ui_bg = "#080808"
-M.status_bg = "#13161c"
+M.status_bg = "#1a1713"
 M.pane_border = "#2a2a2a"
 
 require("catppuccin").setup({
