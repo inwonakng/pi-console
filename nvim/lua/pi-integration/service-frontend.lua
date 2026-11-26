@@ -57,6 +57,9 @@ local viewed_response
 local action_connection, close_bridge
 local reconnect_enabled, reconnect_ticket, reconnect_attempts = false, nil, 0
 local passive_connection = false
+-- Set when a disconnect released an unused new window; the reconnect opens a
+-- fresh one instead of reattaching to the discarded session.
+local reopen_window = false
 local load_metrics
 local function status_data(key)
 	local raw = snapshot and snapshot.conversation.statuses[key]
@@ -991,6 +994,10 @@ local function disconnected(reason, details, intentional)
 	startup_options_context, startup_options_pending = nil, nil
 	workspace_stats.pending, workspace_stats.key, workspace_stats.due, state.workspace_diff = nil, nil, 0, nil
 	session_status, session_error = "unattached", nil
+	-- The server discards an unused window once its last viewer detaches.
+	if ctx.ui.window_id and session_id and not ctx.ui.window_submission and not pending_host then
+		session_id, reopen_window = nil, true
+	end
 	feedback_ui.interrupt(feedback)
 	callbacks, outcomes, auto_control_selection, starting, resume_check = {}, {}, nil, waiting_start, nil
 	ctx.ui.window_id, ctx.ui.window_submission = nil, nil
@@ -1265,11 +1272,12 @@ connect = function(automatic)
 			M.config.expected_host = result.hostId
 			render()
 			local restore = recovery_requested; recovery_requested = false
+			local reopen = reopen_window; reopen_window = false
 			if recover_host(restore, automatic) then return end
 			if session_id then
 				if resume_requested then resume_requested = false; host_operation("host.resume", { sessionId = session_id })
 				else recover_selection(restore, automatic) end
-			elseif not automatic then ctx.ui.open_window() end
+			elseif not automatic or reopen then ctx.ui.open_window() end
 		elseif value.type == "response" then
 			local pending = callbacks[value.id]; callbacks[value.id] = nil
 			if load_metrics and pending and (pending.method == "attach" or pending.method == "snapshot") then
