@@ -23,6 +23,8 @@ require("catppuccin").setup({
 			SignColumn = { bg = M.ui_bg },
 			EndOfBuffer = { bg = M.ui_bg },
 			PiPaneBorder = { fg = M.pane_border, bg = M.ui_bg },
+			PiSideNormal = { fg = colors.text, bg = "#0b1222" },
+			PiSideTitle = { fg = colors.subtext1, bg = "#0b1222" },
 			PiStatusFooter = { bg = M.status_bg },
 			PiStatusFooterNormal = { fg = colors.text, bg = M.status_bg },
 			PiSessionTitle = { fg = colors.text, bg = M.status_bg, bold = true },

@@ -1,4 +1,4 @@
--- Paired side-conversation floats. Ownership and submissions stay in the frontend.
+-- Paired side-conversation splits. Ownership and submissions stay in the frontend.
 local floats = require("pi-integration.floats")
 local buffer = require("pi-integration.utils.buffer")
 local markdown = require("pi-integration.markdown-render")
@@ -12,113 +12,166 @@ local function render_context()
 		notices = { empty_session = "Send a message to begin." },
 		transcript = { metadata_lines = function() return {} end } }
 end
-local transcript_win, input_win, return_win, focus
-local input_cursor, transcript_view, hiding, displayed_buf, picker_height
+local transcript_win, input_win, return_win, sizes
+local transcript_view, input_view, displayed_buf, displayed_input_buf, picker_height
+local left_sizes, bottom_sizes = {}, {}
 local help_state = {}
 local window_group = vim.api.nvim_create_augroup("PiSideWindows", { clear = true })
+local winhl = table.concat({
+	"Normal:PiSideNormal", "NormalNC:PiSideNormal", "EndOfBuffer:PiSideNormal", "SignColumn:PiSideNormal",
+	"Folded:PiSideNormal", "WinBar:PiSideTitle", "WinBarNC:PiSideTitle",
+}, ",")
 
 local function valid(win) return win and vim.api.nvim_win_is_valid(win) end
 
-function M.visible() return valid(transcript_win) or valid(input_win) end
-
-local function geometry()
-	local width = math.max(1, math.min(110, math.floor(vim.o.columns * 0.86), vim.o.columns - 4))
-	local top = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1 or 0
-	local bottom = vim.o.cmdheight + (vim.o.laststatus > 0 and 1 or 0) + 1
-	local usable = math.max(6, vim.o.lines - top - bottom)
-	local total = math.max(6, math.floor(usable * 0.85))
-	local input_height = picker_height and math.min(picker_height, math.max(1, total - 7))
-		or math.max(1, math.min(4, math.floor(total * 0.25)))
-	return width, math.max(1, total - input_height - 4), input_height,
-		top + math.floor((usable - total) / 2), math.max(0, math.floor((vim.o.columns - width) / 2))
+local function in_current_tab(win)
+	return valid(win) and vim.api.nvim_win_get_tabpage(win) == vim.api.nvim_get_current_tabpage()
 end
 
-function M.set_title(title)
-	if valid(transcript_win) then
-		local label = type(title) == "string" and title ~= "" and title:gsub("[%c]", " ") or "Side chat"
-		vim.api.nvim_win_set_config(transcript_win, { title = " " .. label .. " | ask | <leader>s chats " })
-	end
-end
-
+function M.visible() return in_current_tab(transcript_win) and in_current_tab(input_win) end
 function M.input_window() return valid(input_win) and input_win or nil end
 function M.transcript_window() return valid(transcript_win) and transcript_win or nil end
+function M.contains_window(win) return win ~= nil and (win == transcript_win or win == input_win) end
 
-function M.bind_input()
-	if focus and valid(input_win) then focus:add(input_win) end
+function M.set_title(title)
+	if not valid(transcript_win) then return end
+	local label = type(title) == "string" and title ~= "" and title:gsub("[%c]", " "):gsub("%%", "%%%%") or "Chat"
+	vim.wo[transcript_win].winbar = " Side · " .. label .. " · <leader>? keys"
 end
 
-function M.setup_navigation(buf, modes)
-	for _, direction in ipairs({ "h", "j", "k", "l" }) do
-		local function navigate()
-			vim.cmd("stopinsert")
-			local current = vim.api.nvim_get_current_win()
-			local target = direction == "j" and current == transcript_win and input_win
-				or direction == "k" and current == input_win and transcript_win
-			if valid(target) then vim.api.nvim_set_current_win(target)
-			else M.hide() end
-		end
-		for _, lhs in ipairs({ "<C-" .. direction .. ">", "<C-w>" .. direction, "<C-w><C-" .. direction .. ">" }) do
-			vim.keymap.set(modes or "n", lhs, navigate, { buffer = buf, silent = true, desc = "Navigate side conversation" })
-		end
-	end
+function M.adjust_input_height(amount)
+	if not valid(transcript_win) or not valid(input_win) or amount == 0 then return end
+	-- Resize the boundary between the two side panes, never the footer or main input.
+	local min_height = math.max(1, vim.o.winminheight)
+	local transcript_min = min_height + (vim.wo[transcript_win].winbar ~= "" and 1 or 0)
+	local input_min = min_height + (vim.wo[input_win].winbar ~= "" and 1 or 0)
+	amount = math.min(amount, math.max(0, vim.api.nvim_win_get_height(transcript_win) - transcript_min))
+	amount = math.max(amount, -math.max(0, vim.api.nvim_win_get_height(input_win) - input_min))
+	vim.api.nvim_win_call(transcript_win, function() vim.fn.win_move_statusline(transcript_win, -amount) end)
 end
 
 function M.resize_input(height)
-	picker_height = height
-	if not valid(transcript_win) or not valid(input_win) then return end
-	local width, th, ih, row, col = geometry()
-	vim.api.nvim_win_set_config(transcript_win, { relative = "editor", width = width, height = th, row = row, col = col })
-	vim.api.nvim_win_set_config(input_win, { relative = "editor", width = width, height = ih, row = row + th + 2, col = col })
+	if not valid(input_win) then return end
+	local current = vim.api.nvim_win_get_height(input_win)
+	if height then
+		picker_height = picker_height or current
+		M.adjust_input_height(math.max(height, picker_height) - current)
+	elseif picker_height then
+		M.adjust_input_height(picker_height - current)
+		picker_height = nil
+	end
 end
 
-function M.hide(force)
-	if hiding then return end
-	if not force and require("pi-integration.pending-picker").owns_window(input_win) then return end
-	hiding = true
-	if focus then focus:release(); focus = nil end
-	if valid(input_win) then input_cursor = vim.api.nvim_win_get_cursor(input_win) end
-	if valid(transcript_win) then transcript_view = vim.api.nvim_win_call(transcript_win, vim.fn.winsaveview) end
-	for _, win in pairs({ input_win, transcript_win }) do
-		floats.close_descendants(win)
-		floats.close_window(win)
-	end
+local function picker_owns_input()
+	return require("pi-integration.pending-picker").owns_window(input_win)
+end
+
+local function close_pair(closing_win)
+	local focus_return = M.contains_window(vim.api.nvim_get_current_win()) and in_current_tab(return_win)
+	local windows = { input_win, transcript_win }
+	vim.api.nvim_clear_autocmds({ group = window_group, event = "WinClosed" })
 	input_win, transcript_win, picker_height = nil, nil, nil
-	if valid(return_win) then vim.api.nvim_set_current_win(return_win) end
-	hiding = false
+	local function close_windows()
+		for index = 1, 2 do
+			local win = windows[index]
+			floats.close_descendants(win)
+			if win ~= closing_win and valid(win) then vim.api.nvim_win_close(win, true) end
+		end
+	end
+	if closing_win then
+		-- Let :q or :tabclose finish before closing the other pane.
+		vim.schedule(close_windows)
+	else
+		close_windows()
+		if focus_return then vim.api.nvim_set_current_win(return_win) end
+	end
 end
 
-function M.open(transcript_buf, input_buf, resources)
-	if M.visible() then
-		if valid(input_win) then vim.api.nvim_set_current_win(input_win) end
-		return
+function M.hide(force, closing_win)
+	if not force and picker_owns_input() then return false end
+	if valid(input_win) then
+		sizes.input = picker_height or vim.api.nvim_win_get_height(input_win)
+		if vim.api.nvim_win_get_buf(input_win) == displayed_input_buf then
+			input_view = vim.api.nvim_win_call(input_win, vim.fn.winsaveview)
+		end
 	end
+	if valid(transcript_win) then
+		if sizes == left_sizes then sizes.width = vim.api.nvim_win_get_width(transcript_win)
+		elseif valid(input_win) then
+			-- Keep the full pair's size, excluding any temporary picker expansion.
+			sizes.height = vim.api.nvim_win_get_height(transcript_win) + vim.api.nvim_win_get_height(input_win)
+		end
+		transcript_view = vim.api.nvim_win_call(transcript_win, vim.fn.winsaveview)
+	end
+	close_pair(closing_win)
+	return true
+end
+
+vim.api.nvim_create_autocmd("QuitPre", { group = window_group, callback = function()
+	if M.contains_window(vim.api.nvim_get_current_win()) and picker_owns_input() then
+		error("Resolve the pending Pi action first.")
+	end
+end })
+
+local function open_pair(transcript_buf, input_buf, state)
+	local input_height = sizes.input or 5
+	local config = { style = "minimal" }
+	if sizes == left_sizes then
+		config.split, config.win = "left", -1
+		config.width = math.min(sizes.width or math.max(60, math.floor(vim.o.columns * 0.4)), vim.o.columns - 2)
+	else
+		local footer = state and state.status_win
+		config.split, config.win = "below", -1
+		if in_current_tab(footer) then config.split, config.win = "above", footer end
+		-- The split between transcript and input consumes one row.
+		config.height = (sizes.height or math.max(input_height + 3, math.floor(vim.o.lines * 0.4))) + 1
+	end
+	local main_input = state and state.input_win
+	local main_height = in_current_tab(main_input) and vim.api.nvim_win_get_height(main_input)
+	transcript_win = vim.api.nvim_open_win(transcript_buf, false, config)
+	if state then require("pi-integration.statusline").restore_bars(state) end
+	if main_height and vim.api.nvim_win_get_height(main_input) ~= main_height then
+		vim.api.nvim_win_set_height(main_input, main_height)
+	end
+	M.set_title()
+	local available = vim.api.nvim_win_get_height(transcript_win)
+	local height = math.max(1, math.min(input_height, available - math.max(1, vim.o.winminheight) - 1))
+	input_win = vim.api.nvim_open_win(input_buf, true, { split = "below", win = transcript_win, height = height, style = "minimal" })
+end
+
+function M.open(transcript_buf, input_buf, resources, state)
+	if M.visible() and displayed_buf == transcript_buf then
+		vim.api.nvim_set_current_win(input_win)
+		return true
+	end
+	if (valid(transcript_win) or valid(input_win)) and not M.hide() then return false end
 	return_win = vim.api.nvim_get_current_win()
 	if displayed_buf ~= transcript_buf then
-		input_cursor, transcript_view = nil, nil
+		input_view, transcript_view = nil, nil
 		render_state, render_cache = { show_nested_tools = false }, {}
 	end
-	displayed_buf = transcript_buf
-	render_state.transcript_buf = transcript_buf
-	local width, th, ih, row, col = geometry()
-	transcript_win = vim.api.nvim_open_win(transcript_buf, false, {
-		relative = "editor", width = width, height = th, row = row, col = col,
-		style = "minimal", border = "rounded", title = " Side conversation | ask | <leader>? keys ",
-	})
-	input_win = vim.api.nvim_open_win(input_buf, true, {
-		relative = "editor", width = width, height = ih, row = row + th + 2, col = col,
-		style = "minimal", border = "rounded", title = " Side input ",
-		footer = " <leader>? keys ",
-	})
-	render_state.transcript_win = transcript_win
+	displayed_buf, displayed_input_buf = transcript_buf, input_buf
+	sizes = vim.o.columns >= 110 and left_sizes or bottom_sizes
+	local ok, err = pcall(open_pair, transcript_buf, input_buf, state)
+	if not ok then
+		close_pair()
+		require("pi-integration.logs").notify("Could not open side chat: " .. tostring(err), vim.log.levels.WARN)
+		return false
+	end
+	render_state.transcript_buf, render_state.transcript_win = transcript_buf, transcript_win
 	vim.keymap.set("n", "<CR>", function()
 		transcript.open_item_under_cursor(render_context(), resources)
 	end, { buffer = transcript_buf, desc = "Follow link, toggle activity or open output" })
-	vim.api.nvim_clear_autocmds({ group = window_group, event = "WinClosed" })
+	vim.wo[input_win].winbar = ""
+	vim.wo[input_win].winfixheight = true
 	for _, win in ipairs({ transcript_win, input_win }) do
 		vim.wo[win].wrap, vim.wo[win].linebreak, vim.wo[win].conceallevel = true, true, 2
+		vim.wo[win].winhl = winhl
+		vim.wo[win].fillchars = "stl:─,stlnc:─,eob: "
+		vim.wo[win].statusline = "%#PiPaneBorder#%="
 		vim.api.nvim_create_autocmd("WinClosed", {
 			group = window_group, pattern = tostring(win), once = true,
-			callback = function() if not hiding then M.hide(true) end end,
+			callback = function() M.hide(true, win) end,
 		})
 	end
 	for _, buf in ipairs({ transcript_buf, input_buf }) do
@@ -128,9 +181,8 @@ function M.open(transcript_buf, input_buf, resources)
 				lines = {
 					"# Side conversation keys", "",
 					"- `<C-CR>` or `<C-s>` sends from the input (normal or insert mode).",
-					"- `<C-k>` / `<C-w>k` focuses the transcript (normal mode).",
-					"- `<C-j>` / `<C-w>j` focuses the input (normal mode).",
-					"- Moving past either window with `<C-h/j/k/l>` / `<C-w>h/j/k/l` hides the side conversation.",
+					"- `<C-h/j/k/l>` or `<C-w>h/j/k/l` moves between windows normally.",
+					"- `<leader>wr` enters resize mode; `h/l` resize width, `j/k` resize height.",
 					"- `<CR>` in the transcript follows a link, toggles an activity, or opens output.",
 					"- `q` / `<leader>ps` / `:q` hides both windows, preserving the draft and conversation.",
 					"- `<leader>s` / `:PiSides` picks a side chat; Ctrl-x in the picker deletes it.",
@@ -141,19 +193,15 @@ function M.open(transcript_buf, input_buf, resources)
 					"- `q` / `<Esc>` closes this help; `<Esc>` keeps native behavior in the side windows.",
 				},
 			})
-			if focus and help_state.help_win then focus:add(help_state.help_win) end
 		end, { buffer = buf, desc = "Side conversation help" })
 		vim.keymap.set("n", "<leader>ps", M.hide, { buffer = buf, desc = "Hide side conversation" })
 		vim.keymap.set("n", "q", M.hide, { buffer = buf, silent = true, desc = "Hide side conversation" })
-		M.setup_navigation(buf)
 	end
-	focus = floats.focus_group({ transcript_win, input_win })
-	if input_cursor then pcall(vim.api.nvim_win_set_cursor, input_win, input_cursor) end
-	if transcript_view then
-		vim.api.nvim_win_call(transcript_win, function() vim.fn.winrestview(transcript_view) end)
-	end
+	if input_view then vim.api.nvim_win_call(input_win, function() vim.fn.winrestview(input_view) end) end
+	if transcript_view then vim.api.nvim_win_call(transcript_win, function() vim.fn.winrestview(transcript_view) end) end
 	transcript.render(render_context())
 	markdown.render(input_buf, input_win)
+	return true
 end
 
 function M.render(buf, visible, tools, conversation_id)
@@ -186,8 +234,4 @@ function M.render(buf, visible, tools, conversation_id)
 	end
 end
 
-vim.api.nvim_create_autocmd("VimResized", { group = window_group, callback = function()
-	if not valid(transcript_win) or not valid(input_win) then return end
-	M.resize_input(picker_height)
-end })
 return M

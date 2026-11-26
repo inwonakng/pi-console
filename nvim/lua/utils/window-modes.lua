@@ -79,6 +79,11 @@ local function enter_mode(mode, keymaps)
 end
 
 local function resize_height(amount)
+	local side = require("pi-integration.side")
+	if vim.api.nvim_get_current_win() == side.input_window() then
+		side.adjust_input_height(amount)
+		return
+	end
 	local current = vim.fn.winnr()
 	-- The non-focusable footer is skipped by directional window navigation.
 	if vim.fn.winnr("j") == current and vim.fn.bufwinid("pi://status") ~= -1 then

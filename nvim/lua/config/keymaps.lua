@@ -28,6 +28,9 @@ if not vim.g.pi_overview then
 	map("n", "<leader>pt", function()
 		require("pi-integration").show_transcript()
 	end, { desc = "Pi transcript" })
+	map("n", "<leader>ps", function()
+		require("pi-integration").toggle_side()
+	end, { desc = "Open/hide side chat" })
 end
 
 -- tab manipulation

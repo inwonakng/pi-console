@@ -1914,7 +1914,11 @@ local function open_pending(item)
 	state.active_ui_request_id = id
 	local description = dialog_description(request_data.title)
 	state.pending_ui_requests[id].side = description and description.sideConversationId ~= nil
-	if state.pending_ui_requests[id].side then ctx.session.open_side() else side_view.hide() end
+	if state.pending_ui_requests[id].side then
+		if not ctx.session.open_side() then close_approval(); return end
+	else
+		side_view.hide()
+	end
 	local input_buf = require("pi-integration.events").open_dialog(ctx, request_data, answer)
 	if valid(input_buf) then
 		vim.bo[input_buf].buftype = "acwrite"
@@ -2480,9 +2484,10 @@ ctx.session.open_side = function()
 			vim.keymap.set("n", "<leader>s", M.pick_side, { buffer = buf, desc = "Pick side chat" })
 		end
 	end
-	side_view.open(side_buf, side_input_buf, owner_resources())
+	if not side_view.open(side_buf, side_input_buf, owner_resources(), state) then return false end
 	side_view.set_title((status_data("pi-side") or {}).title)
 	render()
+	return true
 end
 function M.side_prompt()
 	command("side.open", {})
@@ -2492,15 +2497,9 @@ function M.toggle_side()
 	if side_view.visible() then side_view.hide() else M.side_prompt() end
 end
 function side_actions.confirm(prompt, choice, done)
-	local focus
-	local function release() if focus then focus:release(); focus = nil end end
-	vim.ui.select({ choice, "Cancel" }, {
-		prompt = prompt, pi_select_layout = "compact",
-		on_create = function(event)
-			if side_view.visible() then focus = require("pi-integration.floats").focus_group({ event.winid }) end
-		end,
-		on_close = release,
-	}, function(selected) release(); if selected == choice then done() end end)
+	vim.ui.select({ choice, "Cancel" }, { prompt = prompt, pi_select_layout = "compact" }, function(selected)
+		if selected == choice then done() end
+	end)
 end
 function side_actions.move(id)
 	if side_actions.pending or side_prompt_pending or side_after_draft then notify("Wait for the pending side action to finish."); return end

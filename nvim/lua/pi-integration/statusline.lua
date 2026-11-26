@@ -535,7 +535,7 @@ local function normalize_bar_window(state, bar)
 	if vim.api.nvim_get_current_tabpage() == transcript_tab then
 		local bar_tab = vim.api.nvim_win_get_tabpage(state[bar.win])
 		if bar_tab ~= transcript_tab or not bar_is_at_edge(state, bar) then
-			pcall(vim.api.nvim_win_set_config, state[bar.win], { split = bar.split, win = -1 })
+			pcall(vim.api.nvim_win_set_config, state[bar.win], { split = bar.split, win = -1, height = 1 })
 		end
 	end
 	if vim.api.nvim_win_get_height(state[bar.win]) ~= 1 then
@@ -672,6 +672,12 @@ local function render_bar(ctx, bar, buf, width)
 	return changed
 end
 
+function M.restore_bars(state)
+	for _, bar in ipairs(service_bars) do
+		if resolve_bar(state, bar) then normalize_bar_window(state, bar) end
+	end
+end
+
 function M.setup(ctx)
 	local update_scheduled = false
 	local function schedule_update()
@@ -735,11 +741,7 @@ function M.setup(ctx)
 		group = footer_group,
 		desc = "Restore the pi-console status bars after window commands",
 		callback = function()
-			local state = ctx.state
-			if not ctx.transcript.win_valid() then return end
-			for _, bar in ipairs(bars) do
-				if resolve_bar(state, bar) then normalize_bar_window(state, bar) end
-			end
+			if ctx.transcript.win_valid() then M.restore_bars(ctx.state) end
 		end,
 	})
 end

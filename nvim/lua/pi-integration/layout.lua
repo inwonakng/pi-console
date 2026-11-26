@@ -95,6 +95,21 @@ function M.ensure_input_buffer(ctx)
 	return true
 end
 
+-- Main-pane actions must not replace a side chat's buffers.
+local function leave_side_window(preferred, buf)
+	local side = require("pi-integration.side")
+	if not side.contains_window(vim.api.nvim_get_current_win()) then return end
+	local main = buffer.find_window(buf, preferred)
+	if main then vim.api.nvim_set_current_win(main); return end
+	for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+		local config = vim.api.nvim_win_get_config(win)
+		if config.focusable and config.relative == "" and not side.contains_window(win) then
+			vim.api.nvim_set_current_win(win)
+			return
+		end
+	end
+end
+
 function M.show_transcript(ctx)
 	local state = ctx.state
 	if require("pi-integration.pending-picker").owns_window(vim.api.nvim_get_current_win())
@@ -102,6 +117,7 @@ function M.show_transcript(ctx)
 		vim.api.nvim_set_current_win(state.transcript_win)
 		return false
 	end
+	leave_side_window(state.transcript_win, state.transcript_buf)
 	local recreated = M.ensure_transcript_buffer(ctx)
 	local win = vim.api.nvim_get_current_win()
 
@@ -119,6 +135,7 @@ end
 function M.show_input(ctx)
 	if require("pi-integration.pending-picker").focus(ctx) then return false end
 	local state = ctx.state
+	leave_side_window(state.input_win, state.input_buf)
 	local recreated = M.ensure_input_buffer(ctx)
 	local win = vim.api.nvim_get_current_win()
 
@@ -142,6 +159,7 @@ function M.open(ctx)
 		return false
 	end
 
+	leave_side_window()
 	M.ensure_transcript_buffer(ctx)
 	M.ensure_input_buffer(ctx)
 

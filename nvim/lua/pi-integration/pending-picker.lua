@@ -42,7 +42,6 @@ local function restore_input(picker)
 	vim.wo[picker.win].statusline = picker.statusline
 	if picker.side then
 		picker.side.resize_input(nil)
-		picker.side.bind_input()
 	else
 		local transcript = picker.ctx.state.transcript_win
 		if picker.restore_height and stacked_with_transcript(picker.win, transcript) then
@@ -150,10 +149,6 @@ function M.select(ctx, id, items, opts, on_choice)
 			vim.wo[picker.win].statusline = picker.statusline
 		end
 		vim.wo[picker.win].statuscolumn = ""
-		if picker.side then
-			picker.side.bind_input()
-			picker.side.setup_navigation(picker.buf, { "n", "t" })
-		end
 		local last_escape
 		vim.keymap.set("t", "<Esc>", function()
 			local now = vim.uv.now()
@@ -162,11 +157,9 @@ function M.select(ctx, id, items, opts, on_choice)
 			end
 			last_escape = now
 		end, { buffer = picker.buf, nowait = true, desc = "Cancel pending Pi action" })
-		if not picker.side then
-			for _, direction in ipairs({ "h", "j", "k", "l" }) do
-				vim.keymap.set("t", "<C-" .. direction .. ">", "<C-\\><C-n><C-w>" .. direction,
-					{ buffer = picker.buf, desc = "Navigate windows" })
-			end
+		for _, direction in ipairs({ "h", "j", "k", "l" }) do
+			vim.keymap.set("t", "<C-" .. direction .. ">", "<C-\\><C-n><C-w>" .. direction,
+				{ buffer = picker.buf, desc = "Navigate windows" })
 		end
 		-- fzf-lua re-enters this window while closing; a queued startinsert
 		-- would then apply to whichever window close() refocuses.
@@ -215,10 +208,6 @@ function M.input(ctx, event, on_input)
 		vim.api.nvim_buf_set_lines(picker.buf, 0, -1, false, vim.split(event.prefill or "", "\n", { plain = true }))
 		vim.bo[picker.buf].modified = false
 		vim.api.nvim_win_set_buf(picker.win, picker.buf)
-		if picker.side then
-			picker.side.bind_input()
-			picker.side.setup_navigation(picker.buf)
-		end
 		local title = event.title or "Pi input"
 		if event.placeholder and event.placeholder ~= "" then title = title .. " | " .. event.placeholder end
 		vim.wo[picker.win].winbar = " " .. title:gsub("[\r\n%%]+", " ") .. " (Ctrl+Enter: submit; :q: cancel)"

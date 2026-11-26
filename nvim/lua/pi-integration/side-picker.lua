@@ -1,4 +1,3 @@
-local floats = require("pi-integration.floats")
 local M = {}
 
 function M.open(side, actions)
@@ -15,8 +14,6 @@ function M.open(side, actions)
 		local chat = selected(entry)
 		return { content = chat and vim.split(chat.preview ~= "" and chat.preview or "No messages yet.", "\n", { plain = true }) or {}, filetype = "markdown" }
 	end
-	local focus
-	local function release() if focus then focus:release(); focus = nil end end
 	local function act(fn)
 		return function(items)
 			local chat = selected(items[1])
@@ -29,8 +26,6 @@ function M.open(side, actions)
 		winopts = {
 			width = 1.0, height = 1.0,
 			preview = { layout = "vertical", vertical = "up:60%", hidden = false, wrap = true },
-			on_create = function(event) focus = floats.focus_group({ event.winid }) end,
-			on_close = release,
 		},
 		fzf_opts = { ["--delimiter"] = "[\t]", ["--with-nth"] = "2..", ["--no-sort"] = true,
 			["--header"] = "Enter: open / Ctrl-x: delete / Ctrl-f, Ctrl-b: scroll preview" },
