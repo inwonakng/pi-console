@@ -2,11 +2,13 @@ local json = require("pi-integration.utils.json")
 local build_info = require("pi-integration.build-info")
 local M = {}
 local option = "@pi_console"
+local overview_activity_option = "@pi_overview_activity"
 local tab_option = "@pi_console_tab"
 local restore_option = "@pi_console_restore"
 local restore_snapshot
 local owner_pane
 local owner_window
+local owner_option
 local pending_launches = {}
 local publication, pending_snapshot, pending_heartbeat, last_published
 local last_publication, last_tab_refresh = -math.huge, -math.huge
@@ -310,10 +312,12 @@ local function publish_tab(snapshot, run, reconcile)
 		local installed, install_err = tabs.install_hooks(run)
 		if not installed then return nil, install_err end
 	end
-	local window, err = run({
-		"set-option", "-p", "-t", owner_pane, option, json.encode(snapshot),
+	local args = snapshot.overview_busy == false
+		and { "set-option", "-pqu", "-t", owner_pane, owner_option }
+		or { "set-option", "-p", "-t", owner_pane, owner_option, json.encode(snapshot) }
+	local window, err = run(vim.list_extend(args, {
 		";", "display-message", "-p", "-t", owner_pane, "#{window_id}",
-	})
+	}))
 	if not window then return nil, err end
 	local moved = owner_window ~= window
 	if owner_window and moved then
@@ -338,6 +342,7 @@ function M.publish(snapshot, heartbeat_only)
 	-- Periodically reconcile external theme changes, independently of liveness.
 	local reconcile = changed or now - last_tab_refresh >= 30000
 	owner_pane = owner_pane or vim.env.TMUX_PANE
+	owner_option = snapshot.overview_busy ~= nil and overview_activity_option or option
 	local update = {}
 	publication = update
 	-- Keep the existing tab/ownership logic sequential, but yield at every
@@ -380,6 +385,10 @@ function M.publish(snapshot, heartbeat_only)
 	return true
 end
 
+function M.set_overview_busy(busy)
+	M.publish({ version = 1, pid = vim.uv.os_getpid(), overview_busy = busy })
+end
+
 -- Restore state is separate from tab/liveness metadata: overview and sidebar
 -- panes need it too, and only selection changes require a new publication.
 function M.publish_restore(config, session_id, cwd)
@@ -414,16 +423,15 @@ function M.clear()
 	end
 	if owner_pane then
 		-- Do not remove a replacement instance's metadata during shutdown.
-		local payload = command({ "show-options", "-pv", "-t", owner_pane, option })
+		local payload = command({ "show-options", "-pqv", "-t", owner_pane, owner_option })
 		local entry = payload and json.decode_object(payload)
 		if entry and entry.pid == vim.uv.os_getpid() then
-			command({ "set-option", "-pu", "-t", owner_pane, option })
+			command({ "set-option", "-pu", "-t", owner_pane, owner_option })
 		end
 		if owner_window and (not entry or entry.pid == vim.uv.os_getpid()) then
 			tabs.refresh(owner_window, command)
 		end
-		owner_window = nil
-		owner_pane = nil
+		owner_window, owner_pane, owner_option = nil, nil, nil
 	end
 end
 

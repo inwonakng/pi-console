@@ -113,7 +113,7 @@ function M.refresh(window, run, attempt)
 	local output, err = run({ "display-message", "-p", "-t", window,
 		"#{version}\t#{window_name}\t#{automatic-rename}\t#{" .. option .. "}",
 		";", "display-message", "-p", boundary,
-		";", "list-panes", "-t", window, "-F", "#{pane_id}\t#{pane_dead}\t#{@pi_sidebar}\t#{@pi_console}" }, true)
+		";", "list-panes", "-t", window, "-F", "#{pane_id}\t#{pane_dead}\t#{@pi_sidebar}\t#{@pi_console}\t#{@pi_overview_activity}" }, true)
 	if not output then return nil, err end
 	local sections = vim.split(output, boundary .. "\n", { plain = true })
 	if #sections ~= 2 then return nil, "Unexpected tmux pane metadata" end
@@ -124,7 +124,7 @@ function M.refresh(window, run, attempt)
 	local tab = previous and previous.version == 2 and vim.deepcopy(previous) or { version = 2, formats = {} }
 	local entries, pane_count = {}, 0
 	for line in pane_output:gmatch("[^\n]+") do
-		local pane, dead, sidebar, value = line:match("^(%%%d+)\t(%d)\t(.-)\t(.*)$")
+		local pane, dead, sidebar, value, overview_value = line:match("^(%%%d+)\t(%d)\t(.-)\t(.-)\t(.*)$")
 		if pane and sidebar ~= "1" then
 			pane_count = pane_count + 1
 			local entry = json.decode_object(value)
@@ -135,6 +135,12 @@ function M.refresh(window, run, attempt)
 				entry.pane = pane
 				if os.time() - entry.updated > 10 then entry.status = "Unresponsive" end
 				table.insert(entries, entry)
+			elseif dead == "0" then
+				local overview = json.decode_object(overview_value)
+				if overview and overview.version == 1 and overview.overview_busy == true and type(overview.pid) == "number"
+					and overview.pid > 0 and overview.pid == math.floor(overview.pid) and vim.uv.kill(overview.pid, 0) then
+					table.insert(entries, { pane = pane, status = "Working", overview = true })
+				end
 			end
 		end
 	end
@@ -167,14 +173,15 @@ function M.refresh(window, run, attempt)
 		end
 		if previous then change(changes, { "set-option", "-wu", "-t", window, option }) end
 	else
-		if tab.managed_name == nil and #entries == 1 and pane_count == 1 then
+		local single_conversation = #entries == 1 and pane_count == 1 and not entries[1].overview
+		if tab.managed_name == nil and single_conversation then
 			tab.managed_name = automatic == "1" or automatic == "on"
 			tab.original_name, tab.original_rename = name, automatic
 		end
 		if tab.managed_name and (automatic == "1" or automatic == "on") then
 			change(changes, { "set-option", "-w", "-t", window, "automatic-rename", "off" })
 		end
-		if tab.managed_name and #entries == 1 and pane_count == 1 then
+		if tab.managed_name and single_conversation then
 			local entry = entries[1]
 			local label = type(entry.slug) == "string" and entry.slug ~= "" and entry.slug or entry.title
 			local title = vim.trim(label:gsub("[%c]", " "))

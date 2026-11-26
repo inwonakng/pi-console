@@ -4,6 +4,7 @@ local session_list = require("pi-integration.session-list")
 local list_cursor = require("pi-integration.list-cursor")
 local icons = require("pi-integration.status-icons")
 local statusline = require("pi-integration.statusline")
+local transport = require("pi-integration.service-connection")
 local build_info = require("pi-integration.build-info")
 local session_navigation = require("pi-integration.session-navigation")
 local M = {}
@@ -117,12 +118,7 @@ local function scratch(name)
 	return buf
 end
 
-function M.render_statusline()
-	local win = vim.g.statusline_winid or vim.api.nvim_get_current_win()
-	return build_info.statusline(vim.api.nvim_win_get_width(win), {
-		" 󰕮", "Enter open", "Tab expand", "j/k move", "<leader>? keys", "/ filter",
-	})
-end
+local hints = { " 󰕮", "Enter open", "Tab expand", "j/k move", "<leader>? keys", "/ filter" }
 
 local function window_options(win, statusline)
 	for name, value in pairs({ number = false, relativenumber = false, signcolumn = "no", wrap = false, spell = false, fillchars = "stl: ,stlnc: ", statusline = statusline }) do
@@ -138,7 +134,8 @@ function M.open(config)
 	local list_buf = scratch("pi://overview")
 	local list_win = vim.api.nvim_get_current_win()
 	vim.api.nvim_win_set_buf(list_win, list_buf)
-	window_options(list_win, "%!v:lua.require('pi-integration.overview').render_statusline()")
+	window_options(list_win, "%#Normal#%=")
+	local update_footer, close_footer = statusline.overview_footer(list_win, list_buf, hints)
 	vim.wo[list_win].cursorline = true
 	vim.wo[list_win].cursorlineopt = "line"
 	list_cursor.attach(list_buf)
@@ -149,10 +146,22 @@ function M.open(config)
 	local query = ""
 	local updating = false
 	local closed = false
-	local refreshing = false
+	local refreshing, foreground_refresh = false, false
 	local select_last_focused = true
 	local focus_autocmd, resize_autocmd
 	local timer = vim.uv.new_timer()
+	local activity_timer = vim.uv.new_timer()
+	local busy = false
+	local function update_activity()
+		if closed then return end
+		local visible = vim.api.nvim_win_is_valid(list_win) and vim.api.nvim_win_get_buf(list_win) == list_buf
+		local label = visible and (transport.activity() or foreground_refresh and "loading sessions") or nil
+		update_footer(label)
+		if registered and (label ~= nil) ~= busy then
+			busy = label ~= nil
+			runtime.set_overview_busy(busy)
+		end
+	end
 	local function selected()
 		if vim.api.nvim_win_is_valid(list_win) then
 			return rows[vim.api.nvim_win_get_cursor(list_win)[1]]
@@ -171,9 +180,7 @@ function M.open(config)
 		end
 	end
 	local function render(instances, err)
-		if closed or not vim.api.nvim_buf_is_valid(list_buf) or not vim.api.nvim_win_is_valid(list_win) then
-			return
-		end
+		if closed or not vim.api.nvim_win_is_valid(list_win) or vim.api.nvim_win_get_buf(list_win) ~= list_buf then return end
 		local previous = selected()
 		local view = vim.api.nvim_win_call(list_win, vim.fn.winsaveview)
 		local focus_target = select_last_focused and runtime.last_focused(instances or {}) or nil
@@ -277,11 +284,13 @@ function M.open(config)
 		highlight_selection()
 		updating = false
 	end
-	local function refresh()
-		if closed or refreshing or not vim.api.nvim_buf_is_valid(list_buf) or not vim.api.nvim_win_is_valid(list_win) then return end
+	local function refresh(foreground)
+		if closed or not vim.api.nvim_win_is_valid(list_win) or vim.api.nvim_win_get_buf(list_win) ~= list_buf then return end
+		foreground_refresh = foreground_refresh or foreground == true
+		if refreshing then return end
 		refreshing = true
 		runtime.list_async(function(instances, err)
-			refreshing = false
+			refreshing, foreground_refresh = false, false
 			-- Selection and viewport are read by render after the query returns,
 			-- preserving navigation performed while the subprocess was running.
 			render(instances, err)
@@ -341,7 +350,7 @@ function M.open(config)
 		query = ""
 		refresh()
 	end, "Clear filter")
-	map("r", refresh, "Refresh overview")
+	map("r", function() refresh(true) end, "Refresh overview")
 	map("<leader>pr", function() require("pi-integration").restart_console() end, "Restart frontend")
 	map("<leader>a", function()
 		control_selected("cycle_access_mode")
@@ -411,13 +420,16 @@ function M.open(config)
 			end
 		end,
 	})
-	local function stop()
-		if not closed then
-			closed = true
-			vim.api.nvim_del_autocmd(focus_autocmd)
-			vim.api.nvim_del_autocmd(resize_autocmd)
-			timer:stop()
-			timer:close()
+	local function stop(leaving)
+		if closed then return end
+		closed = true
+		vim.api.nvim_del_autocmd(focus_autocmd)
+		vim.api.nvim_del_autocmd(resize_autocmd)
+		timer:stop(); timer:close()
+		activity_timer:stop(); activity_timer:close()
+		if not leaving then
+			vim.schedule(close_footer)
+			if busy then runtime.set_overview_busy(false) end
 		end
 	end
 	focus_autocmd = vim.api.nvim_create_autocmd("FocusGained", {
@@ -427,9 +439,13 @@ function M.open(config)
 		end,
 	})
 	resize_autocmd = vim.api.nvim_create_autocmd("WinResized", { callback = refresh })
-	vim.api.nvim_create_autocmd("BufWipeout", { buffer = list_buf, once = true, callback = stop })
-	vim.api.nvim_create_autocmd("VimLeavePre", { once = true, callback = stop })
-	refresh()
+	-- The footer is a real split; don't let it keep the editor open on :quit.
+	vim.api.nvim_create_autocmd("QuitPre", { buffer = list_buf, callback = close_footer })
+	vim.api.nvim_create_autocmd("BufWipeout", { buffer = list_buf, once = true, callback = function() stop(false) end })
+	vim.api.nvim_create_autocmd("VimLeavePre", { once = true, callback = function() stop(true) end })
+	update_activity()
+	refresh(true)
+	activity_timer:start(250, 250, vim.schedule_wrap(update_activity))
 	timer:start(1000, 1000, vim.schedule_wrap(refresh))
 end
 

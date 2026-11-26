@@ -853,7 +853,7 @@ function M.maybe_prompt_archive(identity)
 				M.history_picker(identity, { session_ids = stale, select_all = true })
 			end
 		end)
-	end)
+	end, true) -- Background archive reminder.
 end
 local function with_connected_host(host, callback)
 	local function ready(connected)

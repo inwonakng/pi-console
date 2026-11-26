@@ -65,10 +65,9 @@ function M.highlight()
 	return startup.channel == "dev" and "PiBuildDev" or "PiBuildStable"
 end
 
--- Viewers reserve the identity first, then add complete key hints as they fit.
-function M.statusline(width, hints)
-	local label = M.statusline_label(width)
-	local available = width - vim.fn.strdisplaywidth(label) - 1
+-- Complete key hints that fit the width, styled for the status bar.
+function M.hints(width, hints)
+	local available = width
 	local visible = {}
 	for _, hint in ipairs(hints or {}) do
 		local needed = vim.fn.strdisplaywidth(hint) + (#visible > 0 and 3 or 0)
@@ -79,8 +78,14 @@ function M.statusline(width, hints)
 		table.insert(visible, styled)
 		available = available - needed
 	end
-	local left = table.concat(visible, " · ")
-	return "%#PiOverviewStatusLineBar#" .. left .. "%=%#" .. M.highlight() .. "Bar#" .. label:gsub("%%", "%%%%") .. "%*"
+	return "%#PiOverviewStatusLineBar#" .. table.concat(visible, " · ")
+end
+
+-- Viewers reserve the identity first, then add complete key hints as they fit.
+function M.statusline(width, hints)
+	local label = M.statusline_label(width)
+	return M.hints(width - vim.fn.strdisplaywidth(label) - 1, hints)
+		.. "%=%#" .. M.highlight() .. "Bar#" .. label:gsub("%%", "%%%%") .. "%*"
 end
 
 function M.detail_text(build)

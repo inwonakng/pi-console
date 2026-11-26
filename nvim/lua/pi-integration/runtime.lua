@@ -6,6 +6,9 @@ function M.start_overview()
 	if tmux.available() then return tmux.start_overview() end
 	return true
 end
+function M.set_overview_busy(busy)
+	if tmux.available() then tmux.set_overview_busy(busy) end
+end
 function M.list() return hosts.list() end
 function M.list_async(callback) hosts.list_async(callback) end
 function M.last_focused(entries)

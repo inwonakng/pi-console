@@ -487,6 +487,19 @@ function M.render_secondary(ctx)
 	return left_label .. "%#PiUsageStats#%=" .. right_label .. "%*"
 end
 
+-- Activity row for viewers without conversation state, such as the overview.
+local function render_activity(label, width)
+	local text = ""
+	if label then
+		local tick = math.floor(vim.uv.hrtime() / (250 * 1000000))
+		text = " " .. activity_spinner_frames[(tick % #activity_spinner_frames) + 1] .. " " .. label
+	end
+	local build_label = build_info.statusline_label(math.max(0, width - 1)) .. " "
+	local visible = truncate_plain_to_width(text, math.max(0, width - vim.fn.strdisplaywidth(build_label) - 3))
+	return statusline_text(visible, "PiActivity") .. "%#PiUsageStats#%="
+		.. statusline_text(build_label, build_info.highlight() .. "Bar") .. "%*"
+end
+
 local function resolve_bar(state, bar)
 	state[bar.win] = buffer.find_window(state[bar.buf], state[bar.win])
 	return state[bar.win]
@@ -649,6 +662,40 @@ local function header_formats(state, width)
 	return statusline_text(" " .. truncate_plain_to_width(title, math.max(0, width - 2)), "PiSessionTitle") .. "%*", details
 end
 
+local function write_bar_row(buf, evaluated)
+	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, { evaluated.str })
+	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+	vim.api.nvim_buf_clear_namespace(buf, status_ns, 0, -1)
+	apply_evaluated_highlights(buf, 0, evaluated)
+end
+
+function M.overview_footer(list_win, list_buf, hints)
+	local state = { transcript_win = list_win, transcript_buf = list_buf }
+	local last_win, last_width, last_format
+	local function close()
+		close_bar(state, footer)
+		last_win, last_width, last_format = nil, nil, nil
+	end
+	local function update(label)
+		if not buffer.window_matches(list_win, list_buf) then close(); return end
+		local buf = ensure_bar_buffer(state, footer)
+		local win = ensure_bar_window(state, footer, buf)
+		if not win then return end
+		local width = vim.api.nvim_win_get_width(win)
+		if win ~= last_win or width ~= last_width then
+			write_bar_row(buf, evaluate_statusline(build_info.hints(width, hints), win, width))
+		end
+		local format = render_activity(label, width)
+		if win ~= last_win or format ~= last_format then
+			vim.wo[win].statusline = format
+			vim.cmd("redrawstatus")
+		end
+		last_win, last_width, last_format = win, width, format
+	end
+	return update, close
+end
+
 local rendered_bars = {}
 local function render_bar(ctx, bar, buf, width)
 	local primary_format, secondary_format
@@ -661,11 +708,7 @@ local function render_bar(ctx, bar, buf, width)
 	local previous = rendered_bars[bar]
 	local changed = not previous or previous.buf ~= buf or not vim.deep_equal(previous.primary, primary)
 	if changed then
-		vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
-		vim.api.nvim_buf_set_lines(buf, 0, -1, false, { primary.str })
-		vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
-		vim.api.nvim_buf_clear_namespace(buf, status_ns, 0, -1)
-		apply_evaluated_highlights(buf, 0, primary)
+		write_bar_row(buf, primary)
 		rendered_bars[bar] = { buf = buf, primary = primary }
 	end
 	if vim.api.nvim_get_option_value("statusline", { win = ctx.state[bar.win] }) ~= secondary_format then
