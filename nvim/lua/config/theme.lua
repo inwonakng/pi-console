@@ -141,7 +141,7 @@ require("catppuccin").setup({
 			DiffDelete = { fg = colors.red, bg = "#2a1014" },
 			DiffText = { fg = colors.text, bg = "#3a3214", bold = true },
 		}
-		for _, group in ipairs({ "PiBuildDev", "PiBuildStable", "PiSubagent" }) do
+		for _, group in ipairs({ "PiBuildDev", "PiBuildStable", "PiSubagent", "PiOverviewStatusLine", "PiOverviewKey" }) do
 			highlights[group .. "Bar"] = vim.tbl_extend("force", highlights[group], { bg = M.status_bg })
 		end
 		for _, name in ipairs({
